@@ -16,11 +16,12 @@ to be dependable.
 | `add_tracks_and_scenes` | New MIDI or audio tracks and named scenes, after the last ones by default | `live_session_structure_*` |
 | `write_midi_clip` | A new MIDI clip with notes in an empty Session slot | `live_midi_clip_*` |
 | `load_device` | An instrument, effect or preset from the Browser onto a track | `live_browser_load_*` |
-| `set_device_parameter` | One device parameter | `live_device_parameter_*` |
+| `set_device_parameter` | One device parameter, or several of one device at once (`values`) | `live_device_parameter_*` |
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
-| `load_sample` | A sample `find_samples` returned, in a new Simpler on an empty MIDI track | `live_device_*` (insert with a sample) |
-| `load_sample_to_pad` | A sample `find_samples` returned, on an empty pad of a Drum Rack; undo clears the pad | `live_drum_pad_*` (load-sample) |
+| `load_sample` | A sample in a new Simpler on an empty MIDI track: one `find_samples` returned, or one Kumi picks | `live_device_*` (insert with a sample) |
+| `load_sample_to_pad` | A sample on an empty pad of a Drum Rack; undo clears the pad | `live_drum_pad_*` (load-sample, load-samples) |
+| `make_changes` | Several of these changes in one call, in order (see [Plans](#plans-in-one-reply)) | the tools above |
 | `undo_change` | Undo one of these changes, or the latest | `live_undo` |
 
 Reads for planning a change: `live_discover`, `live_snapshot`,
@@ -52,9 +53,10 @@ and listening. The model is told so and says so plainly.
 
 1. The model calls a Kumi tool, for example `set_tempo {tempo: 124}`.
 2. Kumi checks the Live connection and the epoch (Live restarts and Set changes
-   bump it), and that every reference in the input came from discovery in the
-   same answer. Track references are positions; after anything that moves
-   tracks they would point elsewhere, so old ones are refused.
+   bump it), and that every reference in the input came from this answer: the
+   observation's tracks and devices, discovery, or what an earlier change made.
+   Track references are positions; after anything that moves tracks they would
+   point elsewhere, so old ones are refused.
 3. Kumi calls the bridge's preview. The preview captures the exact prior state
    and returns a transaction id and a confirmation, which is sometimes an
    unpredictable token.
@@ -66,7 +68,7 @@ and listening. The model is told so and says so plainly.
    pan C → 5L", "Drift · LP Freq 20.0 kHz → 159 Hz"), the track name and colour
    for its chip, and before/after values for pictures.
 6. The model gets the title and the change id, and says in a few words what
-   changed.
+   changed, unless Kumi said it (a plan with `final`).
 
 Once the apply is sent it runs to the end (bounded to 30 s) even if the
 producer presses Esc, so every change that reaches Live is in HISTORY with its
@@ -77,6 +79,45 @@ The model keeps track the same way. A stopped answer keeps the steps it
 finished. Every turn's observation lists Kumi's latest changes and where each
 stands (`kumiChanges`: applied, undone, kept, unsure), so an undo clicked in
 HISTORY, or a change that landed as the answer stopped, isn't news to it.
+
+## Plans, in one reply
+
+Most of a request's time is the model: every reply takes seconds, so Kumi is
+built to need as few as possible, and to make each one short.
+
+- **One plan.** `make_changes` runs a whole plan in one call. A step names what
+  it makes (`as: "rack"`) and later steps use `"@rack"`; a change's result
+  gives the reference of what it made. `each` repeats a step:
+  `{"note": [36, 37, 38]}`, or lists of one length taken together
+  (`{"parameterRef": [...], "value": [...]}`). The plan stops at the first
+  failure and says what was done and what was skipped.
+- **No reply to write.** With `final: true`, when every step is done, Kumi
+  lists what changed ("Done: …") and the answer ends there. A failure goes
+  back to the model. The model is asked to use `make_changes` even for one
+  change.
+- **Less to discover.** Each turn's observation lists the Set's tracks and the
+  devices on them, with references usable at once. Kumi reads up to three
+  pages of a discovery before answering, so a big device's parameters come
+  in one answer.
+- **Less to read and write.** The model sees short names for Live's
+  references (`track:5`, `parameter:26`, not
+  `1232800184424618:parameter:1232800184424618:device:4:0:12`), and reads as
+  plain JSON. Kumi maps the names back and never reuses one.
+- **Fewer Live round trips.** Each Live request waits for Live's display tick,
+  and a change takes several. Pad loads on one rack in a row, and parameter
+  changes on one device in a row, become one change: one transaction, one
+  Live request for all of them (all or none), one HISTORY entry and one undo.
+  `load_sample` and `load_sample_to_pad` take `{"random": true}` or words and
+  folders, and Kumi picks the sample itself, with no search first.
+
+On real Live 12.4 ([evidence](../evidence/kumi-poc.md#speed)):
+
+| Request | Before | Now |
+| --- | --- | --- |
+| "create a drum rack and load it with 8 totally random samples" | 72 s, 13 model replies | 10.6 s, 1 reply |
+| "make a reese bass with operator" | hung (see evidence) | 14.6 s, 2 replies |
+| "make the reese bass darker" | | 9.8 s, 2 replies |
+| "set the tempo to 124" | | 3.7 s, 1 reply |
 
 ## Undo
 

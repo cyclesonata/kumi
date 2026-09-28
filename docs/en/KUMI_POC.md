@@ -152,6 +152,15 @@ remembered.
 Kumi refreshes bounded status and Set observations before each turn, and discovers
 fresh detail references rather than treating names or history as authority.
 
+**Speed.** Kumi plans a request in one reply where it can: a whole plan of
+changes goes in one call, and when the plan completes the request Kumi itself
+lists what changed, so the model isn't asked again. Each turn's observation
+lists the tracks and their devices, so most requests need no discovery. A
+Drum Rack's pads, or a device's parameters, change in one Live request with
+one undo. On real Live a drum kit of eight random samples takes about 11 s,
+and a tempo change about 4 s
+([how](KUMI_CHANGES.md#plans-in-one-reply)).
+
 | Input | Behavior |
 | --- | --- |
 | Enter | Send |

@@ -485,6 +485,60 @@ Two things came up on the way:
 - Kumi first answered that it couldn't fill Drum Rack pads. It couldn't, until
   `load_sample_to_pad`.
 
+## Speed
+
+Measured on real Live 12.4 with `openai-codex/gpt-6-astra`, on
+2026-09-28 between 17:40 and 19:30 UTC, bridge 1.0.19 to 1.0.24. Times are
+the whole answer, from the producer's words to Kumi's last line. Every change
+was undone afterwards and the Set checked.
+
+Where the time went, first: each model reply took 3 to 8 s, about 2 s before
+the first output and about 30 tokens a second after it. Each Live request
+waits for Live's display tick, about 100 ms, and one change took about seven
+of them (a status read, preview with a snapshot, a snapshot, preflight,
+prepare, invoke, a snapshot), 0.8 to 1.4 s in all. Reasoning effort made no
+difference: the model reported 0 reasoning tokens either way.
+
+"create a drum rack and load it with 8 totally random samples":
+
+| Step | Time | Model replies | In the model | In tools |
+| --- | --- | --- | --- | --- |
+| Before (1.0.19) | 72 s | 13 | | |
+| One plan: `make_changes`, refs from changes, samples picked by Kumi | 32.3 s | 3 | 17.9 s | 14.2 s |
+| The Set's tracks in the observation, `each` | 24.4 s | 2 | 10.3 s | 13.7 s |
+| `final`: Kumi says what changed | 21.9 s | 1 | 7.5 s | 13.9 s |
+| A rack's pads in one request (1.0.21) | 10.6–11.6 s | 1 | 5.7–6.3 s | 4.4–5.0 s |
+
+The eight pads now load in 2.1 s (preview and apply), down from 9.6 s.
+
+"make a reese bass with operator" edits the existing Reese Bass track's
+Operator:
+- With 1.0.21 it hung: the first parameter change wasn't confirmed within
+  Kumi's 15 s. Before a mutation, the Remote Script checks every reference
+  the mutation names, and it built a full Set snapshot per reference. A
+  parameter names all 195 of Operator's parameters as its siblings, so
+  preflight and prepare took 5.2 s each. With one snapshot per check (1.0.22)
+  the change takes 0.8 s.
+- 32.3 s with 3 replies. Then short references, zipped `each`, devices in the
+  observation and reading pages ahead: 20.6 s with 2 replies, the plan's
+  output down from 483 to 156 tokens.
+- With all of Operator's changes as one change (1.0.24): 14.6 s. Twelve
+  parameters change in 0.9 s instead of 8.8 s.
+
+"make the reese bass darker": 9.8 s, 2 replies ("Operator · Filter Freq
+12.0 kHz → 2.69 kHz"). "set the tempo to 124": 3.7 s, 1 reply.
+
+Two defects came up on the way:
+- A second 8-pad kit made every snapshot fail. Live lists a loaded Drum
+  Rack's chains on the rack and on each pad, so each Simpler's parameters
+  crossed the wire twice. The user's 8-pad kit was 552 KB of a 704 KB
+  snapshot, and the limit was 1 MB. Pads now name their chains, and the
+  bridge points them at the rack's rows. The same Set is 435 KB, and the
+  limit is 4 MB.
+- With the provider slow, one reply took 22.6 s before its first output and
+  another 21 s to stream 127 tokens. Kumi can't help that; its own time
+  stayed the same.
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change
