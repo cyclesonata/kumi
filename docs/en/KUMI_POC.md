@@ -178,6 +178,8 @@ terminal is restored on exit, on crashes and on signals.
   last saw of each Set (readable only by you); the oldest exchanges drop off past
   about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
   end with Kumi. There's no learned memory or skills yet.
+- **Bars and beats:** Kumi doesn't see the Set's time signature yet (the bridge's
+  Set row lacks it), so turning bars into beats for clips and locators assumes 4/4.
 - **Long conversations** have no turn limit. Past about 160 KB (roughly 50k
   tokens), earlier turns' larger Live reads shrink to their opening and a note to
   read again, and earlier turns' Live observations are dropped; the producer's
