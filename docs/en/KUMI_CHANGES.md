@@ -40,7 +40,8 @@ and listening. The model is told so and says so plainly.
 4. Kumi applies with that confirmation and a fresh idempotency key. The model
    never sees either, so it can't confirm anything on its own.
 5. The bridge verifies the result against Live before answering. Kumi records
-   a change for HISTORY: a plain-words title ("Tempo 120 → 124 BPM"), the track
+   a change for HISTORY: a plain-words title ("Tempo 120 → 124 BPM", or for the
+   mixer Live's own units: "Bass volume 0.0 dB → -2.0 dB, pan C → 5L"), the track
    name and colour for its chip, and before/after values for pictures.
 6. The model gets the title and the change id, and says in a few words what
    changed.

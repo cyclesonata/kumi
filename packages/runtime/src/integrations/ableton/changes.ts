@@ -27,7 +27,8 @@ export interface ChangeKind {
   restructures?: boolean;
   /** Adjust the preview's input schema where Kumi's behaviour differs from the bridge's wording. */
   schema?(schema: JsonObject): JsonObject;
-  summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined): ChangeSummary;
+  /** `applied` is the bridge's apply result, when there is one: it can carry Live's own text for the new values. */
+  summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary;
 }
 
 const record = (value: unknown): JsonObject => (value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {});
@@ -37,16 +38,27 @@ const quoted = (value: unknown, fallback: string) => { const text = label(value)
 export const formatNumber = (value: number, digits = 2) => String(Number(value.toFixed(digits)));
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 
-function mixerParts(prior: JsonObject, proposed: JsonObject): string[] {
+/** A value stays whole when a line wraps: its number and unit are joined by a no-break space. */
+const whole = (text: string) => text.trim().replace(/ /g, "\u00a0");
+/** "0.0 dB → -3.2 dB" from Live's own text, when both sides have it. */
+const shown = (before: unknown, after: unknown) => (typeof before === "string" && typeof after === "string" && before && after ? `${whole(before)} → ${whole(after)}` : undefined);
+
+function mixerParts(prior: JsonObject, proposed: JsonObject, was: JsonObject, now: JsonObject): string[] {
   const parts: string[] = [];
   const volume = number(proposed.volume); const before = number(prior.volume);
-  if (volume !== undefined) parts.push(before === undefined || volume === before ? "volume" : volume > before ? "volume up" : "volume down");
+  const volumeText = shown(was.volume, now.volume);
+  if (volume !== undefined) parts.push(volumeText ? `volume ${volumeText}` : before === undefined || volume === before ? "volume" : volume > before ? "volume up" : "volume down");
   const pan = number(proposed.pan);
-  if (pan !== undefined) parts.push(pan === 0 ? "pan centre" : pan < 0 ? "pan left" : "pan right");
+  const panText = shown(was.pan, now.pan);
+  if (pan !== undefined) parts.push(panText ? `pan ${panText}` : pan === 0 ? "pan centre" : pan < 0 ? "pan left" : "pan right");
   if (typeof proposed.mute === "boolean") parts.push(proposed.mute ? "muted" : "unmuted");
   if (typeof proposed.solo === "boolean") parts.push(proposed.solo ? "soloed" : "unsoloed");
   if (number(proposed.cueVolume) !== undefined) parts.push("cue volume");
-  if (Array.isArray(proposed.sends) && proposed.sends.length) parts.push(proposed.sends.length === 1 ? "send A" : "sends");
+  if (Array.isArray(proposed.sends) && proposed.sends.length) {
+    const before = Array.isArray(was.sends) ? was.sends : []; const after = Array.isArray(now.sends) ? now.sends : [];
+    const named = proposed.sends.map((_, index) => { const text = shown(before[index], after[index]); return text && text.split(" → ")[0] !== text.split(" → ")[1] ? `send ${String.fromCharCode(65 + index)} ${text}` : undefined; }).filter(Boolean) as string[];
+    parts.push(...(named.length ? named : [proposed.sends.length === 1 ? "send A" : "sends"]));
+  }
   return parts;
 }
 
@@ -67,10 +79,10 @@ export const CHANGES: readonly ChangeKind[] = [
   {
     tool: "set_mixer", preview: "live_mixer_preview", apply: "live_mixer_apply", family: "mixer",
     description: "Change one track's mixer. volume is the fader position from 0 to 1 (0.85 is 0 dB, 1 is +6 dB); pan goes from -1 (left) to 1 (right); mute and solo are on/off; sends are levels from 0 to 1 for return tracks A, B, … in order (a shorter list leaves the rest). trackRef comes from discovery in this turn; return tracks and the main track work too.",
-    summarize(preview, _input, track) {
+    summarize(preview, _input, track, applied) {
       const prior = record(preview.prior); const proposed = record(preview.proposed);
       const known = track(preview.trackRef);
-      const parts = mixerParts(prior, proposed);
+      const parts = mixerParts(prior, proposed, record(preview.priorDisplay), record(applied?.display));
       const from = number(prior.volume); const to = number(proposed.volume);
       return { title: `${known?.name ?? "Track"} ${parts.join(", ") || "mixer"}`, ...(known ? { track: known } : {}),
         ...(from !== undefined && to !== undefined ? { from, to } : {}) };

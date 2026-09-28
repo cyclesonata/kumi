@@ -45,7 +45,7 @@ function bridge() {
         pending.set(id, { name, args });
         const base = { transactionId: id, epoch: 7, confirmation: name === "live_mixer_preview" ? "secret-confirmation-token-0123456789" : "apply" };
         if (name === "live_tempo_preview") return wrap({ ...base, priorTempo: tempo, proposedTempo: args.tempo });
-        if (name === "live_mixer_preview") return wrap({ ...base, trackRef: args.trackRef, prior: { volume: 0.85, pan: 0 }, proposed: { volume: args.volume, pan: args.pan } });
+        if (name === "live_mixer_preview") return wrap({ ...base, trackRef: args.trackRef, prior: { volume: 0.85, pan: 0 }, ...(args.volume === 0.4 ? { priorDisplay: { volume: "0.0 dB", pan: "C" } } : {}), proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
         return wrap({ ...base, prior: { tracks: tracks.map((track, index) => ({ ref: `7:track:${index}`, name: track.name, index })), scenes: [] }, proposed });
@@ -62,6 +62,7 @@ function bridge() {
           tracks = [...tracks, ...added];
           return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
         }
+        if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
         return wrap({ transactionId: args.transactionId, state: "applied" });
       }
       if (name === "live_undo") {
@@ -139,9 +140,11 @@ test("changes need references from this turn's discovery; HISTORY gets the track
     const apply = b.requests.find((request) => request.name === "live_mixer_apply")!;
     assert.equal(apply.args.confirmation, "secret-confirmation-token-0123456789", "Kumi passes the preview's own confirmation");
     const change = b.records.at(-1)!;
-    assert.equal(change.title, "Fixture Bass volume down, pan left");
+    assert.equal(change.title, "Fixture Bass volume down, pan left", "without Live's text, plain directions");
     assert.deepEqual(change.track, { name: "Fixture Bass", color: "#f7f47c" });
     assert.equal(change.from, 0.85); assert.equal(change.to, 0.6);
+    await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:1", volume: 0.4, pan: -0.5 }, signal());
+    assert.equal(b.records.at(-1)!.title, "Fixture Drums volume 0.0\u00a0dB → -9.3\u00a0dB, pan C → 25L", "with Live's own units when the bridge reports them, each value kept whole");
     await tool(b.tools, "rename").execute({ kind: "track", ref: "7:track:0", name: "Sub" }, signal());
     assert.equal(b.records.at(-1)!.title, "Renamed track “Fixture Bass” → “Sub”");
     await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.55 }, signal());

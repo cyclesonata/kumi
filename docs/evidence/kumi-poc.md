@@ -326,6 +326,16 @@ The bridge reports look-alike empty tracks as one ambiguous group (1 before, 2
 after) rather than a rename and an addition; Kumi resolves such groups by name
 and position. Screens: `.pi/kumi-evidence/tui/13-*.txt`, `14-*.txt`.
 
+### Live's own units
+
+Bridge 1.0.11 adds Live's own text for mixer values (`str_for_value`: "-2.0 dB",
+"5L") to the mixer row; the preview carries the before text and the apply the
+after text. On real Live (UTC `2026-09-28T06:31Z`), "Turn 3-Audio down a little and
+pan it slightly left." produced the HISTORY entry `3-Audio volume 0.0 dB → -2.0 dB,
+pan C → 5L`, and the answer used the same units: "Lowered 3-Audio by 2 dB and
+panned it slightly left (5L)." Long titles continue on a second HISTORY line,
+with each value kept whole.
+
 ## Live quitting and coming back
 
 With Kumi full screen (UTC `2026-09-28T05:52Z`–`05:56Z`), Kumi set the tempo, then

@@ -14,6 +14,7 @@ import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, 
 import { stepLabel, Transcript, type Entry, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { textWidth, truncate } from "./width.js";
+import { wrap } from "./wrap.js";
 
 export interface TuiOptions {
   controller: SessionController;
@@ -665,21 +666,29 @@ export class TuiApp {
     if (area.height <= 0) return;
     if (!this.changes.length) { screen.put(area.x, area.y, truncate("Nothing changed yet", area.width), st.faint); return; }
     const newest = [...this.changes].reverse();
-    const room = newest.length > area.height ? area.height - 1 : area.height;
-    newest.slice(0, room).forEach((change, index) => {
-      const y = area.y + index;
+    let y = area.y;
+    let shown = 0;
+    for (const change of newest) {
       const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : change.state === "expired" ? "no undo" : "check Live";
       const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" || change.state === "expired" ? st.faint : st.warn;
       const actionX = area.x + area.width - textWidth(action);
+      const titleStyle = change.state === "undone" || change.state === "expired" ? st.faint : st.text;
+      // A title gets two lines, so the values ("0.0 dB → -2.0 dB") aren't the part cut off.
+      const lines = wrap([{ text: change.title, style: titleStyle }], Math.max(1, actionX - area.x - 3)).map((spans) => spans.map((span) => span.text).join(""));
+      const rows = Math.min(2, lines.length);
+      const left = newest.length - shown;
+      if (y + rows > area.y + area.height - (left > 1 ? 1 : 0)) break;
       const marker = change.state === "undone" || change.state === "expired" ? { text: "○", style: st.faint }
         : change.state === "unsure" ? { text: "●", style: st.warn }
         : change.track ? { text: "■", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓", style: st.accent };
       screen.put(area.x, y, marker.text, marker.style);
-      screen.put(area.x + 2, y, truncate(change.title, Math.max(1, actionX - area.x - 3)), change.state === "undone" || change.state === "expired" ? st.faint : st.text);
+      screen.put(area.x + 2, y, lines[0] ?? "", titleStyle);
+      if (rows > 1) screen.put(area.x + 2, y + 1, truncate(lines.slice(1).join(" "), Math.max(1, area.width - 2)), titleStyle);
       screen.put(actionX, y, action, actionStyle);
       if (change.state === "applied") this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.undo(change.id); } });
-    });
-    if (newest.length > room) screen.put(area.x, area.y + room, truncate(`${newest.length - room} earlier`, area.width), st.faint);
+      y += rows; shown++;
+    }
+    if (shown < newest.length) screen.put(area.x, y, truncate(`${newest.length - shown} earlier`, area.width), st.faint);
   }
 
   private drawDock(screen: Screen, area: Rect): void {

@@ -414,7 +414,7 @@ export function createAbletonIntegration(options: Options): Integration {
         return { text: `Live couldn't confirm this change: ${JSON.stringify(applied)}`, isError: true };
       }
       const result = payload(applied);
-      const record = newRecord(kind, summary, result.state === "applied" ? "applied" : "unsure", now().getTime());
+      const record = newRecord(kind, kind.summarize(preview, args, knownTrack, result), result.state === "applied" ? "applied" : "unsure", now().getTime());
       remember(record, transactionId);
       // A renamed track keeps its new name in later HISTORY entries.
       if (kind.family === "rename" && summary.track && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, name: summary.track.name });
