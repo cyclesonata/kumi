@@ -25,7 +25,7 @@ npm run kumi -- doctor                 # うまくいかないとき：すべて
 サインインするとデフォルトのモデルも設定されます。`npm run kumi -- model <provider>/<model>`
 でいつでも変更できます。API キーも使えます。`openai/`・`anthropic/`・`opencode/` の
 モデルは `OPENAI_API_KEY`・`ANTHROPIC_API_KEY`・`OPENCODE_API_KEY` を使用し、
-`npm run kumi -- auth` で利用可能なものを確認できます。終了すると会話履歴は失われます。
+`npm run kumi -- auth` で利用可能なものを確認できます。未保存の Set についての会話は、Kumi を閉じると終わります。
 
 ブリッジの Remote Script をインストールし、Live でコントロールサーフェスとして
 選択すると、Kumi は自動でブリッジを見つけます。それまでも Kumi は起動して会話でき、

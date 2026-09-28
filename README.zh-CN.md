@@ -23,7 +23,7 @@ npm run kumi -- doctor                 # 遇到问题时：检查所有环节并
 登录后会自动选择默认模型，可随时用 `npm run kumi -- model <provider>/<model>` 更改。
 也可以使用 API 密钥：`openai/`、`anthropic/`、`opencode/` 模型分别使用
 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENCODE_API_KEY`，运行
-`npm run kumi -- auth` 可查看可用的提供方。退出后，对话历史会丢失。
+`npm run kumi -- auth` 可查看可用的提供方。关于未保存工程的对话会在关闭 Kumi 后结束。
 
 安装桥接的 Remote Script 并在 Live 中将其选为控制界面（Control Surface）后，
 Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示尚未连接 Live。
