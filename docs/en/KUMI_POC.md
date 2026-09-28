@@ -36,7 +36,8 @@ npm run kumi -- --inference-only              # chat without Live
 Pi-based POC (`~/.pi/agent/auth.json`) once. Kumi and Pi then share that session;
 when either refreshes it, the other may need to sign in again.
 
-Credentials live in Kumi's own owner-only store (`~/.kumi/auth.json`, mode 600).
+Credentials live in Kumi's own owner-only store (`~/.kumi/auth.json`, mode 600; on
+Windows it relies on your user folder being private, as it is by default).
 Tokens refresh automatically shortly before expiry, under a cross-process lock.
 Never paste an access/refresh token or API key into a prompt, command argument,
 issue, log, or repository file.

@@ -23,8 +23,9 @@ test("the launcher explains an unbuilt checkout instead of failing with a stack 
 });
 
 test("root npm start forwards CLI arguments from a different cwd; help requires no credential/model", async () => {
+  // npm is npm.cmd on Windows, which only starts through a shell.
   const { stdout, stderr } = await exec("npm", ["--prefix", root, "run", "kumi", "--", "--help"], {
-    cwd: tmpdir(), env: { ...process.env, KUMI_MODEL: "", KUMI_AUTH_FILE: "" }, timeout: 15_000,
+    cwd: tmpdir(), env: { ...process.env, KUMI_MODEL: "", KUMI_AUTH_FILE: "" }, timeout: 15_000, shell: process.platform === "win32",
   });
   assert.match(stdout, /--bridge-config/); assert.match(stdout, /--inference-only/); assert.match(stdout, /producer assistant for Ableton Live/);
   assert.match(stdout, /npm run setup/); assert.match(stdout, /login openai-codex/); assert.match(stdout, /Node\.js 22 or 24/);
@@ -58,7 +59,8 @@ test("missing credentials fail before the terminal starts, with sign-in guidance
 test("login --from-pi imports only the ChatGPT session into an owner-only store; auth and logout never print secrets", async () => {
   const home = await mkdtemp(join(tmpdir(), "kumi-cli-home-"));
   const access = jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-cli" } });
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, KUMI_AUTH_FILE: join(home, ".kumi", "auth.json"), KUMI_SETTINGS_FILE: join(home, ".kumi", "settings.json"), OPENAI_API_KEY: "sk-private-env", ANTHROPIC_API_KEY: "" };
+  // Windows finds the home folder through USERPROFILE.
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home, KUMI_AUTH_FILE: join(home, ".kumi", "auth.json"), KUMI_SETTINGS_FILE: join(home, ".kumi", "settings.json"), OPENAI_API_KEY: "sk-private-env", ANTHROPIC_API_KEY: "" };
   delete env.KUMI_MODEL;
   try {
     await mkdir(join(home, ".pi", "agent"), { recursive: true });
@@ -67,7 +69,7 @@ test("login --from-pi imports only the ChatGPT session into an owner-only store;
     assert.match(imported.stdout, /Signed in to ChatGPT/);
     assert.match(imported.stdout, /Model: openai-codex\/gpt-6-astra/);
     const authFile = join(home, ".kumi", "auth.json");
-    assert.equal((await stat(authFile)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal((await stat(authFile)).mode & 0o777, 0o600);
     assert.equal(JSON.parse(await readFile(authFile, "utf8")).credentials["openai-codex"].accountId, "acct-cli");
     const status = await exec(process.execPath, [cli, "auth"], { env, timeout: 15_000 });
     assert.match(status.stdout, /openai-codex\s+signed in/);

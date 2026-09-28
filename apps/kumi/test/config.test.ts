@@ -75,7 +75,7 @@ test("the chosen model persists in an owner-only settings file; KUMI_MODEL overr
     assert.deepEqual(loadConfig(["model"], local), { mode: "model", settingsFile });
     assert.throws(() => loadConfig(["model", `x/${secret}`], local), (error: unknown) => error instanceof Error && !error.message.includes(secret));
     writeSettings(settingsFile, { model: "anthropic/claude-sonnet-5" });
-    assert.equal(statSync(settingsFile).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(settingsFile).mode & 0o777, 0o600);
     assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5" });
     assert.equal(loadInferenceConfig(local).model, "anthropic/claude-sonnet-5");
     assert.equal(loadInferenceConfig({ ...local, KUMI_MODEL: "openai/gpt-6-luna" }).model, "openai/gpt-6-luna");

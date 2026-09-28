@@ -29,8 +29,10 @@ test("credential store is owner-only, atomic, and removes entries on request", a
     const store = openCredentialStore(path);
     assert.equal(await store.get("openai-codex"), undefined);
     await store.update("openai-codex", async () => credential());
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
-    assert.equal((await stat(join(dir, "nested"))).mode & 0o777, 0o700);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.equal((await stat(join(dir, "nested"))).mode & 0o777, 0o700);
+    }
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")).version, 1);
     await store.update("openai-codex", async () => undefined);
     assert.deepEqual(await store.list(), {});
@@ -42,8 +44,11 @@ test("credential store refuses readable-by-others and malformed files without pr
   await inTemp(async (dir) => {
     const path = join(dir, "auth.json");
     await writeFile(path, JSON.stringify({ version: 1, credentials: { "openai-codex": credential("secret-refresh") } }), { mode: 0o600 });
-    await chmod(path, 0o644);
-    await assert.rejects(openCredentialStore(path).get("openai-codex"), /chmod 600/);
+    // Windows keeps no POSIX modes to check (see the store).
+    if (process.platform !== "win32") {
+      await chmod(path, 0o644);
+      await assert.rejects(openCredentialStore(path).get("openai-codex"), /chmod 600/);
+    }
     await writeFile(path, "{\"token\": \"secret-refresh\"", { mode: 0o600 });
     await chmod(path, 0o600);
     await assert.rejects(openCredentialStore(path).get("openai-codex"), (error: unknown) =>

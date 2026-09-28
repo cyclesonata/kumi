@@ -32,7 +32,9 @@ export function openCredentialStore(path: string): CredentialStore {
   async function read(): Promise<StoreFile> {
     let text: string;
     try {
-      if ((await stat(path)).mode & 0o077) throw new KumiError("auth", `Credential file ${path} is readable by other users; run: chmod 600 ${path}`);
+      // POSIX mode bits say who may read the file. Windows doesn't keep them (every file reads as
+      // 0o666); there the user's profile folder, where Kumi keeps this file, is private by default.
+      if (process.platform !== "win32" && (await stat(path)).mode & 0o077) throw new KumiError("auth", `Credential file ${path} is readable by other users; run: chmod 600 ${path}`);
       text = await readFile(path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, credentials: {} };
