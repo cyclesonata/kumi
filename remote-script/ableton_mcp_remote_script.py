@@ -375,6 +375,8 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 # Selection, arm, meters, playback status and view change without anyone editing the object;
 # ownership fingerprints ignore them so cleanup of created objects is not refused for nothing.
 _VOLATILE_TRACK_FIELDS = frozenset({"armed", "implicitArm", "isSelected", "isVisible", "foldState", "view", "playingSlotIndex", "firedSlotIndex", "backToArranger", "mutedViaSolo", "performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel"})
+# How many routing choices a track offers depends on the other tracks (a new MIDI track is a new MIDI source), not on the track.
+_VOLATILE_ROUTING_FIELDS = frozenset({"availableInputTypes", "availableInputChannels", "availableOutputTypes", "availableOutputChannels"})
 _VOLATILE_SLOT_FIELDS = frozenset({"playingStatus", "willRecordOnStart", "fireButtonState"})
 
 
@@ -3030,7 +3032,7 @@ class LiveObjectMapper:
         if f":track:" in reference:
             track = next((row for row in snapshot["tracks"] if row["ref"] == reference), None)
             if track is None: raise ValueError("created track fingerprint is unavailable")
-            owned_track = {**{key: value for key, value in track.items() if key not in _VOLATILE_TRACK_FIELDS}, "clipSlots": [{key: value for key, value in slot.items() if key not in _VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}; arrangement_clips = [clip for clip in snapshot.get("arrangement", {}).get("clips", []) if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
+            owned_track = {**{key: value for key, value in track.items() if key not in _VOLATILE_TRACK_FIELDS}, **({"routing": {key: value for key, value in track["routing"].items() if key not in _VOLATILE_ROUTING_FIELDS}} if isinstance(track.get("routing"), dict) else {}), "clipSlots": [{key: value for key, value in slot.items() if key not in _VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}; arrangement_clips = [clip for clip in snapshot.get("arrangement", {}).get("clips", []) if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
             return hashlib.sha256(self._bounded_canonical({"track": owned_track, "arrangementClips": arrangement_clips}).encode("utf-8")).hexdigest()
         if f":scene:" not in reference: return self._mapped_fingerprint(reference)
         scene = next((row for row in snapshot["scenes"] if row["ref"] == reference), None)

@@ -330,11 +330,32 @@ and position. Screens: `.pi/kumi-evidence/tui/13-*.txt`, `14-*.txt`.
 
 Bridge 1.0.11 adds Live's own text for mixer values (`str_for_value`: "-2.0 dB",
 "5L") to the mixer row; the preview carries the before text and the apply the
-after text. On real Live (UTC `2026-09-28T06:31Z`), "Turn 3-Audio down a little and
+after text. On real Live (UTC `2026-09-28T06:06Z`), "Turn 3-Audio down a little and
 pan it slightly left." produced the HISTORY entry `3-Audio volume 0.0 dB → -2.0 dB,
 pan C → 5L`, and the answer used the same units: "Lowered 3-Audio by 2 dB and
 panned it slightly left (5L)." Long titles continue on a second HISTORY line,
 with each value kept whole.
+
+## Scale on real Live
+
+Growing the disposable Set through the bridge (UTC `2026-09-28T06:10Z`–`06:20Z`):
+
+- **Several tracks at once failed** before bridge 1.0.12: a track's ownership
+  fingerprint included how many routing choices it offers, which changes
+  whenever another track is added (a new MIDI track is a new MIDI source), so
+  creating more than two tracks in one transaction, or undoing a created track
+  after adding others, was refused. 1.0.12 leaves those counts out on both sides.
+  Afterwards, 16-track batches took 8.3–10.5 s each (the host verifies every new
+  track against a whole-Set snapshot).
+- **At 96 tracks** (99 track rows): `live_snapshot` 143 ms and 467 KB; a focus
+  read about 100 ms; the semantic export for catching up 130 ms and 122 KB;
+  discovering 100 tracks 141 ms.
+- **Limits reached, for the next session:** past 100 track rows the snapshot
+  fails the protocol's bound (tracks and scenes are capped at 100) and the bridge
+  loses Live; the Remote Script-to-host frame is capped at 1 MB, which a real
+  project's snapshot will likely exceed first (the 4-track test Set with clips and
+  devices is 54 KB, about 13 KB a track); a device exposing more than 256
+  parameters fails the snapshot too. Most edits verify through that snapshot.
 
 ## Live quitting and coming back
 

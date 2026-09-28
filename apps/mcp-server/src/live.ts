@@ -218,9 +218,13 @@ function createSimulatorState(): LiveSnapshot {
 // of created tracks ignore them so undo and cleanup are not refused for nothing. Mirrors the Remote Script.
 const VOLATILE_TRACK_FIELDS = new Set(["armed", "implicitArm", "isSelected", "isVisible", "foldState", "view", "playingSlotIndex", "firedSlotIndex", "backToArranger", "mutedViaSolo", "performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel"]);
 const VOLATILE_SLOT_FIELDS = new Set(["playingStatus", "willRecordOnStart", "fireButtonState"]);
+/** How many routing choices a track offers depends on the other tracks (a new MIDI track is a new MIDI source), not on the track. */
+const VOLATILE_ROUTING_FIELDS = new Set(["availableInputTypes", "availableInputChannels", "availableOutputTypes", "availableOutputChannels"]);
 export function ownedTrackFingerprintRow(track: Track): Record<string, unknown> {
   const keep = (row: object, volatile: Set<string>) => Object.fromEntries(Object.entries(row).filter(([key]) => !volatile.has(key)));
-  return { ...keep(track, VOLATILE_TRACK_FIELDS), clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) };
+  const row = keep(track, VOLATILE_TRACK_FIELDS);
+  if (track.routing && typeof track.routing === "object") row.routing = keep(track.routing, VOLATILE_ROUTING_FIELDS);
+  return { ...row, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) };
 }
 
 /** A device row for ownership checks: parameter edit counters and a rack's view (UI selection) are not content. */

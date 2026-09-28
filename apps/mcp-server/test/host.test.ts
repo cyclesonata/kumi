@@ -8,11 +8,19 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { McpHost, PROTOCOL_VERSION, serve } from "../src/host.js";
-import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, ownedDeviceFingerprintRow, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
+import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, ownedDeviceFingerprintRow, ownedTrackFingerprintRow, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
 const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
 function ready(host: McpHost): void { host.handle(initialize); host.handle(initialized); }
+
+test("a created track's ownership fingerprint ignores routing choices other tracks add", () => {
+  const track = new DeterministicLiveSimulator().snapshot().tracks[0]!;
+  const more = { ...track, routing: { ...track.routing!, availableInputTypes: (track.routing!.availableInputTypes ?? 0) + 1, availableOutputTypes: (track.routing!.availableOutputTypes ?? 0) + 1 } };
+  assert.deepEqual(ownedTrackFingerprintRow(more), ownedTrackFingerprintRow(track));
+  const rerouted = { ...track, routing: { ...track.routing!, inputType: "Resampling" } };
+  assert.notDeepEqual(ownedTrackFingerprintRow(rerouted), ownedTrackFingerprintRow(track), "choosing another input still counts");
+});
 
 test("requires initialization and exposes only executable, policy-allowed tools", () => {
   const host = new McpHost();

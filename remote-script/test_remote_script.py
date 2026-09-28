@@ -4668,6 +4668,16 @@ class DeviceOwnershipFingerprintTests(unittest.TestCase):
         mapper._set_parameter_value(parameter["ref"], 0.75)
         self.assertNotEqual(mapper._ownership_fingerprint(device["ref"]), created, "a real change still counts")
 
+    def test_other_tracks_arriving_keeps_a_created_track_fingerprint(self):
+        song = FakeSong(); track = song.tracks[0]
+        track.available_input_routing_types = ["Ext. In", "Resampling"]; track.input_routing_type = type("Route", (), {"display_name": "Ext. In"})()
+        mapper = LiveObjectMapper(song); reference = mapper.snapshot()["tracks"][0]["ref"]
+        created = mapper._ownership_fingerprint(reference)
+        track.available_input_routing_types = ["Ext. In", "Resampling", "2-MIDI"]
+        self.assertEqual(mapper._ownership_fingerprint(reference), created, "a new track elsewhere is a new routing choice, not a change to this track")
+        track.input_routing_type = type("Route", (), {"display_name": "Resampling"})()
+        self.assertNotEqual(mapper._ownership_fingerprint(reference), created, "choosing another input still counts")
+
     def test_rack_view_is_not_device_content(self):
         rack = {"ref": "1:device:0:0", "canHaveChains": True, "view": {"selectedPadIndex": 1}, "parameters": [{"ref": "p", "value": 0.5, "revision": 4}],
                 "chains": [{"devices": [{"canHaveChains": False, "parameters": [{"value": 1.0, "revision": 9}]}]}]}
