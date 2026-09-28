@@ -115,9 +115,20 @@ export interface ChangeRecord {
   at: number;
 }
 
+/** What changed in a saved Set while Kumi wasn't running, in plain words. Names are data. */
+export interface CatchUp {
+  set: string;
+  /** When Kumi last saw the Set, in ms since the epoch. */
+  lastSeenAt: number;
+  lines: string[];
+  /** Changes not listed. */
+  more: number;
+}
+
 export type SessionEvent = KernelEvent
   | { type: "focus"; focus: LiveFocus | null }
   | { type: "change"; change: ChangeRecord }
+  | { type: "catch-up"; catchUp: CatchUp }
   | { type: "state"; state: TurnState }
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }

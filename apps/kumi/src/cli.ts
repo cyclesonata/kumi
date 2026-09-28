@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createInferenceOnlyIntegration, createSession, openCredentialStore, resolveModel,
+  createAbletonIntegration, createAgentKernel, createInferenceOnlyIntegration, createProjectStore, createSession, openCredentialStore, resolveModel,
 } from "@kumi/runtime";
-import { loadConfig, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { loadConfig, loadProjectsDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
@@ -66,6 +66,8 @@ try {
         : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onChange: (change) => terminal?.handleEvent({ type: "change", change }),
+          projectStore: createProjectStore(loadProjectsDir()),
+          onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
       onEvent: (event) => terminal?.handleEvent(event),

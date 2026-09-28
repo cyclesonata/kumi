@@ -77,6 +77,10 @@ old line-by-line interface (`terminal.ts`).
    each change's before and after values, and producer units (dB, pan, bars).
 4. **Saved sessions**, since the full-screen view is gone once Kumi closes.
 
+Done alongside: the welcome screen catches you up on a saved Set ("Since you were
+last here · 3 days ago", a few plain-words lines); once the conversation has
+started, the same summary arrives as a note.
+
 ## Edge cases to design for
 
 Collected during review; none of these block the foundations.

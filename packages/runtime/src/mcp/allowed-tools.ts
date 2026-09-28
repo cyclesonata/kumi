@@ -78,7 +78,8 @@ export class AllowedTools {
     if (this.closed) throw new Error("MCP catalog is closed");
     if (!options.host && !this.isValid) throw new Error("MCP catalog is invalid; refresh before calling tools");
     if (!options.host && !this.catalog.has(name)) throw new Error("Tool is not currently available or permitted");
-    if (Buffer.byteLength(JSON.stringify(args)) > 16 * 1024) throw new Error("Tool arguments are too large; narrow the request");
+    // The model's arguments stay small; Kumi's own calls can carry a Set comparison.
+    if (Buffer.byteLength(JSON.stringify(args)) > (options.host ? 1_536 * 1024 : 16 * 1024)) throw new Error("Tool arguments are too large; narrow the request");
     const invalidation = this.invalidation;
     const result = await this.endpoint.call(name, args, signal);
     signal.throwIfAborted();

@@ -2,7 +2,7 @@
  * Kumi's full-screen terminal app: a header, the conversation, the Live pane (FOCUS, NOW,
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
-import type { ChangeRecord, ConnectionState, LiveFocus, SessionController, SessionEvent } from "@kumi/runtime";
+import { since, type CatchUp, type ChangeRecord, type ConnectionState, type LiveFocus, type SessionController, type SessionEvent } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -131,6 +131,8 @@ export class TuiApp {
   private connection: ConnectionState;
   private setName: string | undefined;
   private focus: LiveFocus | null = null;
+  /** What changed in the Set while Kumi wasn't running. */
+  private catchUp: CatchUp | undefined;
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
@@ -229,6 +231,11 @@ export class TuiApp {
         break;
       case "focus":
         this.focus = event.focus;
+        break;
+      case "catch-up":
+        this.catchUp = event.catchUp;
+        // The welcome screen shows it; once the conversation has started, it becomes a note.
+        if (!this.transcript.isEmpty) this.notice(catchUpText(event.catchUp), "info");
         break;
       case "change": {
         const index = this.changes.findIndex((change) => change.id === event.change.id);
@@ -563,18 +570,33 @@ export class TuiApp {
   }
 
   private drawWelcome(screen: Screen, x: number, y: number, width: number): void {
-    const line = (row: number, text: string, style: Style) => screen.put(x, y + row, truncate(text, width), style);
+    const rows: { text: string; style: Style }[] = [];
+    const add = (text = "", style: Style = st.text) => rows.push({ text, style });
     if (this.connection === "connected" && this.setName) {
-      line(0, `Kumi can see ${this.setName}.`, st.dim);
-      line(2, "Try", st.faint);
-      line(3, "  “What's on this track?”", st.text);
-      line(4, "  “Set the tempo to 124”", st.text);
-      line(5, "  “Why might my low end sound muddy?”", st.text);
+      add(`Kumi can see ${this.setName}.`, st.dim);
+      const catchUp = this.catchUp?.set === this.setName ? this.catchUp : undefined;
+      if (catchUp) {
+        add();
+        if (!catchUp.lines.length) add(`Nothing changed since you were last here, ${since(catchUp.lastSeenAt, Date.now())}.`, st.dim);
+        else {
+          add(`Since you were last here · ${since(catchUp.lastSeenAt, Date.now())}`, st.faint);
+          for (const change of catchUp.lines) add(`  • ${change}`, st.text);
+          if (catchUp.more) add(`  and ${catchUp.more} more ${catchUp.more === 1 ? "change" : "changes"}`, st.faint);
+        }
+      }
+      add();
+      add("Try", st.faint);
+      add("  “What's on this track?”");
+      add("  “Set the tempo to 124”");
+      add("  “Why might my low end sound muddy?”");
     } else {
-      line(0, "Ask anything about production.", st.dim);
-      line(2, "  “How do I make my kick punchier?”", st.text);
+      add("Ask anything about production.", st.dim);
+      add();
+      add("  “How do I make my kick punchier?”");
     }
-    line(7, "Conversations aren't saved yet.", st.faint);
+    add();
+    add("Conversations aren't saved yet.", st.faint);
+    rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
   }
 
   private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style } {
@@ -715,6 +737,13 @@ export class TuiApp {
       if (chosen) screen.put(14, y, truncate(item.about, Math.max(1, width - 15)), st.bright);
     });
   }
+}
+
+/** A catch-up as one line for the conversation. */
+export function catchUpText(catchUp: CatchUp, now = Date.now()): string {
+  const when = since(catchUp.lastSeenAt, now);
+  if (!catchUp.lines.length) return `Nothing changed in ${catchUp.set} since you were last here, ${when}.`;
+  return `Since you were last here (${when}): ${catchUp.lines.join("; ")}${catchUp.more ? `; and ${catchUp.more} more` : ""}.`;
 }
 
 export function createTui(options: TuiOptions): TuiApp {

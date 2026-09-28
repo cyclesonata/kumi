@@ -304,7 +304,29 @@ showed `■ Renamed track “3-Audio” → “K… undo` above `✓ Tempo 120 �
 Two `/undo`s printed “Undid: …” for each and marked both **undone**; Live read
 back at 120 BPM with 3-Audio restored. Screens: `.pi/kumi-evidence/tui/7-9*.txt`.
 
-This verifies small-Set inspection, basic focus and eight of the nine kinds of
-change with their undo (device parameters were not offered for this Set) on one
+## Catching up
+
+Bridge 1.0.10 fixes the semantic Set snapshot on real Live: it failed for every
+real Set, because Live reports a scene's unset tempo and time signature as -1
+(the simulator never did). Kumi uses the snapshot and the bridge's offline diff
+to catch up ([design](../en/KUMI_POC.md#use)). On real Live (UTC
+`2026-09-28T05:38Z`, "Kumi Focus Demo", bridge 1.0.10 upgraded and activated
+through the lifecycle):
+
+1. A first Kumi session recorded the Set (`~/.kumi/projects/<hash>/last-seen.json`,
+   25 KB, mode 0600 in a 0700 folder).
+2. Changes made through the bridge without Kumi: tempo 128 → 130, Vox renamed
+   Lead Vox, an empty MIDI track Kumi Bells added.
+3. Asked “What changed in this Set since I last used you?”, Kumi answered with
+   exactly those three changes and noted the summary may be incomplete.
+4. After another round (130 → 126, Kumi Bells → Bells, Kumi Choir added), the
+   welcome screen read “Since you were last here · just now” with the three lines.
+
+The bridge reports look-alike empty tracks as one ambiguous group (1 before, 2
+after) rather than a rename and an addition; Kumi resolves such groups by name
+and position. Screens: `.pi/kumi-evidence/tui/13-*.txt`, `14-*.txt`.
+
+This verifies small-Set inspection, basic focus, catching up and eight of the
+nine kinds of change with their undo (device parameters were not offered for this Set) on one
 macOS/Live/model setup, not musical usefulness, listening,
 large Sets, Windows, or adversarial robustness.

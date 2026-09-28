@@ -136,6 +136,16 @@ Try “Describe the open Set: tracks, tempo, and transport state,” then ask wh
 devices are on a specific track. Ask for a change, such as “Set the tempo to 124
 and rename 3-Audio to Bass”: each change appears in HISTORY with **undo** beside
 it. Rename a track manually in Live and ask again.
+
+**Catching up.** Kumi remembers each saved Set as it last saw it and, the next
+time you open Kumi on that Set, the welcome screen says what changed meanwhile
+("Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track
+“Pad”"), and Kumi takes it into account in its answers. It compares the bridge's
+privacy-redacted semantic snapshots of the Set, kept in `~/.kumi/projects` (one
+folder per Set file, readable only by you; `KUMI_PROJECTS_DIR` moves it). Kumi
+records the Set when it first sees it, a little after its own changes and when
+it closes. Unsaved Sets have no file to tell them apart, so they aren't
+remembered.
 Kumi refreshes bounded status and Set observations before each turn, and discovers
 fresh detail references rather than treating names or history as authority.
 
@@ -177,6 +187,11 @@ terminal is restored on exit, on crashes and on signals.
 - Undo lasts as long as Kumi's bridge connection: after `/new`, a reconnect or a
   restart, earlier changes can be undone only in Live (Cmd-Z). One answer makes at
   most 40 changes.
+- Catching up needs a saved Set; a Set is recognized by its file path (Save As
+  starts afresh). Very large Sets (a comparison over about 1.5 MB) get "changed,
+  too big to compare yet". Look-alike items the bridge can't match (empty tracks,
+  say) are read by name and position, so a rename can occasionally show as a
+  removal and an addition.
 - After a disconnect, observations are discarded and inference-only conversation
   remains available with no Live tools. `/new` or restart reconnects; Kumi runs no
   hidden reconnect loop. The standalone bridge retains its own status-refresh

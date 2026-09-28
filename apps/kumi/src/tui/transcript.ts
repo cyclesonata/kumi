@@ -110,6 +110,10 @@ export class Transcript {
   private readonly revisions = new WeakMap<Entry, number>();
   private readonly cache = new WeakMap<Entry, { width: number; revision: number; rows: Row[] }>();
 
+  get isEmpty(): boolean {
+    return this.entries.length === 0;
+  }
+
   add(entry: Entry): Entry {
     this.entries.push(entry);
     return entry;

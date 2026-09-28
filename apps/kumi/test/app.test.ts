@@ -330,6 +330,22 @@ test("the narrow strip offers undo for the latest change", async () => {
   await h.app.close();
 });
 
+test("the welcome screen catches you up on the Set; later it's a note in the conversation", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const lastSeenAt = Date.now() - 3 * 24 * 60 * 60_000;
+  h.emit({ type: "catch-up", catchUp: { set: "Night Drive", lastSeenAt, lines: ["Tempo 120 → 124 BPM", "Added track “Pad”"], more: 2 } });
+  let lines = h.screen();
+  for (const text of ["Since you were last here · 3 days ago", "• Tempo 120 → 124 BPM", "• Added track “Pad”", "and 2 more changes", "Try"]) assert.ok(has(lines, text), text);
+  await h.type("hello\r");
+  h.emit({ type: "catch-up", catchUp: { set: "Night Drive", lastSeenAt, lines: [], more: 0 } });
+  lines = h.screen();
+  assert.ok(has(lines, "Nothing changed in Night Drive since you were last here, 3 days ago."));
+  await h.app.close();
+});
+
 test("focus paths follow Live's detail view, shorten from the middle, and keep dark colours visible", () => {
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Clip", clip: "", view: "Arrangement", selectedNotes: 2 }), { crumbs: ["Keys", "Untitled clip"], context: "Arrangement · Clip view · 2 notes selected" });
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Device", device: "Reverb", parameter: { name: "Pan", owner: "Mixer" } }).crumbs, ["Keys", "Reverb"], "a parameter from elsewhere is not shown as the device's");

@@ -35,6 +35,8 @@ function absoluteFile(env: Env, variable: string, fallback: string): string {
 }
 export const loadAuthFile = (env: Env = process.env) => absoluteFile(env, "KUMI_AUTH_FILE", join(homedir(), ".kumi", "auth.json"));
 export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_SETTINGS_FILE", join(homedir(), ".kumi", "settings.json"));
+/** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
+export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
 
 /** Non-secret preferences such as the chosen model; a missing or unreadable file means none. */
 export function readSettings(file: string): { model?: string } {

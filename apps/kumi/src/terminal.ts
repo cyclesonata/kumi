@@ -1,7 +1,7 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Writable } from "node:stream";
 import stringWidth from "string-width";
-import type { SessionController, SessionEvent } from "@kumi/runtime";
+import { since, type SessionController, type SessionEvent } from "@kumi/runtime";
 import { safeError } from "./config.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import { sanitizeText, StreamingText } from "./text.js";
@@ -186,6 +186,12 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
+      case "catch-up": {
+        const { catchUp } = event;
+        const when = since(catchUp.lastSeenAt, Date.now());
+        notice(catchUp.lines.length ? `[since last time · ${when}] ${catchUp.lines.join("; ")}${catchUp.more ? `; and ${catchUp.more} more` : ""}` : `[since last time · ${when}] Nothing changed.`);
+        break;
+      }
       case "change": {
         const { state, title, note } = event.change;
         if (state === "applied") notice(`[change] ${title} (/undo takes it back)`);

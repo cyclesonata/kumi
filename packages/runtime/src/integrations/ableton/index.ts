@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation } from "../../core/contracts.js";
+import type { CatchUp, ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { CHANGES, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
+import { catchUpFrom, describeDiff, since, type Baseline, type ProjectStore } from "./project.js";
+
+/** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
+const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
 
 const MAX_CHANGES_PER_TURN = 40;
 const MAX_CHANGE_RECORDS = 500;
@@ -37,6 +41,10 @@ interface Options {
   onChange?: (change: ChangeRecord) => void;
   /** Bound on one apply or undo once sent; it runs to the end even if the turn is cancelled. */
   changeTimeoutMs?: number;
+  /** Where Kumi keeps each saved Set's last-seen state; without it Kumi doesn't catch up. */
+  projectStore?: ProjectStore;
+  /** What changed in a saved Set while Kumi wasn't running. */
+  onCatchUp?: (catchUp: CatchUp) => void;
 }
 
 interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string }
@@ -69,6 +77,12 @@ export function createAbletonIntegration(options: Options): Integration {
   const changes = new Map<string, Applied>();
   let changesThisTurn = 0;
   const changeTimeoutMs = options.changeTimeoutMs ?? 30_000;
+  /** The saved Set Kumi is keeping track of (unsaved Sets have no file, so nothing to remember). */
+  let project: { identity: string; path?: string; name: string } | undefined;
+  let catchUpContext: JsonObject | undefined;
+  let saving: Promise<void> = Promise.resolve();
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastSaved = 0;
 
   const invalidate = () => { refs.clear(); cursors.clear(); known.clear(); currentEpoch = undefined; observationGeneration++; };
   const loseAccess = () => { if (closed || lost) return; lost = true; available = false; invalidate(); focusFeed?.stop(); options.onConnection("disconnected"); };
@@ -195,6 +209,75 @@ export function createAbletonIntegration(options: Options): Integration {
     changes.set(record.id, { record, transactionId });
     if (changes.size > MAX_CHANGE_RECORDS) changes.delete(changes.keys().next().value!);
     emitChange(record);
+    scheduleSave(20_000);
+  }
+  async function exportPages(signal: AbortSignal): Promise<JsonObject[]> {
+    const pages: JsonObject[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = payload(await tools!.call("live_project_snapshot_export", { profile: "local", limit: 200, ...(cursor ? { cursor } : {}) }, signal, { host: true }));
+      pages.push(page);
+      const next = object(page.page).nextCursor;
+      cursor = typeof next === "string" && next ? next : undefined;
+    } while (cursor && pages.length < 64);
+    if (cursor) throw new ObservationError("The Set is too large to remember yet");
+    return pages;
+  }
+  const artifactOf = (pages: readonly JsonObject[]) => { const id = object(pages[0]?.artifact ?? {}).id; return typeof id === "string" ? id : ""; };
+  /** Save the Set's current state as what Kumi last saw; one save at a time. */
+  function saveNow(bound = 30_000): Promise<void> {
+    const work = saving.then(async () => {
+      const known = project;
+      if (!known?.path || !options.projectStore || !available || lost || closed) return;
+      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(bound)]);
+      await ensureCatalog(signal);
+      if (!tools!.has("live_project_snapshot_export")) return;
+      const pages = await exportPages(signal);
+      if (project !== known) return;
+      await options.projectStore.save({ version: 1, path: known.path, name: known.name, savedAt: now().getTime(), artifactId: artifactOf(pages), pages });
+      lastSaved = Date.now();
+    }).catch(() => { /* remembering is best effort; Live and the conversation are unaffected */ });
+    saving = work;
+    return work;
+  }
+  function scheduleSave(delayMs: number) {
+    if (!options.projectStore || closed) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { void saveNow(); }, delayMs);
+    saveTimer.unref?.();
+  }
+  /** Compare the Set with what Kumi last saw, say what changed, then remember it as it is now. */
+  function catchUp(identity: string, name: string): void {
+    project = { identity, name };
+    catchUpContext = undefined;
+    const store = options.projectStore;
+    if (!store) return;
+    saving = saving.then(async () => {
+      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(60_000)]);
+      await ensureCatalog(signal);
+      if (!PROJECT_TOOLS.every((tool) => tools!.has(tool))) return;
+      const info = payload(await tools!.call("live_project_info", {}, signal, { host: true }));
+      const path = typeof info.path === "string" && info.path && info.exists !== false ? info.path : undefined;
+      if (project?.identity !== identity || !path) return;
+      project = { identity, path, name };
+      const pages = await exportPages(signal);
+      const baseline: Baseline | undefined = await store.load(path);
+      if (baseline && project?.identity === identity) {
+        let described = { lines: [] as string[], more: 0 };
+        if (baseline.artifactId !== artifactOf(pages)) {
+          try {
+            const diff = payload(await tools!.call("live_project_snapshot_diff", { beforePages: baseline.pages, afterPages: pages, limit: 200 }, signal, { host: true }));
+            described = describeDiff(diff, baseline.pages, pages);
+            if (!described.lines.length) described = { lines: ["Small changes Kumi can't name yet"], more: 0 };
+          } catch { described = { lines: ["The Set changed, but it's too big for Kumi to compare yet"], more: 0 }; }
+        }
+        const summary = catchUpFrom(name, baseline, described);
+        catchUpContext = { lastSeen: since(baseline.savedAt, now().getTime()), changes: summary.lines, ...(summary.more ? { more: summary.more } : {}) };
+        try { options.onCatchUp?.(summary); } catch { /* a listener failure must not affect Live */ }
+      }
+      await store.save({ version: 1, path, name, savedAt: now().getTime(), artifactId: artifactOf(pages), pages });
+      lastSaved = Date.now();
+    }).catch(() => { /* catching up is best effort */ });
   }
   const knownTrack = (ref: unknown) => (typeof ref === "string" ? known.get(ref) : undefined);
   /** New tracks go after the last one unless the model gave a position (the bridge's default is request order). */
@@ -301,6 +384,7 @@ export function createAbletonIntegration(options: Options): Integration {
     }
     const body = payload(result);
     if (body.state !== "undone") return { record: update({ state: "unsure", note: "Live didn't confirm the undo; try again." }), text: JSON.stringify(body), isError: true };
+    scheduleSave(20_000);
     return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
   }
   function definitions(): KernelTool[] {
@@ -321,10 +405,10 @@ export function createAbletonIntegration(options: Options): Integration {
       const combined = AbortSignal.any([signal, lifetime.signal]);
       try {
         if (!options.connect && !options.bridgeConfig) throw new ObservationError("Bridge configuration is required; choose explicit inference-only mode otherwise");
-        endpoint = await (options.connect ? options.connect(combined) : connectMcp({ signal: combined, bridgeConfig: options.bridgeConfig!, allowTools: [...MODEL_TOOLS, ...HOST_TOOLS],
+        endpoint = await (options.connect ? options.connect(combined) : connectMcp({ signal: combined, bridgeConfig: options.bridgeConfig!, allowTools: [...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS],
           ...(options.onDispatch ? { onDispatch: options.onDispatch } : {}) }));
         if (combined.aborted || closed) { await endpoint.close(); combined.throwIfAborted(); throw new ObservationError("Connection closed"); }
-        tools = new AllowedTools(endpoint, HOST_TOOLS);
+        tools = new AllowedTools(endpoint, new Set([...HOST_TOOLS, ...PROJECT_TOOLS]));
         // A changed catalog is read again on next use (AllowedTools listens for it); only losing the bridge ends access.
         unlisten.push(endpoint.onDisconnect(loseAccess));
         available = true;
@@ -362,10 +446,13 @@ export function createAbletonIntegration(options: Options): Integration {
         const row = page.items[0]!;
         const identity = setIdentity(row);
         await guardEpoch(signal, epoch, lease);
+        const seenBefore = currentSet === identity;
         currentEpoch = epoch; currentSet = identity;
         registerRows("set", page.items, args, page.nextCursor);
         options.onConnection("connected");
         const name = typeof row.name === "string" && row.name.trim() ? row.name.slice(0, 256) : "(unnamed/unsaved)";
+        if (!seenBefore || project?.identity !== identity) catchUp(identity, name);
+        else if (Date.now() - lastSaved > 5 * 60_000) scheduleSave(1_000);
         await ensureCatalog(signal); assertLease(lease, signal);
         const provenance = typeof status.provenance === "string" ? status.provenance : "unknown";
         const source = provenance === "real-live" && status.adapter === "remote-script" ? "Remote Script · real-live" : `unverified/synthetic fixture · ${provenance}`;
@@ -377,6 +464,7 @@ export function createAbletonIntegration(options: Options): Integration {
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
+            ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             truncated: page.truncated, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
             coverage: "Current open Set only. Bounded discovery; details and track counts require fresh paged reads. Names/paths are not durable identity.",
           }),
@@ -395,9 +483,15 @@ export function createAbletonIntegration(options: Options): Integration {
     },
     close() {
       if (closing) return closing;
-      closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop();
-      for (const remove of unlisten) remove();
-      closing = tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
+      clearTimeout(saveTimer);
+      // Remember the Set as Kumi leaves it, so next time's catch-up starts here (bounded).
+      const remembered = project?.path && options.projectStore && available && !lost
+        ? Promise.race([saveNow(2_000), new Promise<void>((resolve) => { setTimeout(resolve, 2_500).unref?.(); })]) : Promise.resolve();
+      closing = remembered.then(() => {
+        closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop();
+        for (const remove of unlisten) remove();
+        return tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
+      });
       return closing;
     },
   };
