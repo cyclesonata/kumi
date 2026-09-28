@@ -108,6 +108,21 @@ test("typing and sending, then streaming text and steps in plain words, then the
   await h.app.close();
 });
 
+test("answers render their markdown: bold, bullets and code, without the markers", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  await h.type("what's on the bass?\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "text", text: "**Bass** has:\n- EQ Eight\n- Compressor with `attack 12 ms`" });
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 900 });
+  h.emit({ type: "state", state: "idle" });
+  const lines = h.screen();
+  assert.ok(has(lines, "Bass has:") && has(lines, "• EQ Eight") && has(lines, "• Compressor with attack 12 ms"));
+  assert.ok(!has(lines, "**") && !has(lines, "`"));
+  await h.app.close();
+});
+
 test("esc stops Kumi's work; ctrl+c clears the box before it quits", async () => {
   const h = harness();
   const done = h.app.run();

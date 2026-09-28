@@ -1,6 +1,7 @@
 /** The conversation as entries, and how each entry becomes rows at a given width. */
 import { palette, type Rgb, type Style } from "./style.js";
 import { textWidth } from "./width.js";
+import { renderMarkdown } from "./markdown.js";
 import { wrap, type Span } from "./wrap.js";
 
 export interface Step {
@@ -61,7 +62,11 @@ function entryRows(entry: Entry, width: number): Row[] {
     return wrap([{ text: entry.text, style }], inner).map((spans) => ({ spans }));
   }
   const rows: Row[] = [];
-  if (entry.text) rows.push(...wrap([{ text: entry.text.replace(/\n+$/, ""), style: S.text }], inner).map((spans) => ({ spans })));
+  if (entry.text) {
+    for (const row of renderMarkdown(entry.text.replace(/\n+$/, ""), inner, S.text)) {
+      rows.push({ spans: row.spans, ...(row.bg ? { band: { bg: row.bg, width: inner + 2 } } : {}) });
+    }
+  }
   if (entry.steps.length) {
     if (rows.length) rows.push({ spans: [] });
     if (entry.status === "running") {
