@@ -377,9 +377,9 @@ test("racks: the observation shows chains with their devices; a plan adds a chai
     assert.deepEqual(b.requests.filter((request) => request.name === "live_rack_preview").map((request) => request.args.action), ["insert-chain", "add-macro"]);
     assert.equal(b.requests.find((request) => request.name === "live_browser_load_preview")!.args.chainRef, "7:chain:0:0:2", "the new chain, from the step that made it");
     const [chain, load, mixer, macro] = b.records.slice(-4);
-    assert.equal(chain!.title, "Added a chain to Instrument Rack"); assert.equal(chain!.state, "kept", "Live can't take a chain away"); assert.match(chain!.note ?? "", /delete it in Live/);
+    assert.equal(chain!.title, "Added chain 3 to Instrument Rack"); assert.equal(chain!.state, "kept", "Live can't take a chain away"); assert.match(chain!.note ?? "", /delete it in Live/);
     assert.deepEqual(chain!.devices, { rack: "Instrument Rack", chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Chain", devices: [] }], chain: 2 });
-    assert.equal(load!.title, "Loaded Collision into Instrument Rack's chain “Keys” on Fixture Bass"); assert.equal(load!.state, "applied");
+    assert.equal(load!.title, "Loaded Collision into Instrument Rack (chain 3) on Fixture Bass"); assert.equal(load!.state, "applied");
     assert.equal(load!.devices?.index, 0); assert.equal(load!.devices?.chain, 2);
     assert.equal(mixer!.title, "Instrument Rack · chain “Pad” volume down");
     assert.equal(macro!.title, "Added a macro to Instrument Rack"); assert.deepEqual([macro!.from, macro!.to], [8, 9]);

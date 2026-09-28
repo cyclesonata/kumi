@@ -306,8 +306,9 @@ export const CHANGES: readonly ChangeKind[] = [
     description: "Load an instrument, effect, Max for Live device or preset from Live's Browser onto a track (after its devices) or, with chainRef instead, into a rack's chain (after the chain's devices; a chain can hold a rack too). itemId is the Browser path, such as \"instruments/Drum Rack\", \"instruments/Operator\" or \"audio_effects/Reverb\"; live_browser_search finds others. A track or a chain takes one instrument: to layer instruments, load an Instrument Rack, add a chain for each with edit_rack, and load one into each. trackRef and chainRef come from discovery in this turn or an earlier step.",
     summarize(preview, input, track, applied) {
       const known = track(preview.trackRef ?? input.trackRef);
-      const into = label(preview.chainName) ? ` into ${label(preview.rackName) ?? "the rack"}'s chain ${quoted(preview.chainName, "")}` : "";
       const devices = placement(applied?.placement);
+      // Live names a chain after what's in it, so it's the chain's number that says which one.
+      const into = label(preview.chainName) ? ` into ${label(preview.rackName) ?? "the rack"} (chain ${devices?.chain !== undefined ? devices.chain + 1 : quoted(preview.chainName, "")})` : "";
       return { title: `Loaded ${label(record(preview.item).name) ?? "a device"}${into}${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}), ...(devices ? { devices } : {}) };
     },
   },
@@ -351,7 +352,7 @@ export const CHANGES: readonly ChangeKind[] = [
     summarize(preview, input, _track, applied) {
       const devices = placement(applied?.placement);
       const rack = devices?.rack ?? label(preview.rackName) ?? "the rack";
-      if (input.action === "insert-chain") return { title: `Added a chain to ${rack}`, ...(devices ? { devices } : {}) };
+      if (input.action === "insert-chain") return { title: `Added chain ${devices?.chain !== undefined ? `${devices.chain + 1} ` : ""}to ${rack}`, ...(devices ? { devices } : {}) };
       const count = number(applied?.visibleMacroCount); const before = number(record(preview.prior).visibleMacroCount);
       return { title: input.action === "add-macro" ? `Added a macro to ${rack}` : `Removed a macro from ${rack}`, ...(count !== undefined ? { from: before ?? count, to: count, range: [1, 16] as [number, number] } : {}) };
     },

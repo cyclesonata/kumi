@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
 import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
+import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
 import { VirtualTerminal } from "./vt.js";
@@ -363,6 +364,21 @@ test("NOW draws a colour change as the old and new swatches", () => {
   assert.deepEqual(changePicture({ ...change, colors: { from: "#3c3c3c", to: "#e553a0" } }, 40)![0]![0]!.style.fg, [0x94, 0x94, 0x94], "dark colours lightened like the chips, so they show on the pane");
   for (const depth of ["16", "none"] as const) assert.equal(changePicture(change, 40, depth), undefined, `no swatches with ${depth} colours`);
   assert.ok(changePicture(change, 40, "256"), "256 colours tell most of Live's apart");
+});
+
+test("a loaded device's picture: a track's devices in a row, or a rack's chains stacked, the new one lit", () => {
+  const base: ChangeRecord = { id: "c9", family: "device", title: "Loaded Reverb", state: "applied", at: 0 };
+  const text = (lines: ReturnType<typeof changePicture>) => lines!.map((line) => line.map((part) => part.text).join(""));
+  const lit = (lines: ReturnType<typeof changePicture>) => lines!.flatMap((line) => line.filter((part) => JSON.stringify(part.style.fg) === JSON.stringify(palette.accent)).map((part) => part.text));
+  const row = changePicture({ ...base, devices: { devices: ["Operator", "Reverb", "Utility"], index: 1 } }, 40);
+  assert.deepEqual(text(row), ["Operator → Reverb → Utility"]); assert.deepEqual(lit(row), ["Reverb"]);
+  const narrow = changePicture({ ...base, devices: { devices: ["Arpeggiator", "Operator", "Reverb", "Echo", "Utility"], index: 4 } }, 20);
+  assert.deepEqual(text(narrow), ["… → Echo → Utility"], "the lit one stays; the far end gives way");
+  const rack = changePicture({ ...base, devices: { rack: "Instrument Rack", chain: 1, index: 1, chains: [{ name: "Wavetable", devices: ["Wavetable"] }, { name: "Operator", devices: ["Operator", "Reverb"] }, { name: "Bells", devices: ["Collision"] }] } }, 48);
+  assert.deepEqual(text(rack), ["╭ Operator  Operator → Reverb", "╰ Bells     Collision  +1"], "the chain it went into and the next, the rest counted");
+  assert.deepEqual(lit(rack), ["Reverb"]);
+  const added = changePicture({ ...base, devices: { rack: "Instrument Rack", chain: 1, chains: [{ name: "Wavetable", devices: ["Wavetable"] }, { name: "Chain", devices: [] }] } }, 48);
+  assert.deepEqual(text(added), ["╭ Wavetable  Wavetable", "╰ Chain      empty"]); assert.deepEqual(lit(added), ["Chain      "], "a new chain's name is lit");
 });
 
 test("NOW draws a new clip's notes as a tiny piano roll", async () => {
