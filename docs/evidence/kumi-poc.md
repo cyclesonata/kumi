@@ -441,6 +441,29 @@ which Kumi runs): Kumi Keys went from #f7f47c to palette colour 12, which Live
 reported as #e553a0. NOW showed the two swatches, the HISTORY chip took the new
 colour, and the change was undone.
 
+## Finding and loading samples
+
+On real Live with bridge 1.0.17 (UTC `2026-09-28T16:52Z`), asked "Make me a small
+drum kit — kick, snare and closed hat — with random samples from Live's
+library, one MIDI track per sound", the model searched three times at random,
+added three MIDI tracks in one change and loaded one sample into a new Simpler
+on each:
+- Loaded “Kick Short and Prune” into a new Simpler on Kick — Short and Prune
+- Loaded “Snare 808 3” into a new Simpler on Snare — 808 3
+- Loaded “Hihat Closed Machine Soft” into a new Simpler on Closed Hat — Machine Soft
+
+It answered with each pick and its length (0.32, 0.23 and 0.29 s), in 43.6 s. All
+four changes were undone: each Simpler went with its sample, then the tracks.
+
+Earlier, a single Simpler loaded "Kick 007" in 970 ms, and Live showed it by that
+name with its waveform. Two things had to be fixed on the way:
+- The first attempt failed as "adapter request failed". The bridge checks every
+  Remote Script request against its protocol registry, which didn't list the
+  new field.
+- A staged copy used to get a random file name, which Live would have shown.
+
+Search itself takes about 100 ms over the 6,000 files of Live's Core Library.
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change

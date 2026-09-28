@@ -6,7 +6,8 @@ A personal producer assistant for Ableton Live. This proof of concept is a
 full-screen terminal conversation about the open Live Set: it answers questions
 about it and makes the changes you ask for (tempo, mixer, names, new tracks and
 scenes, MIDI clips, loading devices, device parameters, locators, track
-colours), each shown in HISTORY with its own undo. It remembers each saved Set:
+colours, and samples it finds on your computer, each in a new Simpler), each
+shown in HISTORY with its own undo. It remembers each saved Set:
 next time it picks up the conversation and says what changed while it was
 closed. Playback control, recording, listening and learned preferences are not
 implemented yet.

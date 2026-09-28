@@ -19,10 +19,23 @@ to be dependable.
 | `set_device_parameter` | One device parameter | `live_device_parameter_*` |
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
+| `load_sample` | A sample `find_samples` returned, in a new Simpler on an empty MIDI track | `live_device_*` (insert with a sample) |
 | `undo_change` | Undo one of these changes, or the latest | `live_undo` |
 
 Reads for planning a change: `live_discover`, `live_snapshot`,
-`live_browser_search`, `live_note_read`, `live_status`, `server_status`.
+`live_browser_search`, `live_note_read`, `live_status`, `server_status`, and
+Kumi's own `find_samples`. It finds samples on disk by words in their names and
+folders, or at random, in the folders the producer names or where Live keeps
+samples (User Library, Core Library, Factory Packs).
+
+`load_sample` loads only a sample `find_samples` returned, with the folder it
+searched as the file's allowed root. The bridge verifies the file and gives Live
+a copy kept under the original file's name. The new Simpler arrives with its
+sample in one step, so undo takes both away. For "make me a drum kit with random
+samples", Kumi adds a MIDI track per sound and loads each one there.
+
+Not yet: one Drum Rack with a sample on each pad. The bridge can't yet add
+Drum Rack chains with an undo.
 
 Not yet: playback and recording, deleting things, saving, files, audio capture
 and listening. The model is told so and says so plainly.
