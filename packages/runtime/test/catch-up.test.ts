@@ -52,6 +52,10 @@ test("each saved Set's conversation is kept privately, trimmed from the front wh
     const kept = (await store.load(id))!.checkpoint.messages as { role: string; content: string }[];
     assert(kept.length < long.length && Buffer.byteLength(JSON.stringify(kept)) <= 256 * 1024);
     assert.equal(kept[0]!.role, "user", "it starts where the producer spoke"); assert.equal(kept.at(-1)!.content, long.at(-1)!.content, "the newest part is kept");
+    const shaped = Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: `${index}:${"x".repeat(10_000)}` }] }));
+    await store.save(id, { savedAt: 7, checkpoint: { version: 1, messages: shaped } });
+    const noted = (await store.load(id))!.checkpoint.messages as { content: { text: string }[] }[];
+    assert.match(noted[0]!.content[0]!.text, /^\[Kumi removed the earlier part of this conversation to save room\.\]\n\n\d+:x/, "the model is told the start is gone, as in the kernel");
     await store.clear(id);
     assert.equal(await store.load(id), undefined);
     assert.equal(await store.load("../escape"), undefined, "an invalid id reads as nothing");

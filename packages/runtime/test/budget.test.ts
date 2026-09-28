@@ -49,6 +49,14 @@ test("past clearAt, earlier turns' reads shrink to their opening and their obser
   assert.equal(fitted.history.length, history.length);
 });
 
+test("a steered turn before this one is still kept whole", () => {
+  const steered = [user(observed("prev")), called("c_prev"), result("c_prev", read("prev")), user("also check the drums"), said("answer prev")];
+  const history = [...exchange("a"), ...steered];
+  const fitted = fit(history, [user(observed("now"))], { clearAt: 4096, limit: 64 * 1024 });
+  assert.match(outputOf(fitted.history[2])!, /Kumi cleared the rest/, "the turn before it is cleared");
+  assert.deepEqual(fitted.history.slice(4), steered, "the steered turn keeps its read and its observation");
+});
+
 test("fitting is stable: once cleared, the same conversation comes back unchanged, so prompt caches keep working", () => {
   const budget = { clearAt: 4096, limit: 64 * 1024 };
   const once = fit([...exchange("a"), ...exchange("b"), ...exchange("c")], [user(observed("now"))], budget);

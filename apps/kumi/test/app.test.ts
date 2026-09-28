@@ -360,6 +360,9 @@ test("NOW draws a colour change as the old and new swatches", () => {
   assert.deepEqual([line![0]!.style.fg, line![2]!.style.fg], [[0xf7, 0xf4, 0x7c], [0xe5, 0x53, 0xa0]]);
   const { colors: _colors, ...plain } = change;
   assert.deepEqual(changePicture({ ...plain, colors: { to: "#e553a0" } }, 40)![0]!.map((part) => part.text), ["████"], "just the new colour when the old one wasn't known");
+  assert.deepEqual(changePicture({ ...change, colors: { from: "#3c3c3c", to: "#e553a0" } }, 40)![0]![0]!.style.fg, [0x94, 0x94, 0x94], "dark colours lightened like the chips, so they show on the pane");
+  for (const depth of ["16", "none"] as const) assert.equal(changePicture(change, 40, depth), undefined, `no swatches with ${depth} colours`);
+  assert.ok(changePicture(change, 40, "256"), "256 colours tell most of Live's apart");
 });
 
 test("NOW draws a new clip's notes as a tiny piano roll", async () => {

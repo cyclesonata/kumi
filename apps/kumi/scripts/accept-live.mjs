@@ -96,34 +96,37 @@ try {
       say(outcome.ok, outcome.ms, outcome.body?.changed ?? `${name}: ${outcome.error ?? "no title"}`);
       return outcome;
     };
-    const target = before.reads.tracks.items[0];
-    if (!target) say(false, undefined, "the Set has no track to change");
-    else {
-      await change("set_tempo", { tempo: before.tempo === 124 ? 125 : 124 });
-      await change("set_mixer", { trackRef: target.ref, volume: 0.7, pan: -0.25 });
-      await change("rename", { kind: "track", ref: target.ref, name: `${String(target.name).slice(0, 110)} (Kumi)` });
-      await change("set_track_color", { ref: target.ref, colorIndex: 12 });
-      await change("set_locators", { start: 4096, end: 4112, startName: "Kumi Start", endName: "Kumi End" });
-      const added = await change("add_tracks_and_scenes", { tracks: [{ name: "Kumi Pad", kind: "midi" }], scenes: [] });
-      const pad = added?.body?.live?.created?.find((item) => item.kind === "track");
-      if (pad && !stopping) {
-        await change("write_midi_clip", { trackRef: pad.ref, sceneIndex: 0, name: "Kumi Chord", length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) });
-        const found = await run("live_browser_search", { category: "instruments", query: "Drift", limit: 1 });
-        const item = contentOf(found.body).items?.[0];
-        const loaded = item ? await change("load_device", { itemId: item.id, trackRef: pad.ref }) : (say(false, found.ms, "Drift not found in the browser"), undefined);
-        if (loaded?.ok && !stopping) {
-          // A device brings its parameter tools; a new look retires earlier references, so find the pad again.
-          observation = await integration.observe(signal());
-          const padRow = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === "Kumi Pad").at(-1);
-          const device = padRow ? (await all("device", { parent: padRow.ref, fields: ["name"] })).items[0] : undefined;
-          const parameters = device ? (await all("parameter", { parent: device.ref, fields: ["name", "value", "min", "max", "displayValue"] })).items : [];
-          const knob = parameters.find((row) => row.name === "LP Freq" || row.name === "Filter Freq") ?? parameters.find((row) => row.max > row.min && row.name !== "Device On");
-          if (knob) await change("set_device_parameter", { deviceRef: device.ref, parameterRef: knob.ref, value: knob.min + (knob.max - knob.min) * 0.3 });
-          else say(false, undefined, "no Drift parameter to change");
+    try {
+      const target = before.reads.tracks.items[0];
+      if (!target) say(false, undefined, "the Set has no track to change");
+      else {
+        await change("set_tempo", { tempo: before.tempo === 124 ? 125 : 124 });
+        await change("set_mixer", { trackRef: target.ref, volume: 0.7, pan: -0.25 });
+        await change("rename", { kind: "track", ref: target.ref, name: `${String(target.name).slice(0, 110)} (Kumi)` });
+        await change("set_track_color", { ref: target.ref, colorIndex: 12 });
+        await change("set_locators", { start: 4096, end: 4112, startName: "Kumi Start", endName: "Kumi End" });
+        const added = await change("add_tracks_and_scenes", { tracks: [{ name: "Kumi Pad", kind: "midi" }], scenes: [] });
+        const pad = added?.body?.live?.created?.find((item) => item.kind === "track");
+        if (pad && !stopping) {
+          await change("write_midi_clip", { trackRef: pad.ref, sceneIndex: 0, name: "Kumi Chord", length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) });
+          const found = await run("live_browser_search", { category: "instruments", query: "Drift", limit: 1 });
+          const item = contentOf(found.body).items?.[0];
+          const loaded = item ? await change("load_device", { itemId: item.id, trackRef: pad.ref }) : (say(false, found.ms, "Drift not found in the browser"), undefined);
+          if (loaded?.ok && !stopping) {
+            // A device brings its parameter tools; a new look retires earlier references, so find the pad again.
+            observation = await integration.observe(signal());
+            const padRow = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === "Kumi Pad").at(-1);
+            const device = padRow ? (await all("device", { parent: padRow.ref, fields: ["name"] })).items[0] : undefined;
+            const parameters = device ? (await all("parameter", { parent: device.ref, fields: ["name", "value", "min", "max", "displayValue"] })).items : [];
+            const knob = parameters.find((row) => row.name === "LP Freq" || row.name === "Filter Freq") ?? parameters.find((row) => row.max > row.min && row.name !== "Device On");
+            if (knob) await change("set_device_parameter", { deviceRef: device.ref, parameterRef: knob.ref, value: knob.min + (knob.max - knob.min) * 0.3 });
+            else say(false, undefined, "no Drift parameter to change");
+          }
         }
       }
-    }
+    } catch (error) { say(false, undefined, `stopped making changes: ${String(error?.message ?? error).slice(0, 200)}`); }
 
+    // Whatever stopped the changes, what was changed goes back.
     process.stdout.write("\nUndo, newest first\n");
     for (const record of [...records.values()].reverse()) {
       if (record.state !== "applied") continue;
@@ -135,13 +138,15 @@ try {
     }
     for (const record of records.values()) if (record.state === "unsure") say(false, undefined, `unsure, check Live: ${record.title}`);
 
-    observation = await integration.observe(signal());
-    const after = await state();
-    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-    const restored = same(before.tempo, after.tempo) && same(before.tracks, after.tracks) && before.scenes === after.scenes && same(before.locators, after.locators);
     process.stdout.write("\n");
-    say(restored, undefined, restored ? `Set as it was: tempo ${after.tempo}, ${after.tracks.length} tracks, ${after.scenes} scenes, ${after.locators.length} locators`
-      : `Set differs from before: ${JSON.stringify({ before: { ...before, reads: undefined }, after: { ...after, reads: undefined } }).slice(0, 600)}`);
+    try {
+      observation = await integration.observe(signal());
+      const after = await state();
+      const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+      const restored = same(before.tempo, after.tempo) && same(before.tracks, after.tracks) && before.scenes === after.scenes && same(before.locators, after.locators);
+      say(restored, undefined, restored ? `Set as it was: tempo ${after.tempo}, ${after.tracks.length} tracks, ${after.scenes} scenes, ${after.locators.length} locators`
+        : `Set differs from before: ${JSON.stringify({ before: { ...before, reads: undefined }, after: { ...after, reads: undefined } }).slice(0, 600)}`);
+    } catch (error) { say(false, undefined, `couldn't read the Set afterwards to check it: ${String(error?.message ?? error).slice(0, 200)}`); }
     const passed = rows.filter(Boolean).length;
     process.stdout.write(`\n${passed} of ${rows.length} passed${stopping ? " (stopped early)" : ""}.\n`);
     exitCode = passed === rows.length && !stopping ? 0 : 1;

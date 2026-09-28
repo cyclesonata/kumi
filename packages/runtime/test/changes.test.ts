@@ -175,9 +175,10 @@ test("a colour change shows the old and new colours; later changes, and its undo
     assert.deepEqual(colour.track, { name: "Fixture Bass", color: "#e553a0" }, "the chip shows the track as it looks now");
     await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6 }, signal());
     assert.equal(b.records.at(-1)!.track?.color, "#e553a0", "later changes use the new colour");
+    await tool(b.tools, "rename").execute({ kind: "track", ref: "7:track:0", name: "Sub" }, signal());
     await b.integration.undo!(colour.id, signal());
     await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5 }, signal());
-    assert.equal(b.records.at(-1)!.track?.color, "#f7f47c", "and the old one again once it's undone");
+    assert.deepEqual(b.records.at(-1)!.track, { name: "Sub", color: "#f7f47c" }, "the old colour once it's undone, and the later name stays");
   } finally { await b.integration.close(); }
 });
 

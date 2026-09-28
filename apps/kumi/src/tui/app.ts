@@ -160,11 +160,15 @@ export class TuiApp {
   private readonly done: Promise<number>;
   private resolveDone!: (code: number) => void;
 
+  /** How many colours the terminal shows; some pictures need more than a few. */
+  private readonly depth: ColorDepth;
+
   constructor(private readonly options: TuiOptions) {
     this.secrets = options.secrets ?? [];
     this.stream = new StreamingText(this.secrets);
     this.connection = options.mode === "inference-only" ? "disconnected" : "connecting";
-    this.renderer = new Renderer(options.colorDepth ?? detectColorDepth());
+    this.depth = options.colorDepth ?? detectColorDepth();
+    this.renderer = new Renderer(this.depth);
     this.scheduler = new FrameScheduler(() => this.draw(), options.frameMs ?? 16);
     this.tty = new Tty({
       input: options.input, output: options.output,
@@ -716,7 +720,7 @@ export class TuiApp {
       screen.put(at + 1, area.y + 6, label, st.dim);
     }
     put(7, now.detail, now.detailStyle);
-    const picture = this.flashing() ? changePicture(this.flashing()!, width) : undefined;
+    const picture = this.flashing() ? changePicture(this.flashing()!, width, this.depth) : undefined;
     picture?.slice(0, 2).forEach((line, row) => {
       let column = x;
       for (const part of line) column = screen.put(column, area.y + 8 + row, part.text, part.style);
@@ -817,10 +821,13 @@ export class TuiApp {
  * "██████░░░░ → ████░░░░░░". Only for values with a known span.
  */
 /** NOW's picture of a change, a line or two: a value moving within its span, or a new clip's notes. */
-export function changePicture(change: ChangeRecord, width: number): { text: string; style: Style }[][] | undefined {
+export function changePicture(change: ChangeRecord, width: number, depth: ColorDepth = "truecolor"): { text: string; style: Style }[][] | undefined {
   if (change.clip) return clipPicture(change.clip, width);
   if (change.colors) {
-    const swatch = (color: string): { text: string; style: Style } => ({ text: "████", style: { fg: hex(color) } });
+    // Swatches need colours: 16 fold Live's 70 into a few (two different colours could look the same), and none show nothing.
+    if (depth === "16" || depth === "none") return undefined;
+    // Drawn like HISTORY's chips, so dark colours stay visible on the pane.
+    const swatch = (color: string): { text: string; style: Style } => ({ text: "████", style: { fg: chipColor(color) } });
     return [[...(change.colors.from ? [swatch(change.colors.from), { text: " → ", style: st.faint }] : []), swatch(change.colors.to)]];
   }
   if (change.from === undefined || change.to === undefined || !change.range) return undefined;

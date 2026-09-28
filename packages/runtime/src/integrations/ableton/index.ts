@@ -51,8 +51,8 @@ interface Options {
   reconnectIntervalMs?: number;
 }
 
-/** `track` is how a renamed or recoloured track looked before, to put back in Kumi's names when the change is undone. */
-interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string; track?: { ref: string; before: KnownTrack } }
+/** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
+interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string; restore?: { ref: string; field: "name" | "color"; value?: string } }
 
 const resultText = (result: CallToolResult) => result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 const uncertain = (result: CallToolResult) => (result.structuredContent as JsonObject | undefined)?.state === "uncertain" || /uncertain/i.test(resultText(result));
@@ -325,8 +325,8 @@ export function createAbletonIntegration(options: Options): Integration {
   function emitChange(record: ChangeRecord) {
     try { options.onChange?.(structuredClone(record)); } catch { /* a listener failure must not affect Live */ }
   }
-  function remember(record: ChangeRecord, transactionId: string, track?: Applied["track"]) {
-    changes.set(record.id, { record, transactionId, ...(track ? { track } : {}) });
+  function remember(record: ChangeRecord, transactionId: string, restore?: Applied["restore"]) {
+    changes.set(record.id, { record, transactionId, ...(restore ? { restore } : {}) });
     if (changes.size > MAX_CHANGE_RECORDS) changes.delete(changes.keys().next().value!);
     emitChange(record);
     scheduleSave(20_000);
@@ -468,8 +468,9 @@ export function createAbletonIntegration(options: Options): Integration {
         return { text: "Kumi couldn't read Live's answer to this change, so it can't confirm whether it happened. Tell the producer to check Live; discover again before more changes.", isError: true };
       }
       const record = newRecord(kind, kind.summarize(preview, args, knownTrack, result), result.state === "applied" ? "applied" : "unsure", now().getTime());
-      const before = (kind.family === "rename" || kind.family === "color") && typeof args.ref === "string" ? known.get(args.ref) : undefined;
-      remember(record, transactionId, before ? { ref: args.ref as string, before } : undefined);
+      const field = kind.family === "rename" ? "name" : kind.family === "color" ? "color" : undefined;
+      const replaced = field && typeof args.ref === "string" ? known.get(args.ref) : undefined;
+      remember(record, transactionId, field && replaced ? { ref: args.ref as string, field, ...(replaced[field] !== undefined ? { value: replaced[field] } : {}) } : undefined);
       // A renamed track keeps its new name in later HISTORY entries.
       if (kind.family === "rename" && summary.track && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, name: summary.track.name });
       // Likewise its new colour.
@@ -523,7 +524,12 @@ export function createAbletonIntegration(options: Options): Integration {
     const body = payload(result);
     if (body.state !== "undone") return { record: update({ state: "unsure", note: "Live didn't confirm the undo; try again." }), text: JSON.stringify(body), isError: true };
     scheduleSave(20_000);
-    if (entry.track && known.has(entry.track.ref)) known.set(entry.track.ref, entry.track.before);
+    // Only the field the change touched goes back: later changes to the track's other field stay.
+    const restore = entry.restore; const current = restore ? known.get(restore.ref) : undefined;
+    if (restore && current) {
+      if (restore.field === "name") known.set(restore.ref, { ...current, name: restore.value ?? current.name });
+      else { const { color: _color, ...rest } = current; known.set(restore.ref, restore.value ? { ...rest, color: restore.value } : rest); }
+    }
     return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
   }
   function definitions(): KernelTool[] {

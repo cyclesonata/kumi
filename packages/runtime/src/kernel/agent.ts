@@ -95,18 +95,22 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     let reported = false;
     const settled = (stopReason: TurnResult["stopReason"]): TurnResult => ({ stopReason, ...(reported ? { usage } : {}) });
+    // What this turn sends as the earlier conversation, fitted to the budget. It becomes the
+    // history only when the turn settles, so a failed or cancelled turn leaves no trace, the
+    // budget's clearing included; fitting is deterministic, so the next turn sends the same.
+    let earlier = history;
     try {
       for (let step = 0; ; step++) {
-        if (step === maxSteps) { abort.throwIfAborted(); history = [...history, ...messages]; return settled("max-steps"); }
-        const fitted = fit(history, messages, budget);
-        history = fitted.history;
+        if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("max-steps"); }
+        const fitted = fit(earlier, messages, budget);
+        earlier = fitted.history;
         if (fitted.turn !== messages) messages.splice(0, messages.length, ...fitted.turn);
-        const request = binding.prepare({ instructions, messages: [...history, ...messages], tools: specs, sessionId });
+        const request = binding.prepare({ instructions, messages: [...earlier, ...messages], tools: specs, sessionId });
         const result = await stream(request, abort, (text) => deliver({ type: "text", text }));
         add(usage, result.usage); reported = true;
         if (result.content.length) messages.push({ role: "assistant", content: result.content });
         if (result.calls.length) messages.push({ role: "tool", content: await execute(result.calls, abort, deliver) });
-        else if (!steering.length) { abort.throwIfAborted(); history = [...history, ...messages]; return settled("completed"); }
+        else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed"); }
         for (const text of steering.splice(0)) { messages.push(user(text)); deliver({ type: "steer", text }); }
       }
     } catch (error) {

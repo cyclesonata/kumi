@@ -207,6 +207,8 @@ interface ClipLifecycleTransaction {
   state: "previewed" | "applying" | "applied" | "undoing" | "undone" | "uncertain";
   created?: Record<string, unknown>;
   inflight?: Promise<Record<string, unknown>>;
+  /** A track-properties apply's verified colour (0xRRGGBB), repeated on an idempotent replay. */
+  appliedColor?: number;
 }
 
 const REQUEST_ID_MAX_LENGTH = 128;
@@ -4977,7 +4979,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
     if (!transaction || transaction.kind !== "track-set" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired track-properties transaction");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", ...(transaction.appliedColor === undefined ? {} : { color: transaction.appliedColor }), idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.undoKey === undefined && transaction.applyKey === params.idempotencyKey;
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
@@ -4999,7 +5001,8 @@ export class McpHost {
       transaction.state = "applied";
       // The colour Live shows now, for a picture of the change; the palette index alone doesn't say.
       const color = (verified as unknown as JsonObject).color;
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(typeof color === "number" ? { color } : {}), idempotent: false });
+      if (typeof color === "number") transaction.appliedColor = color;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(transaction.appliedColor === undefined ? {} : { color: transaction.appliedColor }), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Track properties state is uncertain; perform fresh discovery before retrying."); }
   }
 

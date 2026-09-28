@@ -32,6 +32,14 @@ const lastIndex = (messages: readonly LanguageModelV4Message[], role: LanguageMo
   for (let index = messages.length - 1; index >= 0; index--) if (messages[index]!.role === role) return index;
   return -1;
 };
+/** Where the turn before this one starts: its opening message carries the Live observation, which steering doesn't. */
+function previousTurn(messages: readonly LanguageModelV4Message[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "user" && message.content.some((part) => part.type === "text" && part.text.includes(OBSERVATION_MARKER))) return index;
+  }
+  return lastIndex(messages, "user");
+}
 
 /** A copy of messages[0, end) with large tool results cut down and, if asked, observations removed; the same array when nothing changed. */
 function clearUntil(messages: LanguageModelV4Message[], end: number, observations: boolean): LanguageModelV4Message[] {
@@ -82,9 +90,11 @@ export function dropEarliest<T extends { role?: unknown }>(messages: readonly T[
   return messages.slice(start);
 }
 
-function noteShortened(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
+/** The conversation's first message, marked as following a removed part (once). */
+export function noteShortened(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
   const [first, ...rest] = messages;
-  if (first?.role !== "user") return messages;
+  // Saved conversations are data from disk: anything unexpected stays as it is.
+  if (first?.role !== "user" || !Array.isArray(first.content)) return messages;
   const text = first.content.find((part) => part.type === "text");
   if (text?.text.startsWith(SHORTENED)) return messages;
   const content = text ? first.content.map((part) => (part === text ? { ...text, text: SHORTENED + text.text } : part))
@@ -100,7 +110,7 @@ export function fit(history: LanguageModelV4Message[], turn: LanguageModelV4Mess
   const turnBytes = () => bytes(turn);
   if (bytes(history) + turnBytes() <= budget.clearAt) return { history, turn };
   // Earlier turns first, keeping the one just before this whole: the producer may refer back to it.
-  history = clearUntil(history, Math.max(0, lastIndex(history, "user")), true);
+  history = clearUntil(history, Math.max(0, previousTurn(history)), true);
   if (bytes(history) + turnBytes() <= budget.limit) return { history, turn };
   history = clearUntil(history, history.length, true);
   if (bytes(history) + turnBytes() <= budget.limit) return { history, turn };

@@ -2272,6 +2272,8 @@ test("track color is readable on rows and writable with exact undo", async () =>
   assert.equal(applied.state, "applied");
   assert.equal(typeof applied.color, "number", "the colour Live shows now");
   assert.equal(applied.color, (simulator as any).state.tracks[0].color);
+  const replayed = JSON.parse(((await call(41, "live_track_properties_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "track-set-1" })) as any).result.content[0].text);
+  assert.equal(replayed.idempotent, true); assert.equal(replayed.color, applied.color, "a replay reports the same colour");
   assert.equal((simulator as any).state.tracks[0].colorIndex, 12);
   const undone = JSON.parse(((await call(5, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "track-set-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone");

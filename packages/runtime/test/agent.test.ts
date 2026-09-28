@@ -299,6 +299,30 @@ test("long conversations stay in budget: earlier reads are cleared in requests a
   await h.kernel.close();
 });
 
+test("a failed or cancelled turn leaves the conversation as it was, even after the budget trimmed it for that turn", async () => {
+  let mode: "answer" | "fail" | "hang" = "answer"; let step = 0;
+  const big = "x".repeat(9_000);
+  const h = harness((options) => {
+    if (mode === "answer") return [...text("fine"), finish()];
+    if (++step % 2 === 1) return [call("read", "{}", `big${step}`), finish("tool-calls")];
+    return mode === "fail" ? Promise.reject(new Error("provider down")) : hanging(options, []);
+  }, { tools: [tool("read", async () => ({ text: big }))], budget: { clearAt: 1024, limit: 8192 } });
+  for (const words of ["one", "two", "three"]) await h.kernel.run(`${words} ${"w".repeat(600)}`, new AbortController().signal, () => {});
+  const before = h.kernel.checkpoint().messages;
+  mode = "fail";
+  await assert.rejects(h.kernel.run("four", new AbortController().signal, () => {}));
+  assert.match(JSON.stringify(h.requests.at(-1)!.prompt[0]), /Kumi removed the earlier part/, "that turn's request did drop the earlier exchanges");
+  assert.deepEqual(h.kernel.checkpoint().messages, before, "but the conversation is as it was");
+  mode = "hang";
+  const controller = new AbortController();
+  const cancelled = h.kernel.run("five", controller.signal, () => {});
+  await delay(20); controller.abort();
+  assert.equal((await cancelled).stopReason, "cancelled");
+  assert.deepEqual(h.kernel.checkpoint().messages, before);
+  assert.equal(h.kernel.transcript().length, 6);
+  await h.kernel.close();
+});
+
 test("when the earliest exchanges go, the model is told and the transcript isn't", async () => {
   const h = harness(() => [...text("w".repeat(1500)), finish()], { budget: { clearAt: 1024, limit: 4096 } });
   for (const words of ["one", "two", "three", "four"]) await h.kernel.run(`${words} ${"w".repeat(1500)}`, new AbortController().signal, () => {});

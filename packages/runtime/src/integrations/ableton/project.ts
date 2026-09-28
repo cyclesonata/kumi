@@ -6,8 +6,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { LanguageModelV4Message } from "@ai-sdk/provider";
 import type { CatchUp, ConversationStore, JsonObject, SavedConversation } from "../../core/contracts.js";
-import { dropEarliest } from "../../kernel/budget.js";
+import { dropEarliest, noteShortened } from "../../kernel/budget.js";
 
 /** A Set's state as Kumi last saw it. */
 export interface Baseline {
@@ -85,6 +86,8 @@ export function createConversationStore(directory: string): ConversationStore {
         messages = last >= 0 && Buffer.byteLength(JSON.stringify(all.slice(last))) <= 4 * MAX_CONVERSATION_BYTES ? all.slice(last) : [];
       }
       if (!messages.length) return;
+      // As in the kernel, the model is told when the start of the conversation is gone.
+      if (messages.length < all.length) messages = noteShortened(messages as LanguageModelV4Message[]);
       const saved: SavedConversation = { savedAt: conversation.savedAt, checkpoint: { ...conversation.checkpoint, messages } };
       file(project);
       await writePrivately(join(directory, project), "conversation.json", JSON.stringify(saved));
