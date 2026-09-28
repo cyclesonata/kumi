@@ -3289,11 +3289,24 @@ export class McpHost {
       if (proposed.pan !== undefined && mixer.panRef === null) throw new Error("pan is unavailable on this track");
       const prior: Record<string, unknown> = {};
       for (const field of Object.keys(proposed)) prior[field] = structuredClone(mixer[field] ?? null);
+      const priorDisplay = this.mixerDisplays(mixer, Object.keys(proposed));
       const fence = JSON.stringify({ ref: params.trackRef, objectIdentity: target.track.objectIdentity, mixer });
       const transaction: ClipLifecycleTransaction = { id: `mixer_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "mixer-set", fence, clipRef: params.trackRef as LiveRef, payload: { ref: params.trackRef, ...proposed, ...this.mixerAuthority(target) }, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "mixer");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, trackRef: params.trackRef, prior, proposed, impact: "edits-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, trackRef: params.trackRef, prior, ...(priorDisplay ? { priorDisplay } : {}), proposed, impact: "edits-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Mixer preview requires fresh authoritative state."); }
+  }
+
+  /** Live's own text for the given mixer fields, when the adapter reports it. */
+  private mixerDisplays(mixer: JsonObject, fields: readonly string[]): Record<string, unknown> | undefined {
+    const source: Record<string, unknown> = { volume: mixer.volumeDisplay, pan: mixer.panDisplay, cueVolume: mixer.cueVolumeDisplay, sends: mixer.sendDisplays };
+    const display: Record<string, unknown> = {};
+    for (const field of fields) {
+      const value = source[field];
+      if (typeof value === "string" && value.length <= 32) display[field] = value;
+      else if (Array.isArray(value) && value.length <= 64 && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
+    }
+    return Object.keys(display).length ? display : undefined;
   }
 
   private async liveMixerApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -3318,7 +3331,8 @@ export class McpHost {
       const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      const display = this.mixerDisplays(verified.mixer, Object.keys(transaction.prior ?? {}));
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(display ? { display } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Mixer state is uncertain; perform fresh discovery before retrying."); }
   }
 

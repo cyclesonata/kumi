@@ -6206,6 +6206,15 @@ class LiveObjectMapper:
             value = self._read_attr(track, name)
             return bool(value) if isinstance(value, bool) else None
 
+        def display(obj: Any) -> str | None:
+            """Live's own text for the value ("-3.2 dB", "25L"), so people see Live's units."""
+            value = param_value(obj)
+            formatter = self._read_attr(obj, "str_for_value") if value is not None else None
+            try:
+                return str(formatter(value))[:32] if callable(formatter) else None
+            except Exception:
+                return None
+
         is_main = self._track_kind(track) == "main"
         song_tempo = self._read_attr(mixer, "song_tempo") if is_main and mixer is not None else None
 
@@ -6220,6 +6229,10 @@ class LiveObjectMapper:
             "mute": flag("mute"),
             "solo": flag("solo"),
             "sends": [param_value(send) for send in send_params],
+            "volumeDisplay": display(volume_param),
+            "panDisplay": display(pan_param),
+            "cueVolumeDisplay": display(cue_param),
+            "sendDisplays": [display(send) for send in send_params],
             "volumeRef": self.refs.put("parameter", volume_param, f"mixer:{track_index}:volume") if volume_param is not None else None,
             "volumeIdentity": self._capture_object_identity(volume_param) if volume_param is not None else None,
             "panRef": self.refs.put("parameter", pan_param, f"mixer:{track_index}:panning") if pan_param is not None else None,

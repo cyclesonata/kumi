@@ -3951,6 +3951,18 @@ class MixerRoutingExpansionTests(unittest.TestCase):
         song.tracks[0].mixer_device = FakeMixerDevice()
         return song, LiveObjectMapper(song)
 
+    def test_mixer_rows_carry_lives_own_text_for_values(self):
+        song, mapper = self._mapper_with_mixer()
+        mixer = song.tracks[0].mixer_device
+        mixer.volume.value = 0.85; mixer.volume.str_for_value = lambda value: "0.0 dB" if value == 0.85 else f"{value:.2f}"
+        mixer.panning.value = -0.5; mixer.panning.str_for_value = lambda value: "25L"
+        mixer.sends[0].str_for_value = lambda value: "-inf dB"
+        mixer.sends[1].str_for_value = lambda value: 1 / 0
+        row = mapper.snapshot()["tracks"][0]["mixer"]
+        self.assertEqual((row["volumeDisplay"], row["panDisplay"]), ("0.0 dB", "25L"))
+        self.assertIsNone(row["cueVolumeDisplay"], "a parameter without Live's text has none")
+        self.assertEqual(row["sendDisplays"], ["-inf dB", None], "a failing formatter is skipped, not fatal")
+
     def test_mixer_extended_fields_and_set(self):
         song, mapper = self._mapper_with_mixer()
         row = mapper.snapshot()["tracks"][0]["mixer"]
