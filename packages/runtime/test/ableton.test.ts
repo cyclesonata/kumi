@@ -101,19 +101,19 @@ test("unnamed Set is valid; name changes refresh context but do not invent proje
   } finally { await f.integration.close(); }
 });
 
-test("detailed follow-up requires current-turn discovery parent refs and reflects manual rename", async () => {
+test("the observation lists the tracks with refs usable at once; deeper reads need parents from this turn and reflect manual renames", async () => {
   const f = await started();
   try {
     const observation = await f.integration.observe(signal()); const discover = tool(observation.tools);
-    let denied = await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal()); assert.equal(denied.isError, true);
+    assert.deepEqual((JSON.parse(observation.context) as JsonObject).tracks, [{ ref: "fixture-track-1", name: "Fixture Bass", type: "regular" }]);
+    const denied = await discover.execute({ kind: "device", parent: "fixture-track-9" }, signal()); assert.equal(denied.isError, true, "a track the observation didn't list");
     assert(!f.requests.some((request) => request.args.kind === "device"));
-    const tracks = await discover.execute({ kind: "track" }, signal()); assert.match(tracks.text, /Fixture Bass/);
     const devices = await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal()); assert.equal(devices.isError, false); assert.match(devices.text, /Fixture Filter/);
     assert.equal(f.requests.find((request) => request.args.kind === "device")?.args.parent, "fixture-track-1");
     const params = await discover.execute({ kind: "parameter", parent: "fixture-device-1" }, signal()); assert.match(params.text, /Cutoff/);
-    f.renameTrack("Manual Renamed Bass"); await f.integration.observe(signal());
-    denied = await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal()); assert.equal(denied.isError, true);
-    const freshTracks = await discover.execute({ kind: "track" }, signal()); assert.match(freshTracks.text, /Manual Renamed Bass/);
+    f.renameTrack("Manual Renamed Bass"); const next = await f.integration.observe(signal());
+    assert.match(next.context, /Manual Renamed Bass/);
+    assert.equal((await discover.execute({ kind: "parameter", parent: "fixture-device-1" }, signal())).isError, true, "a device from an earlier turn is discovered again");
     assert.equal((await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal())).isError, false);
   } finally { await f.integration.close(); }
 });

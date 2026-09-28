@@ -1229,7 +1229,8 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.structure"); const snapshot = await this.asyncAdapter().snapshotAsync();
       const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      if ([...proposed.tracks, ...proposed.scenes].some((item) => existingNames.has(item.name))) throw new Error("track or scene name already exists");
+      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
+      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -8445,7 +8446,8 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.structure"); const snapshot = this.adapter.snapshot();
       const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      if ([...proposed.tracks, ...proposed.scenes].some((item) => existingNames.has(item.name))) throw new Error("track or scene name already exists");
+      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
+      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -8676,7 +8678,7 @@ export class McpHost {
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
     // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad |track or scene )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

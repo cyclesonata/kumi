@@ -8,12 +8,14 @@ import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { defaultSampleFolders, findSamples, folderPath, type Sample } from "./samples.js";
-import { CHANGES, hexColor, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { CHANGES, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
+const MAKE_CHANGES = "make_changes";
+const MAKE_CHANGES_DESCRIPTION = "Make several changes in one call, in order: each step is one of your change tools with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). It stops at the first step that fails and says what was done. Use it whenever a request needs more than one change; it's much faster than one call per change.";
 const FIND_SAMPLES = "find_samples";
 const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
 const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
@@ -91,6 +93,8 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Samples find_samples returned, by path, with the folder searched: what load_sample may load. */
   const samples = new Map<string, Sample>();
   let changesThisTurn = 0;
+  /** Samples Kumi picked itself in this answer, so random picks don't repeat. */
+  const picked = new Set<string>();
   const changeTimeoutMs = options.changeTimeoutMs ?? 30_000;
   /** The saved Set Kumi is keeping track of (unsaved Sets have no file, so nothing to remember). */
   let project: { identity: string; path?: string; name: string } | undefined;
@@ -434,6 +438,70 @@ export function createAbletonIntegration(options: Options): Integration {
     return { ...input, ...(input.tracks !== undefined ? { tracks: place(input.tracks, tracks) } : {}), ...(input.scenes !== undefined ? { scenes: place(input.scenes, scenes) } : {}) };
   }
   /** Preview and apply one change as a single step, then record it for HISTORY. */
+  function changeContext(signal: AbortSignal): ChangeContext {
+    return {
+      sample: (path) => samples.get(path),
+      async pick(selector: SampleSelector) {
+        const named = (selector.folders ?? []).map((folder) => folderPath(folder)).filter((folder): folder is string => Boolean(folder));
+        const found = await findSamples({ folders: named.length ? named : defaultSampleFolders(), words: selector.words ?? [], limit: 50, random: selector.random === true || !(selector.words ?? []).length, signal });
+        const choice = found.samples.find((sample) => !picked.has(sample.path));
+        if (!choice) return undefined;
+        picked.add(choice.path); samples.delete(choice.path); samples.set(choice.path, choice);
+        return choice;
+      },
+    };
+  }
+
+  /**
+   * Several changes in one call: each step runs exactly as its own tool would (the same checks,
+   * HISTORY entry and undo), in order, and stops at the first that fails. "@name" in a step's
+   * input stands for what an earlier step marked `as: "name"` made. One call instead of a model
+   * round trip per change, which is most of the time a multi-step request takes.
+   */
+  async function makeChanges(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    // A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it.
+    const steps: unknown[] = [];
+    for (const raw of Array.isArray(input.steps) ? input.steps : []) {
+      const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
+      const each = item.each && typeof item.each === "object" && !Array.isArray(item.each) ? Object.entries(item.each as JsonObject) : [];
+      if (each.length !== 1 || !Array.isArray(each[0]![1])) { steps.push(raw); continue; }
+      const [field, values] = each[0]! as [string, unknown[]];
+      const base = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
+      for (const value of values) steps.push({ tool: item.tool, input: { ...base, [field]: value } });
+      if (steps.length > MAX_CHANGES_PER_TURN) break;
+    }
+    if (!steps.length || steps.length > MAX_CHANGES_PER_TURN) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
+    const made = new Map<string, string>();
+    const done: JsonObject[] = [];
+    const resolve = (value: unknown, step: number): unknown => {
+      if (typeof value === "string" && /^@[a-z][a-z0-9_]{0,31}$/i.test(value)) {
+        const found = made.get(value.slice(1));
+        if (!found) throw new ObservationError(`step ${step} refers to ${value}, which no earlier step made`);
+        return found;
+      }
+      if (Array.isArray(value)) return value.map((item) => resolve(item, step));
+      if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item, step)]));
+      return value;
+    };
+    for (const [index, raw] of steps.entries()) {
+      const step = index + 1;
+      const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
+      const kind = CHANGES.find((candidate) => candidate.tool === item.tool);
+      const stop = (error: string) => ({ text: JSON.stringify({ done, stopped: { step, tool: item.tool ?? null, error: error.slice(0, 600) }, ...(steps.length > step ? { skipped: steps.length - step } : {}) }), isError: true });
+      if (!kind) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
+      let stepInput: JsonObject;
+      try { stepInput = resolve(item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {}, step) as JsonObject; }
+      catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
+      const outcome = await change(kind, stepInput, signal);
+      let reply: JsonObject = {};
+      try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
+      if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
+      if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
+      done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}) });
+    }
+    return { text: JSON.stringify({ done }), isError: false };
+  }
+
   async function change(kind: ChangeKind, input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
     const lease = observationGeneration;
@@ -444,8 +512,9 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
       requireFreshReferences(input);
-      const prepared = kind.prepare ? kind.prepare(input, { sample: (path) => samples.get(path) }) : input;
+      const prepared = kind.prepare ? await kind.prepare(input, changeContext(signal)) : input;
       if (typeof prepared === "string") return { text: prepared, isError: true };
+      assertLease(lease, signal);
       const epoch = currentEpoch;
       await guardEpoch(signal, epoch, lease);
       const args = await appendAtEnd(kind, prepared, signal); assertLease(lease, signal);
@@ -498,7 +567,10 @@ export function createAbletonIntegration(options: Options): Integration {
           }
         }
       }
-      const reply = { changed: record.title, change: record.id, state: record.state,
+      // What the change made (a new track, a loaded device) is usable at once, without discovering it.
+      const produced = kind.produces?.(result);
+      if (produced && produced.ref.length <= 256) refs.set(produced.ref, produced.kind);
+      const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: produced.ref } : {}),
         ...(kind.restructures ? { note: "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
       const full = JSON.stringify({ ...reply, live: result });
       return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" };
@@ -570,7 +642,14 @@ export function createAbletonIntegration(options: Options): Integration {
           matched: found.matched, looked: found.scanned, ...(found.partial ? { partial: true } : {}), ...(found.missing.length ? { missing: found.missing } : {}),
           ...(folders.length ? {} : { searched: "the User Library, Live's Core Library and Factory Packs" }) }), isError: false };
       } };
-    return [...reads, sampleSearch, ...edits, ...undo];
+    const batch: KernelTool[] = tools!.has("live_undo") && edits.length ? [{ name: MAKE_CHANGES, description: MAKE_CHANGES_DESCRIPTION,
+      inputSchema: { type: "object", additionalProperties: false, required: ["steps"], properties: { steps: { type: "array", minItems: 1, maxItems: MAX_CHANGES_PER_TURN, items: {
+        type: "object", additionalProperties: false, required: ["tool", "input"], properties: {
+          tool: { type: "string", enum: edits.map((item) => item.name) }, input: { type: "object", description: "What that tool takes; \"@name\" for what an earlier step made" },
+          as: { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,31}$", description: "Name what this step makes (a new track, a loaded device) for later steps" },
+          each: { type: "object", description: "Repeat this step once per value of one input field, e.g. {\"note\": [36, 37, 38, 39]}", additionalProperties: { type: "array", maxItems: 40 } } } } } } },
+      execute: (input, signal) => makeChanges(input, signal) }] : [];
+    return [...reads, sampleSearch, ...edits, ...batch, ...undo];
   }
   return {
     async start(signal) {
@@ -592,7 +671,7 @@ export function createAbletonIntegration(options: Options): Integration {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       signal.throwIfAborted();
       if (!started || closed) throw new ObservationError("Integration is not open");
-      invalidate(); const lease = observationGeneration; changesThisTurn = 0;
+      invalidate(); const lease = observationGeneration; changesThisTurn = 0; picked.clear();
       // While Live is away the conversation stays with its Set (and keeps being saved there).
       const away = () => noAccess(previous?.key ?? `${generation}:no-live`, now(), previous?.path && previous.project ? previous.project : undefined);
       if (!available || lost) return away();
@@ -614,6 +693,18 @@ export function createAbletonIntegration(options: Options): Integration {
         await guardEpoch(signal, epoch, lease);
         currentEpoch = epoch; currentSet = identity; lastEpoch = epoch;
         registerRows("set", page.items, args, page.nextCursor);
+        // The Set's tracks, with references usable in this turn: most requests then need no discovery first.
+        let trackList: JsonObject[] | undefined; let moreTracks = false;
+        try {
+          const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: 100 });
+          const tracksRead = await tools!.call("live_discover", trackArgs, signal, { host: true }); assertLease(lease, signal);
+          if (!tracksRead.isError) {
+            const trackPage = discoveryPayload(tracksRead, "track", epoch);
+            registerRows("track", trackPage.items, trackArgs, trackPage.nextCursor);
+            trackList = trackPage.items.map((item) => ({ ref: item.ref ?? null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null }));
+            moreTracks = Boolean(trackPage.nextCursor) || trackPage.truncated === true;
+          }
+        } catch (error) { if (lease !== observationGeneration) throw error; trackList = undefined; }
         options.onConnection("connected");
         const name = typeof row.name === "string" && row.name.trim() ? row.name.slice(0, 256) : "(unnamed/unsaved)";
         // Its file says which saved Set this is (for its conversation and catching up). It's read for a
@@ -644,6 +735,7 @@ export function createAbletonIntegration(options: Options): Integration {
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
+            ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
             ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),

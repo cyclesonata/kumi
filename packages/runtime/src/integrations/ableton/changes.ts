@@ -10,7 +10,34 @@ import type { ChangeFamily, ChangeRecord, JsonObject } from "../../core/contract
 export interface KnownTrack { name: string; color?: string }
 
 /** What a change can look up while preparing: a sample find_samples returned, with the folder searched. */
-export interface ChangeContext { sample(path: string): { path: string; folder: string } | undefined }
+export interface ChangeContext {
+  sample(path: string): { path: string; folder: string } | undefined;
+  /** A sample Kumi finds itself (at random, or the best match for the words), not one already picked in this answer. */
+  pick(selector: SampleSelector): Promise<{ path: string; folder: string } | undefined>;
+}
+export interface SampleSelector { words?: string[]; folders?: string[]; random?: boolean }
+
+/** A `sample` input: a path find_samples returned, or a selector Kumi resolves itself (no search step in between). */
+export const SAMPLE_INPUT = {
+  description: "A path find_samples returned, or {\"random\": true, \"words\": [\"kick\"]} for Kumi to pick one itself (words and folders optional)",
+  anyOf: [
+    { type: "string", minLength: 1, maxLength: 1024 },
+    { type: "object", additionalProperties: false, properties: {
+      random: { type: "boolean" }, words: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 64 } },
+      folders: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 } } } },
+  ],
+} as const;
+
+/** A sample for a change: found earlier, or picked now. A string is a refusal. */
+async function sampleFor(input: unknown, context: ChangeContext): Promise<{ path: string; folder: string } | string> {
+  if (typeof input === "string") return context.sample(input) ?? "Load a sample find_samples returned in this conversation, or give {\"random\": true, \"words\": [...]} for Kumi to pick one.";
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const selector = input as JsonObject;
+    const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+    return await context.pick({ words: strings(selector.words), folders: strings(selector.folders), random: selector.random === true }) ?? "No sample matches that; try other words or folders.";
+  }
+  return "Give the sample as a path find_samples returned, or {\"random\": true, \"words\": [...]}.";
+}
 
 export interface ChangeSummary {
   title: string;
@@ -36,7 +63,9 @@ export interface ChangeKind {
   /** The model's input, when Kumi's tool asks for something other than the bridge's preview does. */
   inputSchema?: JsonObject;
   /** Turn the model's input into the preview's; a string refuses, in words for the model. */
-  prepare?(input: JsonObject, context: ChangeContext): JsonObject | string;
+  prepare?(input: JsonObject, context: ChangeContext): JsonObject | string | Promise<JsonObject | string>;
+  /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" } | undefined;
   /**
    * Offered even while the bridge doesn't advertise it, for changes whose target an earlier step
    * of the same answer creates (a Drum Rack's pads). `unavailable` says what to do first.
@@ -121,6 +150,10 @@ export const CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "add_tracks_and_scenes", preview: "live_session_structure_preview", apply: "live_session_structure_apply", family: "structure", restructures: true,
+    produces(applied) {
+      const created = Array.isArray(applied.created) ? applied.created.map(record).find((item) => item.kind === "track" && typeof item.ref === "string") : undefined;
+      return created ? { ref: created.ref as string, kind: "track" } : undefined;
+    },
     description: "Add new MIDI or audio tracks and named scenes. New ones go after the last track or scene unless you give an index (0 is first). Earlier track and scene references are out of date afterwards; discover again before using them.",
     schema(schema) {
       const copy = structuredClone(schema);
@@ -163,11 +196,15 @@ export const CHANGES: readonly ChangeKind[] = [
     tool: "load_sample", preview: "live_device_preview", apply: "live_device_apply", family: "device",
     description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is a path find_samples returned; trackRef comes from discovery in this turn or the track just added.",
     inputSchema: { type: "object", additionalProperties: false, required: ["trackRef", "sample"], properties: {
-      trackRef: { type: "string", minLength: 1, maxLength: 256 }, sample: { type: "string", minLength: 1, maxLength: 1024, description: "A path find_samples returned" } } },
-    prepare(input, context) {
-      const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
-      if (!found) return "Load a sample find_samples returned in this conversation; search for it first.";
+      trackRef: { type: "string", minLength: 1, maxLength: 256 }, sample: SAMPLE_INPUT } },
+    async prepare(input, context) {
+      const found = await sampleFor(input.sample, context);
+      if (typeof found === "string") return found;
       return { action: "insert", trackRef: input.trackRef ?? null, deviceName: "Simpler", filePath: found.path, allowedRoot: found.folder };
+    },
+    produces(applied) {
+      const created = record(applied.result);
+      return typeof created.ref === "string" ? { ref: created.ref, kind: "device" } : undefined;
     },
     summarize(_preview, input, track) {
       const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
@@ -181,10 +218,10 @@ export const CHANGES: readonly ChangeKind[] = [
     description: "Load a sample onto an empty pad of a Drum Rack, as a new Simpler on that pad; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is a path find_samples returned.",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "note", "sample"], properties: {
       deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127, description: "The pad: 36 is C1, the first pad" },
-      sample: { type: "string", minLength: 1, maxLength: 1024, description: "A path find_samples returned" } } },
-    prepare(input, context) {
-      const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
-      if (!found) return "Load a sample find_samples returned in this conversation; search for it first.";
+      sample: SAMPLE_INPUT } },
+    async prepare(input, context) {
+      const found = await sampleFor(input.sample, context);
+      if (typeof found === "string") return found;
       return { action: "load-sample", deviceRef: input.deviceRef ?? null, note: input.note ?? null, filePath: found.path, allowedRoot: found.folder };
     },
     summarize(preview, input) {
@@ -195,7 +232,11 @@ export const CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "load_device", preview: "live_browser_load_preview", apply: "live_browser_load_apply", family: "device",
-    description: "Load an instrument, effect or preset from Live's Browser onto a track. itemId comes from live_browser_search in this turn; trackRef from discovery in this turn.",
+    produces(applied) {
+      const reference = applied.deviceRef ?? record(applied.created).deviceRef;
+      return typeof reference === "string" ? { ref: reference, kind: "device" } : undefined;
+    },
+    description: "Load an instrument, effect or preset from Live's Browser onto an empty track. itemId is the Browser path, such as \"instruments/Drum Rack\", \"instruments/Operator\" or \"audio_effects/Reverb\"; live_browser_search finds others. trackRef comes from discovery in this turn or a track just made.",
     summarize(preview, input, track) {
       const known = track(preview.trackRef ?? input.trackRef);
       return { title: `Loaded ${label(record(preview.item).name) ?? "a device"}${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };

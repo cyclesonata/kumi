@@ -23,7 +23,8 @@ function bridge() {
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo",
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
-    "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply"];
+    "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
+    "live_browser_load_preview", "live_browser_load_apply"];
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
@@ -55,7 +56,8 @@ function bridge() {
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
         if (name === "live_track_properties_preview") return wrap({ ...base, ref: args.ref, prior: { colorIndex: 4 }, proposed: { colorIndex: args.colorIndex } });
         if (name === "live_device_preview") return wrap({ ...base, action: args.action, payload: { trackRef: args.trackRef, deviceName: args.deviceName }, sample: { path: args.filePath, size: 18 } });
-        if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: "7:drum_pad:0:0:0", note: args.note, sample: { path: args.filePath } });
+        if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: `7:drum_pad:0:0:${String(args.note)}`, note: args.note, sample: { path: args.filePath } });
+        if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef, item: { name: String(args.itemId).split("/").at(-1) } });
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
         return wrap({ ...base, prior: { tracks: tracks.map((track, index) => ({ ref: `7:track:${index}`, name: track.name, index })), scenes: [] }, proposed });
       }
@@ -73,7 +75,12 @@ function bridge() {
           return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
         }
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
-        if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:drum_pad:0:0:0", route: "chain", samplePath: "/staged/Kick Deep.wav" } });
+        if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: `7:drum_pad:0:0:${String(transaction.args.note)}`, route: "chain", samplePath: "/staged/Kick Deep.wav" } });
+        if (transaction.name === "live_browser_load_preview") {
+          // Like the bridge, a Drum Rack in the Set brings the pad tools.
+          if (String(transaction.args.itemId).endsWith("Drum Rack")) { drumRack = true; for (const listener of catalogListeners) listener(); }
+          return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: `7:device:${String(transaction.args.trackRef).split(":").at(-1)}:0` });
+        }
         if (transaction.name === "live_device_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:device:0:0", objectIdentity: "device-identity", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_track_properties_preview") {
           const track = tracks[Number(String(transaction.args.ref).split(":").at(-1))]!;
@@ -104,6 +111,7 @@ function bridge() {
     /** The bridge re-negotiates its tools after content changes and says so. */
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
     addDrumRack: () => { drumRack = true; for (const listener of catalogListeners) listener(); },
+    deleteLastTrack: () => { tracks = tracks.slice(0, -1); },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     holdApply: () => {
       let sent!: () => void; let release!: () => void;
@@ -130,7 +138,7 @@ test("a change tool previews and applies in one step, keeps confirmations away f
     assert(names.includes("set_tempo") && names.includes("set_mixer") && names.includes(UNDO_TOOL));
     for (const name of names) assert(!/_apply$|_preview$|^live_undo$/.test(name), `${name} is not a bridge preview, apply or undo`);
     assert(!names.includes("live_audio_capture_apply") && !names.includes("live_transport_apply"), "tools outside Kumi's changes stay hidden");
-    assert(!names.includes("load_device"), "a change is offered only while the bridge advertises it");
+    assert(!names.includes("set_device_parameter"), "a change is offered only while the bridge advertises it");
     assert.doesNotMatch(b.observation.instructions, /only read Live state/i);
 
     const result = await tool(b.tools, "set_tempo").execute({ tempo: 124 }, signal());
@@ -145,13 +153,14 @@ test("a change tool previews and applies in one step, keeps confirmations away f
   } finally { await b.integration.close(); }
 });
 
-test("changes need references from this turn's discovery; HISTORY gets the track's name and colour from it", async () => {
+test("changes need references from this turn, the observation's tracks or discovery; HISTORY gets the track's name and colour from them", async () => {
   const b = await opened();
   try {
-    const stale = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6 }, signal());
+    const listed = (JSON.parse(b.observation.context) as { tracks: JsonObject[] }).tracks;
+    assert.deepEqual(listed.map((track) => [track.ref, track.name]), [["7:track:0", "Fixture Bass"], ["7:track:1", "Fixture Drums"]], "the observation lists the tracks");
+    const stale = await tool(b.tools, "set_mixer").execute({ trackRef: "6:track:0", volume: 0.6 }, signal());
     assert.equal(stale.isError, true); assert.match(stale.text, /discovery in this turn/);
     assert(!b.requests.some((request) => request.name === "live_mixer_preview"), "nothing is previewed with a stale reference");
-    await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
     const result = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6, pan: -0.25 }, signal());
     assert.equal(result.isError, false, result.text);
     assert.doesNotMatch(result.text, /secret-confirmation-token/, "the preview's confirmation never reaches the model");
@@ -167,9 +176,10 @@ test("changes need references from this turn's discovery; HISTORY gets the track
     assert.equal(b.records.at(-1)!.title, "Renamed track “Fixture Bass” → “Sub”");
     await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.55 }, signal());
     assert.equal(b.records.at(-1)!.track?.name, "Sub", "later changes use the new name");
+    b.deleteLastTrack();
     const next = await b.integration.observe(signal());
-    const again = await tool(next.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5 }, signal());
-    assert.equal(again.isError, true, "a new turn needs fresh discovery again");
+    const again = await tool(next.tools, "set_mixer").execute({ trackRef: "7:track:1", volume: 0.5 }, signal());
+    assert.equal(again.isError, true, "a track deleted in Live since the last turn isn't listed any more, so its ref is refused");
   } finally { await b.integration.close(); }
 });
 
@@ -247,6 +257,81 @@ test("load_sample_to_pad is offered before the Set has a Drum Rack, says what to
     assert.deepEqual(preview.args, { action: "load-sample", deviceRef: "7:track:0", note: 36, filePath: join(folder, "Kick Deep.wav"), allowedRoot: folder });
     assert.equal(b.records.at(-1)!.title, "Loaded “Kick Deep” onto Drum Rack pad C1");
     assert.equal((await b.integration.undo!(b.records.at(-1)!.id, signal())).state, "undone");
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("make_changes runs a whole plan in one call, later steps using what earlier ones made, and stops at the first failure", async () => {
+  const b = await opened();
+  const folder = mkdtempSync(join(tmpdir(), "kumi-plan-"));
+  try {
+    for (const name of ["Kick A.wav", "Kick B.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const plan = tool(b.tools, "make_changes");
+    assert.deepEqual((plan.inputSchema as { properties: { steps: { items: { properties: { tool: { enum: string[] } } } } } }).properties.steps.items.properties.tool.enum.includes("load_sample"), true);
+    const result = await plan.execute({ steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kick", kind: "midi" }], scenes: [] }, as: "kick" },
+      { tool: "load_sample", input: { trackRef: "@kick", sample: { random: true, folders: [folder] } }, as: "simpler" },
+      { tool: "set_tempo", input: { tempo: 126 } },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    const body = JSON.parse(result.text) as { done: { step: number; changed: string; ref?: string }[] };
+    assert.deepEqual(body.done.map((step) => step.step), [1, 2, 3]);
+    assert.equal(body.done[0]!.ref, "7:track:2", "the new track's ref comes back");
+    const insert = b.requests.find((request) => request.name === "live_device_preview")!;
+    assert.equal(insert.args.trackRef, "7:track:2", "@kick became the track the first step made");
+    assert.match(String(insert.args.filePath), /Kick [AB]\.wav$/, "Kumi picked a sample itself, no search first");
+    assert.equal(b.tempo, 126); assert.equal(b.records.length, 3, "three HISTORY entries, each with its own undo");
+    const again = await plan.execute({ steps: [
+      { tool: "load_sample", input: { trackRef: "@nowhere", sample: { random: true, folders: [folder] } } },
+    ] }, signal());
+    assert.equal(again.isError, true); assert.match(again.text, /refers to @nowhere, which no earlier step made/);
+    const failing = await plan.execute({ steps: [
+      { tool: "set_tempo", input: { tempo: 124 } },
+      { tool: "rename", input: { kind: "track", ref: "7:track:99", name: "Nope" } },
+      { tool: "set_tempo", input: { tempo: 128 } },
+    ] }, signal());
+    const stopped = JSON.parse(failing.text) as { done: unknown[]; stopped: { step: number }; skipped: number };
+    assert.equal(failing.isError, true); assert.equal(stopped.done.length, 1); assert.equal(stopped.stopped.step, 2); assert.equal(stopped.skipped, 1);
+    assert.equal(b.tempo, 124, "the step after the failure didn't run");
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("a Drum Rack kit is one make_changes call: a step with each runs once per pad", async () => {
+  const b = await opened();
+  const folder = mkdtempSync(join(tmpdir(), "kumi-kit-"));
+  try {
+    for (const name of ["Kick.wav", "Snare.wav", "Hat.wav", "Clap.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kit", kind: "midi" }], scenes: [] }, as: "track" },
+      { tool: "load_device", input: { trackRef: "@track", itemId: "instruments/Drum Rack" }, as: "rack" },
+      { tool: "load_sample_to_pad", input: { deviceRef: "@rack", sample: { random: true, folders: [folder] } }, each: { note: [36, 37, 38] } },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    const done = (JSON.parse(result.text) as { done: { step: number; ref?: string }[] }).done;
+    assert.deepEqual(done.map((step) => step.step), [1, 2, 3, 4, 5], "the each step became three");
+    assert.equal(done[1]!.ref, "7:device:2:0", "the rack Live loaded");
+    const pads = b.requests.filter((request) => request.name === "live_drum_pad_preview").map((request) => request.args);
+    assert.deepEqual(pads.map((args) => [args.deviceRef, args.note]), [["7:device:2:0", 36], ["7:device:2:0", 37], ["7:device:2:0", 38]]);
+    assert.equal(new Set(pads.map((args) => args.filePath)).size, 3, "three different samples");
+    assert.deepEqual(b.records.slice(-3).map((record) => record.title.replace(/“.*”/, "“…”")), ["Loaded “…” onto Drum Rack pad C1", "Loaded “…” onto Drum Rack pad C#1", "Loaded “…” onto Drum Rack pad D1"]);
+    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
+    assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("random picks within one answer don't repeat", async () => {
+  const b = await opened();
+  const folder = mkdtempSync(join(tmpdir(), "kumi-picks-"));
+  try {
+    for (const name of ["Kick A.wav", "Kick B.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
+    const paths: string[] = [];
+    for (const trackRef of ["7:track:0", "7:track:1"]) {
+      await tool(b.tools, "load_sample").execute({ trackRef, sample: { random: true, folders: [folder] } }, signal());
+      paths.push(String(b.requests.filter((request) => request.name === "live_device_preview").at(-1)!.args.filePath));
+    }
+    assert.notEqual(paths[0], paths[1]);
+    const third = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: { random: true, folders: [folder] } }, signal());
+    assert.equal(third.isError, true); assert.match(third.text, /No sample matches/, "both are taken in this answer");
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 
