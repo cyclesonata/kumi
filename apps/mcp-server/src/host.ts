@@ -8623,7 +8623,7 @@ export class McpHost {
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
     // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 
