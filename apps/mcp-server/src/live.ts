@@ -1858,7 +1858,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const quantization = target.quantization ?? 0;
         if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
         if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");
-        this.set(target.ref, "value", requested); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
+        // Live keeps parameter values as 32-bit floats: 0.3 comes back as 0.29999998.
+        this.set(target.ref, "value", Math.fround(requested)); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
       }
       case "routing.set": {
         const track = this.findTrack(objectRef("ref"));

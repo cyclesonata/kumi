@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { AsyncLiveAdapter, LiveAdapter, LiveOperationContext, LiveSnapshot, LiveStatus } from "../live.js";
-import { canonical, fingerprint, flattenDeviceRows, invokeCheckpoint, isNonEmptyString, isObject, parameterAuthority, parameterRevision, parameterTarget, type MutationCheckpoint } from "./batch.js";
+import { canonical, fingerprint, flattenDeviceRows, invokeCheckpoint, isNonEmptyString, isObject, parameterAuthority, parameterRevision, parameterTarget, sameParameterValue, type MutationCheckpoint } from "./batch.js";
 
 /**
  * Device/rack parameter-state snapshots: save a device's (or rack subtree's)
@@ -349,13 +349,13 @@ export class DeviceStateTransactionManager {
         const snapshot = await adapter.snapshotAsync(context);
         const target = parameterTarget(snapshot, step.deviceRef, step.parameterRef);
         const authority = parameterAuthority(snapshot, step.parameterRef);
-        if (target.parameter.value !== step.proposedValue || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) parameter value or identity changed after apply`);
+        if (!sameParameterValue(target.parameter.value, step.proposedValue) || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) parameter value or identity changed after apply`);
         checkpoint.invocation = { operation: "device.parameter.set", args: this.stepArgs(snapshot, step, step.priorValue, parameterRevision(target.parameter)) };
       }
       await invokeCheckpoint(adapter, checkpoint, context);
       const verifiedSnapshot = await adapter.snapshotAsync(context);
       const verified = parameterTarget(verifiedSnapshot, step.deviceRef, step.parameterRef);
-      if (verified.parameter.value !== step.priorValue || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) prior-value restoration identity or value was not confirmed`);
+      if (!sameParameterValue(verified.parameter.value, step.priorValue) || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) prior-value restoration identity or value was not confirmed`);
       checkpoint.completed = true;
       reverted += 1;
     }
@@ -393,13 +393,13 @@ export class DeviceStateTransactionManager {
           const snapshot = await adapter.snapshotAsync(context);
           const target = parameterTarget(snapshot, step.deviceRef, step.parameterRef);
           const authority = parameterAuthority(snapshot, step.parameterRef);
-          if (target.parameter.value !== step.priorValue || parameterRevision(target.parameter) !== step.priorRevision || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) parameter identity, value, or revision changed since preview`);
+          if (!sameParameterValue(target.parameter.value, step.priorValue) || parameterRevision(target.parameter) !== step.priorRevision || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) parameter identity, value, or revision changed since preview`);
           step.invocation = { operation: "device.parameter.set", args: this.stepArgs(snapshot, step, step.proposedValue, step.priorRevision) };
         }
         await invokeCheckpoint(adapter, step, context);
         const verifiedSnapshot = await adapter.snapshotAsync(context);
         const verified = parameterTarget(verifiedSnapshot, step.deviceRef, step.parameterRef);
-        if (verified.parameter.value !== step.proposedValue || parameterRevision(verified.parameter) <= step.priorRevision || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) identity or postcondition was not confirmed`);
+        if (!sameParameterValue(verified.parameter.value, step.proposedValue) || parameterRevision(verified.parameter) <= step.priorRevision || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) identity or postcondition was not confirmed`);
         step.completed = true; step.result = { index, path: step.path, value: verified.parameter.value, revision: parameterRevision(verified.parameter), ...(replayed ? { replayed: true } : {}) };
         results[index] = step.result;
       }

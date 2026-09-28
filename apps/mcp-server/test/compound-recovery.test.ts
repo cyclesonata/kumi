@@ -35,7 +35,8 @@ for (const kind of ["batch", "device-state"] as const) {
     await assert.rejects(manager.undoAsync(transactionId, "undo", "undo-different"), /Only an applied/);
     const undone = await manager.undoAsync(transactionId, "undo", "undo-original") as any;
     assert.equal(undone.state, "undone");
-    assert.deepEqual(device.parameters.map((row: any) => row.value), [0.1, 0.2]);
+    // Values written back go through Live's 32-bit floats.
+    assert.deepEqual(device.parameters.map((row: any) => row.value), [Math.fround(0.1), Math.fround(0.2)]);
     assert.equal(ledger.executions, 4); assert.equal(ledger.replays, 2);
     assert.deepEqual(ledger.calls[3]!.invocation, ledger.calls[4]!.invocation);
   });
@@ -50,7 +51,7 @@ for (const kind of ["batch", "device-state"] as const) {
     await assert.rejects(manager.applyAsync(transactionId, "apply", "compensate-original"), /rollback failed/);
     const result = await manager.applyAsync(transactionId, "apply", "compensate-original") as any;
     assert.equal(result.state, "compensated"); assert.equal(result.failedIndex, 1); assert.equal(result.rolledBack, 1);
-    assert.deepEqual(device.parameters.map((row: any) => row.value), [0.1, 0.95]);
+    assert.deepEqual(device.parameters.map((row: any) => row.value), [Math.fround(0.1), 0.95], "the compensated step is back (as a 32-bit float); the later one never ran");
     assert.equal(ledger.executions, 2); assert.equal(ledger.replays, 1);
     assert.deepEqual(ledger.calls[1]!.invocation, ledger.calls[2]!.invocation);
     const again = await manager.applyAsync(transactionId, "apply", "compensate-original") as any;

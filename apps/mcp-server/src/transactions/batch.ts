@@ -105,6 +105,10 @@ export interface BatchRecord {
 type Row = Record<string, unknown>;
 
 export function isObject(value: unknown): value is Row { return typeof value === "object" && value !== null && !Array.isArray(value); }
+/** Live keeps parameter values as 32-bit floats (0.3 reads back as 0.29999998), so values match within that rounding. */
+export function sameParameterValue(observed: unknown, expected: unknown): boolean {
+  return typeof observed === "number" && typeof expected === "number" && Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
+}
 function clone<T>(value: T): T { return structuredClone(value); }
 export function canonical(value: unknown): string { if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; const row = value as Row; return `{${Object.keys(row).sort().map((key) => `${JSON.stringify(key)}:${canonical(row[key])}`).join(",")}}`; }
 export function fingerprint(value: unknown): string { return createHash("sha256").update(canonical(value)).digest("hex"); }
@@ -463,7 +467,7 @@ export class BatchTransactionManager {
       case "device.parameter.set": {
         const target = parameterTarget(snapshot, operation.deviceRef, operation.parameterRef);
         const authority = parameterAuthority(snapshot, operation.parameterRef);
-        if (target.parameter.value !== plan.prior.value || parameterRevision(target.parameter) !== plan.prior.revision || fingerprint(authority) !== plan.prior.authorityDigest) throw new Error(`transaction batch step ${index} parameter identity, value, or revision changed since preview`);
+        if (!sameParameterValue(target.parameter.value, plan.prior.value) || parameterRevision(target.parameter) !== plan.prior.revision || fingerprint(authority) !== plan.prior.authorityDigest) throw new Error(`transaction batch step ${index} parameter identity, value, or revision changed since preview`);
         return { operation: "device.parameter.set", args: { ref: operation.parameterRef, value: operation.value, expectedRevision: parameterRevision(target.parameter), expectedObjectIdentity: authority.parameterIdentity, expectedOwnerRef: authority.ownerRef, expectedOwnerIdentity: authority.ownerIdentity, expectedTrackRef: authority.trackRef, expectedTrackIdentity: authority.trackIdentity, expectedSiblings: clone(authority.siblings) } };
       }
       case "clip.set": {
@@ -510,7 +514,7 @@ export class BatchTransactionManager {
         }
         case "device.parameter.set": {
           const target = parameterTarget(snapshot, operation.deviceRef, operation.parameterRef);
-          return target.parameter.value === operation.value && parameterRevision(target.parameter) > (plan.prior.revision as number) && fingerprint(parameterAuthority(snapshot, operation.parameterRef)) === plan.prior.authorityDigest;
+          return sameParameterValue(target.parameter.value, operation.value) && parameterRevision(target.parameter) > (plan.prior.revision as number) && fingerprint(parameterAuthority(snapshot, operation.parameterRef)) === plan.prior.authorityDigest;
         }
         case "clip.set": {
           const located = clipRow(snapshot, operation.clipRef);
@@ -548,7 +552,7 @@ export class BatchTransactionManager {
       }
       case "device.parameter.set": {
         const target = parameterTarget(snapshot, operation.deviceRef, operation.parameterRef);
-        if (target.parameter.value !== operation.value || parameterRevision(target.parameter) <= (plan.prior.revision as number)) throw new Error(`transaction batch step ${index} parameter postcondition was not confirmed`);
+        if (!sameParameterValue(target.parameter.value, operation.value) || parameterRevision(target.parameter) <= (plan.prior.revision as number)) throw new Error(`transaction batch step ${index} parameter postcondition was not confirmed`);
         return { index, kind: operation.kind, parameterRef: operation.parameterRef, value: target.parameter.value, revision: parameterRevision(target.parameter) };
       }
       case "clip.set": {
@@ -616,11 +620,11 @@ export class BatchTransactionManager {
         case "device.parameter.set": {
           const target = parameterTarget(snapshot, operation.deviceRef, operation.parameterRef);
           const authority = parameterAuthority(snapshot, operation.parameterRef);
-          if (target.parameter.value !== plan.proposed.value || fingerprint(authority) !== plan.prior.authorityDigest) throw new Error(`transaction batch ${mode} step ${index} parameter value or identity changed after apply`);
+          if (!sameParameterValue(target.parameter.value, plan.proposed.value) || fingerprint(authority) !== plan.prior.authorityDigest) throw new Error(`transaction batch ${mode} step ${index} parameter value or identity changed after apply`);
           checkpoint.invocation = { operation: "device.parameter.set", args: { ref: operation.parameterRef, value: plan.prior.value, expectedRevision: parameterRevision(target.parameter), expectedObjectIdentity: authority.parameterIdentity, expectedOwnerRef: authority.ownerRef, expectedOwnerIdentity: authority.ownerIdentity, expectedTrackRef: authority.trackRef, expectedTrackIdentity: authority.trackIdentity, expectedSiblings: clone(authority.siblings) } };
           await invokeCheckpoint(adapter, checkpoint, context);
           const verified = parameterTarget((await adapter.snapshotAsync(context)), operation.deviceRef, operation.parameterRef);
-          if (verified.parameter.value !== plan.prior.value) throw new Error(`transaction batch ${mode} step ${index} parameter prior-value restoration was not confirmed`);
+          if (!sameParameterValue(verified.parameter.value, plan.prior.value)) throw new Error(`transaction batch ${mode} step ${index} parameter prior-value restoration was not confirmed`);
           break;
         }
         case "clip.set": {
@@ -681,7 +685,7 @@ export class BatchTransactionManager {
       case "clip.set": { row = clipRow(snapshot, operation.clipRef).clip; identity = fingerprint(clipAuthority(snapshot, operation.clipRef)); expectedIdentity = plan.prior.authorityDigest; break; }
       case "device.parameter.set": {
         const target = parameterTarget(snapshot, operation.deviceRef, operation.parameterRef);
-        if (target.parameter.value !== plan.prior.value || fingerprint(parameterAuthority(snapshot, operation.parameterRef)) !== plan.prior.authorityDigest) throw new Error("transaction batch parameter restoration identity or value changed");
+        if (!sameParameterValue(target.parameter.value, plan.prior.value) || fingerprint(parameterAuthority(snapshot, operation.parameterRef)) !== plan.prior.authorityDigest) throw new Error("transaction batch parameter restoration identity or value changed");
         return;
       }
       case "track.rename": row = (snapshot.tracks as unknown as Row[]).find((item) => item.ref === operation.trackRef); identity = row?.objectIdentity; expectedIdentity = plan.target.trackIdentity; break;

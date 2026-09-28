@@ -359,6 +359,21 @@ test("previews, applies idempotently, verifies, and guardedly undoes a device pa
   assert.equal(JSON.parse((undone as any).result.content[0].text).value, before.value);
 });
 
+test("a device parameter Live rounds to a 32-bit float is still confirmed and undone", () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const before = simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!;
+  const preview = host.handle({ jsonrpc: "2.0", id: 250, method: "tools/call", params: { name: "live_device_parameter_preview", arguments: { deviceRef: "device:utility-1", parameterRef: "parameter:gain-1", value: 0.3 } } });
+  const proposed = JSON.parse((preview as any).result.content[0].text) as { transactionId: string; confirmation: string };
+  const applied = host.handle({ jsonrpc: "2.0", id: 251, method: "tools/call", params: { name: "live_device_parameter_apply", arguments: { transactionId: proposed.transactionId, confirmation: proposed.confirmation, idempotencyKey: "parameter-float32" } } });
+  assert.equal((applied as any).result.isError, false, (applied as any).result.content[0].text);
+  assert.equal(simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!.value, Math.fround(0.3), "Live keeps 0.29999998");
+  const undone = host.handle({ jsonrpc: "2.0", id: 252, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: proposed.transactionId, confirmation: "undo", idempotencyKey: "parameter-float32-undo" } } });
+  assert.equal((undone as any).result.isError, false, (undone as any).result.content[0].text);
+  assert.equal(simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!.value, Math.fround(before.value));
+});
+
 test("refuses device parameter changes for invalid token, stale revision, epoch changes, and bounds", () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
