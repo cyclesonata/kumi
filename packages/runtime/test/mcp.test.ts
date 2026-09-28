@@ -14,7 +14,8 @@ function data(result: CallToolResult) {
   return result.structuredContent ?? JSON.parse(result.content.filter((item) => item.type === "text").map((item) => item.type === "text" ? item.text : "").join("")) as Record<string, unknown>;
 }
 async function open(mode = "normal", timeoutMs = 2_000) {
-  const client = await connectMcp({ entry: fixture, args: [mode], timeoutMs, signal: freshSignal() });
+  // Starting Node on a cold CI runner can take longer than a short request timeout.
+  const client = await connectMcp({ entry: fixture, args: [mode], timeoutMs, connectTimeoutMs: Math.max(timeoutMs, 10_000), signal: freshSignal() });
   return { client, tools: new AllowedTools(client) };
 }
 function running(pid: number | null) { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } }

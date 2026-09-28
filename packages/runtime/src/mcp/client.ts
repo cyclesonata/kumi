@@ -36,14 +36,18 @@ interface Options {
   /** Host-only injection for protocol tests. The CLI never accepts executable/entry overrides. */
   entry?: string;
   args?: string[];
+  /** Per request. */
   timeoutMs?: number;
+  /** Starting the child and the MCP handshake; defaults to the request timeout. */
+  connectTimeoutMs?: number;
   onDispatch?: (name: string) => void;
 }
 
 export async function connectMcp(options: Options): Promise<McpEndpoint> {
   options.signal.throwIfAborted();
   const timeout = options.timeoutMs ?? 15_000;
-  if (!Number.isSafeInteger(timeout) || timeout < 1) throw new Error("Invalid MCP timeout");
+  const connectTimeout = options.connectTimeoutMs ?? timeout;
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || !Number.isSafeInteger(connectTimeout) || connectTimeout < 1) throw new Error("Invalid MCP timeout");
   const entry = options.entry ?? bridgeEntry;
   const environment: Record<string, string> = {
     // Override the SDK's automatic defaults; no model keys, auth paths, NODE_OPTIONS or loader hooks.
@@ -104,7 +108,7 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
     return closing;
   }
   try {
-    await client.connect(transport, { signal: options.signal, timeout, maxTotalTimeout: timeout });
+    await client.connect(transport, { signal: options.signal, timeout: connectTimeout, maxTotalTimeout: connectTimeout });
     ownedPid = transport.ownedPid;
     options.signal.throwIfAborted();
     if (disconnected) throw new Error("MCP disconnected during initialization");
