@@ -165,7 +165,7 @@ export function createTerminal(options: Options): Terminal {
     if (command === "/help") { notice(HELP); return; }
     if (command === "/status") {
       const status = controller.status();
-      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}/${status.maxTurns}; ${status.observation ?? "No current Live observation"}`);
+      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}`);
       return;
     }
     // Connecting or reading the Set, not answering: keep the message and send it when Kumi is ready.

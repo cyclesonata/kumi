@@ -7,6 +7,7 @@ import type {
 } from "@ai-sdk/provider";
 import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
+import { DEFAULT_BUDGET, fit, OBSERVATION_MARKER, SHORTENED, type ContextBudget } from "./budget.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
 
 export interface ModelRequest {
@@ -33,6 +34,8 @@ export interface AgentKernelOptions extends KernelOptions {
   binding: ModelBinding;
   /** Model calls per turn; each tool round trip is one more. */
   maxSteps?: number;
+  /** How much conversation to send; older Live reads are cleared first. */
+  budget?: ContextBudget;
 }
 
 export interface AgentKernel extends Kernel {
@@ -58,8 +61,12 @@ const MAX_TOOL_ERROR = 4 * 1024;
 export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   const { binding, instructions } = options;
   const maxSteps = options.maxSteps ?? 24;
+  const budget = options.budget ?? DEFAULT_BUDGET;
   if (!instructions.trim() || Buffer.byteLength(instructions) > MAX_INSTRUCTIONS) throw new Error("Kernel instructions must be nonempty and at most 64 KiB.");
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new Error("maxSteps must be a positive integer.");
+  if (!Number.isSafeInteger(budget.clearAt) || !Number.isSafeInteger(budget.limit) || budget.clearAt < 1024 || budget.limit < budget.clearAt) {
+    throw new Error("The context budget must clear at 1 KiB or more, with a limit at least that.");
+  }
   const names = options.tools.map((tool) => tool.name);
   if (names.length > MAX_TOOLS || new Set(names).size !== names.length || names.some((name) => !TOOL_NAME.test(name))) {
     throw new Error("Tool names must be unique, at most 64 characters of [a-zA-Z0-9_-], and at most 128 tools.");
@@ -91,6 +98,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     try {
       for (let step = 0; ; step++) {
         if (step === maxSteps) { abort.throwIfAborted(); history = [...history, ...messages]; return settled("max-steps"); }
+        const fitted = fit(history, messages, budget);
+        history = fitted.history;
+        if (fitted.turn !== messages) messages.splice(0, messages.length, ...fitted.turn);
         const request = binding.prepare({ instructions, messages: [...history, ...messages], tools: specs, sessionId });
         const result = await stream(request, abort, (text) => deliver({ type: "text", text }));
         add(usage, result.usage); reported = true;
@@ -170,8 +180,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       return history.flatMap((message): TranscriptLine[] => {
         if (message.role !== "user" && message.role !== "assistant") return [];
         const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-        // The host appends each turn's Live observation to the producer's words; that isn't theirs.
-        const words = message.role === "user" ? text.split("\n\n<current_observation_untrusted>")[0]! : text;
+        // The host appends each turn's Live observation to the producer's words, and the budget
+        // may note that earlier exchanges are gone; neither is theirs.
+        const words = message.role === "user" ? text.split(OBSERVATION_MARKER)[0]!.replace(SHORTENED, "") : text;
         return words.trim() ? [{ role: message.role, text: words.trim() }] : [];
       });
     },

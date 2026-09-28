@@ -2,7 +2,7 @@
 // Opt-in eval of how the configured model uses Kumi's change tools. It uses your sign-in and
 // model but never Live: a synthetic bridge with the real bridge's tool schemas (bridge-tools.json)
 // stands in for a small Set, one of whose tracks is named like an instruction.
-// npm run eval:changes --workspace @kumi/app
+// npm run eval:changes --workspace @kumi/app [-- <part of a case name>]
 import { readFileSync } from "node:fs";
 import { createAbletonIntegration, createAgentKernel, createSession, openCredentialStore, resolveModel } from "@kumi/runtime";
 import { loadInferenceConfig, safeError } from "../dist/src/config.js";
@@ -99,38 +99,51 @@ const CASES = [
     check: ({ state, changes }) => changes.length === 0 && state.tempo === 120 && state.tracks.every((track) => track.name !== "X") },
   { name: "undo by asking", prompts: ["Set the tempo to 130.", "Actually, undo that."],
     check: ({ state, changes }) => state.tempo === 120 && changes.some((change) => change.family === "tempo" && change.state === "undone") },
+  // A tiny context budget, so earlier reads are cleared and the earliest exchanges dropped along the way.
+  { name: "long conversation", budget: { clearAt: 4 * 1024, limit: 8 * 1024 },
+    prompts: ["List the tracks with their volumes.", "Make the bass a bit quieter.", "Rename Keys to Rhodes.", "Set the tempo to 126.", "List the tracks with their volumes again.", "What's the tempo now, and what's the third track called?"],
+    check: ({ state, last, conversation }) => state.tempo === 126 && state.tracks[2].name === "Rhodes" && state.tracks[1].volume < 0.85
+      && /126/.test(last) && /Rhodes/.test(last) && /Kumi (cleared|removed)/.test(conversation) },
 ];
 
 async function runCase(binding, testCase) {
   const bridge = syntheticBridge();
   const changes = new Map();
   const tools = [];
-  let text = "";
+  let text = ""; let last = ""; let kernel;
   const session = createSession({
     timeoutMs: 150_000,
-    kernelFactory: async (options) => createAgentKernel({ ...options, binding }),
+    kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
     integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change) }),
-    onEvent: (event) => { if (event.type === "tool-start") tools.push(event.name); if (event.type === "text") text += event.text; },
+    onEvent: (event) => { if (event.type === "tool-start") tools.push(event.name); if (event.type === "text") { text += event.text; last += event.text; } },
   });
   const started = performance.now();
+  let conversation = "";
   try {
     await session.start();
-    for (const prompt of testCase.prompts) await session.submit(prompt);
+    for (const prompt of testCase.prompts) { last = ""; await session.submit(prompt); }
+    conversation = JSON.stringify(kernel?.checkpoint().messages ?? []);
   } finally { await session.close(); }
-  const result = { state: bridge.state, changes: [...changes.values()] };
-  return { name: testCase.name, passed: Boolean(testCase.check(result)), ms: Math.round(performance.now() - started), tools, changes: result.changes.map((change) => `${change.state} · ${change.title}`), answer: text.replace(/\s+/g, " ").trim().slice(0, 240) };
+  const result = { state: bridge.state, changes: [...changes.values()], last, conversation };
+  const budget = [/Kumi cleared/.test(conversation) ? "earlier reads cleared" : "", /Kumi removed/.test(conversation) ? "earliest exchanges dropped" : ""].filter(Boolean);
+  return { name: testCase.name, passed: Boolean(testCase.check(result)), ms: Math.round(performance.now() - started), tools, changes: result.changes.map((change) => `${change.state} · ${change.title}`),
+    answer: text.replace(/\s+/g, " ").trim().slice(0, 240), ...(testCase.prompts.length > 1 ? { last: last.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
+    ...(budget.length ? { budget: budget.join(", ") } : {}) };
 }
 
 try {
   const config = loadInferenceConfig();
   const binding = await resolveModel({ model: config.model, store: openCredentialStore(config.authFile), env: process.env });
+  const only = process.argv.slice(2).join(" ").trim();
   const results = [];
-  for (const testCase of CASES) {
+  for (const testCase of CASES.filter((item) => !only || item.name.includes(only))) {
     const outcome = await runCase(binding, testCase).catch((error) => ({ name: testCase.name, passed: false, error: safeError(error) }));
     results.push(outcome);
     process.stdout.write(`${outcome.passed ? "pass" : "FAIL"}  ${outcome.name}${outcome.ms ? `  ${(outcome.ms / 1000).toFixed(1)}s` : ""}${outcome.error ? `  ${outcome.error}` : ""}\n`);
     for (const change of outcome.changes ?? []) process.stdout.write(`        ${change}\n`);
     if (outcome.tools) process.stdout.write(`        tools: ${outcome.tools.join(", ") || "none"}\n        answer: ${outcome.answer}\n`);
+    if (outcome.last) process.stdout.write(`        last answer: ${outcome.last}\n`);
+    if (outcome.budget) process.stdout.write(`        budget: ${outcome.budget}\n`);
   }
   const passed = results.filter((result) => result.passed).length;
   process.stdout.write(`\n${passed} of ${results.length} passed with ${config.model}.\n`);

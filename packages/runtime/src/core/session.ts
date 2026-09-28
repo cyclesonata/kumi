@@ -3,6 +3,7 @@ import type {
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
+import { OBSERVATION_MARKER } from "../kernel/budget.js";
 
 interface Options {
   kernelFactory: KernelFactory;
@@ -11,6 +12,7 @@ interface Options {
   timeoutMs?: number;
   closeTimeoutMs?: number;
   cancelGraceMs?: number;
+  /** Prompts per session before /new is needed; none by default, since the kernel keeps its own context in bounds. */
   maxTurns?: number;
   /** Keeps each saved Set's conversation between sessions; without it conversations end with Kumi. */
   conversations?: ConversationStore;
@@ -27,8 +29,8 @@ export function createSession(options: Options): SessionController {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
   const graceMs = options.cancelGraceMs ?? 500;
-  const maxTurns = options.maxTurns ?? 30;
-  for (const value of [timeoutMs, closeTimeoutMs, graceMs, maxTurns]) if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid session bound");
+  const maxTurns = options.maxTurns;
+  for (const value of [timeoutMs, closeTimeoutMs, graceMs, maxTurns ?? 1]) if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid session bound");
   let state: TurnState = "idle";
   let connection: ConnectionState = "disconnected";
   let observationLabel: string | undefined;
@@ -220,12 +222,12 @@ export function createSession(options: Options): SessionController {
       if (active) return Promise.reject(new Error("Session is busy; cancel first"));
       if (!started) return Promise.reject(new Error("Session is not started"));
       if (!input.trim() || Buffer.byteLength(input) > 16 * 1024) return Promise.reject(new Error("Enter a nonempty prompt of at most 16 KiB"));
-      if (turns >= maxTurns) return Promise.reject(new Error("Conversation limit reached; use /new"));
+      if (maxTurns !== undefined && turns >= maxTurns) return Promise.reject(new Error("Conversation limit reached; use /new"));
       turns++;
       return perform(true, "refresh", async (op) => {
         const snapshot = await observe(op); assertCurrent(op);
         op.phase = "inference";
-        return kernel!.value.run(`${input}\n\n<current_observation_untrusted>\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
+        return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) emit(event); });
       });
     },
@@ -264,6 +266,6 @@ export function createSession(options: Options): SessionController {
       })();
       return closing;
     },
-    status(): SessionStatus { return { state, connection, turns, maxTurns, ...(observationLabel === undefined ? {} : { observation: observationLabel }) }; },
+    status(): SessionStatus { return { state, connection, turns, ...(maxTurns === undefined ? {} : { maxTurns }), ...(observationLabel === undefined ? {} : { observation: observationLabel }) }; },
   };
 }

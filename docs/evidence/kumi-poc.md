@@ -384,6 +384,18 @@ you were last here". Asked "Where does the chorus start?", it answered "Bar 17, 
 you noted." The conversation is kept as `conversation.json` (mode 0600) beside the
 Set's last-seen state. Screens: `.pi/kumi-evidence/tui/19-*.txt`, `20-*.txt`.
 
+## Long conversations
+
+The kernel keeps each conversation within a budget, clearing earlier Live reads
+first and then dropping the earliest exchanges (docs/en/KUMI_POC.md, Limits), so
+the 30-prompt session limit is gone. The eval's "long conversation" case runs six
+prompts (list the tracks, three changes, list again, then "What's the tempo now,
+and what's the third track called?") with a budget small enough to force both
+along the way. With `openai-codex/gpt-6-astra` (UTC `2026-09-28T07:22Z`–`07:28Z`),
+the provider accepted the edited conversations, replayed reasoning included; all
+three changes applied; and the last answer was right ("the tempo is 126 BPM and
+the third track is Rhodes"). The full eval passed 7 of 7.
+
 ## Live quitting and coming back
 
 With Kumi full screen (UTC `2026-09-28T05:52Z`–`05:56Z`), Kumi set the tempo, then

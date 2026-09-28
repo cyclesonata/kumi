@@ -279,10 +279,44 @@ test("a checkpoint restores settled history into a fresh kernel", async () => {
   await first.kernel.close(); await second.kernel.close();
 });
 
-test("rejects empty instructions and invalid or duplicate tool names", () => {
+test("long conversations stay in budget: earlier reads are cleared in requests and the checkpoint, and the transcript keeps every word", async () => {
+  const big = JSON.stringify({ items: "x".repeat(3000) });
+  // Each turn reads once, then answers.
+  const h = harness((_options, n) => n % 2 === 1 ? [call("read", "{}", `c${n}`), finish("tool-calls")] : [...text(`answer ${n / 2}`), finish()], {
+    tools: [tool("read", async () => ({ text: big }))], budget: { clearAt: 4096, limit: 64 * 1024 },
+  });
+  const observed = (words: string) => `${words}\n\n<current_observation_untrusted>\n{"tempo":120}\n</current_observation_untrusted>`;
+  for (const words of ["one", "two", "three"]) await h.kernel.run(observed(words), new AbortController().signal, () => {});
+  const output = (message: unknown) => JSON.stringify(message);
+  // The third turn's first request: turn one cleared, turn two whole.
+  const prompt = h.requests[4]!.prompt;
+  assert.deepEqual(prompt[0], { role: "user", content: [{ type: "text", text: "one" }] });
+  assert.match(output(prompt[2]), /Kumi cleared the rest of this earlier result/);
+  assert.equal(output(prompt[6]), output({ role: "tool", content: [{ type: "tool-result", toolCallId: "c3", toolName: "read", output: { type: "text", value: big } }] }));
+  assert.match(output(prompt[4]), /current_observation_untrusted/);
+  assert.match(output(h.kernel.checkpoint().messages[2]), /Kumi cleared the rest/);
+  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "answer 1", "two", "answer 2", "three", "answer 3"]);
+  await h.kernel.close();
+});
+
+test("when the earliest exchanges go, the model is told and the transcript isn't", async () => {
+  const h = harness(() => [...text("w".repeat(1500)), finish()], { budget: { clearAt: 1024, limit: 4096 } });
+  for (const words of ["one", "two", "three", "four"]) await h.kernel.run(`${words} ${"w".repeat(1500)}`, new AbortController().signal, () => {});
+  assert.match(JSON.stringify(h.requests.at(-1)!.prompt[0]), /Kumi removed the earlier part of this conversation/);
+  const lines = h.kernel.transcript();
+  assert.ok(lines.length < 8);
+  assert.ok(lines.every((line) => !line.text.includes("Kumi removed")));
+  assert.match(lines[0]!.text, /^(two|three|four) /);
+  await h.kernel.close();
+});
+
+test("rejects empty instructions, invalid or duplicate tool names, and a budget that can't hold anything", () => {
   const noop = async () => ({ text: "" });
   assert.throws(() => harness(() => [], { instructions: " " }), /instructions/);
   for (const tools of [[tool("bad name", noop)], [tool("dup", noop), tool("dup", noop)], [tool("x".repeat(65), noop)]]) {
     assert.throws(() => harness(() => [], { tools }), /Tool names/);
+  }
+  for (const budget of [{ clearAt: 100, limit: 4096 }, { clearAt: 4096, limit: 2048 }, { clearAt: Number.NaN, limit: 4096 }]) {
+    assert.throws(() => harness(() => [], { budget }), /context budget/);
   }
 });

@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CatchUp, ConversationStore, JsonObject, SavedConversation } from "../../core/contracts.js";
+import { dropEarliest } from "../../kernel/budget.js";
 
 /** A Set's state as Kumi last saw it. */
 export interface Baseline {
@@ -76,17 +77,12 @@ export function createConversationStore(directory: string): ConversationStore {
     },
     async save(project, conversation) {
       const all = [...conversation.checkpoint.messages] as { role?: unknown }[];
-      const size = (items: unknown[]) => Buffer.byteLength(JSON.stringify(items));
       // Drop whole exchanges from the front: the kept part starts where the producer spoke.
-      let messages = all;
-      while (messages.length && size(messages) > MAX_CONVERSATION_BYTES) {
-        messages = messages.slice(1);
-        while (messages.length && messages[0]!.role !== "user") messages = messages.slice(1);
-      }
+      let messages = dropEarliest(all, MAX_CONVERSATION_BYTES);
       // One very large exchange on its own is still kept (up to a hard limit), rather than nothing.
       if (!messages.length) {
         const last = all.map((message) => message.role).lastIndexOf("user");
-        messages = last >= 0 && size(all.slice(last)) <= 4 * MAX_CONVERSATION_BYTES ? all.slice(last) : [];
+        messages = last >= 0 && Buffer.byteLength(JSON.stringify(all.slice(last))) <= 4 * MAX_CONVERSATION_BYTES ? all.slice(last) : [];
       }
       if (!messages.length) return;
       const saved: SavedConversation = { savedAt: conversation.savedAt, checkpoint: { ...conversation.checkpoint, messages } };

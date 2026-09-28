@@ -165,7 +165,7 @@ export interface SessionStatus {
   state: TurnState;
   connection: ConnectionState;
   turns: number;
-  maxTurns: number;
+  maxTurns?: number;
   observation?: string;
 }
 

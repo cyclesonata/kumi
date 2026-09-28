@@ -21,7 +21,7 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
   let refreshError = false;
   const session = createSession({
     onEvent: (event) => events.push(event), timeoutMs: options.timeoutMs ?? 5_000,
-    cancelGraceMs: 10, closeTimeoutMs: 25, maxTurns: options.maxTurns ?? 30,
+    cancelGraceMs: 10, closeTimeoutMs: 25, ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
     kernelFactory: options.factory ?? (async ({ instructions, tools }) => {
       assert.equal(instructions, observation.instructions); assert.deepEqual(tools, []);
       const record = { closed: 0 }; kernels.push(record);
@@ -233,6 +233,13 @@ test("a saved Set's conversation continues next time; /new starts it afresh", as
   assert.equal(saved.has(project), false, "/new discards the saved conversation too");
   assert.equal(created.at(-1)?.checkpoint, undefined);
   await two.session.close();
+});
+
+test("there's no turn limit unless one is set", async () => {
+  const h = harness(); await h.session.start();
+  for (let turn = 0; turn < 40; turn++) await h.session.submit(`prompt ${turn}`);
+  assert.equal(h.session.status().turns, 40); assert.equal(h.session.status().maxTurns, undefined);
+  await h.session.close();
 });
 
 test("new conversation closes old resources, reconnects, and resets submitted-turn limit", async () => {

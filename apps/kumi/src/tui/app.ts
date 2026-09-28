@@ -442,7 +442,7 @@ export class TuiApp {
     if (command === "/status") {
       this.editor.clear();
       const status = controller.status();
-      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.options.model} · ${status.turns} of ${status.maxTurns} turns${status.observation ? ` · ${status.observation}` : ""}`, "info");
+      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.options.model} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}`, "info");
       return;
     }
     // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.

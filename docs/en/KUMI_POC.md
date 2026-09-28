@@ -177,8 +177,14 @@ terminal is restored on exit, on crashes and on signals.
 - **Conversations** are kept for saved Sets, in `~/.kumi/projects` next to what Kumi
   last saw of each Set (readable only by you); the oldest exchanges drop off past
   about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
-  end with Kumi. There's no learned memory, skills or compaction yet. After 30
-  submitted turns in one session (including failed/cancelled ones), use `/new`.
+  end with Kumi. There's no learned memory or skills yet.
+- **Long conversations** have no turn limit. Past about 160 KB (roughly 50k
+  tokens), earlier turns' larger Live reads shrink to their opening and a note to
+  read again, and earlier turns' Live observations are dropped; the producer's
+  words, Kumi's answers, change confirmations and the turn just before stay whole.
+  Past about 400 KB the oldest exchanges drop off, and the model is told so.
+  Reads go stale as you work, so they go first; clearing happens at those
+  thresholds rather than on every request, so provider prompt caches keep working.
 - Prompts are capped at 16 KiB; turns at 120 seconds and 24 model steps; MCP
   requests at 15 seconds. A cancelled or failed turn leaves no trace in the
   conversation. One automatic retry happens only for a retryable provider failure
