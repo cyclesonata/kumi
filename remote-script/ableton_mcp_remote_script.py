@@ -31,7 +31,7 @@ PROTOCOL = "ableton-loopback/v1"
 _DIAGNOSTICS_MAX_BYTES = 256 * 1024
 _DIAGNOSTICS_QUEUE_LIMIT = 64
 _DIAGNOSTICS_RECORD_LIMIT = 512
-_DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure"}
+_DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure", "bridge-accept-failure"}
 
 
 class _DiagnosticsSink:
@@ -609,6 +609,13 @@ class ReferenceRegistry:
         self._objects, self._revisions = dict(checkpoint[0]), dict(checkpoint[1])
 
 
+# A momentary locator jump can land a few milliseconds off the cue-point time
+# on some Live shapes. Confirm the landed position within a small absolute
+# beat tolerance instead of exact float equality; a gross mismatch (for
+# example the wrong locator) still refuses.
+_LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS = 1e-3
+
+
 class LiveObjectMapper:
     """Small, version-tolerant Live object mapper used only on Live's main thread."""
 
@@ -858,12 +865,17 @@ class LiveObjectMapper:
             return callable(getattr(self.song, "duplicate_track", None)) and bool(self._items(getattr(self.song, "tracks", [])))
         if operation == "scene.duplicate":
             return callable(getattr(self.song, "duplicate_scene", None)) and bool(self._items(getattr(self.song, "scenes", [])))
+        if operation == "track.set":
+            return any(self._read_attr(track, "color_index") is not None for track in tracks)
         if operation == "track.view.set":
             return any(getattr(track, "view", None) is not None and (self._read_attr(getattr(track, "view", None), "is_collapsed") is not None or self._read_attr(getattr(track, "view", None), "device_insert_mode") is not None) for track in tracks)
         if operation == "track.select-instrument":
             return any(callable(getattr(getattr(track, "view", None), "select_instrument", None)) for track in tracks)
         if operation == "selection.set":
             return getattr(self.song, "view", None) is not None
+        if operation == "song.set":
+            settings_state = self._song_settings_state()
+            return any(settings_state.get(field) is not None for field in self._SONG_SET_FIELDS)
         if operation == "song.view.set":
             return self._read_attr(getattr(self.song, "view", None), "draw_mode") is not None
         if operation == "clip.view.set":
@@ -2346,12 +2358,16 @@ class LiveObjectMapper:
             return self._track_duplicate(args)
         if operation == "scene.duplicate":
             return self._scene_duplicate(args)
+        if operation == "track.set":
+            return self._track_set(args)
         if operation == "track.view.set":
             return self._track_view_set(args)
         if operation == "track.select-instrument":
             return self._track_select_instrument(args)
         if operation == "selection.set":
             return self._selection_set(args)
+        if operation == "song.set":
+            return self._song_set(args)
         if operation == "song.view.set":
             return self._song_view_set(args)
         if operation == "clip.view.set":
@@ -2490,6 +2506,10 @@ class LiveObjectMapper:
             self.refs.reset()
             self._playback_state_digest = None
             self._playback_revision_counter = 0
+            # Observe subscriptions are epoch-bound; the new epoch makes every
+            # existing entry unusable, so release their quota immediately
+            # instead of letting them linger until expiry.
+            self._observe_subscriptions = {}
             return self.status()
         if operation in {"locator.add", "arrangement.locator.create"}:
             return self._locator_mutate(args, delete=False)
@@ -3323,7 +3343,7 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
-    _CLIP_SET_FIELDS = ("muted", "colorIndex", "looping", "loopStart", "loopEnd", "groove")
+    _CLIP_SET_FIELDS = ("muted", "colorIndex", "looping", "loopStart", "loopEnd", "groove", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount")
 
     def _clip_state_fields(self, clip: Any) -> dict[str, Any]:
         """Muted/color/loop clip state, honestly null when unavailable."""
@@ -3347,6 +3367,7 @@ class LiveObjectMapper:
             value = self._read_attr(clip, name)
             return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
         fields["launchMode"] = optional_int("launch_mode")
+        fields["launchQuantization"] = optional_int("launch_quantization")
         fields["legato"] = optional_bool("legato")
         fields["playingPosition"] = optional_float("playing_position")
         fields["isPlaying"] = optional_bool("is_playing")
@@ -3391,7 +3412,7 @@ class LiveObjectMapper:
         if not isinstance(expected_authority, str) or not hmac.compare_digest(authority_revision, expected_authority) or not isinstance(expected_state, str) or not hmac.compare_digest(state_revision, expected_state): raise ValueError("clip hierarchy or state changed since preview")
         clip = self.refs.get(reference)
         is_audio = self._read_attr(clip, "is_audio_clip") is True
-        allowed = {"ref", "muted", "colorIndex", "looping", "loopStart", "loopEnd", "grooveRef", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"}
+        allowed = {"ref", "muted", "colorIndex", "looping", "loopStart", "loopEnd", "grooveRef", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"}
         if set(args) - allowed:
             raise ValueError("clip fields are invalid")
         proposals: list[tuple[str, str, Any]] = []
@@ -3411,6 +3432,29 @@ class LiveObjectMapper:
             value = args["colorIndex"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 69: raise ValueError("colorIndex is invalid")
             proposals.append(("colorIndex", "color_index", value))
+        if ("launchMode" in args or "launchQuantization" in args) and (self._read_attr(clip, "is_playing") is True or self._read_attr(clip, "is_triggered") is True): raise ValueError("launch behavior changes on a playing or triggered clip are refused")
+        if "launchMode" in args:
+            value = args["launchMode"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 3: raise ValueError("launchMode is invalid")
+            proposals.append(("launchMode", "launch_mode", value))
+        if "launchQuantization" in args:
+            value = args["launchQuantization"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 14: raise ValueError("launchQuantization is invalid")
+            proposals.append(("launchQuantization", "launch_quantization", value))
+        if "legato" in args:
+            value = args["legato"]
+            if not isinstance(value, bool): raise ValueError("legato is invalid")
+            proposals.append(("legato", "legato", value))
+        if "ramMode" in args:
+            value = args["ramMode"]
+            if not isinstance(value, bool): raise ValueError("ramMode is invalid")
+            if not is_audio: raise ValueError("ramMode is only available on audio clips")
+            proposals.append(("ramMode", "ram_mode", value))
+        if "velocityAmount" in args:
+            value = args["velocityAmount"]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1: raise ValueError("velocityAmount is invalid")
+            if is_audio: raise ValueError("velocityAmount is only available on MIDI clips")
+            proposals.append(("velocityAmount", "velocity_amount", float(value)))
         if "looping" in args:
             value = args["looping"]
             if not isinstance(value, bool): raise ValueError("looping is invalid")
@@ -4001,9 +4045,12 @@ class LiveObjectMapper:
         creator = getattr(track, "create_take_lane", None)
         if not callable(creator): raise ValueError("take-lane creation is unavailable")
         before_lanes = self._items(self._read_attr(track, "take_lanes") or []); before_identities = [self._capture_object_identity(lane) for lane in before_lanes]
-        lane = creator()
+        # The LOM documents no return value for create_take_lane, so the
+        # creator's result is deliberately ignored and creation is confirmed
+        # purely through the identity-diff.
+        creator()
         lanes = self._items(self._read_attr(track, "take_lanes") or []); created_rows = [(index, candidate) for index, candidate in enumerate(lanes) if self._capture_object_identity(candidate) not in set(before_identities)]
-        if lane is None or len(lanes) != len(before_lanes) + 1 or len(created_rows) != 1: raise ValueError("take-lane creation was not confirmed (note: the public LOM exposes no take-lane deletion, so creation cannot be compensated)")
+        if len(lanes) != len(before_lanes) + 1 or len(created_rows) != 1: raise ValueError("take-lane creation was not confirmed (note: the public LOM exposes no take-lane deletion, so creation cannot be compensated)")
         lane_index, created = created_rows[0]
         if name is not None and hasattr(created, "name"): created.name = name
         if name is not None and str(getattr(created, "name", "")) != name: raise ValueError("take-lane name was not confirmed (no public deletion exists for compensation)")
@@ -4054,9 +4101,12 @@ class LiveObjectMapper:
         method = getattr(lane, "create_audio_clip" if audio else "create_midi_clip", None)
         if not callable(method): raise ValueError("take-lane clip creation is unavailable")
         before_clips = self._items(self._read_attr(lane, "arrangement_clips") or []); before_identity_order = [self._capture_object_identity(item) for item in before_clips]; before_identities = set(before_identity_order)
-        clip = method(file_path, float(position)) if audio else method(float(position), float(length))
+        # The LOM documents no return value for TakeLane.create_*_clip, so the
+        # creator's result is deliberately ignored and creation is confirmed
+        # purely through the identity-diff.
+        method(file_path, float(position)) if audio else method(float(position), float(length))
         clips = self._items(self._read_attr(lane, "arrangement_clips") or []); created_rows = [(index, candidate) for index, candidate in enumerate(clips) if self._capture_object_identity(candidate) not in before_identities]
-        if clip is None or len(clips) != len(before_clips) + 1 or len(created_rows) != 1: raise ValueError("take-lane clip creation was not confirmed (the public LOM exposes no take-lane clip deletion, so creation cannot be compensated)")
+        if len(clips) != len(before_clips) + 1 or len(created_rows) != 1: raise ValueError("take-lane clip creation was not confirmed (the public LOM exposes no take-lane clip deletion, so creation cannot be compensated)")
         clip_index, created = created_rows[0]
         if name is not None and hasattr(created, "name"): created.name = name
         actual_start = self._read_attr(created, "start_time"); actual_length = self._read_attr(created, "length")
@@ -4425,6 +4475,7 @@ class LiveObjectMapper:
             "sessionRecord": optional_bool("session_record"),
             "sessionAutomationRecord": optional_bool("session_automation_record"),
             "clipTriggerQuantization": self._enum_wire(quantization),
+            "midiRecordingQuantization": self._enum_wire(self._read_attr(song, "midi_recording_quantization")),
             "isAbletonLinkEnabled": optional_bool("is_ableton_link_enabled"),
             "isAbletonLinkStartStopSyncEnabled": optional_bool("is_ableton_link_start_stop_sync_enabled"),
             "tempoFollower": optional_bool("tempo_follower"),
@@ -4494,7 +4545,7 @@ class LiveObjectMapper:
         if not isinstance(position, (int, float)) or isinstance(position, bool) or not math.isfinite(float(position)) or float(position) < 0: raise ValueError("locator jump did not report a readable song position")
         # Live applies the jump on its next tick, so the position may still read as before here.
         pending = isinstance(prior, (int, float)) and not isinstance(prior, bool) and _same_number(position, prior)
-        if isinstance(locator_time, (int, float)) and not _same_number(position, locator_time) and not pending: raise ValueError("locator jump was not confirmed")
+        if isinstance(locator_time, (int, float)) and abs(float(position) - float(locator_time)) > _LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS and not pending: raise ValueError("locator jump was not confirmed")
         return {"position": float(locator_time) if pending and isinstance(locator_time, (int, float)) else float(position)}
 
     _SMPTE_FORMAT_ENUM_NAMES = {"smpte-24": "smpte_24", "smpte-25": "smpte_25", "smpte-29": "smpte_29", "smpte-30": "smpte_30", "smpte-30-drop": "smpte_30_drop"}
@@ -4549,11 +4600,15 @@ class LiveObjectMapper:
         group = self._read_attr(track, "group_track")
         group_ref = self.refs.put("track", group, f"group:{track_index}") if group is not None else None
         view = getattr(track, "view", None)
+        color_index = self._read_attr(track, "color_index")
+        color_rgb = self._read_attr(track, "color")
         selected_device = self._read_attr(view, "selected_device") if view is not None else None
         device_insert_mode = self._read_attr(view, "device_insert_mode") if view is not None else None
         selected_track = self._read_attr(getattr(self.song, "view", None), "selected_track")
         return {
             "groupTrackRef": group_ref,
+            "colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None,
+            "color": int(color_rgb) if isinstance(color_rgb, int) and not isinstance(color_rgb, bool) and 0 <= color_rgb <= 0xFFFFFF else None,
             "isVisible": optional_bool(track, "is_visible"),
             "isSelected": (selected_track is track) if selected_track is not None else None,
             "isFrozen": optional_bool(track, "is_frozen"),
@@ -4588,32 +4643,51 @@ class LiveObjectMapper:
         if not callable(creator): raise ValueError("return-track creation is unavailable")
         name = args.get("name")
         if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("name is invalid")
-        before = self._items(getattr(self.song, "return_tracks", [])); before_identities = [self._capture_object_identity(item) for item in before]
-        track = creator()
-        after = self._items(getattr(self.song, "return_tracks", [])); created = [candidate for candidate in after if self._capture_object_identity(candidate) not in set(before_identities)]
-        if track is None or len(after) != len(before) + 1 or len(created) != 1: raise ValueError("return-track creation was not confirmed")
-        created_track = created[0]
-        index = len(after) - 1
-        if name is not None and hasattr(created_track, "name"):
-            # New returns show their letter ("C-Return"); Live prepends it to the name we set.
-            letter = f"{chr(ord('A') + index)}-" if index < 26 else ""
-            prefix = letter if letter and str(getattr(created_track, "name", "")).startswith(letter) else ""
-            requested = name[len(prefix):] if prefix and name.startswith(prefix) and len(name) > len(prefix) else name
-            try: created_track.name = requested
-            except BaseException: pass
-            if str(getattr(created_track, "name", "")) not in {name, prefix + requested}:
-                deleter = getattr(self.song, "delete_return_track", None)
-                try:
-                    if callable(deleter): deleter(index)
+        before = self._items(getattr(self.song, "return_tracks", [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology()
+        if len(set(before_identities)) != len(before_identities): raise ValueError("return-track collection identity is ambiguous")
+        # The LOM documents no return value for create_return_track, so the
+        # creator's result is deliberately ignored: creation is confirmed
+        # purely through the identity-diff, and any post-creation failure
+        # rolls the created return track back exactly, exactly like
+        # _structure_create_atomic does for tracks and scenes.
+        checkpoint = self.refs.checkpoint(); creation_error: BaseException | None = None
+        try: creator()
+        except BaseException as error: creation_error = error
+        after = self._items(getattr(self.song, "return_tracks", [])); created = [(position, item, self._capture_object_identity(item)) for position, item in enumerate(after) if self._capture_object_identity(item) not in set(before_identities)]
+        try:
+            if creation_error is not None: raise creation_error
+            if len(after) != len(before) + 1 or len(created) != 1: raise ValueError("return-track creation did not produce one exact identity-distinct object")
+            position, created_track, identity = created[0]; expected_identity_order = list(before_identities); expected_identity_order.insert(position, identity)
+            if [self._capture_object_identity(candidate) for candidate in after] != expected_identity_order: raise ValueError("return-track creation reordered pre-existing objects")
+            if name is not None and hasattr(created_track, "name"):
+                # New returns show their letter ("C-Return"); Live prepends it to the name we set.
+                letter = f"{chr(ord('A') + position)}-" if position < 26 else ""
+                prefix = letter if letter and str(getattr(created_track, "name", "")).startswith(letter) else ""
+                requested = name[len(prefix):] if prefix and name.startswith(prefix) and len(name) > len(prefix) else name
+                try: created_track.name = requested
                 except BaseException: pass
-                removed = len(self._items(getattr(self.song, "return_tracks", []))) == len(before)
-                raise ValueError("return-track name was not confirmed; " + ("the new return track was removed" if removed else "the new return track could not be removed"))
-        # Discovery and snapshots name a return track by its position after the regular tracks; return that
-        # same reference and the fingerprint cleanup re-checks, so the host can find and later remove it.
-        regular = len(self._items(getattr(self.song, "tracks", [])))
-        reference = self.refs.put("track", created_track, str(regular + index)); identity = self._capture_object_identity(created_track)
-        fingerprint = self._ownership_fingerprint(reference)
-        return {"ref": reference, "objectIdentity": identity, "name": str(getattr(created_track, "name", "")), "index": index, "createdFingerprint": fingerprint}
+                # Rolled back below; if that fails, the rollback error replaces this one.
+                if str(getattr(created_track, "name", "")) not in {name, prefix + requested}: raise ValueError("return-track name was not confirmed; the new return track was removed")
+            # Discovery and snapshots name a return track by its position after the regular tracks; return that
+            # same reference and the fingerprint cleanup re-checks, so the host can find and later remove it.
+            regular = len(self._items(getattr(self.song, "tracks", [])))
+            reference = self.refs.put("track", created_track, str(regular + position))
+            fingerprint = self._ownership_fingerprint(reference)
+            return {"ref": reference, "objectIdentity": identity, "name": str(getattr(created_track, "name", "")), "index": position, "createdFingerprint": fingerprint}
+        except BaseException as error:
+            rollback_failed = False; deleter = getattr(self.song, "delete_return_track", None)
+            current = self._items(getattr(self.song, "return_tracks", [])); new_rows = [(position, item) for position, item in enumerate(current) if self._capture_object_identity(item) not in set(before_identities)]
+            if new_rows and not callable(deleter): rollback_failed = True
+            if callable(deleter):
+                for position, _ in reversed(new_rows):
+                    try: deleter(position)
+                    except BaseException: pass
+            if [self._capture_object_identity(item) for item in self._items(getattr(self.song, "return_tracks", []))] != before_identities or self._creation_topology() != baseline_topology: rollback_failed = True
+            if rollback_failed:
+                try: self.snapshot()
+                except BaseException: pass
+                raise ValueError("return-track creation failed and exact rollback failed") from error
+            self.refs.restore(checkpoint); raise
 
     def _track_delete_return(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
@@ -4669,6 +4743,44 @@ class LiveObjectMapper:
         created = after[index + 1]; reference_new = self.refs.put("scene", created, str(index + 1)); identity = self._capture_object_identity(created)
         fingerprint = hashlib.sha256(self._bounded_canonical({"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1}).encode("utf-8")).hexdigest()
         return {"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1, "createdFingerprint": fingerprint}
+
+    def _track_properties_state(self, track: Any) -> dict[str, Any]:
+        color_index = self._read_attr(track, "color_index")
+        return {"colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None}
+
+    def _track_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        reference = args.get("ref")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:track:") or set(args) - {"ref", "colorIndex", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("track properties authority is invalid")
+        tracks = self._items(getattr(self.song, "tracks", [])); parts = reference.split(":"); index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else -1
+        if not 0 <= index < len(tracks): raise ValueError("track hierarchy changed")
+        track = tracks[index]
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(track), args["expectedObjectIdentity"]): raise ValueError("track identity changed since preview")
+        state_revision = hashlib.sha256(self._bounded_canonical(self._track_properties_state(track)).encode("utf-8")).hexdigest()
+        if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("track properties state changed since preview")
+        proposals = []
+        if "colorIndex" in args:
+            value = args["colorIndex"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 69: raise ValueError("colorIndex is invalid")
+            proposals.append(("color_index", value))
+        if not proposals: raise ValueError("track properties mutation has no fields")
+        for attribute, _ in proposals:
+            if self._read_attr(track, attribute) is None: raise ValueError(f"{attribute} is unavailable on this track")
+        assignments = [(attribute, value, self._read_attr(track, attribute)) for attribute, value in proposals]
+        before_revision = state_revision
+        try:
+            for attribute, value, _ in assignments: setattr(track, attribute, value)
+            for attribute, value, _ in assignments:
+                observed = self._read_attr(track, attribute)
+                if not isinstance(observed, int) or isinstance(observed, bool) or observed != value: raise ValueError("track properties change was not confirmed")
+        except BaseException as error:
+            rollback_failed = False
+            for attribute, _, prior in reversed(assignments):
+                try: setattr(track, attribute, prior)
+                except BaseException: rollback_failed = True
+            if rollback_failed or hashlib.sha256(self._bounded_canonical(self._track_properties_state(track)).encode("utf-8")).hexdigest() != before_revision: raise ValueError("track properties change failed and exact rollback failed") from error
+            raise
+        revision = self.refs.touch(reference)
+        return {"changed": True, "revision": revision}
 
     def _track_view_set(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
@@ -4798,6 +4910,72 @@ class LiveObjectMapper:
             raise
         return {"changed": True, "revision": hashlib.sha256(self._bounded_canonical({"drawMode": self._read_attr(view, "draw_mode")}).encode("utf-8")).hexdigest()}
 
+    _SONG_SET_FIELDS = ("signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization")
+
+    def _song_settings_state(self) -> dict[str, Any]:
+        def int_or_none(value: Any) -> int | None:
+            return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+        def enum_or_none(value: Any) -> int | None:
+            if value is None or isinstance(value, bool): return None
+            if isinstance(value, int): return int(value)
+            try:
+                candidate = int(value)
+                return candidate if 0 <= candidate <= 10**6 else None
+            except (TypeError, ValueError):
+                return None
+        swing = self._read_attr(self.song, "swing_amount")
+        return {"signatureNumerator": int_or_none(self._read_attr(self.song, "signature_numerator")),
+                "signatureDenominator": int_or_none(self._read_attr(self.song, "signature_denominator")),
+                "swingAmount": float(swing) if isinstance(swing, (int, float)) and not isinstance(swing, bool) and math.isfinite(float(swing)) else None,
+                "clipTriggerQuantization": enum_or_none(self._read_attr(self.song, "clip_trigger_quantization")),
+                "midiRecordingQuantization": enum_or_none(self._read_attr(self.song, "midi_recording_quantization"))}
+
+    def _song_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        if set(args) - set(self._SONG_SET_FIELDS) - {"setRef", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("song settings fields are invalid")
+        if args.get("setRef") != self.refs.put("set", self.song, "song") or not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(self.song), args["expectedObjectIdentity"]): raise ValueError("song settings Set identity changed since preview")
+        state_revision = hashlib.sha256(self._bounded_canonical(self._song_settings_state()).encode("utf-8")).hexdigest()
+        if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("song settings state changed since preview")
+        proposals = []
+        if "signatureNumerator" in args:
+            value = args["signatureNumerator"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 99: raise ValueError("signatureNumerator is invalid")
+            proposals.append(("signatureNumerator", "signature_numerator", value))
+        if "signatureDenominator" in args:
+            value = args["signatureDenominator"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 99: raise ValueError("signatureDenominator is invalid")
+            proposals.append(("signatureDenominator", "signature_denominator", value))
+        if "swingAmount" in args:
+            value = args["swingAmount"]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1: raise ValueError("swingAmount is invalid")
+            proposals.append(("swingAmount", "swing_amount", float(value)))
+        if "clipTriggerQuantization" in args:
+            value = args["clipTriggerQuantization"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 13: raise ValueError("clipTriggerQuantization is invalid")
+            proposals.append(("clipTriggerQuantization", "clip_trigger_quantization", value))
+        if "midiRecordingQuantization" in args:
+            value = args["midiRecordingQuantization"]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 8: raise ValueError("midiRecordingQuantization is invalid")
+            proposals.append(("midiRecordingQuantization", "midi_recording_quantization", value))
+        if not proposals: raise ValueError("song settings mutation has no fields")
+        for _, attribute, _ in proposals:
+            if self._read_attr(self.song, attribute) is None: raise ValueError(f"{attribute} is unavailable on this song")
+        assignments = [(field, attribute, value, self._read_attr(self.song, attribute)) for field, attribute, value in proposals]
+        before_revision = state_revision
+        try:
+            for _, attribute, value, _ in assignments: setattr(self.song, attribute, value)
+            observed_state = self._song_settings_state()
+            for field, _, value, _ in assignments:
+                observed = observed_state.get(field)
+                if not isinstance(observed, (int, float)) or isinstance(observed, bool) or float(observed) != float(value): raise ValueError("song settings change was not confirmed")
+        except BaseException as error:
+            rollback_failed = False
+            for _, attribute, _, prior in reversed(assignments):
+                try: setattr(self.song, attribute, prior)
+                except BaseException: rollback_failed = True
+            if rollback_failed or hashlib.sha256(self._bounded_canonical(self._song_settings_state()).encode("utf-8")).hexdigest() != before_revision: raise ValueError("song settings change failed and exact rollback failed") from error
+            raise
+        return {"changed": True, "revision": hashlib.sha256(self._bounded_canonical(self._song_settings_state()).encode("utf-8")).hexdigest()}
+
     def _clip_view_state(self, clip: Any) -> dict[str, Any]:
         view = getattr(clip, "view", None)
         grid = self._read_attr(view, "grid_quantization") if view is not None else None
@@ -4808,7 +4986,7 @@ class LiveObjectMapper:
 
     def _clip_view_set(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
-        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:") or set(args) - {"ref", "gridQuantization", "gridIsTriplet", "showEnvelope", "showLoop", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("clip view authority is invalid")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:clip:") or set(args) - {"ref", "gridQuantization", "gridIsTriplet", "showEnvelope", "showLoop", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("clip view authority is invalid")
         clip = self.refs.get(reference); view = getattr(clip, "view", None)
         if view is None: raise ValueError("clip view is unavailable")
         current = self.get(reference)
@@ -5609,11 +5787,23 @@ class LiveObjectMapper:
             if rollback_failed: raise ValueError("IR selection change failed and exact rollback failed") from error
             raise
         if any(field in args for field in ("attack", "decay", "size")):
-            return self._specialized_set(reference, args, {
-                "attack": ("ir_attack_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
-                "decay": ("ir_decay_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 100000),
-                "size": ("ir_size_factor", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
-            }, "hybrid-reverb")
+            try:
+                return self._specialized_set(reference, args, {
+                    "attack": ("ir_attack_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
+                    "decay": ("ir_decay_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 100000),
+                    "size": ("ir_size_factor", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
+                }, "hybrid-reverb")
+            except BaseException as error:
+                # The shaping phase fences independently, but a failure there
+                # must not strand the IR indices already applied above:
+                # restore the exact prior selection so one failed call leaves
+                # the device untouched, like every other specialized family.
+                rollback_failed = False
+                for index_attr, prior in reversed(applied):
+                    try: setattr(device, index_attr, prior)
+                    except BaseException: rollback_failed = True
+                if rollback_failed: raise ValueError("hybrid-reverb shaping change failed and exact IR rollback failed") from error
+                raise
         if not ir_proposals: raise ValueError("hybrid-reverb mutation has no fields")
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
@@ -5779,6 +5969,10 @@ class LiveObjectMapper:
         topics = args.get("topics")
         if not isinstance(topics, list) or not 1 <= len(topics) <= 64: raise ValueError("topics are invalid")
         if not hasattr(self, "_observe_subscriptions"): self._observe_subscriptions = {}
+        sweep_ms = int(time.time() * 1000)
+        for existing_id, existing in list(self._observe_subscriptions.items()):
+            if sweep_ms >= existing.get("expiresAtMs", 0) or existing.get("epoch") != self.refs.epoch:
+                del self._observe_subscriptions[existing_id]
         if len(self._observe_subscriptions) >= 8: raise ValueError("observe subscription quota is exhausted")
         interval = args.get("minIntervalMs", 250)
         if not isinstance(interval, int) or isinstance(interval, bool) or not 100 <= interval <= 60000: raise ValueError("minIntervalMs is invalid")
@@ -5817,7 +6011,6 @@ class LiveObjectMapper:
             raise ValueError("observe subscription expired; resubscribe")
         if now - subscription["lastPollMs"] < subscription["minIntervalMs"]: raise ValueError("observe poll is faster than the negotiated minimum interval")
         subscription["lastPollMs"] = now
-        subscription["expiresAtMs"] = now + 900000
         events = []; overflow = False
         for index, topic in enumerate(subscription["topics"]):
             digest, values = self._observe_topic_digest(topic)
@@ -5834,6 +6027,10 @@ class LiveObjectMapper:
                 digest, values = self._observe_topic_digest(topic)
                 topic["revision"] = digest
                 topic["values"] = values
+        # Renew only after every topic digest succeeded: a subscription whose
+        # digests keep failing must still expire instead of being kept alive
+        # (and occupying quota) by a client polling a permanently broken topic.
+        subscription["expiresAtMs"] = now + 900000
         subscription["sequence"] += 1
         return {"events": events, "overflow": overflow, "sequence": subscription["sequence"]}
 
@@ -7643,7 +7840,15 @@ class _Subscription:
                 continue
             register = getattr(song, f"add_{name}_listener", None)
             if callable(register):
-                register(callback)
+                try:
+                    register(callback)
+                except BaseException:
+                    # A mid-registration failure must not strand the callbacks
+                    # that already registered: they would fire into this
+                    # orphaned subscription on Live's main thread for the rest
+                    # of the process lifetime.
+                    self.close()
+                    raise
                 self._registrations.append((song, name, callback))
 
     def _emit(self, event_type: str, payload: dict[str, Any], ref: str | None = None) -> None:
@@ -8132,10 +8337,15 @@ class _RealtimePlane:
             raise error
 
 
+class _DispatchUncertainError(RuntimeError):
+    """The Live-thread callback was claimed and may still complete."""
+
+
 class _DispatchToken:
     def __init__(self, deadline_ms: int):
         self.deadline_ms = deadline_ms
         self.state = "queued"
+        self._cancel_notified = False
         self._lock = threading.Lock()
 
     def claim(self) -> bool:
@@ -8157,6 +8367,12 @@ class _DispatchToken:
         with self._lock:
             if self.state == "running": self.state = "completed"
 
+    def mark_cancel_notified(self) -> bool:
+        with self._lock:
+            if self._cancel_notified: return False
+            self._cancel_notified = True
+            return True
+
 
 class _MainThreadQueue:
     def __init__(self) -> None:
@@ -8166,7 +8382,7 @@ class _MainThreadQueue:
         # Set while the network pump runs on Live's main thread; work submitted there runs inline.
         self.inline_thread: int | None = None
 
-    def submit(self, callback: Callable[[], Any], timeout: float = DEFAULT_TIMEOUT_SECONDS, deadline_ms: int | None = None) -> Any:
+    def submit(self, callback: Callable[[], Any], timeout: float = DEFAULT_TIMEOUT_SECONDS, deadline_ms: int | None = None, on_cancel: Callable[[BaseException], None] | None = None) -> Any:
         now_ms = int(time.time() * 1000)
         deadline_ms = deadline_ms if isinstance(deadline_ms, int) and not isinstance(deadline_ms, bool) else now_ms + int(timeout * 1000)
         if deadline_ms <= now_ms or deadline_ms > now_ms + 60000: raise TimeoutError("Live main-thread operation deadline expired")
@@ -8179,11 +8395,14 @@ class _MainThreadQueue:
         token = _DispatchToken(deadline_ms)
         with self._lock:
             if self._closed: raise RuntimeError("Live bridge is disconnected")
-            self.items.put_nowait((callback, event, result, token, None))
+            self.items.put_nowait((callback, event, result, token, on_cancel))
         wait_seconds = max(0.0, min(timeout, (deadline_ms - int(time.time() * 1000)) / 1000.0))
         if not event.wait(wait_seconds):
-            if token.cancel(): raise TimeoutError("Live main-thread operation timed out before dispatch")
-            raise RuntimeError("Live main-thread operation state uncertain after dispatch")
+            if token.cancel():
+                error = TimeoutError("Live main-thread operation timed out before dispatch")
+                self._notify_cancel(token, on_cancel, error)
+                raise error
+            raise _DispatchUncertainError("Live main-thread operation state uncertain after dispatch")
         if result and isinstance(result[0], BaseException): raise result[0]
         return result[0] if result else None
 
@@ -8204,8 +8423,8 @@ class _MainThreadQueue:
         return True
 
     @staticmethod
-    def _notify_cancel(callback: Callable[[BaseException], None] | None, error: BaseException) -> None:
-        if callback is not None:
+    def _notify_cancel(token: _DispatchToken, callback: Callable[[BaseException], None] | None, error: BaseException) -> None:
+        if callback is not None and token.mark_cancel_notified():
             try: callback(error)
             except BaseException: pass
 
@@ -8217,7 +8436,7 @@ class _MainThreadQueue:
                 except queue.Empty: break
                 error = RuntimeError("Live bridge is disconnected")
                 token.cancel(); result.append(error); event.set()
-                self._notify_cancel(on_cancel, error)
+                self._notify_cancel(token, on_cancel, error)
 
     def drain(self, budget: int = MAX_QUEUE_ITEMS) -> int:
         count = 0
@@ -8226,7 +8445,7 @@ class _MainThreadQueue:
             except queue.Empty: break
             if not token.claim():
                 error = TimeoutError("Live main-thread operation timed out before dispatch")
-                result.append(error); event.set(); self._notify_cancel(on_cancel, error)
+                result.append(error); event.set(); self._notify_cancel(token, on_cancel, error)
                 count += 1; continue
             try: result.append(callback())
             except BaseException as exc: result.append(exc)
@@ -8436,7 +8655,10 @@ class AbletonMcpBridge:
     def _accept_pending(self) -> None:
         while len(self._connections) < MAX_BRIDGE_CONNECTIONS:
             try: client, _ = self._server.accept()
-            except OSError: return
+            except BlockingIOError: return
+            except OSError:
+                if not self._stop.is_set(): _debug_trace("bridge-accept-failure")
+                return
             try:
                 client.setblocking(False)
                 holder: dict[str, Any] = {"subscription": None}
@@ -8546,6 +8768,7 @@ class AbletonMcpBridge:
                 raise ValueError("missing, expired, or mismatched mutation authority")
             if not isinstance(transaction_id, str): raise ValueError("mutation transaction identity is required")
             idempotency_key = authority["idempotencyKey"]
+            claim = object()
             with self._executed_lock:
                 retired = getattr(self, "_retired_mutation_keys", None)
                 if retired is None: retired = self._retired_mutation_keys = {}
@@ -8553,8 +8776,6 @@ class AbletonMcpBridge:
                 if pending is None: pending = self._pending_mutations = {}
                 for key, expires_at in list(retired.items()):
                     if expires_at <= now: retired.pop(key, None)
-                for key, row in list(pending.items()):
-                    if row["expiresAt"] <= now: pending.pop(key, None)
                 finalized = getattr(self, "_finalized_transactions", set())
                 if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
                 if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
@@ -8562,9 +8783,21 @@ class AbletonMcpBridge:
                 if prior_pending is not None and (prior_pending["transactionId"] != transaction_id or prior_pending["operation"] != request.get("operation") or prior_pending["argsDigest"] != digest): raise ValueError("idempotency key conflicts with a pending mutation")
                 if prior_pending is None:
                     if len(pending) >= 256: raise ValueError("pending mutation ledger is full")
-                    pending[idempotency_key] = {"transactionId": transaction_id, "operation": request.get("operation"), "argsDigest": digest, "count": 1, "expiresAt": int(request.get("deadlineMs", now + 60000))}
+                    pending_row = {"transactionId": transaction_id, "operation": request.get("operation"), "argsDigest": digest, "count": 1, "claims": {claim}}
+                    pending[idempotency_key] = pending_row
                 else:
-                    prior_pending["count"] += 1; prior_pending["expiresAt"] = max(prior_pending["expiresAt"], int(request.get("deadlineMs", now + 60000)))
+                    pending_row = prior_pending
+                    pending_row["claims"].add(claim); pending_row["count"] = len(pending_row["claims"])
+            released = False
+            def release_pending(_error: BaseException | None = None) -> None:
+                nonlocal released
+                with self._executed_lock:
+                    if released: return
+                    released = True
+                    pending = getattr(self, "_pending_mutations", {}); row = pending.get(idempotency_key)
+                    if row is not pending_row or claim not in pending_row["claims"]: return
+                    pending_row["claims"].remove(claim); pending_row["count"] = len(pending_row["claims"])
+                    if pending_row["count"] == 0: pending.pop(idempotency_key, None)
             def replay_or_apply(apply: Callable[[], Any]) -> Any:
                 with self._executed_lock:
                     retired = getattr(self, "_retired_mutation_keys", {}); finalized = getattr(self, "_finalized_transactions", set())
@@ -8583,12 +8816,12 @@ class AbletonMcpBridge:
                     if operation in {"realtime.arm", "realtime.disarm"}: return replay_or_apply(lambda: self._realtime_op(operation, args))
                     return replay_or_apply(lambda: self.mapper.invoke(operation, args, transaction_id, request.get("ownershipToken")))
                 finally:
-                    with self._executed_lock:
-                        pending = getattr(self, "_pending_mutations", {}); row = pending.get(idempotency_key)
-                        if row is not None and row.get("transactionId") == transaction_id and row.get("operation") == request.get("operation") and row.get("argsDigest") == digest:
-                            row["count"] -= 1
-                            if row["count"] <= 0: pending.pop(idempotency_key, None)
-            return self.queue.submit(invoke_authorized, deadline_ms=request.get("deadlineMs"))
+                    release_pending()
+            try:
+                return self.queue.submit(invoke_authorized, deadline_ms=request.get("deadlineMs"), on_cancel=release_pending)
+            except BaseException as error:
+                if not isinstance(error, _DispatchUncertainError): release_pending()
+                raise
         if method == "invoke" and request.get("operation") == "realtime.stats":
             return self._realtime_op(request["operation"], request.get("args", {}))
         if method == "retire":
@@ -8608,8 +8841,6 @@ class AbletonMcpBridge:
                     if pending is None: pending = self._pending_mutations = {}
                     for key, expires_at in list(retired.items()):
                         if expires_at <= now: retired.pop(key, None)
-                    for key, row in list(pending.items()):
-                        if row["expiresAt"] <= now: pending.pop(key, None)
                     keys = [key for key, row in self._executed_mutations.items() if row.get("transactionId") == transaction_id]
                     pending_keys = [key for key, row in pending.items() if row.get("transactionId") == transaction_id]
                     retiring = set(keys + pending_keys)

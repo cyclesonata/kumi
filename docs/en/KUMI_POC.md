@@ -7,7 +7,7 @@ independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
 
-You need **Node.js 22, 24 or 25**; the LTS installer from
+You need **Node.js 22 or 24** (Node 25 has reached end of life); the Node 24 LTS installer from
 [nodejs.org](https://nodejs.org) is fine. On any other version Kumi says so and
 stops before doing anything. From the repository root:
 
@@ -187,7 +187,8 @@ data, not instructions or permission grants. Reading Live is not local-only.
 Kumi does not save conversation files; terminal scrollback and the provider's
 retention policies are separate. The credential store intentionally persists.
 
-Tested locally with macOS arm64 on Node 22.23.3, 24.21.0 and 25.9.0, Kumi's agent
+Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25
+was retired), Kumi's agent
 core on AI SDK provider packages (`@ai-sdk/openai` 4.0.78), MCP SDK 1.30.1,
 ChatGPT OAuth and Live **12.4.15b4** with bridge 1.0.7. Authenticated inference,
 actual PTYs and Live acceptance passed, including external-edit refresh,

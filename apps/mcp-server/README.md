@@ -6,7 +6,8 @@ It remains independent of the parent Kumi assistant and its inference dependency
 
 ## Source checkout
 
-Requires Node.js **22, 24, or 25**. From the repository root:
+Requires Node.js **22 or 24** (24 LTS recommended; Node 25 is end-of-life and
+unsupported). From the repository root:
 
 ```sh
 cd apps/mcp-server

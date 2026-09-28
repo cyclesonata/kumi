@@ -27,7 +27,7 @@ test("root npm start forwards CLI arguments from a different cwd; help requires 
     cwd: tmpdir(), env: { ...process.env, KUMI_MODEL: "", KUMI_AUTH_FILE: "" }, timeout: 15_000,
   });
   assert.match(stdout, /--bridge-config/); assert.match(stdout, /--inference-only/); assert.match(stdout, /producer assistant for Ableton Live/);
-  assert.match(stdout, /npm run setup/); assert.match(stdout, /login openai-codex/); assert.match(stdout, /Node\.js 22, 24 or 25/);
+  assert.match(stdout, /npm run setup/); assert.match(stdout, /login openai-codex/); assert.match(stdout, /Node\.js 22 or 24/);
   assert.equal(stderr, "");
 });
 

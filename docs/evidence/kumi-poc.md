@@ -14,7 +14,7 @@ A follow-up review of the bridge against actual Live fixed thirteen defects,
 including the return-track rename, and cut each bridge request from about 2 s to
 about 0.1 s. Every read, edit family and undo in the real-Live exerciser now
 passes (see [Bridge review](#bridge-review-on-actual-live)). Setup is one command on
-Node 22, 24 or 25, and a plain `npm run kumi` finds the installed bridge
+Node 22 or 24, and a plain `npm run kumi` finds the installed bridge
 (see [Onboarding](#onboarding)).
 
 The hosted repository rename remains owner-managed. No commit or push was made.

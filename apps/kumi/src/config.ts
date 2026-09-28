@@ -6,7 +6,7 @@ import { parseModelId, PROVIDERS } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-export const SUPPORTED_NODE_MAJORS = [22, 24, 25];
+export const SUPPORTED_NODE_MAJORS = [22, 24];
 /** Chosen after a ChatGPT sign-in when no model is set; change with `npm run kumi -- model`. */
 export const DEFAULT_CODEX_MODEL = "openai-codex/gpt-6-astra";
 

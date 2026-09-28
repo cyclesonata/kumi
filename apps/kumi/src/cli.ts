@@ -9,7 +9,7 @@ import { createTui } from "./tui/app.js";
 
 const HELP = `Kumi — producer assistant for Ableton Live
 
-First run (Node.js 22, 24 or 25):
+First run (Node.js 22 or 24):
   npm run setup                          Install and build Kumi and the Ableton bridge
   npm run kumi -- login openai-codex     Sign in with a ChatGPT plan (--device without a browser)
   npm run kumi                           Talk about the open Live Set; the installed bridge is found automatically
@@ -33,7 +33,7 @@ const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, pro
 
 try {
   if (!SUPPORTED_NODE_MAJORS.includes(Number(process.versions.node.split(".")[0]))) {
-    throw new Error(`Kumi needs Node.js 22, 24 or 25 (this is ${process.version}); install the LTS release from https://nodejs.org.`);
+    throw new Error(`Kumi needs Node.js 22 or 24 (this is ${process.version}); install Node 24 LTS from https://nodejs.org.`);
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "help") process.stdout.write(HELP);

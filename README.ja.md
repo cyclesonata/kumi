@@ -9,8 +9,8 @@ Ableton Live Set を調べ、文脈に沿った質問に答えます。編集、
 
 ## 開始
 
-**Node.js 22、24、25** のいずれかが必要です（[nodejs.org](https://nodejs.org) の
-LTS インストーラーで構いません）。リポジトリのルートで実行します。
+**Node.js 22 または 24** が必要です（[nodejs.org](https://nodejs.org) の
+Node 24 LTS インストーラーで構いません。Node 25 はサポート終了）。リポジトリのルートで実行します。
 
 ```sh
 npm run setup                          # すべてをインストール・ビルド（約 1 分）
@@ -38,7 +38,7 @@ Esc で処理を中止、Ctrl-C で入力欄をクリアし、空なら終了し
 
 ## Ableton MCP Beyond — 独立したブリッジ
 
-[![Node 22 | 24 | 25](https://img.shields.io/badge/node-22%20%7C%2024%20%7C%2025-339933)](apps/mcp-server/package.json)
+[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 `@ableton-mcp/mcp-server` は引き続き他の MCP クライアントから単独で使用できます。
 独自のロックファイル、Node 対応方針、安全性の契約、CI を維持します。

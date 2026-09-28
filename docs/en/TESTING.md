@@ -2,6 +2,46 @@
 
 English · [简体中文](../zh-CN/TESTING.md) · [日本語](../ja/TESTING.md)
 
+## MCP compatibility evidence
+
+`mcp-protocol.test.ts` covers modern discovery/inline metadata, version refusal,
+legacy fallback, sequential ID reuse vs in-flight rejection, private zero-TTL
+results, structured/coalesced replay flags, unchanged confirmation/policy and
+lost-reply ledger recovery, absent push, and cancellation through ordered flush.
+Transport regressions exercise immediate ID reuse from the exported `serve()`
+response-data handler (numeric/string IDs and success/error replies), plus
+cancellation after a completed success/error reply enters the serialized output
+queue behind a backpressured busy response. ID retirement and the final abort
+check occur at emission, not queue admission or write-callback completion;
+old-response cleanup cannot remove a reused ID's new cancellation owner. Both
+callback-only delay and drain backpressure are covered in `stdio.test.ts`.
+`verify-package.mjs` independently starts installed legacy and modern processes.
+These are host/fake-Live checks, not third-party-client or fresh Live certification.
+
+## Transform invariants
+
+Rotation property tests include exact id-less duplicates and repeated object
+references: pitch multiplicity, input ordering and every non-pitch field survive.
+This fixes the pure helper; the MCP mutation path still requires stable note IDs.
+Note digests use UTF-16 code-unit ordering, never ICU collation; subprocess tests
+vary English/Swedish locales with a collation-sensitive fixture and retain
+representative ASCII digest pins.
+
+## Hierarchy invariants
+
+Chain lookup tests retain the actual containing device through later track
+siblings, nested racks, pad-only chains and racks inside pads. The owner-field
+bug was latent in current callers; tests do not claim a demonstrated Live edit.
+
+## Semantic privacy invariants
+
+Ordinary `Verse / Chorus` names survive name-retaining profiles; root, quoted,
+assigned, embedded unspaced absolute, drive, network, device and URI path shapes
+remain screened. Media basenames/project-relative locators pass the same screen
+before the final audit. Portable authority-like names such as
+`REUSABLE-TOKEN.wav` reproduce the old abort; a literal slash cannot be a single
+basename on supported filesystems and is not claimed as reproduced evidence.
+
 ## Deterministic gates
 
 Run serially from `apps/mcp-server`:
@@ -59,10 +99,19 @@ choices, capture fences/watchdog/emergency/cleanup, and bridge teardown. The
 package verifier starts the installed production bridge and checks
 authenticated fake Set, scene, track, child-slot, and playback discovery.
 
+The offline-Set/MIDI regressions exercise malformed XML, comments/CDATA,
+child-value timing, unknown length refusal, source-byte evidence, root/symlink
+media boundaries, optional MIDI privacy and note-revision ordering, pre-expansion
+note limits, chord registers/bassline boundaries, and order-independent key
+ranking. Property-authority probes replace a Set/track identity while preserving
+its reference and values before/after apply and undo, and ensure uncertain undo
+cannot resume forward apply. These synthetic fixtures do not certify arbitrary
+Set versions, listening quality, or behavior in a running Live instance.
+
 CI builds one clean local unpublished tarball on Ubuntu 24.04, runs
 `package:verify` before upload, repeats the pack from a fresh detached local
 clone plus fresh `npm ci` and compares bytes, records the exact Git SHA and
-tarball SHA-256, then installs that same artifact in every Node 22/24/25 Ubuntu
+tarball SHA-256, then installs that same artifact in every Node 22/24 Ubuntu
 24.04, macOS 15, and Windows Server 2025 job. Each candidate job verifies strict
 inventory/hashes and exercises lifecycle plan/install, unavailable activation,
 idempotent repair, unowned rollback refusal, and uninstall; Windows additionally
@@ -110,6 +159,22 @@ regression signal, not a substitute
 for real-Live, security, recovery, or platform evidence.
 
 The benchmark warms the declared maximum PCM input and reports repeated latency measurements. `audio:oracle` generates temporary PCM, compares BS.1770/EBU and true-peak outputs to FFmpeg `ebur128`, and removes the owner-only temporary tree; it commits no third-party audio. Latency, output size, bounded-memory, DSP-oracle, package, and real-Live evidence are distinct concerns; none substitutes for another.
+
+## Compound recovery and library-reader regressions
+
+`compound-recovery.test.ts` uses an explicit simulator execution ledger to test
+lost apply, compensation, and undo replies; exact argument/key retention;
+post-acknowledgement readback failures; rejection of externally matching values
+and substituted identities; and creation-time fingerprint fencing. It does not
+stand in for a production bridge or real-Live run. `batch.test.ts` also covers
+policy changes between preview/apply/undo and during awaited snapshots.
+`device-state.test.ts` covers duplicate sibling paths, refusal of output symlinks
+before writes, and quantization that never exceeds parameter bounds.
+
+`sqlite-reader.test.ts` checks signed 48-/64-bit integer decoding, precision
+refusal, negative row IDs, reserved-page-aware bounds, unsupported text encodings, and
+malformed b-tree/page bounds. Library search remains UTF-8-only, read-only and
+fail-closed for unsupported file layouts or uncheckpointed WAL.
 
 ## What passing means
 

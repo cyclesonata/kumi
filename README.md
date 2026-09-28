@@ -9,8 +9,9 @@ memory are not implemented yet.
 
 ## Quick start
 
-You need **Node.js 22, 24 or 25** (the LTS installer from
-[nodejs.org](https://nodejs.org) is fine). From the repository root:
+You need **Node.js 22 or 24**; the Node 24 LTS installer from
+[nodejs.org](https://nodejs.org) is fine (Node 25 has reached end of life). From the
+repository root:
 
 ```sh
 npm run setup                          # install and build everything, about a minute
@@ -54,7 +55,7 @@ integration.
 ## Ableton MCP Beyond — standalone bridge
 
 [![Bridge CI](https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml?query=branch%3Amain)
-[![Node 22 | 24 | 25](https://img.shields.io/badge/node-22%20%7C%2024%20%7C%2025-339933)](apps/mcp-server/package.json)
+[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 The existing `@ableton-mcp/mcp-server` component remains independently usable
 with other MCP clients. Kumi uses its Live-reading tools so far; its editing and

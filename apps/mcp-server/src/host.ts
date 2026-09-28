@@ -1,9 +1,9 @@
 import type { Readable, Writable } from "node:stream";
 import { createHash, randomBytes } from "node:crypto";
-import { realpathSync, statSync, createReadStream, constants as fsConstants, mkdtempSync, chmodSync, unlinkSync } from "node:fs";
-import { dirname, extname, join as joinPath } from "node:path";
+import { realpathSync, statSync, createReadStream, constants as fsConstants, chmodSync, closeSync, fsyncSync, linkSync, openSync, renameSync, unlinkSync, lstatSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, extname, isAbsolute, join as joinPath, resolve } from "node:path";
 import { sep } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { AnalysisRunner, type EncodedAnalysisSource } from "./analysis-runner.js";
 import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
@@ -12,16 +12,26 @@ import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagn
 import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, UnavailableLiveAdapter, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
-import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectPage } from "./project-semantic.js";
+import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
 import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project-semantic-diff.js";
+import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
+import { BatchTransactionManager, BATCH_OPERATION_POLICY_TOOLS, type BatchOperationKind } from "./transactions/batch.js";
+import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
+import { SqliteReader } from "./sqlite-reader.js";
+import { LIBRARY_KINDS, LIBRARY_SEARCH_SCHEMA, LibraryUnavailable, SUPPORTED_FILES_SCHEMA_VERSIONS, SUPPORTED_PLUGINS_SCHEMA_VERSIONS, assertSupportedFilesSchema, assertSupportedPluginsSchema, queryLibraryFiles, queryLibraryPlugins, queryLibraryTagVocabulary, type LibraryQuery } from "./library-search.js";
 import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD, MIDI_TRANSFORM_TYPES, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, type MidiTransformType } from "./midi-transforms.js";
+import { estimateKey } from "./key-estimation.js";
 import { JOURNEY_IDS, JOURNEY_PROMPTS, journeyResource, planUserJourney, renderJourneyPrompt, type ExperienceLevel, type JourneyId } from "./journeys.js";
 import type { AsyncLiveAdapter } from "./live.js";
 import { PACKAGE_VERSION } from "./delivery.js";
 import { DEFAULT_TOOL_POLICY, TOOL_POLICY_PROFILES, liveMutationAvailable, parseToolPolicySpec, resolveToolVisibility, toolCatalogEntry, toolPolicyFromEnv, visibleToolDescriptors, type ToolPolicySpec, type ToolVisibilityRow } from "./tool-catalog.js";
 
-export const PROTOCOL_VERSION = "2025-11-25";
+import { LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, MODERN_UNAVAILABLE_TOOLS, prepareMcpRequest, formatMcpResponse, type ProtocolEra } from "./mcp-protocol.js";
+
+/** Kept as the legacy initialize version for existing embedded callers. */
+export const PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSION;
+export { MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS };
 export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 const MAX_TRACKED_REQUEST_IDS = 4096;
 const MAX_TOOL_CALLS_PER_MINUTE = 120;
@@ -184,7 +194,7 @@ interface NoteEditTransaction {
 interface ClipLifecycleTransaction {
   id: string;
   epoch: number;
-  kind: "rename" | "duplicate" | "arrangement-create" | "arrangement-delete" | "arrangement-audio-create" | "arrangement-take-lane-create" | "move" | "audio-set" | "mixer-set" | "automation" | "browser-load" | "device" | "routing-set" | "recording" | "backup" | "realtime-arm" | "capture-midi" | "scene-capture" | "view" | "locator-jump" | "clip-set" | "session-audio-create" | "warp-marker" | "clip-action" | "note-target" | "midi-transform" | "tuning" | "groove" | "scene-set" | "scene-fire" | "transport-action" | "track-structure" | "device-delete" | "track-view" | "selection" | "clip-view" | "device-view" | "dialog" | "mixer-extended" | "chain-mixer" | "device-io" | "device-advanced" | "chain-set" | "drum-pad" | "rack" | "rack-view" | "device-specialized" | "looper" | "simpler";
+  kind: "rename" | "duplicate" | "arrangement-create" | "arrangement-delete" | "arrangement-audio-create" | "arrangement-take-lane-create" | "move" | "audio-set" | "mixer-set" | "automation" | "browser-load" | "device" | "routing-set" | "recording" | "backup" | "realtime-arm" | "capture-midi" | "scene-capture" | "view" | "locator-jump" | "clip-set" | "session-audio-create" | "warp-marker" | "clip-action" | "note-target" | "midi-transform" | "tuning" | "groove" | "scene-set" | "scene-fire" | "transport-action" | "track-structure" | "track-set" | "song-set" | "device-delete" | "track-view" | "selection" | "clip-view" | "device-view" | "dialog" | "mixer-extended" | "chain-mixer" | "device-io" | "device-advanced" | "chain-set" | "drum-pad" | "rack" | "rack-view" | "device-specialized" | "looper" | "simpler";
   fence: string;
   clipRef?: LiveRef;
   payload: Record<string, unknown>;
@@ -206,6 +216,11 @@ const AUDITION_TTL_MS = 30_000;
 // state propagates asynchronously at quantization boundaries; the deadline
 // must cover snapshot + dispatch + polled verification.
 const AUDITION_DEADLINE_MS = 15_000;
+// Mirrors the Remote Script's _LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS: a
+// momentary jump can land a few milliseconds off the cue-point time, so the
+// host confirms within the same absolute beat tolerance instead of exact
+// float equality (a gross mismatch still refuses).
+const LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS = 1e-3;
 // Structure ownership checks can require multiple complete real-Live snapshots
 // around one create/delete. Each step receives a fresh protocol-bounded window.
 const STRUCTURE_STEP_DEADLINE_MS = 45_000;
@@ -213,6 +228,13 @@ const STRUCTURE_STEP_DEADLINE_MS = 45_000;
 // mutations and authoritative readback. An explicit context may extend the
 // configured default timeout while remaining bounded by the bridge protocol.
 const SESSION_MIDI_TRANSACTION_DEADLINE_MS = 30_000;
+// Ranked browser search re-fetches a bounded candidate traversal per root at
+// most once per TTL window (or per Live connection epoch); the cache is
+// in-memory only, bounded, and never persisted across restarts.
+const BROWSER_SEARCH_CANDIDATE_LIMIT = 100;
+const BROWSER_SEARCH_CACHE_TTL_MS = 60_000;
+const BROWSER_SEARCH_CACHE_MAX_ENTRIES = 16;
+const BROWSER_SEARCH_MAX_TOKENS = 8;
 const MAX_AUDITION_TRANSACTIONS = 64;
 const MONITORABLE_TRACK_KINDS = new Set(["regular", "audio", "midi"]);
 
@@ -330,7 +352,14 @@ function isRetirableAppliedTransaction(candidate: unknown): boolean {
   }
 }
 class BoundedTransactionMap<T extends { expiresAt: number; state: string }> extends Map<string, T> {
-  public constructor(private readonly capacity = MAX_AUDITION_TRANSACTIONS) { super(); }
+  public constructor(private readonly capacity = MAX_AUDITION_TRANSACTIONS, private readonly onDelete?: (value: T) => void) { super(); }
+  public override delete(key: string): boolean {
+    const value = this.get(key);
+    if (!super.delete(key)) return false;
+    // Terminal cleanup hook (staged-file release); never let cleanup break bookkeeping.
+    if (value !== undefined) { try { this.onDelete?.(value); } catch { /* best-effort transaction cleanup hook */ } }
+    return true;
+  }
   public override set(key: string, value: T): this {
     const now = Date.now();
     // Applied non-undoable records retire at their advertised TTL so
@@ -358,6 +387,8 @@ function sameLiveValue(observed: unknown, expected: unknown): boolean {
 export class McpHost {
   private initialized = false;
   private initializedNotification = false;
+  private protocolEra: ProtocolEra | undefined;
+  private readonly modernInFlightIds = new Set<string>();
   private shuttingDown = false;
   private readonly seenIds = new Set<string>();
   private readonly idOrder: string[] = [];
@@ -369,21 +400,34 @@ export class McpHost {
   private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>();
   private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>();
   private readonly midiTransactions: SessionMidiTransactionManager;
+  private readonly batchTransactions: BatchTransactionManager;
+  private readonly deviceStateTransactions: DeviceStateTransactionManager;
   private readonly inFlightMutations = new Map<string, { idempotencyKey: string; argumentDigest: string; promise: Promise<JsonObject | null>; controller: AbortController; waiters: number; settled: boolean }>();
   private readonly auditionTransactions = new BoundedTransactionMap<SessionAuditionTransaction>();
   private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>();
   private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>();
   private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
-  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>();
+  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
+    if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
+  });
+  private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
   private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
   private recoveryFinalizationInFlight = false;
   private activeAsyncOperations = 0;
   private toolPolicy: ToolPolicySpec;
   private toolListFingerprint: string | undefined;
 
-  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown } = {}) {
+  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string } = {}) {
     this.midiTransactions = new SessionMidiTransactionManager(adapter);
+    this.batchTransactions = new BatchTransactionManager(adapter, (kinds) => {
+      for (const kind of kinds) {
+        const ownerTool = BATCH_OPERATION_POLICY_TOOLS[kind];
+        if (!this.policyAllowsTool(ownerTool)) throw new Error(`transaction batch contains an operation denied by the deployment policy (${ownerTool})`);
+      }
+    });
+    this.deviceStateTransactions = new DeviceStateTransactionManager(adapter);
     this.toolPolicy = options.toolPolicy === undefined ? DEFAULT_TOOL_POLICY : parseToolPolicySpec(options.toolPolicy);
+    this.importStagingDirOption = options.importStagingDir;
   }
 
   /** The effective deployment tool policy (profile plus explicit overrides). */
@@ -448,24 +492,51 @@ export class McpHost {
     }
   }
 
-  /** Promise-based request entrypoint for process-backed adapters. The legacy
-   * handle() remains for deterministic in-process callers. */
+  private prepareWire(input: unknown): ReturnType<typeof prepareMcpRequest> & { key?: string } {
+    const wire = prepareMcpRequest(input, this.protocolEra);
+    if (wire.error || !wire.modern || !isObject(input) || this.requestId(input.id) === null) return wire;
+    const key = `${typeof input.id}:${String(input.id)}`;
+    if (this.modernInFlightIds.has(key)) return { ...wire, error: error(this.requestId(input.id), -32600, "Duplicate in-flight request identifier") };
+    this.modernInFlightIds.add(key);
+    // Discovery is an era-neutral probe; a dual-era client may still select
+    // legacy initialize afterwards. Other modern calls select this process's
+    // wire binding, not client capabilities or any musical edit authority.
+    if (input.method !== "server/discover") this.protocolEra = "modern";
+    return { ...wire, key };
+  }
+
+  /** Promise-based wire boundary; transaction execution is protocol-independent. */
   public async handleAsync(input: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     if (signal?.aborted) return null;
-    if (!isObject(input) || input.method !== "tools/call" || !isObject(input.params) || typeof input.params.name !== "string") return this.handle(input);
+    const wire = this.prepareWire(input);
+    if (wire.error) return wire.error;
+    try {
+      const result = await this.handleAsyncCore(wire.input, signal, wire.modern);
+      return signal?.aborted ? null : formatMcpResponse(result, wire.input, wire.modern, { name: "ableton-mcp-host", version: SERVER_VERSION });
+    } finally { if (wire.key) this.modernInFlightIds.delete(wire.key); }
+  }
+
+  private async handleAsyncCore(input: unknown, signal: AbortSignal | undefined, modern: boolean): Promise<JsonObject | null> {
+    if (signal?.aborted) return null;
+    // JSON-RPC notifications are never answered on either request path.
+    if (isObject(input) && input.id === undefined) return this.handleCore(input, modern);
+    if (!isObject(input) || input.method !== "tools/call" || !isObject(input.params) || typeof input.params.name !== "string") return this.handleCore(input, modern);
     const name = input.params.name;
     const toolArguments = input.params.arguments;
-    if (![ "live_status", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_snapshot", "live_discover", "live_device_parameter_preview", "live_device_parameter_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "live_project_backup_preview", "live_project_backup_apply", "live_realtime_arm_preview", "live_realtime_arm_apply", "live_realtime_disarm", "live_realtime_stats", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply"].includes(name)) return this.handle(input);
+    if (!["live_status", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_snapshot", "live_discover", "live_device_parameter_preview", "live_device_parameter_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_realtime_arm_preview", "live_realtime_arm_apply", "live_realtime_disarm", "live_realtime_stats", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"].includes(name)) return this.handleCore(input, modern);
     // Reuse the synchronous validator and request bookkeeping, then execute the
     // adapter operation asynchronously. Invalid requests never reach Live.
     const id = this.requestId(input.id);
     if (id === null || input.jsonrpc !== "2.0" || !hasOnly(input, ["jsonrpc", "id", "method", "params", "_meta"])) return error(null, -32600, "Invalid Request");
-    const key = `${typeof id}:${String(id)}`;
-    if (this.seenIds.has(key)) return error(id, -32600, "Duplicate request identifier");
-    this.seenIds.add(key); this.idOrder.push(key);
-    if (this.idOrder.length > MAX_TRACKED_REQUEST_IDS) { const expired = this.idOrder.shift(); if (expired !== undefined) this.seenIds.delete(expired); }
-    if (!this.initialized) return error(id, -32002, "Server has not been initialized");
-    if (!this.initializedNotification && name !== "live_status") return error(id, -32002, "Server has not received initialized notification");
+    if (!modern) {
+      const key = `${typeof id}:${String(id)}`;
+      if (this.seenIds.has(key)) return error(id, -32600, "Duplicate request identifier");
+      this.seenIds.add(key); this.idOrder.push(key);
+      if (this.idOrder.length > MAX_TRACKED_REQUEST_IDS) { const expired = this.idOrder.shift(); if (expired !== undefined) this.seenIds.delete(expired); }
+    }
+    if (this.shuttingDown) return error(id, -32600, "Server is shutting down");
+    if (!modern && !this.initialized) return error(id, -32002, "Server has not been initialized");
+    if (!modern && !this.initializedNotification && name !== "live_status") return error(id, -32002, "Server has not received initialized notification");
     this.noteToolListChanged();
     if (!this.toolCallable(name)) return this.toolGateError(id, name);
     try {
@@ -528,6 +599,7 @@ export class McpHost {
       if (name === "live_note_edit_preview") return await this.liveNoteTargetPreviewAsync(id, toolArguments);
       if (name === "live_note_edit_apply") return await this.liveNoteTargetApplyAsync(id, toolArguments, signal);
       if (name === "live_note_read") return await this.liveNoteReadAsync(id, toolArguments);
+      if (name === "live_key_estimate") return await this.liveKeyEstimateAsync(id, toolArguments);
       if (name === "live_tuning_preview") return await this.liveTuningPreviewAsync(id, toolArguments);
       if (name === "live_tuning_apply") return await this.liveTuningApplyAsync(id, toolArguments, signal);
       if (name === "live_groove_preview") return await this.liveGroovePreviewAsync(id, toolArguments);
@@ -537,6 +609,8 @@ export class McpHost {
       if (name === "live_scene_fire_preview") return await this.liveSceneFirePreviewAsync(id, toolArguments);
       if (name === "live_scene_fire_apply") return await this.liveSceneFireApplyAsync(id, toolArguments, signal);
       if (name === "live_song_state") return await this.liveSongStateAsync(id, toolArguments);
+      if (name === "live_song_settings_preview") return await this.liveSongSettingsPreviewAsync(id, toolArguments);
+      if (name === "live_song_settings_apply") return await this.liveSongSettingsApplyAsync(id, toolArguments, signal);
       if (name === "live_transport_action_preview") return await this.liveTransportActionPreviewAsync(id, toolArguments);
       if (name === "live_transport_action_apply") return await this.liveTransportActionApplyAsync(id, toolArguments, signal);
       if (name === "live_track_structure_preview") return await this.liveTrackStructurePreviewAsync(id, toolArguments);
@@ -545,6 +619,8 @@ export class McpHost {
       if (name === "live_device_delete_apply") return await this.liveDeviceDeleteApplyAsync(id, toolArguments, signal);
       if (name === "live_track_view_preview") return await this.liveTrackViewPreviewAsync(id, toolArguments);
       if (name === "live_track_view_apply") return await this.liveTrackViewApplyAsync(id, toolArguments, signal);
+      if (name === "live_track_properties_preview") return await this.liveTrackPropertiesPreviewAsync(id, toolArguments);
+      if (name === "live_track_properties_apply") return await this.liveTrackPropertiesApplyAsync(id, toolArguments, signal);
       if (name === "live_selection_preview") return await this.liveSelectionPreviewAsync(id, toolArguments);
       if (name === "live_selection_apply") return await this.liveSelectionApplyAsync(id, toolArguments, signal);
       if (name === "live_clip_view_preview") return await this.liveClipViewPreviewAsync(id, toolArguments);
@@ -588,6 +664,12 @@ export class McpHost {
       if (name === "live_automation_preview") return await this.liveAutomationPreviewAsync(id, toolArguments);
       if (name === "live_automation_apply") return await this.liveAutomationApplyAsync(id, toolArguments, signal);
       if (name === "live_browser_search") return await this.liveBrowserSearchAsync(id, toolArguments);
+      if (name === "live_library_search") return await this.liveLibrarySearchAsync(id, toolArguments);
+      if (name === "live_batch_preview") return await this.liveBatchPreviewAsync(id, toolArguments);
+      if (name === "live_batch_apply") return await this.liveBatchApplyAsync(id, toolArguments, signal);
+      if (name === "live_device_state_save") return await this.liveDeviceStateSaveAsync(id, toolArguments);
+      if (name === "live_device_state_recall_preview") return await this.liveDeviceStateRecallPreviewAsync(id, toolArguments);
+      if (name === "live_device_state_recall_apply") return await this.liveDeviceStateRecallApplyAsync(id, toolArguments, signal);
       if (name === "live_browser_load_preview") return await this.liveBrowserLoadPreviewAsync(id, toolArguments);
       if (name === "live_browser_load_apply") return await this.liveBrowserLoadApplyAsync(id, toolArguments, signal);
       if (name === "live_device_preview") return await this.liveDevicePreviewAsync(id, toolArguments);
@@ -601,6 +683,9 @@ export class McpHost {
       if (name === "live_project_info") return await this.liveProjectInfoAsync(id, toolArguments);
       if (name === "live_project_snapshot_export") return await this.liveProjectSnapshotExportAsync(id, toolArguments);
       if (name === "live_project_snapshot_diff") return this.liveProjectSnapshotDiff(id, toolArguments);
+      if (name === "als_read") return this.alsRead(id, toolArguments);
+      if (name === "als_lint") return this.alsLint(id, toolArguments);
+      if (name === "als_diff") return this.alsDiff(id, toolArguments);
       if (name === "live_project_backup_preview") return await this.liveProjectBackupPreviewAsync(id, toolArguments);
       if (name === "live_project_backup_apply") return await this.liveProjectBackupApplyAsync(id, toolArguments, signal);
       if (name === "live_realtime_arm_preview") return await this.liveRealtimeArmPreviewAsync(id, toolArguments);
@@ -1357,7 +1442,7 @@ export class McpHost {
         const outcome = await transaction.inflight;
         return this.successText(id, { ...outcome, idempotent: true });
       } catch (cause) {
-        return this.adapterToolError(id, cause, "Audition state is uncertain; do not retry. Perform fresh playback discovery before stopping or recovering.");
+        return this.auditionApplyError(id, cause, transaction);
       }
     }
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey && transaction.confirmation === params.confirmation;
@@ -1374,23 +1459,46 @@ export class McpHost {
       const outcome = await inflight;
       return this.successText(id, { ...outcome, idempotent: false });
     } catch (cause) {
-      return this.adapterToolError(id, cause, "Audition state is uncertain; do not retry. Perform fresh playback discovery before stopping or recovering.");
+      return this.auditionApplyError(id, cause, transaction);
     }
   }
 
+  private auditionApplyError(id: RequestId, cause: unknown, transaction: SessionAuditionTransaction): JsonObject {
+    return this.adapterToolError(id, cause, transaction.state === "previewed" ? "Audition apply failed before dispatch; the preview remains available until expiry." : "Audition state is uncertain; do not retry. Perform fresh playback discovery before stopping or recovering.");
+  }
+
   private async dispatchAuditionApply(transaction: SessionAuditionTransaction, signal?: AbortSignal, reconciliation = false): Promise<JsonObject> {
+    // A reconciled transaction may have dispatched previously, so its
+    // pre-dispatch failures must preserve uncertain rather than restore the
+    // preview (mirroring the capture apply path).
+    let dispatched = reconciliation;
     try {
       if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id };
-      let scene = JSON.parse(transaction.sceneRevision) as { name?: unknown; index?: unknown }; let playbackRevision = transaction.playbackRevision;
-      if (!reconciliation) { const before = await adapter.snapshotAsync(context); const state = this.auditionSnapshot(before, transaction.sceneRef);
-        if (JSON.stringify(state.scene) !== transaction.sceneRevision || state.playbackRevision !== transaction.playbackRevision || state.set.objectIdentity !== transaction.setIdentity || this.auditionAuthorityRevision(before, transaction.sceneRef, transaction.eligibleTargetKeys) !== transaction.authorityRevision) throw new Error("audition state or identity hierarchy changed since preview");
-        // Safety evidence and all dynamic preconditions are rechecked immediately before the single potentially audible dispatch.
-        this.validateAuditionSafety(status, state.set, state.tracks, state.playback, transaction.outputSafety, transaction.setName); scene = state.scene; playbackRevision = state.playback.revision; }
+      const before = await adapter.snapshotAsync(context); const state = this.auditionSnapshot(before, transaction.sceneRef);
+      // Reconciliation after a real acknowledgement loss: if every active
+      // target belongs to this transaction (matching scene, subset of the
+      // eligible targets), the unacked launch did dispatch — reconcile to
+      // applied without re-dispatching (the mapper execution ledger makes
+      // replay safe), mirroring the clip-launch precedent.
+      const activeTargets = [...state.playback.firedTargets, ...state.playback.playingTargets];
+      if (reconciliation && activeTargets.length > 0) {
+        if (activeTargets.some((target) => target.sceneRef !== transaction.sceneRef || !transaction.eligibleTargetKeys.includes(`${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}`))) throw new Error("external playback appeared during audition reconciliation");
+        transaction.launched = { launched: transaction.sceneRef, targets: activeTargets };
+        transaction.state = "applied";
+        return { transactionId: transaction.id, state: "applied", launched: transaction.launched, verified: { sceneRef: transaction.sceneRef, firedOrPlaying: true }, stopConfirmation: transaction.stopConfirmation, reconciled: true };
+      }
+      // The authority fence, safety evidence, and all dynamic preconditions are
+      // rechecked host-side immediately before the single potentially audible
+      // dispatch on both the initial and the reconciliation path.
+      if (JSON.stringify(state.scene) !== transaction.sceneRevision || state.playbackRevision !== transaction.playbackRevision || state.set.objectIdentity !== transaction.setIdentity || this.auditionAuthorityRevision(before, transaction.sceneRef, transaction.eligibleTargetKeys) !== transaction.authorityRevision) throw new Error("audition state or identity hierarchy changed since preview");
+      this.validateAuditionSafety(status, state.set, state.tracks, state.playback, transaction.outputSafety, transaction.setName);
+      const scene = state.scene; const playbackRevision = state.playback.revision;
       if (signal?.aborted) throw new Error("audition apply cancelled before dispatch");
+      dispatched = true;
       const result = await adapter.invokeAsync({ operation: "session.audition-launch", args: { ref: transaction.sceneRef, setName: transaction.setName, sceneName: scene.name, sceneIndex: scene.index, playbackRevision, eligibleTargets: transaction.eligibleTargetKeys, expectedSetIdentity: transaction.setIdentity, expectedAuthorityRevision: transaction.authorityRevision, outputSafety: transaction.outputSafety } }, context) as { launched?: unknown; targets?: unknown };
       const targets = Array.isArray(result?.targets) ? result.targets : [];
       if (result?.launched !== transaction.sceneRef || targets.some((target) => !isObject(target) || target.sceneRef !== transaction.sceneRef || !transaction.eligibleTargetKeys.includes(`${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}`))) throw new Error("guarded launch result does not match the audition target");
@@ -1410,10 +1518,10 @@ export class McpHost {
       transaction.state = "applied";
       return { transactionId: transaction.id, state: "applied", launched: transaction.launched, verified: { sceneRef: transaction.sceneRef, firedOrPlaying: true }, stopConfirmation: transaction.stopConfirmation };
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      // A failure proven to be pre-dispatch restores the preview; anything else
-      // is an explicitly uncertain audible state.
-      transaction.state = /cancelled before dispatch/.test(message) ? "previewed" : "uncertain";
+      // A failure proven to be pre-dispatch restores the preview and clears the
+      // reserved key; anything else is an explicitly uncertain audible state.
+      transaction.state = dispatched ? "uncertain" : "previewed";
+      if (!dispatched) delete transaction.applyKey;
       throw cause;
     }
   }
@@ -1434,11 +1542,12 @@ export class McpHost {
       }
     }
     if (!(transaction.state === "applied" || transaction.state === "uncertain")) return this.transactionError(id, "Only mapper-owned applied or uncertain audition playback can be stopped");
-    if (transaction.state === "uncertain" && transaction.stopKey !== params.idempotencyKey) return this.transactionError(id, "Uncertain audition stop requires the exact original idempotency key");
+    if (transaction.state === "uncertain" && transaction.stopKey !== undefined && transaction.stopKey !== params.idempotencyKey) return this.transactionError(id, "Uncertain audition stop requires the exact original idempotency key");
     if (signal?.aborted) return null;
+    const stoppingUncertain = transaction.state === "uncertain";
     transaction.state = "stopping";
     transaction.stopKey = params.idempotencyKey as string;
-    const inflight = this.dispatchAuditionStop(transaction, signal);
+    const inflight = this.dispatchAuditionStop(transaction, signal, stoppingUncertain);
     transaction.inflight = inflight;
     inflight.catch(() => undefined);
     try {
@@ -1449,7 +1558,7 @@ export class McpHost {
     }
   }
 
-  private async dispatchAuditionStop(transaction: SessionAuditionTransaction, signal?: AbortSignal): Promise<JsonObject> {
+  private async dispatchAuditionStop(transaction: SessionAuditionTransaction, signal?: AbortSignal, stoppingUncertain = false): Promise<JsonObject> {
     let dispatched = false;
     try {
       const status = this.requireConnected("session.read");
@@ -1477,7 +1586,9 @@ export class McpHost {
       transaction.state = "stopped";
       return { transactionId: transaction.id, state: "stopped", restoredBaseline: true };
     } catch (cause) {
-      transaction.state = dispatched ? "uncertain" : "applied";
+      // A stop that never dispatched proves nothing about Live changed: keep an
+      // uncertain record uncertain; only an applied record returns to applied.
+      transaction.state = dispatched || stoppingUncertain ? "uncertain" : "applied";
       throw cause;
     }
   }
@@ -1937,6 +2048,7 @@ export class McpHost {
   }
 
   private onLiveEvent(event: LiveEvent): void {
+    if (this.protocolEra !== "legacy") return;
     const line = JSON.stringify({ jsonrpc: "2.0", method: "notifications/live_event", params: event });
     if (this.eventQueue.length >= 256) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(line);
@@ -1963,7 +2075,8 @@ export class McpHost {
   }
 
   private toolVisibilityRows(): readonly ToolVisibilityRow[] {
-    return resolveToolVisibility(this.safeAdapterStatus(), this.toolPolicy);
+    const rows = resolveToolVisibility(this.safeAdapterStatus(), this.toolPolicy);
+    return this.protocolEra === "modern" ? rows.map((row) => MODERN_UNAVAILABLE_TOOLS.has(row.entry.name) ? { ...row, executable: false, visible: false } : row) : rows;
   }
 
   /** Server-side dispatch gate: a tool is callable only when it is currently visible in tools/list. */
@@ -1981,10 +2094,10 @@ export class McpHost {
 
   /** Map a transaction to the tool that owns its apply path for policy re-checks at undo/emergency dispatch. */
   private transactionOwnerTool(transactionId: string, kind?: string): string | undefined {
-    const byPrefix: Record<string, string> = { tempo_: "live_tempo_apply", arrangement_: "live_arrangement_section_apply", structure_: "live_session_structure_apply", parameter_: "live_device_parameter_apply", audition_: "live_session_audition_apply", transport_: "live_transport_apply", transportaction_: "live_transport_action_apply", cliplaunch_: "live_clip_launch_apply", noteupdate_: "live_note_update_apply", notedelete_: "live_note_delete_apply", midi_: "live_midi_clip_apply", miditransform_: "live_midi_transform_apply", capture_: "live_audio_capture_apply", audio_capture_: "live_audio_capture_apply", capturemidi_: "live_capture_midi_apply", scenecapture_: "live_scene_capture_apply", clipdup_: "live_clip_duplicate_apply", arrclip_: "live_arrangement_clip_apply", clipmove_: "live_clip_move_apply", audioimport_: "live_audio_import_apply", audioclip_: "live_audio_clip_apply", warp_: "live_warp_marker_apply", noteedit_: "live_note_edit_apply", rename_: "live_object_rename_apply", routing_: "live_routing_apply", backup_: "live_project_backup_apply", recording_: "live_recording_apply", realtime_: "live_realtime_arm_apply", browserload_: "live_browser_load_apply", device_: "live_device_apply", mixer_: "live_mixer_apply", mixerext_: "live_mixer_extended_apply", view_: "live_view_apply", locjump_: "live_locator_jump_apply", clipset_: "live_clip_properties_apply", clipaction_: "live_clip_action_apply", tuning_: "live_tuning_apply", groove_: "live_groove_apply", sceneset_: "live_scene_apply", scenefire_: "live_scene_fire_apply", trackstruct_: "live_track_structure_apply", devdel_: "live_device_delete_apply", trackview_: "live_track_view_apply", selection_: "live_selection_apply", clipview_: "live_clip_view_apply", devview_: "live_device_view_apply", dialog_: "live_application_dialog_apply", chainmix_: "live_chain_mixer_apply", devio_: "live_device_io_apply", devadv_: "live_device_advanced_apply", chainset_: "live_chain_apply", drumpad_: "live_drum_pad_apply", rack_: "live_rack_apply", rackview_: "live_rack_view_apply", devspec_: "live_device_specialized_apply", looper_: "live_looper_apply", simpler_: "live_simpler_apply", automation_: "live_automation_apply" };
+    const byPrefix: Record<string, string> = { tempo_: "live_tempo_apply", arrangement_: "live_arrangement_section_apply", structure_: "live_session_structure_apply", parameter_: "live_device_parameter_apply", audition_: "live_session_audition_apply", transport_: "live_transport_apply", transportaction_: "live_transport_action_apply", cliplaunch_: "live_clip_launch_apply", noteupdate_: "live_note_update_apply", notedelete_: "live_note_delete_apply", midi_: "live_midi_clip_apply", miditransform_: "live_midi_transform_apply", capture_: "live_audio_capture_apply", audio_capture_: "live_audio_capture_apply", capturemidi_: "live_capture_midi_apply", scenecapture_: "live_scene_capture_apply", clipdup_: "live_clip_duplicate_apply", arrclip_: "live_arrangement_clip_apply", clipmove_: "live_clip_move_apply", audioimport_: "live_audio_import_apply", audioclip_: "live_audio_clip_apply", warp_: "live_warp_marker_apply", noteedit_: "live_note_edit_apply", rename_: "live_object_rename_apply", routing_: "live_routing_apply", backup_: "live_project_backup_apply", recording_: "live_recording_apply", realtime_: "live_realtime_arm_apply", browserload_: "live_browser_load_apply", device_: "live_device_apply", mixer_: "live_mixer_apply", mixerext_: "live_mixer_extended_apply", view_: "live_view_apply", locjump_: "live_locator_jump_apply", clipset_: "live_clip_properties_apply", clipaction_: "live_clip_action_apply", tuning_: "live_tuning_apply", groove_: "live_groove_apply", sceneset_: "live_scene_apply", trackset_: "live_track_properties_apply", songset_: "live_song_settings_apply", scenefire_: "live_scene_fire_apply", trackstruct_: "live_track_structure_apply", devdel_: "live_device_delete_apply", trackview_: "live_track_view_apply", selection_: "live_selection_apply", clipview_: "live_clip_view_apply", devview_: "live_device_view_apply", dialog_: "live_application_dialog_apply", chainmix_: "live_chain_mixer_apply", devio_: "live_device_io_apply", devadv_: "live_device_advanced_apply", chainset_: "live_chain_apply", drumpad_: "live_drum_pad_apply", rack_: "live_rack_apply", rackview_: "live_rack_view_apply", devspec_: "live_device_specialized_apply", looper_: "live_looper_apply", simpler_: "live_simpler_apply", automation_: "live_automation_apply", batch_: "live_batch_apply", devstate_: "live_device_state_recall_apply" };
     const prefixes = Object.keys(byPrefix).sort((a, b) => b.length - a.length);
     for (const prefix of prefixes) if (transactionId.startsWith(prefix)) return byPrefix[prefix];
-    const byKind: Record<string, string> = { "audio-set": "live_audio_clip_apply", "mixer-set": "live_mixer_apply", automation: "live_automation_apply", "browser-load": "live_browser_load_apply", device: "live_device_apply", "routing-set": "live_routing_apply", recording: "live_recording_apply", backup: "live_project_backup_apply", "realtime-arm": "live_realtime_arm_apply", view: "live_view_apply", "locator-jump": "live_locator_jump_apply", "clip-set": "live_clip_properties_apply", "clip-action": "live_clip_action_apply", tuning: "live_tuning_apply", groove: "live_groove_apply", "scene-set": "live_scene_apply", "scene-fire": "live_scene_fire_apply", "transport-action": "live_transport_action_apply", "track-structure": "live_track_structure_apply", "device-delete": "live_device_delete_apply", "track-view": "live_track_view_apply", selection: "live_selection_apply", "clip-view": "live_clip_view_apply", "device-view": "live_device_view_apply", dialog: "live_application_dialog_apply", "mixer-extended": "live_mixer_extended_apply", "chain-mixer": "live_chain_mixer_apply", "device-io": "live_device_io_apply", "device-advanced": "live_device_advanced_apply", "chain-set": "live_chain_apply", "drum-pad": "live_drum_pad_apply", rack: "live_rack_apply", "rack-view": "live_rack_view_apply", "device-specialized": "live_device_specialized_apply", looper: "live_looper_apply", simpler: "live_simpler_apply", rename: "live_object_rename_apply", "warp-marker": "live_warp_marker_apply", "note-target": "live_note_edit_apply", duplicate: "live_clip_duplicate_apply", move: "live_clip_move_apply", "session-audio-create": "live_audio_import_apply", "capture-midi": "live_capture_midi_apply", "scene-capture": "live_scene_capture_apply", "arrangement-create": "live_arrangement_clip_apply", "arrangement-audio-create": "live_arrangement_clip_apply", "arrangement-take-lane-create": "live_arrangement_clip_apply" };
+    const byKind: Record<string, string> = { "audio-set": "live_audio_clip_apply", "mixer-set": "live_mixer_apply", automation: "live_automation_apply", "browser-load": "live_browser_load_apply", device: "live_device_apply", "routing-set": "live_routing_apply", recording: "live_recording_apply", backup: "live_project_backup_apply", "realtime-arm": "live_realtime_arm_apply", view: "live_view_apply", "locator-jump": "live_locator_jump_apply", "clip-set": "live_clip_properties_apply", "clip-action": "live_clip_action_apply", tuning: "live_tuning_apply", groove: "live_groove_apply", "scene-set": "live_scene_apply", "track-set": "live_track_properties_apply", "song-set": "live_song_settings_apply", "scene-fire": "live_scene_fire_apply", "transport-action": "live_transport_action_apply", "track-structure": "live_track_structure_apply", "device-delete": "live_device_delete_apply", "track-view": "live_track_view_apply", selection: "live_selection_apply", "clip-view": "live_clip_view_apply", "device-view": "live_device_view_apply", dialog: "live_application_dialog_apply", "mixer-extended": "live_mixer_extended_apply", "chain-mixer": "live_chain_mixer_apply", "device-io": "live_device_io_apply", "device-advanced": "live_device_advanced_apply", "chain-set": "live_chain_apply", "drum-pad": "live_drum_pad_apply", rack: "live_rack_apply", "rack-view": "live_rack_view_apply", "device-specialized": "live_device_specialized_apply", looper: "live_looper_apply", simpler: "live_simpler_apply", rename: "live_object_rename_apply", "warp-marker": "live_warp_marker_apply", "note-target": "live_note_edit_apply", duplicate: "live_clip_duplicate_apply", move: "live_clip_move_apply", "session-audio-create": "live_audio_import_apply", "capture-midi": "live_capture_midi_apply", "scene-capture": "live_scene_capture_apply", "arrangement-create": "live_arrangement_clip_apply", "arrangement-audio-create": "live_arrangement_clip_apply", "arrangement-take-lane-create": "live_arrangement_clip_apply" };
     return kind !== undefined ? byKind[kind] : undefined;
   }
 
@@ -2015,6 +2128,83 @@ export class McpHost {
       const diff = diffSemanticProjectSnapshots(before, after);
       return this.successText(id, pageSemanticProjectDiff(diff, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Semantic diff requires complete untampered page bundles with the same schema and privacy profile; no merge was attempted."); }
+  }
+
+  private alsFileAuthority(path: unknown, allowedRoot: unknown): { canonicalPath: string; canonicalRoot: string } {
+    if (!isNonEmptyString(path, 4096) || !isNonEmptyString(allowedRoot, 1024)) throw new Error("path and allowedRoot are required");
+    if (!(path.startsWith("/") || /^[A-Za-z]:/.test(path))) throw new Error("path must be an absolute path");
+    const canonicalRoot = realpathSync(allowedRoot);
+    const canonicalPath = realpathSync(path);
+    if (canonicalPath !== canonicalRoot && !canonicalPath.startsWith(canonicalRoot.endsWith(sep) ? canonicalRoot : canonicalRoot + sep)) throw new Error("path escapes the allowed root");
+    if (extname(canonicalPath).toLowerCase() !== ".als") throw new Error("path must be an .als file");
+    const stats = statSync(canonicalPath);
+    if (!stats.isFile()) throw new Error("path is not a regular file");
+    return { canonicalPath, canonicalRoot };
+  }
+
+  private alsProfileParam(value: unknown, fallback: SemanticPrivacyProfile = "collaboration"): SemanticPrivacyProfile {
+    if (value === undefined) return fallback;
+    if (value !== "strict" && value !== "collaboration" && value !== "local") throw new Error("profile must be strict, collaboration, or local");
+    return value;
+  }
+
+  private alsRead(id: RequestId, params: unknown): JsonObject {
+    if (!isObject(params) || !hasOnly(params, ["path", "allowedRoot", "profile", "limit", "cursor", "includeNotes", "maxRecords"]) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096)) || (params.maxRecords !== undefined && !isIntegerInRange(params.maxRecords, 1, SEMANTIC_PROJECT_MAX_RECORDS)) || (params.includeNotes !== undefined && typeof params.includeNotes !== "boolean")) return error(id, -32602, "path, allowedRoot, and optional profile/limit/cursor/includeNotes/maxRecords are required");
+    try {
+      const authority = this.alsFileAuthority(params.path, params.allowedRoot);
+      const { source, model } = readAlsModel(authority.canonicalPath);
+      const artifact = createOfflineAlsArtifact(source, model, { profile: this.alsProfileParam(params.profile), exporterVersion: PACKAGE_VERSION, ...(params.maxRecords !== undefined ? { maxRecords: params.maxRecords as number } : {}) });
+      const page = pageSemanticProjectSnapshot(artifact, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) });
+      let midi: unknown;
+      if (params.includeNotes === true) {
+        const rows = extractAlsMidi(model, artifact.policy.profile);
+        let budget = 4096; let truncated = rows.length > 256;
+        const boundedRows = rows.slice(0, 256).map((row) => {
+          if (budget <= 0) { truncated = true; return { ...row, notes: [] }; }
+          const kept = row.notes.slice(0, budget); budget -= kept.length;
+          if (kept.length < row.notes.length) truncated = true;
+          return { ...row, notes: kept };
+        }).filter((row, index) => index === 0 || row.notes.length > 0 || !truncated);
+        midi = { clips: boundedRows, truncated, noteBudget: 4096, clipBudget: 256 };
+      }
+      return this.successText(id, { page, provenance: "offline-file", ...(midi !== undefined ? { midi } : {}) });
+    } catch (cause) { return this.adapterToolError(id, cause, "Offline .als reading requires one owner-authorized regular file under the allowed root; sections that cannot be reconstructed offline are marked unavailable."); }
+  }
+
+  private alsLint(id: RequestId, params: unknown): JsonObject {
+    if (!isObject(params) || !hasOnly(params, ["path", "allowedRoot"])) return error(id, -32602, "path and allowedRoot are required");
+    try {
+      const authority = this.alsFileAuthority(params.path, params.allowedRoot);
+      const { model } = readAlsModel(authority.canonicalPath);
+      const { findings, truncated } = lintAlsModel(model, { allowedRoot: authority.canonicalRoot, setDirectory: dirname(authority.canonicalPath) });
+      const bySeverity: Record<string, number> = {};
+      const byCheck: Record<string, number> = {};
+      for (const finding of findings) { bySeverity[finding.severity] = (bySeverity[finding.severity] ?? 0) + 1; byCheck[finding.check] = (byCheck[finding.check] ?? 0) + 1; }
+      return this.successText(id, { findings, truncated, summary: { total: findings.length, bySeverity, byCheck }, parseNotes: model.parseNotes });
+    } catch (cause) { return this.adapterToolError(id, cause, "Offline .als lint requires one owner-authorized regular file under the allowed root; findings are never fixes."); }
+  }
+
+  private alsDiff(id: RequestId, params: unknown): JsonObject {
+    if (!isObject(params) || !hasOnly(params, ["before", "after", "limit", "cursor"]) || !isObject(params.before) || !isObject(params.after) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "before and after sides plus optional limit/cursor are required");
+    const side = (value: unknown, otherProfile: SemanticPrivacyProfile | undefined): SemanticProjectArtifact => {
+      if (!isObject(value) || !hasOnly(value, ["als", "pages"])) throw new Error("each diff side must be an object with exactly one of als or pages");
+      if (value.als !== undefined) {
+        if (!isObject(value.als) || !hasOnly(value.als, ["path", "allowedRoot", "profile"])) throw new Error("an als side requires path and allowedRoot with optional profile");
+        const alsArgs = value.als as Record<string, unknown>;
+        const authority = this.alsFileAuthority(alsArgs.path, alsArgs.allowedRoot);
+        const { source, model } = readAlsModel(authority.canonicalPath);
+        return createOfflineAlsArtifact(source, model, { profile: this.alsProfileParam(alsArgs.profile, otherProfile ?? "collaboration"), exporterVersion: PACKAGE_VERSION });
+      }
+      if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 512) throw new Error("a pages side requires 1-512 complete pages");
+      return assembleSemanticProjectPages(value.pages as SemanticProjectPage[]);
+    };
+    try {
+      const before = side(params.before, undefined);
+      const after = side(params.after, before.policy.profile);
+      if (before.policy.profile !== after.policy.profile) throw new Error("semantic diff sides must share one privacy profile");
+      const diff = diffSemanticProjectSnapshots(before, after);
+      return this.successText(id, pageSemanticProjectDiff(diff, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) }));
+    } catch (cause) { return this.adapterToolError(id, cause, "Offline .als diff requires owner-authorized files or complete untampered page bundles with one shared privacy profile; no merge was attempted."); }
   }
 
   private async liveProjectInfoAsync(id: RequestId, params: unknown): Promise<JsonObject> {
@@ -2408,21 +2598,337 @@ export class McpHost {
     throw new Error("owned device cleanup was not confirmed");
   }
 
+  /** Rank one bounded browser candidate against tokenized query terms.
+   * Documented scoring (deterministic, integer-only): the full query as an
+   * exact name substring scores 100 (path substring 40); each query token
+   * scores 30 for an exact name-word match, 18 for a name-word prefix, 10 for
+   * a name substring, plus 4 when it also appears in the path; matching every
+   * token adds a 25-point coverage bonus. Ties break by name then id using
+   * code-point order, so identical candidates and query always rank alike. */
+  private rankBrowserCandidate(item: { id: string; name: string; path: string }, queryLower: string, tokens: readonly string[]): { score: number; matchedTokens: string[]; exactNameMatch: boolean } {
+    const name = item.name.toLowerCase();
+    const path = item.path.toLowerCase();
+    const nameWords = name.split(/[^a-z0-9]+/).filter((word) => word.length > 0);
+    let score = 0;
+    let exactNameMatch = false;
+    if (queryLower.length > 0 && name.includes(queryLower)) { score += 100; exactNameMatch = true; }
+    else if (queryLower.length > 0 && path.includes(queryLower)) score += 40;
+    const matchedTokens: string[] = [];
+    for (const token of tokens) {
+      let tokenScore = 0;
+      if (nameWords.includes(token)) tokenScore = 30;
+      else if (nameWords.some((word) => word.startsWith(token))) tokenScore = 18;
+      else if (name.includes(token)) tokenScore = 10;
+      if (path.includes(token)) tokenScore += 4;
+      if (tokenScore > 0) { matchedTokens.push(token); score += tokenScore; }
+    }
+    if (tokens.length > 0 && matchedTokens.length === tokens.length) score += 25;
+    return { score, matchedTokens, exactNameMatch };
+  }
+
   private async liveBrowserSearchAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const categories = ["instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips"];
-    if (!isObject(params) || !hasOnly(params, ["category", "query", "limit"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100))) return error(id, -32602, "category, query, and limit are invalid");
+    if (!isObject(params) || !hasOnly(params, ["category", "query", "limit", "matchMode", "refresh"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.matchMode !== undefined && params.matchMode !== "ranked" && params.matchMode !== "substring") || (params.refresh !== undefined && typeof params.refresh !== "boolean")) return error(id, -32602, "category, query, limit, matchMode, and refresh are invalid");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.search")) throw new Error("the Live Browser is unavailable");
       const adapter = this.asyncAdapter();
-      const searchArgs: Record<string, unknown> = {};
-      if (params.category !== undefined) searchArgs.category = params.category;
-      if (params.query !== undefined) searchArgs.query = params.query;
-      if (params.limit !== undefined) searchArgs.limit = params.limit;
-      const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
-      return this.successText(id, { items: Array.isArray(result.items) ? result.items : [] });
+      if (params.matchMode === "substring") {
+        const searchArgs: Record<string, unknown> = {};
+        if (params.category !== undefined) searchArgs.category = params.category;
+        if (params.query !== undefined) searchArgs.query = params.query;
+        if (params.limit !== undefined) searchArgs.limit = params.limit;
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        return this.successText(id, { items: Array.isArray(result.items) ? result.items : [] });
+      }
+      const epoch = (status.epoch ?? 0) as number;
+      const cacheKey = typeof params.category === "string" ? params.category : "all";
+      const cached = this.browserSearchCache.get(cacheKey);
+      const cacheValid = cached !== undefined && cached.epoch === epoch && Date.now() - cached.fetchedAt < BROWSER_SEARCH_CACHE_TTL_MS;
+      let candidates: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>;
+      let fetchedAt: number;
+      let fromCache: boolean;
+      if (cacheValid && params.refresh !== true) {
+        candidates = cached.items; fetchedAt = cached.fetchedAt; fromCache = true;
+        this.browserSearchCache.delete(cacheKey); this.browserSearchCache.set(cacheKey, cached);
+      } else {
+        const searchArgs: Record<string, unknown> = { query: "", limit: BROWSER_SEARCH_CANDIDATE_LIMIT };
+        if (params.category !== undefined) searchArgs.category = params.category;
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        if (!Array.isArray(result.items) || result.items.length > BROWSER_SEARCH_CANDIDATE_LIMIT) throw new Error("browser search returned an unbounded or malformed candidate set");
+        const rows = result.items.filter(isObject).map((item) => ({ id: item.id, objectIdentity: item.objectIdentity, name: item.name, category: item.category, path: item.path, isDevice: item.isDevice }));
+        if (rows.length !== result.items.length || rows.some((item) => !isNonEmptyString(item.id, 256) || !isNonEmptyString(item.objectIdentity, 256) || typeof item.name !== "string" || item.name.length > 256 || !isNonEmptyString(item.category, 64) || typeof item.path !== "string" || item.path.length > 512 || typeof item.isDevice !== "boolean")) throw new Error("browser search returned a malformed candidate set");
+        candidates = rows as Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>;
+        fetchedAt = Date.now(); fromCache = false;
+        this.browserSearchCache.set(cacheKey, { items: candidates, fetchedAt, epoch });
+        while (this.browserSearchCache.size > BROWSER_SEARCH_CACHE_MAX_ENTRIES) { const oldest = this.browserSearchCache.keys().next().value; if (oldest === undefined) break; this.browserSearchCache.delete(oldest); }
+      }
+      const queryText = typeof params.query === "string" ? params.query : "";
+      const queryLower = queryText.trim().toLowerCase();
+      const tokens = [...new Set(queryLower.split(/[^a-z0-9]+/).filter((token) => token.length > 0 && token.length <= 64))].slice(0, BROWSER_SEARCH_MAX_TOKENS);
+      const ranked = candidates
+        .map((item) => ({ item, ...this.rankBrowserCandidate(item, queryLower, tokens) }))
+        .filter((entry) => tokens.length === 0 || entry.matchedTokens.length > 0);
+      ranked.sort((a, b) => (b.score - a.score) || (a.item.name < b.item.name ? -1 : a.item.name > b.item.name ? 1 : 0) || (a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0));
+      const limit = params.limit === undefined ? 50 : (params.limit as number);
+      const page = ranked.slice(0, limit);
+      return this.successText(id, {
+        items: page.map((entry) => ({ ...entry.item, score: entry.score, match: { matchedTokens: entry.matchedTokens, exactNameMatch: entry.exactNameMatch } })),
+        matchMode: "ranked",
+        query: queryText,
+        tokens,
+        searchedRoots: [...new Set(candidates.map((item) => item.category))].sort(),
+        candidates: candidates.length,
+        candidateBound: BROWSER_SEARCH_CANDIDATE_LIMIT,
+        candidateBoundReached: candidates.length >= BROWSER_SEARCH_CANDIDATE_LIMIT,
+        truncated: ranked.length > page.length,
+        fromCache,
+        cacheAgeSeconds: Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)),
+        cacheTtlSeconds: BROWSER_SEARCH_CACHE_TTL_MS / 1000,
+        epoch,
+        note: "Ranked host-side over one bounded candidate traversal per root; searchedRoots are the roots that contributed candidates, so a bound-limited traversal may not have reached every requested root. Substring-exact matching remains available with matchMode=substring. Loadability still requires a fresh live_browser_inspect result.",
+      });
     } catch (cause) { return this.adapterToolError(id, cause, "Browser search requires an available Live Browser."); }
+  }
+
+  private async liveBatchPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["operations"]) || !Array.isArray(params.operations)) return error(id, -32602, "a bounded operations array is required");
+    try {
+      // Policy: every contained operation must be permitted by the effective
+      // deployment policy; a single denied operation fails the whole batch.
+      for (const operation of params.operations) {
+        const kind = isObject(operation) ? operation.kind : undefined;
+        const ownerTool = typeof kind === "string" ? BATCH_OPERATION_POLICY_TOOLS[kind as BatchOperationKind] : undefined;
+        if (ownerTool === undefined) return this.transactionError(id, "transaction batch operation kind is not in the composable allowlist");
+        if (!this.policyAllowsTool(ownerTool)) return this.transactionError(id, `transaction batch contains an operation denied by the deployment policy (${ownerTool})`);
+      }
+      const result = await this.batchTransactions.previewAsync(params);
+      return this.successText(id, result);
+    } catch (cause) { return this.adapterToolError(id, cause, "Batch preview failed without mutation; every operation must resolve against fresh authoritative state."); }
+  }
+
+  private async liveBatchApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
+    if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
+    if (signal?.aborted) return null;
+    try {
+      const result = await this.batchTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      return this.successText(id, result);
+    } catch (cause) { return this.adapterToolError(id, cause, "Batch apply may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
+  }
+
+  private static readonly DEVICE_STATE_FILE_SUFFIX = ".ableton-device-state.json";
+
+  private deviceStateDirectory(directory: unknown): string {
+    if (!isNonEmptyString(directory, 4096) || !isAbsolute(directory) || directory.includes("\0")) throw new Error("an explicit absolute directory is required");
+    const resolved = resolve(directory);
+    const stats = lstatSync(resolved);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error("the device-state directory must be a real directory");
+    return realpathSync(resolved);
+  }
+
+  private readDeviceStateFile(file: unknown): DeviceStateFile {
+    if (!isNonEmptyString(file, 4096) || !isAbsolute(file) || file.includes("\0")) throw new Error("an explicit absolute snapshot file path is required");
+    const resolved = resolve(file);
+    const stats = lstatSync(resolved);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("the device-state snapshot must be a real regular file");
+    if (stats.size > 256 * 1024) throw new Error("the device-state snapshot exceeds its 256 KiB bound");
+    let parsed: unknown;
+    try { parsed = JSON.parse(readFileSync(resolved, "utf8")); } catch (cause) { throw new Error(`the device-state snapshot is not readable JSON (${cause instanceof Error ? cause.message : String(cause)})`); }
+    return validateDeviceStateFile(parsed);
+  }
+
+  private writeDeviceStateFileAtomically(target: string, file: DeviceStateFile, overwrite: boolean): boolean {
+    let targetExists = false;
+    try {
+      const stats = lstatSync(target);
+      targetExists = true;
+      if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("device-state snapshot target must be a real regular file, not a symbolic link");
+      if (!overwrite) throw new Error("device-state snapshot already exists; pass overwrite=true to replace it");
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+
+    const temporary = `${target}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
+    let descriptor: number | undefined;
+    let temporaryExists = false;
+    try {
+      descriptor = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+      temporaryExists = true;
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8" });
+        fsyncSync(descriptor);
+      } finally {
+        const opened = descriptor;
+        descriptor = undefined;
+        closeSync(opened);
+      }
+      const staged = this.readDeviceStateFile(temporary);
+      if (staged.digest !== file.digest) throw new Error("device-state staged snapshot failed read-back verification");
+
+      if (targetExists) {
+        // Renaming a verified regular file replaces the directory entry and
+        // never follows a target symlink introduced after the lstat check.
+        renameSync(temporary, target);
+        temporaryExists = false;
+      } else {
+        // Hard-link installation is an atomic no-clobber create. A concurrent
+        // target creation fails with EEXIST instead of being overwritten.
+        try { linkSync(temporary, target); }
+        catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "EEXIST") throw new Error("device-state snapshot target changed during save; retry");
+          throw cause;
+        }
+        unlinkSync(temporary);
+        temporaryExists = false;
+      }
+      return targetExists;
+    } finally {
+      if (descriptor !== undefined) { try { closeSync(descriptor); } catch { /* preserve the original error */ } }
+      if (temporaryExists) { try { unlinkSync(temporary); } catch { /* preserve the original error */ } }
+    }
+  }
+
+  private async liveDeviceStateSaveAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["deviceRef", "name", "directory", "overwrite"]) || !isNonEmptyString(params.deviceRef, 256) || !isNonEmptyString(params.name, 64) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(params.name) || (params.overwrite !== undefined && typeof params.overwrite !== "boolean")) return error(id, -32602, "deviceRef, a filesystem-safe name, directory, and optional overwrite are required");
+    try {
+      const status = this.requireConnected("devices");
+      if (!(status.capabilities ?? []).includes("parameters")) throw new Error("parameter capability is unavailable");
+      if (!(status.operations ?? []).includes("snapshot")) throw new Error("snapshot operation is unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const file = buildDeviceStateFile(snapshot, params.deviceRef, params.name);
+      const directory = this.deviceStateDirectory(params.directory);
+      const target = joinPath(directory, `${params.name}${McpHost.DEVICE_STATE_FILE_SUFFIX}`);
+      const overwritten = this.writeDeviceStateFileAtomically(target, file, params.overwrite === true);
+      return this.successText(id, { saved: true, file: target, overwritten, schema: DEVICE_STATE_SCHEMA, name: params.name, device: file.device, privacy: file.privacy, digest: file.digest });
+    } catch (cause) { return this.adapterToolError(id, cause, "Device-state save is read-only toward Live and writes exactly one bounded owner-scoped file."); }
+  }
+
+  private async liveDeviceStateRecallPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["file", "targetDeviceRef", "morphFromFile", "morphFromLive", "amount", "allowPartialLayout"]) || !isNonEmptyString(params.targetDeviceRef, 256) || (params.morphFromLive !== undefined && typeof params.morphFromLive !== "boolean") || (params.allowPartialLayout !== undefined && typeof params.allowPartialLayout !== "boolean") || (params.amount !== undefined && (typeof params.amount !== "number" || !Number.isFinite(params.amount) || params.amount < 0 || params.amount > 1))) return error(id, -32602, "file, targetDeviceRef, and optional morph fields are invalid");
+    const morphKinds = [params.morphFromFile !== undefined, params.morphFromLive === true].filter(Boolean).length;
+    if (morphKinds > 1 || (morphKinds === 1 && params.amount === undefined) || (morphKinds === 0 && params.amount !== undefined)) return error(id, -32602, "morph requires exactly one source (morphFromFile or morphFromLive=true) plus an explicit amount from 0 to 1");
+    try {
+      const file = this.readDeviceStateFile(params.file);
+      const morphFile = params.morphFromFile !== undefined ? this.readDeviceStateFile(params.morphFromFile) : undefined;
+      const status = this.requireConnected("device.parameter.write");
+      if (!(status.capabilities ?? []).includes("parameters")) throw new Error("parameter capability is unavailable");
+      if (!(status.operations ?? []).includes("device.parameter.set")) throw new Error("device parameter writes are unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const mode = morphKinds === 1 ? "morph" : "recall";
+      const plan = planDeviceStateRecall(snapshot, file, params.targetDeviceRef, { allowPartialLayout: params.allowPartialLayout === true, ...(morphFile ? { morphFrom: { kind: "file", file: morphFile } } : params.morphFromLive === true ? { morphFrom: { kind: "live" } } : {}), ...(params.amount === undefined ? {} : { amount: params.amount }) });
+      const record = await this.deviceStateTransactions.previewAsync(plan, mode, params.amount as number | undefined) as { transactionId: string; epoch: number; expiresAt: number };
+      return this.successText(id, { transactionId: record.transactionId, epoch: record.epoch, mode, ...(params.amount === undefined ? {} : { amount: params.amount }), target: { deviceRef: plan.deviceRef, identity: plan.identity, layoutFingerprint: plan.layoutFingerprint }, source: { name: file.name, identity: file.device.identity, layoutFingerprint: file.device.layoutFingerprint, digest: file.digest }, ...(morphFile ? { morphSource: { name: morphFile.name, digest: morphFile.digest } } : params.morphFromLive === true ? { morphSource: "live" } : {}), applicable: plan.applicable, skipped: plan.skipped, dispositions: plan.dispositions, impact: mode === "morph" ? "interpolates-device-parameter-state" : "restores-device-parameter-state", confirmation: "apply", expiresAt: record.expiresAt });
+    } catch (cause) {
+      const report = (cause as { deviceStateReport?: unknown }).deviceStateReport;
+      if (report !== undefined) return response(id, { content: [{ type: "text", text: JSON.stringify(report) }], isError: true });
+      return this.adapterToolError(id, cause, "Device-state recall preview failed without mutation; verify the snapshot file and target device identity.");
+    }
+  }
+
+  private async liveDeviceStateRecallApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
+    if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
+    if (signal?.aborted) return null;
+    try {
+      const result = await this.deviceStateTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      return this.successText(id, result);
+    } catch (cause) { return this.adapterToolError(id, cause, "Device-state recall may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
+  }
+
+  private static readonly LIBRARY_DATABASE_MAX_BYTES = 128 * 1024 * 1024;
+
+  private libraryAllowlistedFile(file: unknown, allowlistRoot: unknown, label: string): string {
+    if (!isNonEmptyString(file, 4096) || !isAbsolute(file) || file.includes("\0")) throw new LibraryUnavailable(`an explicit absolute ${label} path is required`, {});
+    if (!isNonEmptyString(allowlistRoot, 4096) || !isAbsolute(allowlistRoot) || allowlistRoot.includes("\0")) throw new LibraryUnavailable("an explicit absolute allowlist root is required", {});
+    const root = resolve(allowlistRoot);
+    let rootStats;
+    try { rootStats = lstatSync(root); } catch { throw new LibraryUnavailable("the allowlist root does not exist", {}); }
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new LibraryUnavailable("the allowlist root must be a real directory", {});
+    let realRoot: string;
+    try { realRoot = realpathSync(root); } catch { throw new LibraryUnavailable("the allowlist root cannot be resolved", {}); }
+    const resolved = resolve(file);
+    let stats;
+    try { stats = lstatSync(resolved); } catch { throw new LibraryUnavailable(`the ${label} does not exist`, {}); }
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new LibraryUnavailable(`the ${label} must be a real regular file`, {});
+    if (stats.size > McpHost.LIBRARY_DATABASE_MAX_BYTES) throw new LibraryUnavailable(`the ${label} exceeds its 128 MiB bound`, {});
+    let realFile: string;
+    try { realFile = realpathSync(resolved); } catch { throw new LibraryUnavailable(`the ${label} cannot be resolved`, {}); }
+    if (realFile !== realRoot && !realFile.startsWith(`${realRoot}${sep}`)) throw new LibraryUnavailable(`the ${label} is outside the owner allowlist root`, {});
+    return realFile;
+  }
+
+  private readLibraryDatabase(realFile: string): SqliteReader {
+    let reader: SqliteReader;
+    try { reader = new SqliteReader(new Uint8Array(readFileSync(realFile))); }
+    catch (cause) { throw new LibraryUnavailable(`the library database is unreadable (${cause instanceof Error ? cause.message : String(cause)})`, {}); }
+    if (reader.walMode) {
+      const wal = `${realFile}-wal`;
+      try { if (existsSync(wal) && lstatSync(wal).size > 0) throw new LibraryUnavailable("the library database has uncheckpointed WAL frames; close Live and retry after a checkpoint rather than guessing at partial content", {}); }
+      catch (cause) { if (cause instanceof LibraryUnavailable) throw cause; }
+    }
+    return reader;
+  }
+
+  private async liveLibrarySearchAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    const modes = ["files", "plugins", "tags"];
+    const sorts = ["useCount", "modified", "name"];
+    const formats = ["vst3", "vst2", "au", "clap", "unknown"];
+    const boundedStringArray = (value: unknown, maxItems: number): boolean => Array.isArray(value) && value.length <= maxItems && value.every((item) => isNonEmptyString(item, 256));
+    if (!isObject(params) || !hasOnly(params, ["database", "allowlistRoot", "pluginsDatabase", "mode", "query", "tags", "kinds", "sources", "vendors", "formats", "sort", "limit", "cursor"])
+      || (params.mode !== undefined && !modes.includes(String(params.mode)))
+      || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "")
+      || (params.tags !== undefined && !boundedStringArray(params.tags, 8))
+      || (params.kinds !== undefined && !(Array.isArray(params.kinds) && params.kinds.length <= LIBRARY_KINDS.length && params.kinds.every((item) => (LIBRARY_KINDS as readonly string[]).includes(String(item)))))
+      || (params.sources !== undefined && !boundedStringArray(params.sources, 8))
+      || (params.vendors !== undefined && !boundedStringArray(params.vendors, 8))
+      || (params.formats !== undefined && !(Array.isArray(params.formats) && params.formats.length <= formats.length && params.formats.every((item) => formats.includes(String(item)))))
+      || (params.sort !== undefined && !sorts.includes(String(params.sort)))
+      || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100))
+      || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "database, allowlistRoot, and bounded query fields are invalid");
+    const mode = (params.mode ?? "files") as "files" | "plugins" | "tags";
+    try {
+      const databasePath = this.libraryAllowlistedFile(params.database, params.allowlistRoot, "library database");
+      const query: LibraryQuery = { mode, limit: (params.limit as number | undefined) ?? 50, ...(params.query !== undefined ? { query: params.query as string } : {}), ...(params.tags !== undefined ? { tags: params.tags as string[] } : {}), ...(params.kinds !== undefined ? { kinds: params.kinds as LibraryQuery["kinds"] } : {}), ...(params.sources !== undefined ? { sources: params.sources as string[] } : {}), ...(params.vendors !== undefined ? { vendors: params.vendors as string[] } : {}), ...(params.formats !== undefined ? { formats: params.formats as LibraryQuery["formats"] } : {}), ...(params.sort !== undefined ? { sort: params.sort as LibraryQuery["sort"] } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) };
+      let items: unknown[];
+      let paging: Record<string, unknown>;
+      let databaseVersion: number;
+      let supportedVersions: readonly number[];
+      let extra: Record<string, unknown> = {};
+      if (mode === "plugins") {
+        if (params.pluginsDatabase === undefined) throw new LibraryUnavailable("plug-in inventory requires an explicit pluginsDatabase path (Live-plugins-*.db) inside the same allowlist root", {});
+        const pluginsPath = this.libraryAllowlistedFile(params.pluginsDatabase, params.allowlistRoot, "plug-in database");
+        const reader = this.readLibraryDatabase(pluginsPath);
+        databaseVersion = assertSupportedPluginsSchema(reader);
+        supportedVersions = SUPPORTED_PLUGINS_SCHEMA_VERSIONS;
+        const page = queryLibraryPlugins(reader, query);
+        items = page.items; paging = page.paging as unknown as Record<string, unknown>;
+      } else {
+        const reader = this.readLibraryDatabase(databasePath);
+        databaseVersion = assertSupportedFilesSchema(reader);
+        supportedVersions = SUPPORTED_FILES_SCHEMA_VERSIONS;
+        const page = mode === "tags" ? queryLibraryTagVocabulary(reader, query) : queryLibraryFiles(reader, query);
+        items = page.items; paging = page.paging as unknown as Record<string, unknown>;
+        if (mode === "files" && "tagVocabularyNote" in page) extra = { tagVocabularyNote: (page as { tagVocabularyNote?: string }).tagVocabularyNote };
+      }
+      return this.successText(id, {
+        schema: LIBRARY_SEARCH_SCHEMA,
+        mode,
+        databaseVersion,
+        supportedVersions: [...supportedVersions],
+        items,
+        paging,
+        ...extra,
+        unavailable: {
+          similarity: "audio-similarity queries are unavailable in this build: the fe_values record schema is not enumerated (presence is noted, semantics are never guessed)",
+          duplicates: "duplicate-sample queries are unavailable in this build: no duplicate-identity evidence is enumerated",
+        },
+        privacy: { note: "the database path, allowlist root, and raw filesystem paths are redacted from results; usage counts are opaque numbers; only module basenames are reported for plug-ins", redacted: ["database", "allowlistRoot", "pluginsDatabase", "plugin_modules.path"] },
+        provenance: { bindingEvidence: "shape-probed first-hand on Live 12.4.5 (files database version 12300, macOS platform 2; plug-ins database version 1); unofficial undocumented schema, version-specific; results are discovery evidence and loadability still requires live_browser_inspect", supportedFilesVersions: [...SUPPORTED_FILES_SCHEMA_VERSIONS], supportedPluginsVersions: [...SUPPORTED_PLUGINS_SCHEMA_VERSIONS] },
+      });
+    } catch (cause) {
+      if (cause instanceof LibraryUnavailable) return response(id, { content: [{ type: "text", text: JSON.stringify({ unavailable: true, reason: cause.message, ...cause.details }) }], isError: true });
+      return this.adapterToolError(id, cause, "Library search is read-only and fail-closed; verify the database path and allowlist root.");
+    }
   }
 
   /** Revision-bound opaque paging for read-only probe surfaces: cursors carry
@@ -2939,7 +3445,7 @@ export class McpHost {
         ? await adapter.invokeAsync({ operation: "locator.jump-to", args: { ref: transaction.payload.ref, expectedObjectIdentity: transaction.payload.expectedObjectIdentity, expectedCollectionRevision: transaction.payload.expectedCollectionRevision } }, context) as Record<string, unknown>
         : await adapter.invokeAsync({ operation: "locator.jump", args: { direction: transaction.payload.direction } }, context) as Record<string, unknown>;
       if (typeof result.position !== "number" || !Number.isFinite(result.position) || result.position < 0) throw new Error("locator jump was not confirmed");
-      if (transaction.payload.jumpTo === true && Math.abs(result.position - ((transaction.prior as { target: number }).target)) > 1e-6) throw new Error("locator jump did not land on the exact cue");
+      if (transaction.payload.jumpTo === true && Math.abs(result.position - ((transaction.prior as { target: number }).target)) > LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS) throw new Error("locator jump did not land on the cue within tolerance");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
@@ -2947,21 +3453,24 @@ export class McpHost {
   }
 
   private clipPropertiesMutationAuthority(snapshot: LiveSnapshot, clipRef: LiveRef): JsonObject {
-    const located = this.clipRow(snapshot, clipRef); const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "groove"];
+    const located = this.clipRow(snapshot, clipRef); const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "groove", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount"];
     const state = Object.fromEntries(fields.map((field) => [field, located.clip[field] ?? null]));
     const expectedAuthorityRevision = this.clipAuthorityDigest(snapshot, clipRef);
     return { expectedObjectIdentity: located.clip.objectIdentity, expectedAuthorityRevision, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
   }
 
   private async liveClipPropertiesPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd"] as const;
+    const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount"] as const;
     if (!isObject(params) || !hasOnly(params, ["clipRef", "grooveRef", ...fields]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     const proposed: Record<string, unknown> = {};
     for (const field of fields) {
       const value = params[field];
       if (value === undefined) continue;
-      if (field === "muted" || field === "looping") { if (typeof value !== "boolean") return error(id, -32602, `${field} must be boolean`); }
+      if (field === "muted" || field === "looping" || field === "legato" || field === "ramMode") { if (typeof value !== "boolean") return error(id, -32602, `${field} must be boolean`); }
       else if (field === "colorIndex") { if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 69) return error(id, -32602, "colorIndex is out of bounds"); }
+      else if (field === "launchMode") { if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 3) return error(id, -32602, "launchMode is out of bounds"); }
+      else if (field === "launchQuantization") { if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 14) return error(id, -32602, "launchQuantization is out of bounds"); }
+      else if (field === "velocityAmount") { if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) return error(id, -32602, "velocityAmount is out of bounds"); }
       else if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return error(id, -32602, `${field} is out of bounds`);
       proposed[field] = value;
     }
@@ -2975,6 +3484,9 @@ export class McpHost {
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio === true && Object.keys(proposed).some((field) => field === "looping" || field === "loopStart" || field === "loopEnd")) return this.transactionError(id, "audio clip loop editing uses live_audio_clip_preview");
+      if (row.clip.isAudio === true && proposed.velocityAmount !== undefined) return this.transactionError(id, "velocityAmount is only available on MIDI clips");
+      if (row.clip.isAudio !== true && proposed.ramMode !== undefined) return this.transactionError(id, "ramMode is only available on audio clips");
+      if ((proposed.launchMode !== undefined || proposed.launchQuantization !== undefined) && (row.clip.isPlaying === true || row.clip.isTriggered === true)) return this.transactionError(id, "launch behavior changes on a playing or triggered clip are refused");
       if (fields.some((field) => proposed[field] !== undefined && (row.clip[field] === null || row.clip[field] === undefined))) return this.transactionError(id, "one or more requested clip fields are unavailable on this exact clip");
       if (params.grooveRef !== undefined && params.grooveRef !== null) { const grooves = (snapshot.groovePool?.grooves ?? []); if (!grooves.some((groove) => groove.ref === params.grooveRef)) return this.transactionError(id, "groove reference is unknown"); }
       const finalStart = (proposed.loopStart ?? row.clip.loopStart ?? null) as number | null; const finalEnd = (proposed.loopEnd ?? row.clip.loopEnd ?? null) as number | null;
@@ -3003,7 +3515,7 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd"] as const;
+      const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount"] as const;
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "clip identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -3062,12 +3574,30 @@ export class McpHost {
   }
 
   private importStagingRoot(): string {
-    // Canonicalize once: tmpdir may contain symlinks (/var -> /private/var on
-    // macOS), and containment checks compare canonical paths.
-    this.importStagingDir ??= realpathSync(mkdtempSync(joinPath(tmpdir(), "ableton-mcp-import-")));
+    // Persistent, owner-controlled managed media directory (never $TMPDIR):
+    // Live references imported audio in place, so a staged copy becomes the
+    // clip's or Simpler's media once an apply succeeds. Staged files are
+    // released only on no-consumer paths (preview failure, transaction
+    // expiry/eviction/finalization, pre-dispatch refusals, failed apply, and
+    // undo after the clip is deleted) — never on apply success, host
+    // shutdown, or wall-clock age. Canonicalize once; containment checks
+    // compare canonical paths.
+    if (this.importStagingDir === undefined) {
+      const configured = this.importStagingDirOption ?? process.env.ABLETON_MCP_IMPORT_STAGING_DIR;
+      if (configured !== undefined && !isAbsolute(configured)) throw new Error("import staging directory override must be an absolute path");
+      const appData = process.env.APPDATA;
+      const root = configured ?? (process.platform === "win32" ? joinPath(appData !== undefined && isAbsolute(appData) ? appData : joinPath(homedir(), "AppData", "Roaming"), "ableton-mcp", "import-staging") : joinPath(homedir(), ".config", "ableton-mcp", "import-staging"));
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      const stats = lstatSync(root);
+      if (!stats.isDirectory()) throw new Error("import staging root is not a directory");
+      if (typeof process.getuid === "function" && stats.uid !== process.getuid()) throw new Error("import staging root is not owned by the current user");
+      chmodSync(root, 0o700);
+      this.importStagingDir = realpathSync(root);
+    }
     return this.importStagingDir;
   }
   private importStagingDir: string | undefined;
+  private readonly importStagingDirOption: string | undefined;
 
   /** Re-verify the authorized source through one no-follow descriptor (identity
       and size checked before and after a byte-bounded read), then copy the
@@ -3133,6 +3663,10 @@ export class McpHost {
     try { if (stagingPath.startsWith(this.importStagingDir + sep)) { chmodSync(stagingPath, 0o600); unlinkSync(stagingPath); } } catch { /* best-effort staging cleanup */ }
   }
 
+  private releaseStagedImportFor(transaction: ClipLifecycleTransaction | undefined): void {
+    if (transaction && (transaction.kind === "session-audio-create" || transaction.kind === "simpler")) this.releaseStagedImportFile(transaction.payload?.filePath);
+  }
+
   private clipAuthorityDigest(snapshot: LiveSnapshot, clipRef: LiveRef): string {
     const located = this.clipRow(snapshot, clipRef);
     if (located.takeLane) {
@@ -3178,6 +3712,9 @@ export class McpHost {
     try {
       const authority = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
       const stagingPath = await this.stageVerifiedImportFile(authority.canonicalPath, authority);
+      // The staged copy is transaction-owned: every preview exit that does not
+      // retain a transaction must release it, or the bytes leak in $TMPDIR.
+      try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (params.takeLaneRef !== undefined) {
@@ -3199,19 +3736,20 @@ export class McpHost {
       const slot = (track.clipSlots as unknown[] ?? []).filter(isObject).find((candidate) => candidate.sceneIndex === params.sceneIndex);
       const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.index === params.sceneIndex);
       if (!slot || !isNonEmptyString(slot.ref, 256) || !isNonEmptyString(slot.objectIdentity, 256) || !scene || !isNonEmptyString(scene.ref, 256) || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("Session import target identity is incomplete");
-      if (slot.clipRef) return this.transactionError(id, "Session slot is occupied");
+      if (slot.clipRef) { this.releaseStagedImportFile(stagingPath); return this.transactionError(id, "Session slot is occupied"); }
       const payload: Record<string, unknown> = { trackRef: params.trackRef, sceneIndex: params.sceneIndex, filePath: stagingPath, ...(params.name !== undefined ? { name: params.name } : {}), expectedTrackIdentity: track.objectIdentity, expectedSlotRef: slot.ref, expectedSlotIdentity: slot.objectIdentity, expectedSceneRef: scene.ref, expectedSceneIdentity: scene.objectIdentity };
       const fence = JSON.stringify({ trackRef: params.trackRef, trackIdentity: track.objectIdentity, slotRef: slot.ref, slotIdentity: slot.objectIdentity, sceneRef: scene.ref, sceneIdentity: scene.objectIdentity });
       const transaction: ClipLifecycleTransaction = { id: `audioimport_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "session-audio-create", fence, clipRef: params.trackRef as LiveRef, payload, prior: { file: authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "audio import");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, trackRef: params.trackRef, sceneIndex: params.sceneIndex, file: { path: authority.canonicalPath, size: authority.size, sha256: authority.sha256 }, impact: "creates-session-audio-clip", confirmation: "apply", expiresAt: transaction.expiresAt });
+      } catch (stagingCause) { this.releaseStagedImportFile(stagingPath); throw stagingCause; }
     } catch (cause) { return this.adapterToolError(id, cause, "Audio-import preview requires fresh authoritative state and a readable file."); }
   }
 
   private async liveAudioImportApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
-    if (!transaction || transaction.kind !== "session-audio-create" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired audio-import transaction");
+    if (!transaction || transaction.kind !== "session-audio-create" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Unknown or expired audio-import transaction"); }
     if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", created: transaction.created, idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
@@ -3219,9 +3757,10 @@ export class McpHost {
     try {
       if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       const status = this.requireConnected("session.read");
-      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const previewFile = (transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string } }).file;
-      if (!previewFile) return this.transactionError(id, "audio import file authority is missing; preview again");
+      if (!previewFile) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "audio import file authority is missing; preview again"); }
+      if (!existsSync(transaction.payload.filePath as string)) return this.transactionError(id, "staged import file is no longer available; preview again");
       // The bytes Live opens are the transaction-owned staged copy verified at
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, previewFile);
@@ -3231,15 +3770,15 @@ export class McpHost {
         const snapshot = await adapter.snapshotAsync(context);
         const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef);
         const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity }));
-        if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) return this.transactionError(id, "take lane or its clips changed since preview; preview again");
+        if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "take lane or its clips changed since preview; preview again"); }
       }
       if (!reconciliation && transaction.payload.takeLaneRef === undefined) {
         const snapshot = await adapter.snapshotAsync(context);
         const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.trackRef);
         const slot = track && ((track.clipSlots as unknown[]) ?? []).filter(isObject).find((candidate) => candidate.sceneIndex === transaction.payload.sceneIndex);
         const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.index === transaction.payload.sceneIndex);
-        if (!track || !slot || !scene || JSON.stringify({ trackRef: transaction.payload.trackRef, trackIdentity: track.objectIdentity, slotRef: slot.ref, slotIdentity: slot.objectIdentity, sceneRef: scene.ref, sceneIdentity: scene.objectIdentity }) !== transaction.fence) return this.transactionError(id, "Session import target changed since preview; preview again");
-        if (slot.clipRef) return this.transactionError(id, "Session slot became occupied since preview; preview again");
+        if (!track || !slot || !scene || JSON.stringify({ trackRef: transaction.payload.trackRef, trackIdentity: track.objectIdentity, slotRef: slot.ref, slotIdentity: slot.objectIdentity, sceneRef: scene.ref, sceneIdentity: scene.objectIdentity }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Session import target changed since preview; preview again"); }
+        if (slot.clipRef) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Session slot became occupied since preview; preview again"); }
       }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: (transaction.payload.takeLaneRef !== undefined ? "take-lane.audio-clip.create" : "session.audio-clip.create") as "session.audio-clip.create" | "take-lane.audio-clip.create", args: transaction.payload }, context) as Record<string, unknown>;
@@ -3264,6 +3803,9 @@ export class McpHost {
       transaction.created = result;
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
+      // The staged copy is now the created clip's media: Live references the
+      // path in place from the managed staging directory. It is released only
+      // by undo (after the clip is deleted) — never on apply success.
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Audio-import state is uncertain; perform fresh discovery before retrying."); }
   }
@@ -3619,8 +4161,80 @@ export class McpHost {
     }
   }
 
+  private validTransformParams(params: unknown): params is Record<string, unknown> {
+    if (!isObject(params) || Object.keys(params).length > 12) return false;
+    for (const value of Object.values(params)) {
+      if (typeof value === "string" || typeof value === "number") continue;
+      if (Array.isArray(value) && value.length >= 1 && value.length <= 32 && value.every((entry) => typeof entry === "string" && entry.length >= 1 && entry.length <= 32)) continue;
+      if (isObject(value) && Object.keys(value).length <= 32 && Object.entries(value).every(([key, entry]) => key.length <= 32 && typeof entry === "number" && Number.isFinite(entry))) continue;
+      return false;
+    }
+    return true;
+  }
+
+  private discoverDrumMapping(snapshot: LiveSnapshot): { mapping: Record<string, number>; assumptions: string[] } {
+    const roleMatchers: ReadonlyArray<readonly [string, (name: string) => boolean]> = [
+      ["kick", (name) => name.includes("kick")],
+      ["snare", (name) => name.includes("snare")],
+      ["openHat", (name) => name.includes("open") && name.includes("hat")],
+      ["closedHat", (name) => name.includes("hat")],
+      ["clap", (name) => name.includes("clap")],
+      ["ride", (name) => name.includes("ride")],
+      ["crash", (name) => name.includes("crash")],
+      ["highTom", (name) => name.includes("high") && name.includes("tom")],
+      ["lowTom", (name) => name.includes("low") && name.includes("tom")],
+      ["midTom", (name) => name.includes("tom")],
+    ];
+    const mapping: Record<string, number> = {};
+    const discovered: string[] = [];
+    const visit = (devices: readonly unknown[]): void => {
+      for (const device of devices.filter(isObject)) {
+        for (const chain of ((device.chains as unknown[]) ?? []).filter(isObject)) {
+          const name = String(chain.name ?? "").toLowerCase();
+          const inNote = chain.inNote;
+          if (Number.isInteger(inNote) && (inNote as number) >= 0 && (inNote as number) <= 127) {
+            for (const [role, match] of roleMatchers) {
+              if (mapping[role] === undefined && match(name)) { mapping[role] = inNote as number; discovered.push(`${role}=${inNote} (chain "${String(chain.name ?? "")}")`); break; }
+            }
+          }
+          visit((chain.devices as unknown[]) ?? []);
+        }
+      }
+    };
+    for (const track of ((snapshot.tracks as unknown[]) ?? []).filter(isObject)) visit((track.devices as unknown[]) ?? []);
+    return { mapping, assumptions: discovered.length > 0 ? [`drum mapping discovered from the Set's drum-chain notes: ${discovered.join(", ")}`] : [] };
+  }
+
+  private async resolveMidiTransformContext(transform: MidiTransformType, params: Record<string, unknown>, snapshot: LiveSnapshot, status: LiveStatus): Promise<{ params: Record<string, unknown>; assumptions: string[] }> {
+    const resolved: Record<string, unknown> = { ...params };
+    const assumptions: string[] = [];
+    if ((transform === "chord-progression" || transform === "bassline") && resolved.root === undefined && resolved.scale === undefined) {
+      const tokens = (transform === "chord-progression" ? resolved.numerals ?? resolved.symbols : resolved.chords) as unknown;
+      const roman = Array.isArray(tokens) && tokens.length > 0 && tokens.every((token) => typeof token === "string" && /^(vii|vi|iv|v|iii|ii|i)(°|dim)?(7)?$/i.test(token.trim()));
+      if (roman) {
+        if (!(status.operations ?? []).includes("tuning.read")) throw new Error("roman-numeral input requires an explicit key/mode: tuning state is unavailable");
+        const tuning = await this.asyncAdapter().invokeAsync({ operation: "tuning.read", args: { setRef: snapshot.set.ref } }) as JsonObject;
+        const scale = tuning.scale as JsonObject | undefined;
+        const rootNote = scale?.rootNote;
+        const scaleNameRaw = scale?.scaleName;
+        const scaleName = typeof scaleNameRaw === "string" ? scaleNameRaw.trim().toLowerCase().replace(/\s+/g, "-") : null;
+        if (!Number.isInteger(rootNote) || (rootNote as number) < 0 || (rootNote as number) > 11 || scaleName === null || scaleName === "") throw new Error("roman-numeral input requires an explicit key/mode: the Set does not name a song scale");
+        resolved.root = rootNote;
+        resolved.scale = scaleName;
+        assumptions.push(`key/mode discovered from the Set's song scale: root ${rootNote}, ${scaleName}`);
+      }
+    }
+    if (transform === "drum-pattern" && resolved.mapping === undefined) {
+      const discovered = this.discoverDrumMapping(snapshot);
+      if (Object.keys(discovered.mapping).length === 0) throw new Error("drum-pattern requires an explicit mapping: no drum-chain notes were discovered in the Set");
+      resolved.mapping = discovered.mapping;
+      assumptions.push(...discovered.assumptions);
+    }
+    return { params: resolved, assumptions };
+  }
+
   private async liveMidiTransformPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["clipRef", "transform", "params", "scope", "target"]) || !isNonEmptyString(params.clipRef, 256) || typeof params.transform !== "string" || !(MIDI_TRANSFORM_TYPES as readonly string[]).includes(params.transform) || !isObject(params.params) || Object.keys(params.params).length > 12 || Object.values(params.params).some((value) => typeof value !== "string" && typeof value !== "number") || (params.scope !== undefined && !["in-place", "duplicate"].includes(String(params.scope)))) return error(id, -32602, "clipRef, a known transform, and bounded string/number params are required");
+    if (!isObject(params) || !hasOnly(params, ["clipRef", "transform", "params", "scope", "target"]) || !isNonEmptyString(params.clipRef, 256) || typeof params.transform !== "string" || !(MIDI_TRANSFORM_TYPES as readonly string[]).includes(params.transform) || !this.validTransformParams(params.params) || (params.scope !== undefined && !["in-place", "duplicate"].includes(String(params.scope)))) return error(id, -32602, "clipRef, a known transform, and bounded params (strings, numbers, string arrays, or flat pitch maps) are required");
     const transform = params.transform as MidiTransformType;
     const generative = GENERATIVE_TRANSFORMS.includes(transform);
     const probe = midiExpressionProbe();
@@ -3634,8 +4248,15 @@ export class McpHost {
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const clip = this.noteClip(snapshot, params.clipRef as LiveRef);
       if (clip.notes.some((note) => typeof note.id !== "number")) throw new Error("stable note identity is unavailable for this clip");
+      let resolvedParams = params.params as Record<string, unknown>;
+      let contextAssumptions: string[] = [];
+      if (transform === "chord-progression" || transform === "bassline" || transform === "drum-pattern") {
+        const resolved = await this.resolveMidiTransformContext(transform, resolvedParams, snapshot, status);
+        resolvedParams = resolved.params;
+        contextAssumptions = resolved.assumptions;
+      }
       let outcome;
-      try { outcome = applyMidiTransform(structuredClone(clip.notes) as never, { type: transform, params: params.params }, clip.length); }
+      try { outcome = applyMidiTransform(structuredClone(clip.notes) as never, { type: transform, params: resolvedParams }, clip.length); }
       catch (cause) { return error(id, -32602, cause instanceof Error ? cause.message : "invalid transform parameters"); }
       const diff = diffNotes(clip.notes as never, outcome.notes as never);
       if (diff.add.length + diff.update.length + diff.delete.length === 0) return this.transactionError(id, "transform produced no changes");
@@ -3661,14 +4282,15 @@ export class McpHost {
         fenceTarget = { target: slot.ref, targetIdentity: slot.objectIdentity, targetTrackIdentity: targetTrack.objectIdentity, targetSceneIdentity: scene.objectIdentity, empty: slot.empty };
       }
       const fence = JSON.stringify({ ref: params.clipRef, notes: clip.notes, notesRevision: clip.notesRevision, authority, ...fenceTarget });
-      const transaction: ClipLifecycleTransaction = { id: `miditransform_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "midi-transform", fence, clipRef: params.clipRef as LiveRef, payload: { transform, params: structuredClone(params.params), scope: effectiveScope, generative, seed: outcome.seed ?? null, target: targetAuthority ?? null, diff: structuredClone(diff), sourceRevision: clip.notesRevision, authority, expectedResultContent: this.canonicalNoteContent(outcome.notes as unknown as Array<Record<string, unknown>>), expectedResultIdentity: noteIdentityDigest(outcome.notes as unknown as Array<Record<string, unknown>>), clipLength: clip.length }, prior: { notes: clip.notes.map((note) => structuredClone(note)) }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `miditransform_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "midi-transform", fence, clipRef: params.clipRef as LiveRef, payload: { transform, params: structuredClone(resolvedParams), scope: effectiveScope, generative, seed: outcome.seed ?? null, target: targetAuthority ?? null, diff: structuredClone(diff), sourceRevision: clip.notesRevision, authority, expectedResultContent: this.canonicalNoteContent(outcome.notes as unknown as Array<Record<string, unknown>>), expectedResultIdentity: noteIdentityDigest(outcome.notes as unknown as Array<Record<string, unknown>>), clipLength: clip.length }, prior: { notes: clip.notes.map((note) => structuredClone(note)) }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "MIDI transform");
       return this.successText(id, {
         transactionId: transaction.id, epoch: transaction.epoch, transform, scope: effectiveScope, clipRef: params.clipRef,
         sourceRevision: clip.notesRevision,
         diff: { add: diff.add.length, update: diff.update.length, delete: diff.delete.length, notes: diff },
         constraints: { sourceNotes: clip.notes.length, resultNotes: diff.add.length + clip.notes.length - diff.delete.length, generative, largeEdit, duplicateFirstDefault: generative || largeEdit },
-        assumptions: outcome.assumptions,
+        assumptions: [...contextAssumptions, ...outcome.assumptions],
+        params: resolvedParams,
         seed: outcome.seed ?? null,
         mpe: { ...probe, refusedInPlace: generative && !probe.deleteRecreatePreservesExpression, note: "Per-note Pitch/Slide/Pressure are not in the canonical note schema and are never authored or silently erased by transforms; update-only transforms patch exposed fields through note.update, which preserves unexposed per-note data." },
         undo: effectiveScope === "duplicate" ? "live_undo deletes the exact transaction-created duplicate clip" : "live_undo restores the exact prior note fields through note.update",
@@ -4311,6 +4933,166 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Track-view state is uncertain; perform fresh discovery before retrying."); }
   }
 
+  private trackPropertiesStateRevision(track: JsonObject): string {
+    return createHash("sha256").update(canonicalMutationIdentity({ colorIndex: track.colorIndex ?? null })).digest("hex");
+  }
+
+  private async liveTrackPropertiesPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["ref", "colorIndex"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
+    if (params.colorIndex === undefined) return error(id, -32602, "at least one track property is required");
+    if (!Number.isInteger(params.colorIndex) || (params.colorIndex as number) < 0 || (params.colorIndex as number) > 69) return error(id, -32602, "colorIndex is out of bounds");
+    try {
+      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
+      if (!(status.operations ?? []).includes("track.set")) throw new Error("track property editing is unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
+      if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
+      const prior = { colorIndex: track.colorIndex ?? null };
+      const payload: Record<string, unknown> = { ref: params.ref, colorIndex: params.colorIndex, expectedObjectIdentity: track.objectIdentity, expectedStateRevision: this.trackPropertiesStateRevision(track) };
+      const fence = JSON.stringify({ ref: params.ref, objectIdentity: track.objectIdentity, state: [track.colorIndex ?? null] });
+      const transaction: ClipLifecycleTransaction = { id: `trackset_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "track-set", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "track properties edit");
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, ref: params.ref, prior, proposed: { colorIndex: params.colorIndex }, impact: "edits-track-properties", confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) { return this.adapterToolError(id, cause, "Track-properties preview requires fresh authoritative state."); }
+  }
+
+  private async liveTrackPropertiesApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
+    if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
+    const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
+    if (!transaction || transaction.kind !== "track-set" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired track-properties transaction");
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: true });
+    const reconciliation = transaction.state === "uncertain" && transaction.undoKey === undefined && transaction.applyKey === params.idempotencyKey;
+    if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
+    if (signal?.aborted) return null;
+    try {
+      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = this.requireConnected("session.read");
+      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter();
+      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+        if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, state: [track.colorIndex ?? null] }) !== transaction.fence) return this.transactionError(id, "track identity or state changed since preview; preview again"); }
+      transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
+      const result = await adapter.invokeAsync({ operation: "track.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
+      if (result.changed !== true) throw new Error("track properties change was not confirmed");
+      const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      if (!verified || verified.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("edited track identity changed after apply");
+      if ((verified as unknown as JsonObject).colorIndex !== transaction.payload.colorIndex) throw new Error("track properties postcondition was not confirmed");
+      transaction.applyKey = params.idempotencyKey as string;
+      transaction.state = "applied";
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+    } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Track properties state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  private songSettingsFields(song: JsonObject): Record<string, unknown> {
+    const quantizationValue = (entry: unknown): unknown => (entry as { value?: unknown } | null | undefined)?.value ?? null;
+    return { signatureNumerator: song.signatureNumerator ?? null, signatureDenominator: song.signatureDenominator ?? null, swingAmount: song.swingAmount ?? null, clipTriggerQuantization: quantizationValue(song.clipTriggerQuantization), midiRecordingQuantization: quantizationValue(song.midiRecordingQuantization) };
+  }
+
+  private songSettingsRevision(song: JsonObject): string {
+    return createHash("sha256").update(canonicalMutationIdentity(this.songSettingsFields(song))).digest("hex");
+  }
+
+  private async liveSongSettingsPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"] as const;
+    if (!isObject(params) || !hasOnly(params, [...fields])) return error(id, -32602, "song settings arguments are invalid");
+    const proposed: Record<string, unknown> = {};
+    for (const field of fields) {
+      const value = params[field];
+      if (value === undefined) continue;
+      if (field === "signatureNumerator" || field === "signatureDenominator") { if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 99) return error(id, -32602, `${field} is out of bounds`); }
+      else if (field === "swingAmount") { if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) return error(id, -32602, "swingAmount is out of bounds"); }
+      else if (field === "clipTriggerQuantization") { if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 13) return error(id, -32602, "clipTriggerQuantization is out of bounds"); }
+      else if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 8) return error(id, -32602, "midiRecordingQuantization is out of bounds");
+      proposed[field] = value;
+    }
+    if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one song settings field is required");
+    try {
+      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
+      if (!(status.operations ?? []).includes("song.set")) throw new Error("song settings editing is unavailable");
+      const adapter = this.asyncAdapter();
+      const snapshot = await adapter.snapshotAsync();
+      const song = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }) as JsonObject;
+      const settings = this.songSettingsFields(song);
+      if (Object.keys(proposed).some((field) => settings[field] === null)) return this.transactionError(id, "one or more requested song settings are unavailable on this shape");
+      const prior: Record<string, unknown> = {};
+      for (const field of Object.keys(proposed)) prior[field] = settings[field];
+      if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("song settings require exact Set identity");
+      const payload: Record<string, unknown> = { ...proposed, setRef: snapshot.set.ref, expectedObjectIdentity: snapshot.set.objectIdentity, expectedStateRevision: this.songSettingsRevision(song) };
+      const fence = JSON.stringify({ state: fields.map((field) => settings[field]) });
+      const transaction: ClipLifecycleTransaction = { id: `songset_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "song-set", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "song settings edit");
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, prior, proposed, impact: "edits-song-settings-playback-feel", confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) { return this.adapterToolError(id, cause, "Song-settings preview requires fresh authoritative state."); }
+  }
+
+  private async liveSongSettingsApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
+    if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
+    const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
+    if (!transaction || transaction.kind !== "song-set" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired song-settings transaction");
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: true });
+    const reconciliation = transaction.state === "uncertain" && transaction.undoKey === undefined && transaction.applyKey === params.idempotencyKey;
+    if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
+    if (signal?.aborted) return null;
+    try {
+      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = this.requireConnected("session.read");
+      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter();
+      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = await adapter.snapshotAsync(context);
+      if (snapshot.set.ref !== transaction.payload.setRef || snapshot.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed since preview");
+      const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"];
+      if (!reconciliation) { const song = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject;
+        const settings = this.songSettingsFields(song);
+        if (JSON.stringify({ state: fields.map((field) => settings[field]) }) !== transaction.fence) return this.transactionError(id, "song settings changed since preview; preview again"); }
+      transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
+      const result = await adapter.invokeAsync({ operation: "song.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
+      if (result.changed !== true) throw new Error("song settings change was not confirmed");
+      const after = await adapter.snapshotAsync(context);
+      if (after.set.ref !== transaction.payload.setRef || after.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply");
+      const verified = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
+      for (const field of fields) if (transaction.payload[field] !== undefined && verified[field] !== transaction.payload[field]) throw new Error("song settings postcondition was not confirmed");
+      transaction.applyKey = params.idempotencyKey as string;
+      transaction.state = "applied";
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+    } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Song settings state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  private async liveKeyEstimateAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["clipRef", "notes", "expectedNotesRevision"])) return error(id, -32602, "key estimate arguments are invalid");
+    if (params.notes !== undefined) {
+      if (params.clipRef !== undefined || params.expectedNotesRevision !== undefined) return error(id, -32602, "notes is mutually exclusive with clipRef and expectedNotesRevision");
+      if (!Array.isArray(params.notes) || params.notes.length > 4096) return error(id, -32602, "notes must be an array of at most 4096 note objects");
+      const notes: Array<{ pitch: number; start: number; duration: number; velocity?: number }> = [];
+      for (const entry of params.notes) {
+        if (!isObject(entry) || !hasOnly(entry, ["pitch", "start", "duration", "velocity"])) return error(id, -32602, "note objects may only carry pitch, start, duration, and velocity");
+        if (!Number.isInteger(entry.pitch) || (entry.pitch as number) < 0 || (entry.pitch as number) > 127) return error(id, -32602, "note pitch must be an integer in 0..127");
+        if (typeof entry.start !== "number" || !Number.isFinite(entry.start) || entry.start < 0 || entry.start > 1_000_000) return error(id, -32602, "note start must be finite in 0..1000000 beats");
+        if (typeof entry.duration !== "number" || !Number.isFinite(entry.duration) || entry.duration <= 0 || entry.duration > 1_000_000) return error(id, -32602, "note duration must be finite in 0..1000000 beats, exclusive of zero");
+        if (entry.velocity !== undefined && (!Number.isInteger(entry.velocity) || (entry.velocity as number) < 0 || (entry.velocity as number) > 127)) return error(id, -32602, "note velocity must be an integer in 0..127");
+        notes.push({ pitch: entry.pitch as number, start: entry.start, duration: entry.duration, ...(entry.velocity !== undefined ? { velocity: entry.velocity as number } : {}) });
+      }
+      return this.successText(id, estimateKey(notes) as unknown as JsonObject);
+    }
+    if (!isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef or notes are required");
+    if (params.expectedNotesRevision !== undefined && (typeof params.expectedNotesRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedNotesRevision))) return error(id, -32602, "expectedNotesRevision must be a 64-character hex digest");
+    try {
+      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const row = this.clipRow(snapshot, params.clipRef as LiveRef);
+      if (row.clip.isAudio === true || row.clip.kind === "audio") return this.transactionError(id, "key estimation requires a MIDI clip");
+      const notes = ((row.clip.notes as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>) ?? []).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
+      const notesRevision = typeof row.clip.notesRevision === "string" ? row.clip.notesRevision : createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex");
+      if (params.expectedNotesRevision !== undefined && params.expectedNotesRevision !== notesRevision) return this.transactionError(id, "clip notes changed since the fenced revision");
+      const estimate = estimateKey(notes);
+      return this.successText(id, { ...estimate, evidence: { ...estimate.evidence, clipRef: params.clipRef, notesRevision } } as unknown as JsonObject);
+    } catch (cause) { return this.adapterToolError(id, cause, "Key estimation requires fresh authoritative state."); }
+  }
+
   private selectionRevision(snapshot: LiveSnapshot): string {
     const selection = snapshot.selection ?? {};
     return createHash("sha256").update(canonicalMutationIdentity({ trackRef: selection.trackRef ?? null, sceneRef: selection.sceneRef ?? null, slotRef: selection.slotRef ?? null, detailClipRef: selection.detailClipRef ?? null, deviceRef: selection.deviceRef ?? null, parameterRef: selection.parameterRef ?? null, chainRef: selection.chainRef ?? null })).digest("hex");
@@ -4383,7 +5165,9 @@ export class McpHost {
           if (drawResult.changed !== true) throw new Error("draw-mode change was not confirmed");
         } catch (cause) {
           if (selectionApplied && transaction.prior) {
-            try { await adapter.invokeAsync({ operation: "selection.set", args: { ...(transaction.prior as Record<string, unknown>), expectedStateRevision: this.selectionRevision(await adapter.snapshotAsync(context)) } }, context); } catch { throw new Error("draw-mode change failed and selection compensation failed"); }
+            // The mapper's selection.set rejects drawMode; compensation must carry only exact prior selection fields.
+            const compensation = Object.fromEntries(Object.entries(transaction.prior as Record<string, unknown>).filter(([key]) => key !== "drawMode"));
+            try { await adapter.invokeAsync({ operation: "selection.set", args: { ...compensation, expectedStateRevision: this.selectionRevision(await adapter.snapshotAsync(context)) } }, context); } catch { throw new Error("draw-mode change failed and selection compensation failed"); }
           }
           throw cause;
         }
@@ -4513,8 +5297,10 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
       const dialogState = { buttonCount: read.buttonCount ?? null, message: read.message ?? null, openDialogCount: read.openDialogCount ?? null };
-      if (params.button === undefined) return this.successText(id, { ...dialogState, done: true });
-      if (typeof dialogState.buttonCount !== "number" || typeof dialogState.openDialogCount !== "number") throw new Error("the current dialog shape is not observable; guarded presses are refused");
+      const done = read.done === undefined ? true : read.done === true;
+      if (params.button === undefined) return this.successText(id, { ...dialogState, done });
+      if (!done) return this.adapterToolError(id, new Error("dialog observation is incomplete; guarded presses are refused"), "Wait for a complete dialog observation before requesting a guarded press.");
+      if (typeof dialogState.buttonCount !== "number" || typeof dialogState.openDialogCount !== "number") throw new Error("dialog shape is not observable; guarded presses are refused");
       if ((params.button as number) >= dialogState.buttonCount) return error(id, -32602, "button is not present in the current dialog");
       const payload: Record<string, unknown> = { action: "press", button: params.button, expectedMessage: dialogState.message, expectedButtonCount: dialogState.buttonCount, expectedOpenDialogCount: dialogState.openDialogCount };
       const fence = JSON.stringify({ button: params.button, ...dialogState });
@@ -4538,7 +5324,9 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, context) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown };
+      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, context) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
+      const done = read.done === undefined ? true : read.done === true;
+      if (!done) return this.adapterToolError(id, new Error("dialog observation is incomplete; the press was refused"), "Wait for a complete dialog observation, then request a fresh preview.");
       if (JSON.stringify({ button: transaction.payload.button, buttonCount: read.buttonCount ?? null, message: read.message ?? null, openDialogCount: read.openDialogCount ?? null }) !== transaction.fence) return this.transactionError(id, "dialog state changed since preview; the press was refused");
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "application.dialog", args: transaction.payload }, context) as { done?: unknown; buttonCount?: unknown; message?: unknown; openDialogCount?: unknown };
@@ -4674,20 +5462,24 @@ export class McpHost {
   }
 
   private chainRow(snapshot: LiveSnapshot, chainRef: LiveRef): { device: JsonObject; chain: JsonObject } {
-    const walk = (devices: JsonObject[]): JsonObject | undefined => {
+    const walk = (devices: JsonObject[]): { device: JsonObject; chain: JsonObject } | undefined => {
       for (const device of devices) {
         const chains = ((device.chains as unknown[]) ?? []).filter(isObject);
         const found = chains.find((chain) => chain.ref === chainRef);
-        if (found) return found;
+        if (found) return { device, chain: found };
         for (const chain of chains) { const nested = walk(((chain.devices as unknown[]) ?? []).filter(isObject)); if (nested) return nested; }
-        for (const pad of ((device.drumPads as unknown[]) ?? []).filter(isObject)) { for (const chain of ((pad.chains as unknown[]) ?? []).filter(isObject)) { const nested = walk(((chain.devices as unknown[]) ?? []).filter(isObject)); if (nested) return nested; } }
+        for (const pad of ((device.drumPads as unknown[]) ?? []).filter(isObject)) {
+          for (const chain of ((pad.chains as unknown[]) ?? []).filter(isObject)) {
+            if (chain.ref === chainRef) return { device, chain };
+            const nested = walk(((chain.devices as unknown[]) ?? []).filter(isObject)); if (nested) return nested;
+          }
+        }
       }
       return undefined;
     };
     for (const track of snapshot.tracks as unknown as JsonObject[]) {
-      const devices = ((track.devices as unknown[]) ?? []).filter(isObject);
-      const found = walk(devices);
-      if (found) return { device: devices[0]!, chain: found };
+      const found = walk(((track.devices as unknown[]) ?? []).filter(isObject));
+      if (found) return found;
     }
     throw new Error("chain reference is not authoritative");
   }
@@ -5304,18 +6096,20 @@ export class McpHost {
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
       const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
       const stagingPath = await this.stageVerifiedImportFile(authority.canonicalPath, authority);
+      try {
       const payload: Record<string, unknown> = { ref: params.deviceRef, filePath: stagingPath, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity({ filePath: currentPath })).digest("hex") };
       const fence = JSON.stringify({ ref: params.deviceRef, objectIdentity: row.device.objectIdentity, filePath: currentPath });
       const transaction: ClipLifecycleTransaction = { id: `simpler_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "simpler", fence, payload, prior: { file: authority, samplePath: currentPath }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "simpler");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, deviceRef: params.deviceRef, currentSample: currentPath, file: { path: authority.canonicalPath, size: authority.size, sha256: authority.sha256 }, impact: "replaces-simpler-sample", confirmation: "apply", expiresAt: transaction.expiresAt });
+      } catch (stagingCause) { this.releaseStagedImportFile(stagingPath); throw stagingCause; }
     } catch (cause) { return this.adapterToolError(id, cause, "Simpler preview requires fresh authoritative state and a readable file."); }
   }
 
   private async liveSimplerApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
-    if (!transaction || transaction.kind !== "simpler" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired simpler transaction");
+    if (!transaction || transaction.kind !== "simpler" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Unknown or expired simpler transaction"); }
     if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
@@ -5323,9 +6117,10 @@ export class McpHost {
     try {
       if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       const status = this.requireConnected("session.read");
-      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const prior = transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string }; samplePath: string };
-      if (!prior.file) return this.transactionError(id, "simpler file authority is missing; preview again");
+      if (!prior.file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "simpler file authority is missing; preview again"); }
+      if (!existsSync(transaction.payload.filePath as string)) return this.transactionError(id, "staged import file is no longer available; preview again");
       // The bytes Live opens are the transaction-owned staged copy verified at
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, prior.file);
@@ -5333,13 +6128,16 @@ export class McpHost {
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
-        if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, filePath: currentPath }) !== transaction.fence) return this.transactionError(id, "device identity or sample state changed since preview; preview again"); }
+        if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, filePath: currentPath }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "device identity or sample state changed since preview; preview again"); } }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "simpler.replace-sample", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown; filePath?: unknown };
       if (result.changed !== true) throw new Error("sample replacement was not confirmed");
       transaction.created = { samplePath: result.filePath ?? transaction.payload.filePath };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
+      // The staged copy is now the Simpler's sample media: Live references the
+      // path in place from the managed staging directory. It is released only
+      // by undo (which restores the original sample) — never on apply success.
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Simpler state is uncertain; perform fresh discovery before retrying."); }
   }
@@ -5397,8 +6195,9 @@ export class McpHost {
   private parameterRow(snapshot: LiveSnapshot, parameterRef: LiveRef): JsonObject {
     const walk = (devices: JsonObject[]): JsonObject | undefined => {
       for (const device of devices) {
-        const parameters = ((device.parameters as unknown[]) ?? []).filter(isObject);
-        const found = parameters.find((parameter) => parameter.ref === parameterRef);
+        // Rack macros are first-class addressable parameters (kind "rack-macro"), mirroring the realtime target resolver.
+        const rows = [...((device.parameters as unknown[]) ?? []), ...((device.macros as unknown[]) ?? [])].filter(isObject);
+        const found = rows.find((parameter) => parameter.ref === parameterRef);
         if (found) return found;
         for (const chain of ((device.chains as unknown[]) ?? []).filter(isObject)) { const nested = walk(((chain.devices as unknown[]) ?? []).filter(isObject)); if (nested) return nested; }
         for (const pad of ((device.drumPads as unknown[]) ?? []).filter(isObject)) { for (const chain of ((pad.chains as unknown[]) ?? []).filter(isObject)) { const nested = walk(((chain.devices as unknown[]) ?? []).filter(isObject)); if (nested) return nested; } }
@@ -6303,7 +7102,9 @@ export class McpHost {
     try {
       const maps = [this.transactions, this.arrangementTransactions, this.sessionStructureTransactions, this.deviceParameterTransactions, this.auditionTransactions, this.transportTransactions, this.clipLaunchTransactions, this.noteEditTransactions, this.clipLifecycleTransactions, this.audioCaptureTransactions] as unknown as Array<Map<string, { state: string; kind?: string; epoch: number }>>;
       const owner = maps.find((candidate) => candidate.has(transactionId)); const midiFinalizable = !owner && this.midiTransactions.isFinalizable(transactionId);
-      if (!owner && !midiFinalizable) return this.recoveryFinalizeError(id, "Recovery transaction was not found or is not finalizable.");
+      const batchFinalizable = !owner && !midiFinalizable && this.batchTransactions.isFinalizable(transactionId);
+      const deviceStateFinalizable = !owner && !midiFinalizable && !batchFinalizable && this.deviceStateTransactions.isFinalizable(transactionId);
+      if (!owner && !midiFinalizable && !batchFinalizable && !deviceStateFinalizable) return this.recoveryFinalizeError(id, "Recovery transaction was not found or is not finalizable.");
       const retireRemote = async (): Promise<boolean> => { const retire = (this.adapter as Partial<{ retireTransactionAsync(transactionId: string, context?: LiveOperationContext, terminal?: boolean): Promise<unknown> }>).retireTransactionAsync; if (typeof retire !== "function") return true; try { await retire.call(this.adapter, transactionId, { deadlineMs: Date.now() + 5_000 }, true); return true; } catch { return false; } };
       const adapter = this.asyncAdapter(); const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const safetySnapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const transport = safetySnapshot.playback?.transport;
       if (!transport || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || safetySnapshot.playback.playingTargets.length > 0 || safetySnapshot.playback.firedTargets.length > 0) return this.recoveryFinalizeError(id, "Recovery finalization requires authoritative stopped playback and recording with no active Session targets.");
@@ -6311,6 +7112,14 @@ export class McpHost {
       if (midiFinalizable) {
         if (!await retireRemote()) return this.recoveryFinalizeError(id, "Remote replay authority could not be retired; finalization refused.");
         const finalized = this.midiTransactions.finalize(transactionId); return this.successText(id, { ...finalized, resolution: params.resolution, evidence: params.evidence, liveMutated: false, recoveryAuthorityRetired: true });
+      }
+      if (batchFinalizable) {
+        if (!await retireRemote()) return this.recoveryFinalizeError(id, "Remote replay authority could not be retired; finalization refused.");
+        const finalized = this.batchTransactions.finalize(transactionId); return this.successText(id, { ...finalized, resolution: params.resolution, evidence: params.evidence, liveMutated: false, recoveryAuthorityRetired: true });
+      }
+      if (deviceStateFinalizable) {
+        if (!await retireRemote()) return this.recoveryFinalizeError(id, "Remote replay authority could not be retired; finalization refused.");
+        const finalized = this.deviceStateTransactions.finalize(transactionId); return this.successText(id, { ...finalized, resolution: params.resolution, evidence: params.evidence, liveMutated: false, recoveryAuthorityRetired: true });
       }
       const record = owner!.get(transactionId)!; const audioOwner = owner === (this.audioCaptureTransactions as unknown as Map<string, { state: string; epoch: number }>);
       if (audioOwner ? record.state !== "uncertain" : (!["uncertain", "applied", "undone"].includes(record.state) || ACTIVE_TRANSACTION_STATES.has(record.state))) return this.recoveryFinalizeError(id, "Active or unresolved transaction work cannot be finalized.");
@@ -6328,6 +7137,8 @@ export class McpHost {
     if (undoOwnerTool !== undefined && !this.policyAllowsTool(undoOwnerTool)) return this.transactionError(id, "The current deployment policy no longer allows this transaction's tool domain; reconcile manually or restore the policy before undo.");
     const transaction = this.transactions.get(params.transactionId as string);
     if (!transaction && String(params.transactionId).startsWith("midi_")) return this.successText(id, await this.midiTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + SESSION_MIDI_TRANSACTION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("batch_")) return this.successText(id, await this.batchTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("devstate_")) return this.successText(id, await this.deviceStateTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
     if (!transaction && String(params.transactionId).startsWith("transport_")) {
       const transport = this.transportTransactions.get(params.transactionId as string);
       if (!transport) return this.transactionError(id, "Unknown or expired transport transaction");
@@ -6552,6 +7363,50 @@ export class McpHost {
         for (const [field, value] of Object.entries(sceneset.prior)) if ((restored as unknown as JsonObject)[field] !== value) throw new Error("scene exact prior state was not restored");
         sceneset.state = "undone"; return this.successText(id, { transactionId: sceneset.id, state: "undone", idempotent: false });
       } catch (cause) { sceneset.state = "uncertain"; return this.adapterToolError(id, cause, "Scene undo is uncertain; perform fresh discovery."); }
+    }
+    if (!transaction && String(params.transactionId).startsWith("trackset_")) {
+      const trackset = this.clipLifecycleTransactions.get(params.transactionId as string);
+      if (!trackset || trackset.kind !== "track-set") return this.transactionError(id, "Unknown or expired track-properties transaction");
+      if (trackset.state === "undone" && trackset.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: trackset.id, state: "undone", idempotent: true });
+      const reconciliation = trackset.state === "uncertain" && trackset.undoKey === params.idempotencyKey;
+      if ((trackset.state !== "applied" && !reconciliation) || !trackset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain track-properties transaction can be undone");
+      try {
+        this.beginUndoRecovery(trackset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackset, adapter, context);
+        const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
+        if (!track || track.objectIdentity !== trackset.payload.expectedObjectIdentity) throw new Error("track identity changed after apply; undo refused");
+        if (!reconciliation && (track.colorIndex ?? null) !== trackset.payload.colorIndex) return this.transactionError(id, "track changed after apply; undo refused");
+        trackset.state = "undoing";
+        const result = await this.invokeUndoRecovery(trackset, adapter, "track.set", { ref: trackset.payload.ref, ...(trackset.prior as Record<string, unknown>), expectedObjectIdentity: track.objectIdentity, expectedStateRevision: this.trackPropertiesStateRevision(track) }, context) as JsonObject;
+        if (result.changed !== true) throw new Error("track restoration was not confirmed");
+        const restored = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
+        if (!restored || restored.objectIdentity !== trackset.payload.expectedObjectIdentity) throw new Error("track identity changed after undo");
+        for (const [field, value] of Object.entries(trackset.prior)) if ((restored as unknown as JsonObject)[field] !== value) throw new Error("track exact prior state was not restored");
+        trackset.state = "undone"; return this.successText(id, { transactionId: trackset.id, state: "undone", idempotent: false });
+      } catch (cause) { trackset.state = "uncertain"; return this.adapterToolError(id, cause, "Track-properties undo is uncertain; perform fresh discovery."); }
+    }
+    if (!transaction && String(params.transactionId).startsWith("songset_")) {
+      const songset = this.clipLifecycleTransactions.get(params.transactionId as string);
+      if (!songset || songset.kind !== "song-set") return this.transactionError(id, "Unknown or expired song-settings transaction");
+      if (songset.state === "undone" && songset.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: songset.id, state: "undone", idempotent: true });
+      const reconciliation = songset.state === "uncertain" && songset.undoKey === params.idempotencyKey;
+      if ((songset.state !== "applied" && !reconciliation) || !songset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain song-settings transaction can be undone");
+      try {
+        this.beginUndoRecovery(songset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== songset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; songset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(songset, adapter, context);
+        const snapshot = await adapter.snapshotAsync(context);
+        if (snapshot.set.ref !== songset.payload.setRef || snapshot.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply; undo refused");
+        const rawSong = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject; const song = this.songSettingsFields(rawSong);
+        if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (song[field] !== value) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
+        songset.state = "undoing";
+        const result = await this.invokeUndoRecovery(songset, adapter, "song.set", { ...(songset.prior as Record<string, unknown>), setRef: songset.payload.setRef, expectedObjectIdentity: songset.payload.expectedObjectIdentity, expectedStateRevision: this.songSettingsRevision(rawSong) }, context) as JsonObject;
+        if (result.changed !== true) throw new Error("song settings restoration was not confirmed");
+        const after = await adapter.snapshotAsync(context);
+        if (after.set.ref !== songset.payload.setRef || after.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after undo");
+        const restored = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
+        for (const [field, value] of Object.entries(songset.prior)) if (restored[field] !== value) throw new Error("song settings exact prior state was not restored");
+        songset.state = "undone"; return this.successText(id, { transactionId: songset.id, state: "undone", idempotent: false });
+      } catch (cause) { songset.state = "uncertain"; return this.adapterToolError(id, cause, "Song-settings undo is uncertain; perform fresh discovery."); }
     }
     if (!transaction && String(params.transactionId).startsWith("trackstruct_")) {
       const trackstruct = this.clipLifecycleTransactions.get(params.transactionId as string);
@@ -6878,6 +7733,7 @@ export class McpHost {
         simpler.state = "undoing";
         const result = await this.invokeUndoRecovery(simpler, adapter, "simpler.replace-sample", { ref: simpler.payload.ref, filePath: prior.samplePath, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity({ filePath: currentPath })).digest("hex") }, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("simpler sample restoration was not confirmed");
+        this.releaseStagedImportFor(simpler);
         simpler.state = "undone"; return this.successText(id, { transactionId: simpler.id, state: "undone", idempotent: false });
       } catch (cause) { simpler.state = "uncertain"; return this.adapterToolError(id, cause, "Simpler undo is uncertain; perform fresh discovery."); }
     }
@@ -7074,7 +7930,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
         const current = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
         if (!current || current.objectIdentity !== rename.prior?.objectIdentity || current.name !== (reconciliation ? rename.prior?.name : rename.payload.name)) return this.transactionError(id, reconciliation ? "Rename undo replay did not restore prior name" : "Renamed object identity or name changed after apply; undo refused");
-        const operation = `${rename.payload.kind}.rename` as LiveInvocation["operation"];
+        const operation = (rename.payload.kind === "takeLane" ? "take-lane.rename" : `${rename.payload.kind}.rename`) as LiveInvocation["operation"];
         if (!reconciliation) { rename.state = "undoing"; await this.invokeUndoRecovery(rename, adapter, operation, { ref: rename.clipRef, name: rename.prior?.name, expectedName: rename.payload.name, expectedObjectIdentity: rename.prior?.objectIdentity, expectedAuthorityRevision: this.renameAuthorityRevision(await adapter.snapshotAsync(context), rename.payload.kind as string, rename.clipRef) }, context); }
         const restored = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
         if (!restored || restored.objectIdentity !== rename.prior?.objectIdentity || restored.name !== rename.prior?.name) throw new Error("rename undo was not confirmed for the exact target");
@@ -7212,6 +8068,13 @@ export class McpHost {
   }
 
   public handle(input: unknown): JsonObject | null {
+    const wire = this.prepareWire(input);
+    if (wire.error) return wire.error;
+    try { return formatMcpResponse(this.handleCore(wire.input, wire.modern), wire.input, wire.modern, { name: "ableton-mcp-host", version: SERVER_VERSION }); }
+    finally { if (wire.key) this.modernInFlightIds.delete(wire.key); }
+  }
+
+  private handleCore(input: unknown, modern: boolean): JsonObject | null {
     if (!isObject(input) || input.jsonrpc !== "2.0" || !hasOnly(input, ["jsonrpc", "id", "method", "params", "_meta"])) {
       return error(null, -32600, "Invalid Request");
     }
@@ -7225,16 +8088,19 @@ export class McpHost {
         return null;
       }
       if (input.method === "notifications/cancelled") return null;
+      if (input.method === "exit") { this.shuttingDown = true; return null; }
       return null;
     }
     if (!this.isId(id)) return error(null, -32600, "Invalid Request");
-    const key = `${typeof id}:${String(id)}`;
-    if (this.seenIds.has(key)) return error(id, -32600, "Duplicate request identifier");
-    this.seenIds.add(key);
-    this.idOrder.push(key);
-    if (this.idOrder.length > MAX_TRACKED_REQUEST_IDS) {
-      const expired = this.idOrder.shift();
-      if (expired !== undefined) this.seenIds.delete(expired);
+    if (!modern) {
+      const key = `${typeof id}:${String(id)}`;
+      if (this.seenIds.has(key)) return error(id, -32600, "Duplicate request identifier");
+      this.seenIds.add(key);
+      this.idOrder.push(key);
+      if (this.idOrder.length > MAX_TRACKED_REQUEST_IDS) {
+        const expired = this.idOrder.shift();
+        if (expired !== undefined) this.seenIds.delete(expired);
+      }
     }
     if (this.shuttingDown && input.method !== "exit") return error(id, -32600, "Server is shutting down");
 
@@ -7247,13 +8113,18 @@ export class McpHost {
       if (input.params !== undefined && (!isObject(input.params) || !hasOnly(input.params, ["requestId"]) || !this.isId(input.params.requestId))) return null;
       return null;
     }
-    if (!this.initialized && input.method !== "initialize") {
+    // Lifecycle, not a tool: an id-bearing exit is acknowledged and the
+    // transport terminates after the response flushes; new work is refused by
+    // the shutdown guard above from then on.
+    if (input.method === "exit") { this.shuttingDown = true; return response(id, {}); }
+    if (!modern && !this.initialized && input.method !== "initialize") {
       return error(id, -32002, "Server has not been initialized");
     }
-    if (!this.initializedNotification && input.method !== "initialize" && input.method !== "ping") {
+    if (!modern && !this.initializedNotification && input.method !== "initialize" && input.method !== "ping") {
       return error(id, -32002, "Server has not received initialized notification");
     }
     switch (input.method) {
+      case "server/discover": return modern && this.utilityParams(input.params) ? response(id, { supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS], capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: "Preview and explicitly confirm edits; preserve transaction IDs and exact idempotency keys for recovery. RPC retries are not permission to repeat writes. Application handles are process-local and expire. Modern stdio has no push subscriptions; use snapshot or observe/poll. Discovery permits a later legacy initialize; otherwise do not mix eras in one process." }) : error(id, -32602, "Invalid server/discover parameters");
       case "initialize": return this.initialize(id, input.params);
       case "ping": return this.utilityParams(input.params) ? response(id, {}) : error(id, -32602, "Invalid ping parameters");
       case "tools/list": return this.utilityParams(input.params) ? (this.noteToolListChanged(), response(id, { tools: visibleToolDescriptors(this.safeAdapterStatus(), this.toolPolicy) })) : error(id, -32602, "Invalid tools/list parameters");
@@ -7265,6 +8136,9 @@ export class McpHost {
       default: return error(id, -32601, "Method not found");
     }
   }
+
+  /** True once a peer asked the server to exit; new request work is refused. */
+  public isShuttingDown(): boolean { return this.shuttingDown; }
 
   private initialize(id: RequestId, params: unknown): JsonObject {
     if (this.initialized) return error(id, -32600, "Already initialized");
@@ -7281,6 +8155,7 @@ export class McpHost {
       return error(id, -32602, "Invalid initialize parameters");
     }
     this.initialized = true;
+    this.protocolEra = "legacy";
     return response(id, {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true }, resources: {}, prompts: {} },
@@ -7303,7 +8178,7 @@ export class McpHost {
     this.noteToolListChanged();
     if (!this.toolCallable(params.name)) return this.toolGateError(id, params.name);
     if (this.recoveryFinalizationInFlight && !["server_status", "capabilities", "plan_user_journey", "live_status", "live_snapshot", "live_discover", "live_project_snapshot_export", "live_project_snapshot_diff"].includes(params.name)) return this.adapterToolError(id, new Error("recovery finalization safety barrier is in progress"), "Wait for terminal recovery finalization before any synchronous mutation.");
-    const argumentTools = new Set(["plan_user_journey", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_discover", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "live_project_backup_preview", "live_project_backup_apply", "live_device_parameter_preview", "live_device_parameter_apply", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply"]);
+    const argumentTools = new Set(["plan_user_journey", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_discover", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_device_parameter_preview", "live_device_parameter_apply", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"]);
     if (!argumentTools.has(params.name) && params.arguments !== undefined && Object.keys(params.arguments as JsonObject).length !== 0) {
       return error(id, -32602, "Tool arguments must be an empty object");
     }
@@ -7328,7 +8203,7 @@ export class McpHost {
     if (params.name === "live_status") return this.liveStatus(id);
     if (params.name === "live_snapshot") return this.liveSnapshot(id);
     if (params.name === "live_discover") return this.liveDiscover(id, params.arguments);
-    if (["audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "live_project_backup_preview", "live_project_backup_apply", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply"].includes(params.name)) return error(id, -32001, "This operation requires the asynchronous host request path");
+    if (["audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"].includes(params.name)) return error(id, -32001, "This operation requires the asynchronous host request path");
     if (params.name === "live_device_parameter_preview") return this.liveDeviceParameterPreview(id, params.arguments);
     if (params.name === "live_device_parameter_apply") return this.liveDeviceParameterApply(id, params.arguments);
     if (params.name === "live_session_structure_preview") return this.liveSessionStructurePreview(id, params.arguments);
@@ -7697,7 +8572,7 @@ export class McpHost {
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
     // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |probe |warp |notes |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 
@@ -7786,7 +8661,7 @@ export async function serve(input: Readable, output: Writable, diagnostics: Writ
       diagnostics.write("mcp-host: internal fault\n");
       return JSON.stringify(error(null, -32603, "Internal error"));
     }
-  }, { notifier: (emit) => host.setEventEmitter((value) => emit(value)) }); } finally {
+  }, { notifier: (emit) => host.setEventEmitter((value) => emit(value)), shouldStop: () => host.isShuttingDown() }); } finally {
     const close = (adapter as Partial<{ close: () => Promise<void> }>).close;
     if (typeof close === "function") await close.call(adapter);
   }

@@ -8,8 +8,8 @@
 
 ## 开始使用
 
-需要 **Node.js 22、24 或 25**（使用 [nodejs.org](https://nodejs.org) 的 LTS
-安装程序即可）。在仓库根目录运行：
+需要 **Node.js 22 或 24**（使用 [nodejs.org](https://nodejs.org) 的 Node 24 LTS
+安装程序即可；Node 25 已停止维护）。在仓库根目录运行：
 
 ```sh
 npm run setup                          # 安装并构建全部组件，约一分钟
@@ -36,7 +36,7 @@ Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示
 
 ## Ableton MCP Beyond — 独立桥接组件
 
-[![Node 22 | 24 | 25](https://img.shields.io/badge/node-22%20%7C%2024%20%7C%2025-339933)](apps/mcp-server/package.json)
+[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 `@ableton-mcp/mcp-server` 仍可由其他 MCP 客户端独立使用，保留自己的锁文件、
 Node 支持策略、安全契约和 CI。Kumi 目前使用桥接的 Live 读取工具，编辑与分析工具是下一步。

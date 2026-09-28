@@ -7,7 +7,9 @@ are. Source, schemas, and tests are the final authority.
 
 ## Implemented and verified
 
-- Strict newline-delimited JSON-RPC MCP host (`2025-11-25`) with bounded
+- Dual-era newline-delimited JSON-RPC MCP host (legacy `2025-11-25`, modern
+  `2026-07-28`) with per-request modern metadata/discovery, structured JSON tool
+  results, private zero-TTL cache hints, and bounded
   framing/concurrency, ordered backpressure-aware output, cancellation,
   duplicate-ID rejection, redacted diagnostics, and a fail-closed default
   adapter.
@@ -47,6 +49,44 @@ are. Source, schemas, and tests are the final authority.
   envelopes. Content-destroying actions (crop, envelope clear) are honestly
   non-undoable. Verified at the host, simulator, Python contract, and packaged
   fake-Live levels; exact-candidate real-Live proof is pending.
+- Ranked Browser search: host-side multi-term order-independent token matching
+  with documented integer scores and matched-token explanations over a bounded,
+  epoch-bound per-root candidate cache (60-second TTL, explicit refresh, cache
+  and truncation provenance in every result); exact-substring matching remains
+  as a documented fallback, and inspect/load identity fencing is unchanged.
+  Compound batch transactions (`live_batch_preview/apply`) execute a bounded
+  (≤32) ordered allowlist of composable operations (`mixer.set`,
+  `device.parameter.set`, `clip.set`, `track.rename`, `scene.rename`,
+  `track.create`, `routing.arm`) in one preview/apply/undo cycle with
+  per-operation policy enforcement, one mutation per exact target, checkpoint
+  fencing, exact rollback of completed steps on mid-batch refusal, and
+  lost-acknowledgement reconciliation via retained exact dispatch arguments and
+  execution-ledger results, followed by fresh identity/state verification.
+  Matching values alone are not execution evidence. Policy is rechecked at
+  apply/undo and before each step; execution is sequential, not atomic.
+  Device parameter-state snapshots (`live_device_state_save`,
+  `live_device_state_recall_preview/apply`) save named schema-versioned,
+  digest-verified snapshot files to owner-scoped directories and recall or
+  morph them onto class-and-layout-fenced targets with per-parameter
+  dispositions, deterministic float64 quantization rounding, per-step revision
+  fencing, guarded rollback, and guarded pre-recall undo. Apply, compensation,
+  and undo retain distinct recovery checkpoints; failed verification or recovery
+  remains uncertain. Indexed nested paths disambiguate same-named siblings;
+  output symlinks are refused before writes. Batch and device-state
+  mutations reuse existing negotiated registry operations only; they are
+  verified at the host and simulator levels, and exact-candidate real-Live
+  proof is pending.
+- Opt-in read-only Live library database search (`live_library_search`):
+  owner-allowlisted `Live-files-*.db`/`Live-plugins-*.db` opened read-only
+  with a dependency-free UTF-8 SQLite reader (no writes ever, no journals,
+  reserved-page-aware bounds; uncheckpointed WAL and unsafe integer precision refused), fail-closed schema-version gating (files
+  database 12300, plug-ins database 1, shape-probed first-hand on the Live
+  12.4.5 macOS install), tag/kind/source/sort queries with bounded
+  revision-paged results, plug-in inventory with vendor/format filters, path
+  redaction, and explicit similarity/duplicate unavailability. Verified at the
+  host level with fixture databases and by reading a real Live 12.4.5 database
+  copy; newer or older schema versions report structured unavailability rather
+  than guessing.
 - Take-lane discovery under `Track.take_lanes` with bounded rows and
   stable-in-snapshot references, lane rename, file-backed audio clip creation
   inside existing lanes, and `is_take_lane_clip` exposure on clip rows. The
@@ -205,9 +245,9 @@ are. Source, schemas, and tests are the final authority.
   source ports, channels, exact parameter refs, packet/rate/queue bounds,
   sequence/replay checks, generation fencing, verified writes, XY compensation,
   telemetry, disarm, and independent TCP emergency stop.
-- `pcm-analysis/v2`: privacy-preserving waveform, spectral, time-frequency,
-  transient, channel, phase, dynamics, clipping, and deterministic aggregate
-  analysis.
+- `pcm-analysis/v3`: privacy-preserving waveform, spectral, time-frequency,
+  transient, channel, phase, dynamics, source clipping/reconstruction-over
+  separation, and deterministic aggregate analysis.
 - ITU-R BS.1770-5 / EBU R128, Tech 3341, and Tech 3342 programme loudness,
   momentary/short-term measures, loudness range, semantic channel weights, and
   validated 44.1/48 kHz true peak. Generated independent FFmpeg-oracle evidence
@@ -243,7 +283,7 @@ are. Source, schemas, and tests are the final authority.
   and clean-SHA/toolchain/lock/workflow provenance. Package `private: true`
   prevents accidental npm publication without changing MIT rights. The release
   workflow requires fresh-clone byte reproducibility and shares one exact
-  candidate across Node 22/24/25 on Ubuntu 24.04, macOS 15, and Windows Server
+  candidate across Node 22/24 on Ubuntu 24.04, macOS 15, and Windows Server
   2025.
 - Receipt-driven install, truthful manual activation, strict newer-version
   upgrade, exact rollback, receipt-bound repair/quarantine, retained cleanup,
@@ -279,6 +319,24 @@ are. Source, schemas, and tests are the final authority.
   revisions, monotonicity checks, and read-only mutation feasibility). The
   mapper status carries a best-effort environment probe (Live version/edition,
   OS, API surface) for artifact-bound evidence.
+
+- Offline Set inspection/diff and root-bounded findings-only lint: complete bounded XML consumption, child-value timing and MIDI events, explicit unknowns, privacy-aware MIDI extraction, and source evidence from the same read bytes. Malformed documents and semantic clips without measured lengths fail closed. No claim of exhaustive Live-version file-format coverage.
+- Bounded generative MIDI with C4 = 60, retained first-chord register and chord-boundary bassline durations; order-independent key-estimation evidence with heuristic confidence. Track-color and song-settings mutations retain exact target identity through apply/readback/undo and distinguish uncertain undo from forward recovery. Covered by host/simulator and fake-Live contracts, not new real-Live certification.
+
+## Maintenance and toolkit follow-ups
+
+Candidate bytes and their verification reports request 90-day CI retention;
+[DELIVERY.md](DELIVERY.md) explains exact-run retrieval, archiving and staged
+diagnostics. This is not publication or durable hosting, and #66's guided,
+resumable onboarding remains open. Node 22/24 and both implemented MCP eras do
+not certify a particular third-party client or current Live installation.
+
+The model-independent direction keeps MCP, exact typed execution and independent
+verification. Compact task discovery (#55), optional Jev-style selectors, a
+shared-authority GUI export pilot, public-only Extensions feasibility and
+retained bounce (#52) remain follow-ups, not shipped model/GUI/SDK integrations.
+[EXTENSION_SURFACES.md](EXTENSION_SURFACES.md) records authority and evaluation
+gates, including the protected local SDK exclusion and separate listening evidence.
 
 ## Evidence boundary
 
