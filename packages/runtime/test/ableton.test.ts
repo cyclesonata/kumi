@@ -105,16 +105,16 @@ test("the observation lists the tracks with refs usable at once; deeper reads ne
   const f = await started();
   try {
     const observation = await f.integration.observe(signal()); const discover = tool(observation.tools);
-    assert.deepEqual((JSON.parse(observation.context) as JsonObject).tracks, [{ ref: "fixture-track-1", name: "Fixture Bass", type: "regular" }]);
+    assert.deepEqual((JSON.parse(observation.context) as JsonObject).tracks, [{ ref: "fixture-track-1", name: "Fixture Bass", type: "regular", devices: [{ ref: "fixture-device-1", name: "Fixture Filter" }] }], "with the devices on each track");
     const denied = await discover.execute({ kind: "device", parent: "fixture-track-9" }, signal()); assert.equal(denied.isError, true, "a track the observation didn't list");
-    assert(!f.requests.some((request) => request.args.kind === "device"));
+    assert(!f.requests.some((request) => request.args.parent === "fixture-track-9"), "a refused read never reaches Live");
     const devices = await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal()); assert.equal(devices.isError, false); assert.match(devices.text, /Fixture Filter/);
-    assert.equal(f.requests.find((request) => request.args.kind === "device")?.args.parent, "fixture-track-1");
+    assert.equal(f.requests.filter((request) => request.args.kind === "device").at(-1)?.args.parent, "fixture-track-1");
     const params = await discover.execute({ kind: "parameter", parent: "fixture-device-1" }, signal()); assert.match(params.text, /Cutoff/);
     f.renameTrack("Manual Renamed Bass"); const next = await f.integration.observe(signal());
     assert.match(next.context, /Manual Renamed Bass/);
-    assert.equal((await discover.execute({ kind: "parameter", parent: "fixture-device-1" }, signal())).isError, true, "a device from an earlier turn is discovered again");
-    assert.equal((await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal())).isError, false);
+    assert.equal((await discover.execute({ kind: "parameter", parent: "fixture-device-9" }, signal())).isError, true, "a device the observation doesn't list is discovered first");
+    assert.equal((await discover.execute({ kind: "parameter", parent: "fixture-device-1" }, signal())).isError, false, "a listed one's parameters can be read at once");
   } finally { await f.integration.close(); }
 });
 
@@ -122,13 +122,16 @@ test("cursor leases preserve page markers and reject old-turn or wrong-query cur
   const f = await started();
   try {
     const { tools } = await f.integration.observe(signal()); const discover = tool(tools); f.partial();
-    const result = await discover.execute({ kind: "track", limit: 1 }, signal());
-    assert.equal(result.isError, false); assert.match(result.text, /"truncated":true/); assert.match(result.text, /fixture-cursor-1/); assert.match(result.text, /bounded/i);
+    const whole = await discover.execute({ kind: "track", limit: 1 }, signal());
+    assert.equal(whole.isError, false); assert.match(whole.text, /"truncated":false/); assert.match(whole.text, /bounded/i);
+    assert.equal((JSON.parse(whole.text) as { live: { items: unknown[] } }).live.items.length, 2, "Kumi read the next page too, sparing the model a reply");
     const count = f.requests.filter((item) => item.name === "live_discover").length;
     assert.equal((await discover.execute({ kind: "scene", cursor: "fixture-cursor-1", limit: 1 }, signal())).isError, true);
     assert.equal(f.requests.filter((item) => item.name === "live_discover").length, count);
     assert.equal((await discover.execute({ kind: "track", cursor: "fixture-cursor-1", limit: 1 }, signal())).isError, false);
     f.repeatCursor();
+    const stopped = await discover.execute({ kind: "track", limit: 1 }, signal());
+    assert.match(stopped.text, /"truncated":true/); assert.match(stopped.text, /fixture-cursor-1/, "when reading on stops, the page markers reach the model");
     assert.equal((await discover.execute({ kind: "track", cursor: "fixture-cursor-1", limit: 1 }, signal())).isError, true);
     await f.integration.observe(signal());
     assert.equal((await discover.execute({ kind: "track", cursor: "fixture-cursor-1", limit: 1 }, signal())).isError, true);
@@ -163,9 +166,10 @@ test("epoch change around a detailed read discards results, refs and cursors ins
 });
 
 test("late cancelled tool results cannot erase newer-turn parent leases", async () => {
-  const f = await started(); const pending = f.holdNext("device");
+  const f = await started(); let pending: ReturnType<typeof f.holdNext> | undefined;
   try {
     const observation = await f.integration.observe(signal()); const discover = tool(observation.tools);
+    pending = f.holdNext("device");
     await discover.execute({ kind: "track" }, signal());
     const controller = new AbortController();
     const old = discover.execute({ kind: "device", parent: "fixture-track-1" }, controller.signal);
@@ -173,7 +177,7 @@ test("late cancelled tool results cannot erase newer-turn parent leases", async 
     await f.integration.observe(signal()); await discover.execute({ kind: "track" }, signal());
     pending.release(); assert.equal((await old).isError, true);
     assert.equal((await discover.execute({ kind: "device", parent: "fixture-track-1" }, signal())).isError, false);
-  } finally { pending.release(); await f.integration.close(); }
+  } finally { pending?.release(); await f.integration.close(); }
 });
 
 test("late failed observation cannot invalidate a newer successful refresh", async () => {
@@ -252,8 +256,8 @@ test("asking for a few fields keeps what Kumi's checks need: the Set's identity 
     const observation = await f.integration.observe(signal());
     const set = await tool(observation.tools).execute({ kind: "set", fields: ["tempo"] }, signal());
     assert.equal(set.isError, false, set.text);
-    const tracks = JSON.parse((await tool(observation.tools).execute({ kind: "track", fields: ["mediaKind"] }, signal())).text) as { mcp: { structuredContent: { items: JsonObject[] } } };
-    const track = tracks.mcp.structuredContent.items[0]!;
+    const tracks = JSON.parse((await tool(observation.tools).execute({ kind: "track", fields: ["mediaKind"] }, signal())).text) as { live: { items: JsonObject[] } };
+    const track = tracks.live.items[0]!;
     assert.equal(track.name, "Fixture Bass", "a track's name always comes along, for HISTORY");
     const devices = await tool(observation.tools).execute({ kind: "device", parent: track.ref, fields: ["name"] }, signal());
     assert.equal(devices.isError, false, devices.text);

@@ -14,6 +14,10 @@ import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type Proj
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
+/** Keys whose values are Live references: ref, parent, trackRef, parentRef, selectedTrackRef… */
+const REF_KEY = /^(?:ref|parent)$|Refs?$/;
+/** Live's references: an epoch, a kind and a path ("1232800184424618:track:4"). */
+const LIVE_REF = /^\d+:[a-z][a-z_]{0,31}:/;
 const MAKE_CHANGES = "make_changes";
 const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const FIND_SAMPLES = "find_samples";
@@ -73,6 +77,10 @@ export function createAbletonIntegration(options: Options): Integration {
   const now = options.now ?? (() => new Date());
   const lifetime = new AbortController();
   const refs = new Map<string, string>();
+  // The model's names for Live's references: "parameter:12" for
+  // "1232800184424618:parameter:1232800184424618:device:4:0:12". References were half of a read and
+  // most of a plan, and the model reads and writes them token by token; Kumi maps them back.
+  const shortRefs = new Map<string, string>(); const longRefs = new Map<string, string>(); const refCounts = new Map<string, number>();
   const cursors = new Map<string, string>();
   const unlisten: (() => void)[] = [];
   let endpoint: McpEndpoint | undefined;
@@ -267,21 +275,50 @@ export function createAbletonIntegration(options: Options): Integration {
     }
   }
   /** A track row's mixer, as a producer reads it: values and Live's text, without the bridge's internal references. */
-  function slimMixers(result: CallToolResult): CallToolResult {
-    const content = result.structuredContent as JsonObject | undefined;
-    if (!content || !Array.isArray(content.items) || !content.items.some((item) => item && typeof item === "object" && "mixer" in (item as JsonObject))) return result;
+  function shortRef(ref: string): string {
+    if (!LIVE_REF.test(ref)) return ref;
+    const known = shortRefs.get(ref); if (known) return known;
+    // Counts go on after a clear, so a name never comes back meaning something else.
+    if (shortRefs.size >= 50_000) { shortRefs.clear(); longRefs.clear(); }
+    const kind = /^\d+:([a-z][a-z_]{0,31}):/.exec(ref)![1]!;
+    const count = (refCounts.get(kind) ?? 0) + 1; refCounts.set(kind, count);
+    const name = `${kind}:${count}`;
+    shortRefs.set(ref, name); longRefs.set(name, ref);
+    return name;
+  }
+  /** A copy with Live's references, under keys that hold them, as the model's short names. */
+  function shorten(value: unknown, key = "", depth = 0): unknown {
+    if (depth > 32) return value;
+    if (typeof value === "string") return REF_KEY.test(key) ? shortRef(value) : value;
+    if (Array.isArray(value)) return value.map((item) => shorten(item, key, depth + 1));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, shorten(item, child, depth + 1)]));
+    return value;
+  }
+  /** The model's input with its short names turned back into Live's references. */
+  function lengthen(value: unknown, key = "", depth = 0): unknown {
+    if (depth > 32) return value;
+    if (typeof value === "string") return REF_KEY.test(key) ? longRefs.get(value) ?? value : value;
+    if (Array.isArray(value)) return value.map((item) => lengthen(item, key, depth + 1));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, lengthen(item, child, depth + 1)]));
+    return value;
+  }
+  /** Mixer rows as the model needs them: the values and Live's text for them. */
+  function slimMixers(content: JsonObject): JsonObject {
+    if (!Array.isArray(content.items) || !content.items.some((item) => item && typeof item === "object" && "mixer" in (item as JsonObject))) return content;
     const keep = ["volume", "pan", "mute", "solo", "cueVolume", "sends", "volumeDisplay", "panDisplay", "cueVolumeDisplay", "sendDisplays"];
     const items = content.items.map((item) => {
       const row = item as JsonObject;
       if (!row.mixer || typeof row.mixer !== "object") return row;
       return { ...row, mixer: Object.fromEntries(Object.entries(row.mixer as JsonObject).filter(([key]) => keep.includes(key))) };
     });
-    const slim = { ...content, items };
-    return { ...result, structuredContent: slim, content: [{ type: "text", text: JSON.stringify(slim) }] };
+    return { ...content, items };
   }
-  function encode(result: CallToolResult, epoch: number): { text: string; isError: boolean } {
+  function encode(result: CallToolResult, epoch: number, slim = false): { text: string; isError: boolean } {
     if (result.isError) return { text: JSON.stringify(result), isError: true };
-    const text = JSON.stringify({ mcp: result, observation: { observedAt: now().toISOString(), connectionGeneration: generation, epoch,
+    // Live's answer as plain JSON, not a string inside the bridge's envelope: escaped quotes cost the model too.
+    let live: unknown;
+    try { live = payload(result); } catch { live = result; }
+    const text = JSON.stringify({ live: shorten(slim && live && typeof live === "object" && !Array.isArray(live) ? slimMixers(live as JsonObject) : live), observation: { observedAt: now().toISOString(), connectionGeneration: generation, epoch,
       coverage: "Bounded read; preserve truncated/nextCursor markers. Traversal completeness is not established." } });
     if (Buffer.byteLength(text) > 64 * 1024) return { text: "Result too large; narrow fields/parent/page.", isError: true };
     return { text, isError: false };
@@ -296,23 +333,46 @@ export function createAbletonIntegration(options: Options): Integration {
       const epoch = currentEpoch;
       await ensureCatalog(signal); assertLease(lease, signal);
       if (!tools.has(name)) throw new ObservationError("That read isn't available for the open Set right now");
-      const args = name === "live_discover" ? discoveryArgs(input) : input;
+      const named = lengthen(input) as JsonObject;
+      const args = name === "live_discover" ? discoveryArgs(named) : named;
       if (name === "live_discover") validateParentAndCursor(args);
       else requireFreshReferences(args);
       reading = true;
-      await guardEpoch(signal, epoch, lease);
-      const result = await tools.call(name, args, signal, { host: true });
+      // A discovery answer carries its epoch, checked below, so only the check after it is needed.
+      if (name !== "live_discover") await guardEpoch(signal, epoch, lease);
+      let result = await tools.call(name, args, signal, { host: true });
       assertLease(lease, signal);
       // The model gets bounded reads: too big means narrowing the request, whatever the answer holds.
       if (Buffer.byteLength(JSON.stringify(result)) > 64 * 1024) { refs.clear(); cursors.clear(); return { text: "Result too large; narrow fields/parent/page instead of requesting a whole Set dump.", isError: true }; }
+      if (!result.isError && name === "live_discover") {
+        assertEpoch(payload(result).epoch, epoch);
+        const first = discoveryPayload(result, String(args.kind), epoch);
+        if (args.kind === "set" && (first.items.length !== 1 || setIdentity(first.items[0]!) !== currentSet)) changed();
+        registerRows(String(args.kind), first.items, args, first.nextCursor);
+        // Kumi reads on for the model while the rows stay small: a big device's parameters come in
+        // one answer, not a model reply per page.
+        let items = first.items; let next = first.nextCursor; let pages = 1;
+        while (next && pages < 3 && Buffer.byteLength(JSON.stringify(items)) < 32 * 1024) {
+          const pageArgs = { ...args, cursor: next };
+          const more = await tools.call(name, pageArgs, signal, { host: true }); assertLease(lease, signal);
+          if (more.isError || Buffer.byteLength(JSON.stringify(more)) > 64 * 1024) break;
+          // Anything odd about a later page ends reading on; the model gets what came, with its cursor.
+          try {
+            assertEpoch(payload(more).epoch, epoch);
+            const page = discoveryPayload(more, String(args.kind), epoch);
+            registerRows(String(args.kind), page.items, pageArgs, page.nextCursor);
+            items = [...items, ...page.items]; next = page.nextCursor; pages++;
+          } catch { break; }
+        }
+        if (pages > 1) {
+          const { nextCursor: _cursor, ...rest } = payload(result);
+          const merged: JsonObject = { ...rest, items, truncated: Boolean(next), ...(next ? { nextCursor: next } : {}) };
+          result = { content: [{ type: "text", text: JSON.stringify(merged) }], structuredContent: merged };
+        }
+      }
       await guardEpoch(signal, epoch, lease);
       if (!result.isError) {
-        if (name === "live_discover") {
-          assertEpoch(payload(result).epoch, epoch);
-          const page = discoveryPayload(result, String(args.kind), epoch);
-          if (args.kind === "set" && (page.items.length !== 1 || setIdentity(page.items[0]!) !== currentSet)) changed();
-          registerRows(String(args.kind), page.items, args, page.nextCursor);
-        } else if (name === "live_snapshot") {
+        if (name === "live_snapshot") {
           const data = payload(result); assertEpoch(data.epoch, epoch);
           if (setIdentity(object(object(data.snapshot).set)) !== currentSet) changed();
           // Snapshot refs intentionally do not satisfy fresh-discovery parent leases.
@@ -322,7 +382,7 @@ export function createAbletonIntegration(options: Options): Integration {
           assertEpoch(data.epoch, epoch);
         }
       }
-      const encoded = encode(name === "live_discover" ? slimMixers(result) : result, epoch);
+      const encoded = encode(result, epoch, name === "live_discover");
       if (encoded.isError) { refs.clear(); cursors.clear(); }
       return encoded;
     } catch (error) {
@@ -459,15 +519,17 @@ export function createAbletonIntegration(options: Options): Integration {
    * round trip per change, which is most of the time a multi-step request takes.
    */
   async function makeChanges(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError: boolean; reply?: string }> {
-    // A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it.
+    // A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it;
+    // with several lists of one length (parameterRef and value), the i-th run takes the i-th of each.
     const steps: unknown[] = [];
-    for (const raw of Array.isArray(input.steps) ? input.steps : []) {
+    for (const [index, raw] of (Array.isArray(input.steps) ? input.steps : []).entries()) {
       const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
       const each = item.each && typeof item.each === "object" && !Array.isArray(item.each) ? Object.entries(item.each as JsonObject) : [];
-      if (each.length !== 1 || !Array.isArray(each[0]![1])) { steps.push(raw); continue; }
-      const [field, values] = each[0]! as [string, unknown[]];
+      if (!each.length) { steps.push(raw); continue; }
+      const runs = Array.isArray(each[0]![1]) ? (each[0]![1] as unknown[]).length : -1;
+      if (runs < 0 || each.some(([, values]) => !Array.isArray(values) || values.length !== runs)) return { text: `Step ${index + 1}: each gives input fields lists of one length, one value per run.`, isError: true };
       const base = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
-      for (const value of values) steps.push({ tool: item.tool, input: { ...base, [field]: value } });
+      for (let run = 0; run < runs; run++) steps.push({ tool: item.tool, input: { ...base, ...Object.fromEntries(each.map(([field, values]) => [field, (values as unknown[])[run]])) } });
       if (steps.length > MAX_CHANGES_PER_TURN) break;
     }
     if (!steps.length || steps.length > MAX_CHANGES_PER_TURN) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
@@ -541,8 +603,9 @@ export function createAbletonIntegration(options: Options): Integration {
   }
 
   /** `settled`: an earlier change in the same plan just confirmed Live's epoch, so it isn't read again. */
-  async function change(kind: ChangeKind, input: JsonObject, originalSignal: AbortSignal, settled = false): Promise<{ text: string; isError: boolean }> {
+  async function change(kind: ChangeKind, named: JsonObject, originalSignal: AbortSignal, settled = false): Promise<{ text: string; isError: boolean }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    const input = lengthen(named) as JsonObject;
     const lease = observationGeneration;
     try {
       signal.throwIfAborted();
@@ -611,9 +674,9 @@ export function createAbletonIntegration(options: Options): Integration {
       const produced = kind.produces?.(result);
       if (produced && produced.ref.length <= 256) refs.set(produced.ref, produced.kind);
       const { lines } = settledSummary;
-      const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: produced.ref } : {}), ...(lines?.length ? { lines } : {}),
+      const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: shortRef(produced.ref) } : {}), ...(lines?.length ? { lines } : {}),
         ...(kind.restructures ? { note: "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
-      const full = JSON.stringify({ ...reply, live: result });
+      const full = JSON.stringify({ ...reply, live: shorten(result) });
       return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" };
     } catch (error) {
       return { text: error instanceof ObservationError ? error.message : "The change failed before anything happened in Live; discover again, then retry.", isError: true };
@@ -688,7 +751,7 @@ export function createAbletonIntegration(options: Options): Integration {
         type: "object", additionalProperties: false, required: ["tool", "input"], properties: {
           tool: { type: "string", enum: edits.map((item) => item.name) }, input: { type: "object", description: "What that tool takes; \"@name\" for what an earlier step made" },
           as: { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,31}$", description: "Name what this step makes (a new track, a loaded device) for later steps" },
-          each: { type: "object", description: "Repeat this step once per value of one input field, e.g. {\"note\": [36, 37, 38, 39]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
+          each: { type: "object", description: "Repeat this step: each field's list gives that input field its value run by run, e.g. {\"note\": [36, 37, 38, 39]}, or several lists of one length, e.g. {\"parameterRef\": [\"parameter:3\", \"parameter:9\"], \"value\": [0.5, 1]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
         final: { type: "boolean", description: "These changes complete the request: Kumi says what changed and you aren't called again. Leave it out to see the results and carry on." } } },
       execute: (input, signal) => makeChanges(input, signal) }] : [];
     return [...reads, sampleSearch, ...edits, ...batch, ...undo];
@@ -736,15 +799,33 @@ export function createAbletonIntegration(options: Options): Integration {
         currentEpoch = epoch; currentSet = identity; lastEpoch = epoch;
         registerRows("set", page.items, args, page.nextCursor);
         // The Set's tracks, with references usable in this turn: most requests then need no discovery first.
-        let trackList: JsonObject[] | undefined; let moreTracks = false;
+        let trackList: JsonObject[] | undefined; let moreTracks = false; let moreDevices = false;
         try {
           const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: 100 });
           const tracksRead = await tools!.call("live_discover", trackArgs, signal, { host: true }); assertLease(lease, signal);
           if (!tracksRead.isError) {
             const trackPage = discoveryPayload(tracksRead, "track", epoch);
             registerRows("track", trackPage.items, trackArgs, trackPage.nextCursor);
-            trackList = trackPage.items.map((item) => ({ ref: item.ref ?? null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null }));
+            trackList = trackPage.items.map((item) => ({ ref: typeof item.ref === "string" ? shortRef(item.ref) : null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null }));
             moreTracks = Boolean(trackPage.nextCursor) || trackPage.truncated === true;
+            // And the devices on them, so a request about a track's sound goes straight to its parameters.
+            try {
+              const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className"], limit: 100 });
+              const devicesRead = await tools!.call("live_discover", deviceArgs, signal, { host: true }); assertLease(lease, signal);
+              if (!devicesRead.isError) {
+                const devicePage = discoveryPayload(devicesRead, "device", epoch);
+                registerRows("device", devicePage.items, deviceArgs);
+                const onTrack = new Map<unknown, JsonObject[]>();
+                for (const device of devicePage.items) {
+                  if (typeof device.ref !== "string") continue;
+                  const name = typeof device.name === "string" ? device.name.slice(0, 120) : null;
+                  const type = typeof device.className === "string" && device.className !== name ? device.className.slice(0, 64) : undefined;
+                  onTrack.set(device.parentRef, [...(onTrack.get(device.parentRef) ?? []), { ref: shortRef(device.ref), name, ...(type ? { type } : {}) }]);
+                }
+                trackList = trackList.map((entry, index) => { const devices = onTrack.get(trackPage.items[index]!.ref); return devices ? { ...entry, devices } : entry; });
+                moreDevices = Boolean(devicePage.nextCursor) || devicePage.truncated === true;
+              }
+            } catch (error) { if (lease !== observationGeneration) throw error; }
           }
         } catch (error) { if (lease !== observationGeneration) throw error; trackList = undefined; }
         options.onConnection("connected");
@@ -776,8 +857,8 @@ export function createAbletonIntegration(options: Options): Integration {
           ...(project?.identity === identity && project.path ? { project: { id: projectIdOf(project.path), name } } : {}),
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
-            set: { ref: row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
-            ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}) } : {}),
+            set: { ref: typeof row.ref === "string" ? shortRef(row.ref) : row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
+            ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
             ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),

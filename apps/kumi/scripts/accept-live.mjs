@@ -46,8 +46,8 @@ async function run(name, input) {
     return { ok: !result.isError, ms: performance.now() - t0, body, error: result.isError ? result.text.replace(/\s+/g, " ").slice(0, 240) : undefined };
   } catch (error) { return { ok: false, ms: performance.now() - t0, error: String(error?.message ?? error).slice(0, 240) }; }
 }
-/** A read's payload: structured when the bridge sends it that way, otherwise its text. */
-const contentOf = (body) => body?.mcp?.structuredContent ?? (() => { try { return JSON.parse(body?.mcp?.content?.[0]?.text ?? "null") ?? {}; } catch { return {}; } })();
+/** A read's payload, as Kumi gives it to the model. */
+const contentOf = (body) => body?.live ?? {};
 /** Every row of one kind, page by page. */
 async function all(kind, extra = {}) {
   const items = []; let cursor; let pages = 0; let ms = 0;

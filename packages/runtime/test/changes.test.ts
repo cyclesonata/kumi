@@ -160,12 +160,13 @@ test("changes need references from this turn, the observation's tracks or discov
   const b = await opened();
   try {
     const listed = (JSON.parse(b.observation.context) as { tracks: JsonObject[] }).tracks;
-    assert.deepEqual(listed.map((track) => [track.ref, track.name]), [["7:track:0", "Fixture Bass"], ["7:track:1", "Fixture Drums"]], "the observation lists the tracks");
+    assert.deepEqual(listed.map((track) => [track.ref, track.name]), [["track:1", "Fixture Bass"], ["track:2", "Fixture Drums"]], "the observation lists the tracks, by short names for Live's references");
     const stale = await tool(b.tools, "set_mixer").execute({ trackRef: "6:track:0", volume: 0.6 }, signal());
     assert.equal(stale.isError, true); assert.match(stale.text, /discovery in this turn/);
     assert(!b.requests.some((request) => request.name === "live_mixer_preview"), "nothing is previewed with a stale reference");
-    const result = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6, pan: -0.25 }, signal());
+    const result = await tool(b.tools, "set_mixer").execute({ trackRef: "track:1", volume: 0.6, pan: -0.25 }, signal());
     assert.equal(result.isError, false, result.text);
+    assert.equal(b.requests.find((request) => request.name === "live_mixer_preview")!.args.trackRef, "7:track:0", "Live gets its own reference back");
     assert.doesNotMatch(result.text, /secret-confirmation-token/, "the preview's confirmation never reaches the model");
     const apply = b.requests.find((request) => request.name === "live_mixer_apply")!;
     assert.equal(apply.args.confirmation, "secret-confirmation-token-0123456789", "Kumi passes the preview's own confirmation");
@@ -183,6 +184,20 @@ test("changes need references from this turn, the observation's tracks or discov
     const next = await b.integration.observe(signal());
     const again = await tool(next.tools, "set_mixer").execute({ trackRef: "7:track:1", volume: 0.5 }, signal());
     assert.equal(again.isError, true, "a track deleted in Live since the last turn isn't listed any more, so its ref is refused");
+  } finally { await b.integration.close(); }
+});
+
+test("the model reads and writes short names for Live's references, as plain JSON; Live gets its own back", async () => {
+  const b = await opened();
+  try {
+    const read = await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
+    const body = JSON.parse(read.text) as { live: { items: JsonObject[] } };
+    assert.deepEqual(body.live.items.map((item) => [item.ref, item.parentRef]), [["track:1", "set:1"], ["track:2", "set:1"]], "the same names as the observation's");
+    assert.doesNotMatch(read.text, /7:track|\\"/, "no long references, and no JSON inside a string");
+    const renamed = await tool(b.tools, "rename").execute({ kind: "track", ref: "track:2", name: "Drums" }, signal());
+    assert.equal(renamed.isError, false, renamed.text);
+    assert.equal(b.requests.find((request) => request.name === "live_object_rename_preview")!.args.ref, "7:track:1");
+    assert.equal((await tool(b.tools, "set_mixer").execute({ trackRef: "track:9", volume: 0.5 }, signal())).isError, true, "a name Kumi never gave is refused like any unknown reference");
   } finally { await b.integration.close(); }
 });
 
@@ -278,7 +293,7 @@ test("make_changes runs a whole plan in one call, later steps using what earlier
     assert.equal(result.isError, false, result.text);
     const body = JSON.parse(result.text) as { done: { step: number; changed: string; ref?: string }[] };
     assert.deepEqual(body.done.map((step) => step.step), [1, 2, 3]);
-    assert.equal(body.done[0]!.ref, "7:track:2", "the new track's ref comes back");
+    assert.equal(body.done[0]!.ref, "track:3", "the new track's ref comes back, by its short name");
     const insert = b.requests.find((request) => request.name === "live_device_preview")!;
     assert.equal(insert.args.trackRef, "7:track:2", "@kick became the track the first step made");
     assert.match(String(insert.args.filePath), /Kick [AB]\.wav$/, "Kumi picked a sample itself, no search first");
@@ -311,7 +326,7 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     assert.equal(result.isError, false, result.text);
     const done = (JSON.parse(result.text) as { done: { step: number; ref?: string }[] }).done;
     assert.deepEqual(done.map((step) => step.step), [1, 2, 3, 4, 5], "the each step became three");
-    assert.equal(done[1]!.ref, "7:device:2:0", "the rack Live loaded");
+    assert.equal(done[1]!.ref, "device:1", "the rack Live loaded");
     const pads = b.requests.filter((request) => request.name === "live_drum_pad_preview").map((request) => request.args);
     assert.deepEqual(pads.map((args) => [args.deviceRef, args.note]), [["7:device:2:0", 36], ["7:device:2:0", 37], ["7:device:2:0", 38]]);
     assert.equal(new Set(pads.map((args) => args.filePath)).size, 3, "three different samples");
@@ -319,6 +334,19 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("each takes several lists of one length together: the same change on several tracks in one step", async () => {
+  const b = await opened();
+  try {
+    const plan = tool(b.tools, "make_changes");
+    const result = await plan.execute({ steps: [{ tool: "set_mixer", input: { pan: 0 }, each: { trackRef: ["track:1", "track:2"], volume: [0.6, 0.5] } }] }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.deepEqual(b.requests.filter((request) => request.name === "live_mixer_preview").map((request) => [request.args.trackRef, request.args.volume, request.args.pan]), [["7:track:0", 0.6, 0], ["7:track:1", 0.5, 0]]);
+    const uneven = await plan.execute({ steps: [{ tool: "set_mixer", input: {}, each: { trackRef: ["track:1", "track:2"], volume: [0.6] } }] }, signal());
+    assert.equal(uneven.isError, true); assert.match(uneven.text, /lists of one length/);
+    assert.equal(b.requests.filter((request) => request.name === "live_mixer_preview").length, 2, "an uneven step changes nothing");
+  } finally { await b.integration.close(); }
 });
 
 test("make_changes with final answers for the model when every step is done, and not when one fails", async () => {
