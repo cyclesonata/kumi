@@ -20,6 +20,7 @@ to be dependable.
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
 | `load_sample` | A sample `find_samples` returned, in a new Simpler on an empty MIDI track | `live_device_*` (insert with a sample) |
+| `load_sample_to_pad` | A sample `find_samples` returned, on an empty pad of a Drum Rack; undo clears the pad | `live_drum_pad_*` (load-sample) |
 | `undo_change` | Undo one of these changes, or the latest | `live_undo` |
 
 Reads for planning a change: `live_discover`, `live_snapshot`,
@@ -32,10 +33,17 @@ samples (User Library, Core Library, Factory Packs).
 searched as the file's allowed root. The bridge verifies the file and gives Live
 a copy kept under the original file's name. The new Simpler arrives with its
 sample in one step, so undo takes both away. For "make me a drum kit with random
-samples", Kumi adds a MIDI track per sound and loads each one there.
+samples", Kumi adds a MIDI track, loads a Drum Rack onto it and puts a sample
+on each pad from C1 up; without a Drum Rack, a MIDI track per sound.
 
-Not yet: one Drum Rack with a sample on each pad. The bridge can't yet add
-Drum Rack chains with an undo.
+Live's scripting API has no single call for putting a sample on a pad. The
+Remote Script has the Browser load Simpler into the pad as its hot-swap target,
+as Push does, and then gives that Simpler the sample. Before loading anything
+it checks that Live really took the pad as the target, since otherwise the
+load would land on the selected track. If that route fails, it adds a chain to
+the rack and points it at the pad's note. On Live 12.4 the first route works.
+`load_sample_to_pad` is offered even before the Set has a Drum Rack, because an
+earlier step of the same answer usually loads one.
 
 Not yet: playback and recording, deleting things, saving, files, audio capture
 and listening. The model is told so and says so plainly.

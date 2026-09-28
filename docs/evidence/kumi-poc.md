@@ -464,6 +464,27 @@ name with its waveform. Two things had to be fixed on the way:
 
 Search itself takes about 100 ms over the 6,000 files of Live's Core Library.
 
+### A Drum Rack of random samples
+
+With bridge 1.0.19 (UTC `2026-09-28T17:14Z`), the producer's own words, "create a
+drum rack and load it with 8 totally random samples", went end to end in 72 s:
+- The model added a MIDI track ("Random 8") and loaded a Drum Rack onto it.
+- It put eight random samples on pads C1 to G1: "Snare Lot 4", "Tom 909 Hi K",
+  "Hihat Closed Wrinkled" and five more.
+- It answered with a table of pads, samples and lengths.
+
+All ten changes were undone. Each pad load took about 1 s, through the Browser
+loading Simpler into the pad as its hot-swap target.
+
+Two things came up on the way:
+- The first try loaded a kick onto pad C1, but then every snapshot failed with
+  "device hierarchy is cyclic or identity-ambiguous". Live lists a Drum Rack's
+  chains on the rack and on their pads. That had kept the bridge from reading
+  any Set with a loaded Drum Rack, which most real projects have. Fixed in
+  bridge 1.0.19.
+- Kumi first answered that it couldn't fill Drum Rack pads. It couldn't, until
+  `load_sample_to_pad`.
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change
