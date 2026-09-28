@@ -914,6 +914,8 @@ class LiveObjectMapper:
             return any(self._read_attr(pad, "note") is not None or self._read_attr(pad, "solo") is not None for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
         if operation == "drum-pad.delete-all-chains":
             return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
+        if operation == "drum-pad.load-sample":
+            return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
         if operation == "rack.set":
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
         if operation == "rack.action":
@@ -2469,6 +2471,8 @@ class LiveObjectMapper:
             return self._drum_pad_set(args)
         if operation == "drum-pad.delete-all-chains":
             return self._drum_pad_delete_all_chains(args)
+        if operation == "drum-pad.load-sample":
+            return self._drum_pad_load_sample(args)
         if operation == "rack.set":
             return self._rack_set(args)
         if operation == "rack.action":
@@ -5559,6 +5563,99 @@ class LiveObjectMapper:
         remaining = self._items(self._read_attr(pad, "chains") or [])
         if remaining: raise ValueError("delete-all-chains was not confirmed")
         return {"deleted": len(chains_before)}
+
+    def _drum_pad_load_sample(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A Simpler with a sample on one empty Drum Rack pad, as one change: undo clears the pad.
+
+        Live's scripting API has no single call for this, so two routes are tried: the Browser
+        loading Simpler into the pad as its hot-swap target (as Push does), then a chain added to
+        the rack and pointed at the pad's note. A pad that doesn't end up with exactly the new
+        chain is cleared again; what each route did is in the error.
+        """
+        reference = args.get("ref"); sample_path = args.get("samplePath"); name = args.get("name")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:drum_pad:") or set(args) - {"ref", "expectedObjectIdentity", "samplePath", "name"}: raise ValueError("drum pad authority is invalid")
+        if not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha())): raise ValueError("samplePath must be an absolute path")
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("drum pad chain name is invalid")
+        pad = self.refs.get(reference)
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(pad), args["expectedObjectIdentity"]): raise ValueError("drum pad identity changed since preview")
+        if self._items(self._read_attr(pad, "chains") or []): raise ValueError("drum pad already has a sound; choose an empty pad")
+        rack = self._read_attr(pad, "canonical_parent"); note = self._read_attr(pad, "note")
+        if rack is None or not isinstance(note, int) or isinstance(note, bool): raise ValueError("drum pad has no rack or note")
+        tried: list[str] = []
+        def pad_chains() -> list[Any]: return self._items(self._read_attr(pad, "chains") or [])
+        def clear_pad() -> None:
+            deleter = getattr(pad, "delete_all_chains", None)
+            if callable(deleter) and pad_chains(): deleter()
+        chain = None; route = None
+        # Route 1: the Browser loads Simpler into the pad, set as its hot-swap target.
+        try:
+            browser = self._browser()
+            simpler_item = next((item for item in self._items(self._read_attr(self._read_attr(browser, "instruments"), "children") or []) if str(self._read_attr(item, "name") or "") == "Simpler"), None)
+            if simpler_item is None: tried.append("browser: no Simpler among the instruments")
+            else:
+                targeted = False
+                try:
+                    browser.hotswap_target = pad
+                    # Only with the pad confirmed as the target: otherwise Live would load onto the selected track.
+                    target = self._read_attr(browser, "hotswap_target")
+                    targeted = target is not None and self._capture_object_identity(target) == self._capture_object_identity(pad)
+                    if targeted: browser.load_item(simpler_item)
+                finally:
+                    try: browser.hotswap_target = None
+                    except BaseException: pass
+                if not targeted: tried.append("browser: the pad can't be a hot-swap target")
+                else:
+                    chains = pad_chains()
+                    if len(chains) == 1: chain, route = chains[0], "hotswap"
+                    else: tried.append(f"browser: the pad has {len(chains)} chains"); clear_pad()
+        except BaseException as error:
+            tried.append(f"browser: {type(error).__name__}: {str(error)[:80]}")
+            try: clear_pad()
+            except BaseException: pass
+        # Route 2: a chain added to the rack and pointed at this pad's note.
+        if chain is None:
+            inserter = getattr(rack, "insert_chain", None)
+            if not callable(inserter): tried.append("chain: the rack can't add chains")
+            else:
+                before = {self._capture_object_identity(item) for item in self._items(self._read_attr(rack, "chains") or [])}
+                try:
+                    try: inserter(len(before))
+                    except TypeError: inserter()
+                    created = [item for item in self._items(self._read_attr(rack, "chains") or []) if self._capture_object_identity(item) not in before]
+                    if len(created) != 1: tried.append(f"chain: adding made {len(created)} chains")
+                    else:
+                        candidate = created[0]; landed = self._read_attr(candidate, "in_note")
+                        if landed != note: candidate.in_note = note
+                        if any(self._capture_object_identity(item) == self._capture_object_identity(candidate) for item in pad_chains()): chain, route = candidate, "chain"
+                        else: tried.append(f"chain: landed on note {landed}, now {self._read_attr(candidate, 'in_note')}, not this pad's {note}")
+                except BaseException as error:
+                    tried.append(f"chain: {type(error).__name__}: {str(error)[:80]}")
+                if chain is None:
+                    # Nothing half-made stays: a stray chain is removed from whichever pad it reached, if it's alone there.
+                    for other in self._items(self._read_attr(rack, "drum_pads") or []):
+                        others = self._items(self._read_attr(other, "chains") or [])
+                        if len(others) == 1 and self._capture_object_identity(others[0]) not in before and callable(getattr(other, "delete_all_chains", None)): other.delete_all_chains()
+        if chain is None: raise ValueError("drum pad load failed: " + "; ".join(tried))
+        try:
+            devices = self._items(self._read_attr(chain, "devices") or [])
+            if not devices:
+                inserter = getattr(chain, "insert_device", None)
+                if not callable(inserter): raise ValueError("drum pad chain can't take a device")
+                inserter("Simpler", 0); devices = self._items(self._read_attr(chain, "devices") or [])
+            if len(devices) != 1: raise ValueError(f"drum pad chain has {len(devices)} devices")
+            simpler = devices[0]
+            replacer = getattr(simpler, "replace_sample", None)
+            if not callable(replacer): raise ValueError("drum pad device can't take a sample")
+            replacer(sample_path)
+            loaded = self._read_attr(self._read_attr(simpler, "sample"), "file_path")
+            if not isinstance(loaded, str) or not loaded: raise ValueError("the sample did not load")
+            if name is not None:
+                try: chain.name = name
+                except BaseException: pass
+        except BaseException:
+            clear_pad(); raise
+        self.refs.touch(reference)
+        return {"ref": reference, "objectIdentity": self._capture_object_identity(pad), "chainIdentity": self._capture_object_identity(chain), "deviceIdentity": self._capture_object_identity(simpler), "samplePath": loaded, "route": route, "tried": tried}
 
     def _rack_state(self, device: Any) -> dict[str, Any]:
         visible = self._read_attr(device, "visible_macro_count"); selected = self._read_attr(device, "selected_variation_index")

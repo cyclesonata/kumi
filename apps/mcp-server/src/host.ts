@@ -413,7 +413,7 @@ export class McpHost {
   private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
   private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
-    if (value.kind === "device" && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
+    if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
   private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
@@ -3713,7 +3713,7 @@ export class McpHost {
 
   private releaseStagedImportFor(transaction: ClipLifecycleTransaction | undefined): void {
     if (transaction && (transaction.kind === "session-audio-create" || transaction.kind === "simpler")) this.releaseStagedImportFile(transaction.payload?.filePath);
-    if (transaction?.kind === "device") this.releaseStagedImportFile(transaction.payload?.samplePath);
+    if (transaction?.kind === "device" || transaction?.kind === "drum-pad") this.releaseStagedImportFile(transaction.payload?.samplePath);
   }
 
   private clipAuthorityDigest(snapshot: LiveSnapshot, clipRef: LiveRef): string {
@@ -5788,13 +5788,18 @@ export class McpHost {
   }
 
   private async liveDrumPadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo"]) || !isNonEmptyString(params.padRef, 256)) return error(id, -32602, "action and padRef are required");
-    if (params.action !== "set" && params.action !== "delete-all-chains") return error(id, -32602, "action must be set or delete-all-chains");
+    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo", "deviceRef", "filePath", "allowedRoot"])) return error(id, -32602, "action and padRef are required");
+    if (params.action !== "set" && params.action !== "delete-all-chains" && params.action !== "load-sample") return error(id, -32602, "action must be set, delete-all-chains or load-sample");
+    // Loading a sample names the Drum Rack and the pad's note; the other actions name the pad.
+    const loading = params.action === "load-sample";
+    if (loading ? !isNonEmptyString(params.deviceRef, 256) || !Number.isInteger(params.note) || (params.note as number) < 0 || (params.note as number) > 127 : !isNonEmptyString(params.padRef, 256)) return error(id, -32602, loading ? "deviceRef and note (0-127) are required to load a sample" : "action and padRef are required");
+    if (!loading && (params.deviceRef !== undefined || params.filePath !== undefined || params.allowedRoot !== undefined)) return error(id, -32602, "deviceRef and a sample file go only with load-sample");
+    let stagingPath: string | undefined;
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.asyncAdapter().snapshotAsync();
-      const pad = this.drumPadRow(snapshot, params.padRef as LiveRef);
+      const pad = loading ? this.drumRackPad(snapshot, params.deviceRef as LiveRef, params.note as number) : this.drumPadRow(snapshot, params.padRef as LiveRef);
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown> = {};
       if (params.action === "set") {
@@ -5806,17 +5811,36 @@ export class McpHost {
         const state = { note: pad.note ?? null, solo: pad.solo ?? null };
         prior = { ...state };
         payload = { action: params.action, ref: params.padRef, ...proposed, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
+      } else if (loading) {
+        if (!(status.operations ?? []).includes("drum-pad.load-sample")) throw new Error("drum pad sample loading is unavailable");
+        if (((pad.chains as unknown[]) ?? []).length) throw new Error("drum pad already has a sound; choose an empty pad");
+        // The same file authority and verified copy as an audio import.
+        const file = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
+        stagingPath = await this.stageVerifiedImportFile(file.canonicalPath, file);
+        prior = { file, chainCount: 0 };
+        payload = { action: params.action, ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath: stagingPath, name: basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256) };
       } else {
         if (!(status.operations ?? []).includes("drum-pad.delete-all-chains")) throw new Error("delete-all-chains is unavailable");
         const chains = ((pad.chains as unknown[]) ?? []).filter(isObject).map((chain) => chain.objectIdentity);
         prior = { chainCount: chains.length };
         payload = { action: params.action, ref: params.padRef, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(chains)).digest("hex") };
       }
-      const fence = JSON.stringify({ action: params.action, ref: params.padRef, objectIdentity: pad.objectIdentity, payload });
+      const fence = JSON.stringify({ action: params.action, ref: pad.ref, objectIdentity: pad.objectIdentity, payload });
       const transaction: ClipLifecycleTransaction = { id: `drumpad_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "drum-pad", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "drum pad");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, padRef: params.padRef, prior, impact: params.action === "set" ? "edits-drum-pad" : "deletes-all-pad-chains-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state."); }
+      stagingPath = undefined;
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, padRef: pad.ref, note: pad.note ?? null, ...(loading ? { sample: { path: (prior.file as { canonicalPath: string }).canonicalPath } } : { prior }), impact: params.action === "set" ? "edits-drum-pad" : loading ? "loads-a-sample-onto-an-empty-drum-pad" : "deletes-all-pad-chains-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) { this.releaseStagedImportFile(stagingPath); return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state."); }
+  }
+
+  /** The visible pad of a Drum Rack that plays `note` (C1–D#2, 36–51, on a new rack). */
+  private drumRackPad(snapshot: LiveSnapshot, deviceRef: LiveRef, note: number): JsonObject {
+    const { device } = this.deviceRow(snapshot, deviceRef);
+    const pads = (device as unknown as { drumPads?: JsonObject[] }).drumPads ?? [];
+    if (!pads.length) throw new Error("drum pad loading needs a Drum Rack");
+    const pad = pads.find((item) => item.note === note);
+    if (!pad || !isNonEmptyString(pad.ref, 256)) throw new Error(`drum pad note ${note} isn't among the rack's visible pads`);
+    return pad;
   }
 
   private async liveDrumPadApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -5834,9 +5858,23 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
+      if (action === "load-sample" && !reconciliation) {
+        const current = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        if (current.objectIdentity !== transaction.payload.expectedObjectIdentity || ((current.chains as unknown[]) ?? []).length !== 0) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "drum pad changed since preview; preview again"); }
+        const file = (transaction.prior as { file?: { size: number; sha256: string } } | undefined)?.file;
+        if (!file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
+        await this.verifyStagedImportFile(transaction.payload.samplePath as string, file);
+      }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
-      if (action === "set") {
+      if (action === "load-sample") {
+        const result = await adapter.invokeAsync({ operation: "drum-pad.load-sample", args }, context) as JsonObject;
+        if (!isNonEmptyString(result.chainIdentity, 256) || !isNonEmptyString(result.deviceIdentity, 256)) throw new Error("drum pad sample load did not return exact identities");
+        const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const chains = (verified.chains as JsonObject[] | undefined) ?? [];
+        if (chains.length !== 1 || chains[0]!.objectIdentity !== result.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
+        transaction.created = result;
+      } else if (action === "set") {
         const result = await adapter.invokeAsync({ operation: "drum-pad.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("drum pad change was not confirmed");
         const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
@@ -5849,7 +5887,7 @@ export class McpHost {
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", ...(transaction.created ? { result: transaction.created } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Drum-pad state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -7698,6 +7736,17 @@ export class McpHost {
         this.beginUndoRecovery(drumpad, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== drumpad.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const pad = this.drumPadRow(snapshot, drumpad.payload.ref as LiveRef);
+        if (drumpad.payload.action === "load-sample") {
+          const created = drumpad.created as { chainIdentity?: string; deviceIdentity?: string } | undefined;
+          const chains = (pad.chains as JsonObject[] | undefined) ?? [];
+          const devices = (chains[0]?.devices as JsonObject[] | undefined) ?? [];
+          if (!reconciliation && (chains.length !== 1 || chains[0]!.objectIdentity !== created?.chainIdentity || devices.length !== 1 || devices[0]!.objectIdentity !== created?.deviceIdentity)) return this.transactionError(id, "drum pad changed after the sample loaded; undo refused");
+          drumpad.state = "undoing";
+          const cleared = await this.invokeUndoRecovery(drumpad, adapter, "drum-pad.delete-all-chains", { ref: drumpad.payload.ref, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(chains.map((chain) => chain.objectIdentity))).digest("hex") }, context) as { deleted?: unknown };
+          if (typeof cleared.deleted !== "number") throw new Error("drum pad clearing was not confirmed");
+          this.releaseStagedImportFor(drumpad);
+          drumpad.state = "undone"; return this.successText(id, { transactionId: drumpad.id, state: "undone", idempotent: false });
+        }
         if (!reconciliation) { if (drumpad.payload.solo !== undefined && pad.solo !== drumpad.payload.solo) return this.transactionError(id, "drum pad changed after apply; undo refused"); }
         const state = { note: pad.note ?? null, solo: pad.solo ?? null };
         drumpad.state = "undoing";
@@ -8627,7 +8676,7 @@ export class McpHost {
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
     // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

@@ -616,7 +616,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "bb53852c945e801e2f546f69bfe0eb23227b023778ae02ee0628b73490aff899")
+        self.assertEqual(digest, "303695907f72f6676a47d3cf19934a61276830a656a7f32e879ceadd64308628")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -4287,6 +4287,55 @@ class RackMacroDrumPadTests(unittest.TestCase):
         chains_revision = hashlib.sha256(mapper._bounded_canonical([mapper._capture_object_identity(chain) for chain in pad.chains]).encode()).hexdigest()
         result = mapper.invoke("drum-pad.delete-all-chains", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": chains_revision})
         self.assertEqual(result, {"deleted": 2}); self.assertEqual(pad.chains, [])
+
+    def test_a_sample_goes_onto_an_empty_drum_pad_by_either_route_and_nothing_half_made_stays(self):
+        def simpler():
+            device = type("InsertedDevice", (), {"name": "Simpler", "class_name": "OriginalSimpler", "enabled": True, "parameters": [], "sample": None})()
+            device.replace_sample = lambda path: setattr(device, "sample", type("Sample", (), {"file_path": path})())
+            return device
+        def kit(route):
+            """A Drum Rack whose pads show the chains playing their note, as in Live."""
+            song = FakeSong(); rack = FakeDevice(); rack.name = "Drum Rack"; rack.can_have_chains = True; rack.can_have_drum_pads = True; rack.chains = []
+            def new_chain(in_note):
+                chain = type("DrumChain", (), {"name": "Chain", "in_note": in_note, "devices": []})()
+                chain.insert_device = lambda name, index: chain.devices.insert(index, simpler())
+                rack.chains.append(chain); return chain
+            pads = []
+            for note in (36, 37, 38):
+                pad = type("DrumPad", (), {"name": "Pad", "mute": False, "note": note, "solo": False, "canonical_parent": rack})()
+                type(pad).chains = property(lambda self: [chain for chain in rack.chains if chain.in_note == self.note])
+                pad.delete_all_chains = (lambda self: rack.chains.__setitem__(slice(None), [chain for chain in rack.chains if chain.in_note != self.note])).__get__(pad)
+                pads.append(pad)
+            rack.drum_pads = pads
+            if route in ("chain", "stray"): rack.insert_chain = lambda index=None: new_chain(36)
+            song.tracks[0].devices = [rack]
+            browser = type("Browser", (), {"instruments": type("Root", (), {"children": [type("Item", (), {"name": "Simpler", "is_device": True})()]})(), "hotswap_target": None})()
+            browser.load_item = lambda item: new_chain(browser.hotswap_target.note).devices.append(simpler())
+            if route != "hotswap": type(browser).hotswap_target = property(lambda self: None, lambda self, value: None)
+            return song, rack, pads, browser
+        for route in ("hotswap", "chain"):
+            song, rack, pads, browser = kit(route); mapper = LiveObjectMapper(song)
+            row = mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"][2]
+            with patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+                self.assertTrue(mapper._operation_supported("drum-pad.load-sample"))
+                result = mapper.invoke("drum-pad.load-sample", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": "/Samples/Snare.wav", "name": "Snare"})
+            validate_operation_payload("drum-pad.load-sample", "result", result)
+            self.assertEqual(result["route"], route); self.assertEqual(result["samplePath"], "/Samples/Snare.wav")
+            self.assertEqual(len(pads[2].chains), 1); self.assertEqual(pads[2].chains[0].name, "Snare"); self.assertEqual(pads[2].chains[0].devices[0].sample.file_path, "/Samples/Snare.wav")
+            self.assertEqual([len(pad.chains) for pad in pads[:2]], [0, 0], "no other pad changes")
+            with self.assertRaisesRegex(ValueError, "already has a sound"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+                mapper.invoke("drum-pad.load-sample", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": "/Samples/Other.wav"})
+        # Neither route: the chain lands on another pad and can't be moved. It's removed again and the error says what happened.
+        song, rack, pads, browser = kit("stray"); mapper = LiveObjectMapper(song)
+        def stuck(self, value): raise AttributeError("in_note is read-only")
+        row = mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"][2]
+        original = rack.insert_chain
+        def insert_stuck(index=None):
+            chain = original(index); type(chain).in_note = property(lambda self: 36, stuck); return chain
+        rack.insert_chain = insert_stuck
+        with self.assertRaisesRegex(ValueError, r"drum pad load failed: browser: the pad can't be a hot-swap target; chain: AttributeError"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+            mapper.invoke("drum-pad.load-sample", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": "/Samples/Snare.wav"})
+        self.assertEqual(rack.chains, [], "the stray chain on the first pad is gone")
 
     def test_rack_rows_actions_and_view(self):
         song = FakeSong()

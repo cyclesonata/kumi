@@ -37,6 +37,12 @@ export interface ChangeKind {
   inputSchema?: JsonObject;
   /** Turn the model's input into the preview's; a string refuses, in words for the model. */
   prepare?(input: JsonObject, context: ChangeContext): JsonObject | string;
+  /**
+   * Offered even while the bridge doesn't advertise it, for changes whose target an earlier step
+   * of the same answer creates (a Drum Rack's pads). `unavailable` says what to do first.
+   */
+  always?: boolean;
+  unavailable?: string;
   /** `applied` is the bridge's apply result, when there is one: it can carry Live's own text for the new values. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary;
 }
@@ -47,6 +53,8 @@ const label = (value: unknown): string | undefined => (typeof value === "string"
 const quoted = (value: unknown, fallback: string) => { const text = label(value); return text ? `“${text}”` : fallback; };
 export const formatNumber = (value: number, digits = 2) => String(Number(value.toFixed(digits)));
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+/** A MIDI note as Live names it: 36 is C1, 60 is C3. */
+export const noteName = (note: number) => `${["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][note % 12]}${Math.floor(note / 12) - 2}`;
 /** Live's 0xRRGGBB colours as "#rrggbb". */
 export const hexColor = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF ? `#${value.toString(16).padStart(6, "0")}` : undefined);
 
@@ -165,6 +173,24 @@ export const CHANGES: readonly ChangeKind[] = [
       const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
       const known = track(input.trackRef);
       return { title: `Loaded ${quoted(file, "a sample")} into a new Simpler${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };
+    },
+  },
+  {
+    tool: "load_sample_to_pad", preview: "live_drum_pad_preview", apply: "live_drum_pad_apply", family: "device", always: true,
+    unavailable: "There's no Drum Rack in the Set yet: load one with load_device first (search the Browser for \"Drum Rack\"), then its pads can take samples.",
+    description: "Load a sample onto an empty pad of a Drum Rack, as a new Simpler on that pad; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is a path find_samples returned.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "note", "sample"], properties: {
+      deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127, description: "The pad: 36 is C1, the first pad" },
+      sample: { type: "string", minLength: 1, maxLength: 1024, description: "A path find_samples returned" } } },
+    prepare(input, context) {
+      const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
+      if (!found) return "Load a sample find_samples returned in this conversation; search for it first.";
+      return { action: "load-sample", deviceRef: input.deviceRef ?? null, note: input.note ?? null, filePath: found.path, allowedRoot: found.folder };
+    },
+    summarize(preview, input) {
+      const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
+      const note = number(preview.note ?? input.note);
+      return { title: `Loaded ${quoted(file, "a sample")} onto Drum Rack pad ${note !== undefined ? noteName(note) : ""}`.trimEnd() };
     },
   },
   {

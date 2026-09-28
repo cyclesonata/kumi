@@ -441,7 +441,7 @@ export function createAbletonIntegration(options: Options): Integration {
       signal.throwIfAborted();
       if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new before changing anything");
       await ensureCatalog(signal); assertLease(lease, signal);
-      if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError("That change isn't available for the open Set right now");
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
       requireFreshReferences(input);
       const prepared = kind.prepare ? kind.prepare(input, { sample: (path) => samples.get(path) }) : input;
@@ -548,7 +548,8 @@ export function createAbletonIntegration(options: Options): Integration {
   function definitions(): KernelTool[] {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
       execute: (input, signal) => invoke(tool.name, input, signal) }));
-    const edits: KernelTool[] = CHANGES.filter((kind) => tools!.has(kind.preview) && tools!.has(kind.apply)).map((kind) => ({
+    // A change whose target an earlier step can create is offered by any bridge that makes changes (has undo).
+    const edits: KernelTool[] = CHANGES.filter((kind) => (kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply))).map((kind) => ({
       name: kind.tool, description: kind.description,
       inputSchema: kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
       execute: (input, signal) => change(kind, input, signal) }));

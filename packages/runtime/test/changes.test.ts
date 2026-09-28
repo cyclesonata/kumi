@@ -23,7 +23,9 @@ function bridge() {
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo",
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
-    "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply"];
+    "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply"];
+  // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
+  let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
     ? { type: "object", properties: { tracks: { type: "array", items: { type: "object", properties: { name: { type: "string" }, kind: { type: "string" }, index: { type: "integer", description: "request order" } } } }, scenes: { type: "array" } } }
     : { type: "object", properties: {}, additionalProperties: true } }));
@@ -34,7 +36,7 @@ function bridge() {
   let transactions = 0;
   const endpoint: McpEndpoint = {
     pid: null, serverInfo: { name: "kumi-synthetic-bridge", version: "1" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
-    async list() { return { tools: catalog }; },
+    async list() { return { tools: catalog.filter((tool) => drumRack || !tool.name.startsWith("live_drum_pad_")) }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
       if (name === "live_status") return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null });
@@ -53,6 +55,7 @@ function bridge() {
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
         if (name === "live_track_properties_preview") return wrap({ ...base, ref: args.ref, prior: { colorIndex: 4 }, proposed: { colorIndex: args.colorIndex } });
         if (name === "live_device_preview") return wrap({ ...base, action: args.action, payload: { trackRef: args.trackRef, deviceName: args.deviceName }, sample: { path: args.filePath, size: 18 } });
+        if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: "7:drum_pad:0:0:0", note: args.note, sample: { path: args.filePath } });
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
         return wrap({ ...base, prior: { tracks: tracks.map((track, index) => ({ ref: `7:track:${index}`, name: track.name, index })), scenes: [] }, proposed });
       }
@@ -70,6 +73,7 @@ function bridge() {
           return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
         }
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
+        if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:drum_pad:0:0:0", route: "chain", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_device_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:device:0:0", objectIdentity: "device-identity", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_track_properties_preview") {
           const track = tracks[Number(String(transaction.args.ref).split(":").at(-1))]!;
@@ -99,6 +103,7 @@ function bridge() {
     refuseUndo: (text: string) => { undoRefusal = text; },
     /** The bridge re-negotiates its tools after content changes and says so. */
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
+    addDrumRack: () => { drumRack = true; for (const listener of catalogListeners) listener(); },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     holdApply: () => {
       let sent!: () => void; let release!: () => void;
@@ -222,6 +227,26 @@ test("load_sample puts a sample find_samples returned into a new Simpler, as one
     assert.equal((await b.integration.undo!(change.id, signal())).state, "undone");
     const schema = b.tools.find((item) => item.name === "load_sample")!.inputSchema as { required: string[] };
     assert.deepEqual(schema.required, ["trackRef", "sample"], "the model names a track and a found sample, nothing about files or roots");
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("load_sample_to_pad is offered before the Set has a Drum Rack, says what to do first, then loads onto the pad", async () => {
+  const b = await opened();
+  const folder = mkdtempSync(join(tmpdir(), "kumi-pad-"));
+  try {
+    writeFileSync(join(folder, "Kick Deep.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    assert.ok(b.tools.some((item) => item.name === "load_sample_to_pad"), "offered although the bridge doesn't advertise pads yet");
+    await tool(b.tools, "find_samples").execute({ folders: [folder] }, signal());
+    await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
+    const early = await tool(b.tools, "load_sample_to_pad").execute({ deviceRef: "7:track:0", note: 36, sample: join(folder, "Kick Deep.wav") }, signal());
+    assert.equal(early.isError, true); assert.match(early.text, /load one with load_device first/);
+    b.addDrumRack();
+    const result = await tool(b.tools, "load_sample_to_pad").execute({ deviceRef: "7:track:0", note: 36, sample: join(folder, "Kick Deep.wav") }, signal());
+    assert.equal(result.isError, false, result.text);
+    const preview = b.requests.find((request) => request.name === "live_drum_pad_preview")!;
+    assert.deepEqual(preview.args, { action: "load-sample", deviceRef: "7:track:0", note: 36, filePath: join(folder, "Kick Deep.wav"), allowedRoot: folder });
+    assert.equal(b.records.at(-1)!.title, "Loaded “Kick Deep” onto Drum Rack pad C1");
+    assert.equal((await b.integration.undo!(b.records.at(-1)!.id, signal())).state, "undone");
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 

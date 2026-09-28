@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "bb53852c945e801e2f546f69bfe0eb23227b023778ae02ee0628b73490aff899",
-  "operationCount": 156,
+  "registryHash": "303695907f72f6676a47d3cf19934a61276830a656a7f32e879ceadd64308628",
+  "operationCount": 157,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -875,6 +875,13 @@
           "status": "executable-negotiated",
           "access": [
             "write"
+          ]
+        },
+        {
+          "id": "drum-pad.load-sample",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
           ]
         },
         {

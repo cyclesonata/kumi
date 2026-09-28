@@ -4688,6 +4688,99 @@
    }
   },
   {
+   "id": "drum-pad.load-sample",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "samplePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+     }
+    },
+    "required": [
+     "ref",
+     "expectedObjectIdentity",
+     "samplePath"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "objectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "chainIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "deviceIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "samplePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+     },
+     "route": {
+      "type": "string",
+      "enum": [
+       "hotswap",
+       "chain"
+      ]
+     },
+     "tried": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+       "type": "string",
+       "maxLength": 256
+      }
+     }
+    },
+    "required": [
+     "ref",
+     "objectIdentity",
+     "chainIdentity",
+     "deviceIdentity",
+     "samplePath",
+     "route",
+     "tried"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "drum-pad.set",
    "method": "invoke",
    "request": {

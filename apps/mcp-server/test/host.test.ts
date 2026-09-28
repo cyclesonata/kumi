@@ -1752,6 +1752,38 @@ test("a new Simpler can arrive with its sample in one change, named as the file 
   assert.equal(existsSync(staged), false); assert.equal(readdirSync((host as any).importStagingDir).length, 0, "and so does the staged copy, with Live's analysis file and its folder");
 });
 
+test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clears the pad again", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const dir = mkdtempSync(join(tmpdir(), "pad-samples-"));
+  const samplePath = join(dir, "Snare 808.wav");
+  writeFileSync(samplePath, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from("fake-audio-bytes")]));
+  const rackPreview = JSON.parse(((await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" })) as any).result.content[0].text);
+  const rack = JSON.parse(((await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "drum-rack" })) as any).result.content[0].text).result;
+  const preview = JSON.parse(((await call(13, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: samplePath, allowedRoot: dir })) as any).result.content[0].text);
+  assert.equal(preview.note, 38); assert.equal(preview.sample.path, realpathSync(samplePath));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.samplePath as string;
+  assert.equal(basename(staged), "Snare 808.wav");
+  const applied = JSON.parse(((await call(14, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "pad-sample" })) as any).result.content[0].text);
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.samplePath, staged);
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  const pad = pads().find((item: any) => item.note === 38);
+  assert.equal(pad.chains.length, 1); assert.equal(pad.chains[0].name, "Snare 808"); assert.equal(pad.chains[0].devices[0].samplePath, staged);
+  const occupied = await call(15, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: samplePath, allowedRoot: dir });
+  assert.match(JSON.parse((occupied as any).result.content[0].text).reason, /already has a sound/);
+  const hidden = await call(16, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 90, filePath: samplePath, allowedRoot: dir });
+  assert.match(JSON.parse((hidden as any).result.content[0].text).reason, /visible pads/);
+  const undone = JSON.parse(((await call(17, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "pad-sample-undo" })) as any).result.content[0].text);
+  assert.equal(undone.state, "undone");
+  assert.equal(pads().find((item: any) => item.note === 38).chains.length, 0, "the pad is empty again");
+  assert.equal(existsSync(staged), false);
+  const other = pads().find((item: any) => item.note === 36);
+  assert.equal(other.chains.length, 0, "no other pad changed");
+});
+
 test("an inserted device someone changed afterwards isn't removed by undo", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
