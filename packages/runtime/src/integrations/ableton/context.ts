@@ -55,7 +55,7 @@ export const FIELDS: Record<string, string[]> = {
   track: [...BASICS, "kind", "mediaKind", "armed", "monitoringState", "playingSlotIndex", "firedSlotIndex", "isSelected", "color"],
   "return-track": [...BASICS, "kind", "mediaKind", "color"], "main-track": [...BASICS, "kind", "mediaKind", "color"],
   scene: [...BASICS, "index"], locator: [...BASICS, "position"],
-  device: [...BASICS, "kind", "className", "enabled", "canHaveChains"],
+  device: [...BASICS, "kind", "className", "enabled", "canHaveChains", "chainList"],
   parameter: [...BASICS, "value", "min", "max", "displayValue", "enabled", "automatable"],
   "clip-slot": [...BASICS, "sceneIndex", "empty", "clipRef"],
   "session-clip": [...BASICS, "kind", "start", "length"], "arrangement-clip": [...BASICS, "kind", "start", "length"],
@@ -66,7 +66,8 @@ export const FIELDS: Record<string, string[]> = {
 };
 const TRACKS = ["track", "return-track", "main-track"];
 export const PARENTS: Record<string, string[]> = {
-  device: [...TRACKS, "device"], parameter: ["device"], "clip-slot": TRACKS,
+  // A rack's chain holds devices too: they name the chain as their parent.
+  device: [...TRACKS, "device", "chain"], parameter: ["device"], "clip-slot": TRACKS,
   "session-clip": ["clip-slot"], "arrangement-clip": TRACKS, note: ["session-clip", "arrangement-clip"], "routing-choice": TRACKS,
 };
 export function discoveryArgs(input: JsonObject): JsonObject {

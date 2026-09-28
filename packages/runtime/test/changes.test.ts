@@ -54,7 +54,8 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean; racks?: b
             { ref: "7:device:0:1", parentRef: "7:track:0", name: "Reverb", className: "Reverb" }]
           : args.kind === "device" && options.parameters ? [{ ref: "7:device:0:0", parentRef: "7:track:0", name: "Operator", className: "Operator" }]
           : args.kind === "parameter" && options.parameters ? ["Osc-A Level", "Filter Freq", "Ae Release"].map((name, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name, value: 0, min: 0, max: 1 })) : [];
-        return wrap({ epoch: 7, kind: args.kind, items, revision: "r1", truncated: false });
+        // Like the bridge, a parent narrows the rows to those it holds.
+        return wrap({ epoch: 7, kind: args.kind, items: args.parent === undefined ? items : (items as JsonObject[]).filter((item) => item.parentRef === args.parent), revision: "r1", truncated: false });
       }
       if (name.endsWith("_preview")) {
         const id = `tx${++transactions}`;
@@ -383,6 +384,11 @@ test("racks: the observation shows chains with their devices; a plan adds a chai
     assert.equal(load!.devices?.index, 0); assert.equal(load!.devices?.chain, 2);
     assert.equal(mixer!.title, "Instrument Rack · chain “Pad” volume down");
     assert.equal(macro!.title, "Added a macro to Instrument Rack"); assert.deepEqual([macro!.from, macro!.to], [8, 9]);
+    // A chain's devices can be read with the chain as their parent.
+    const read = await tool(b.tools, "live_discover").execute({ kind: "device", parent: "chain:1" }, signal());
+    assert.equal(read.isError, false, read.text);
+    assert.equal(b.requests.filter((request) => request.name === "live_discover" && request.args.kind === "device").at(-1)!.args.parent, "7:chain:0:0:0");
+    assert.match(read.text, /Operator/, "the chain's device");
   } finally { await b.integration.close(); }
 });
 
