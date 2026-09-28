@@ -4299,6 +4299,145 @@
    }
   },
   {
+   "id": "device.parameters.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "expectedOwnerRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedOwnerIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedTrackRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedTrackIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedSiblings": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "ref": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        },
+        "objectIdentity": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        }
+       },
+       "required": [
+        "ref",
+        "objectIdentity"
+       ],
+       "additionalProperties": false
+      },
+      "maxItems": 256
+     },
+     "parameters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+       "type": "object",
+       "properties": {
+        "ref": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        },
+        "value": {
+         "type": "number",
+         "minimum": -1000000,
+         "maximum": 1000000
+        },
+        "expectedRevision": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 9007199254740991
+        },
+        "expectedObjectIdentity": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        }
+       },
+       "required": [
+        "ref",
+        "value",
+        "expectedRevision",
+        "expectedObjectIdentity"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "expectedOwnerRef",
+     "expectedOwnerIdentity",
+     "expectedTrackRef",
+     "expectedTrackIdentity",
+     "expectedSiblings",
+     "parameters"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "parameters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+       "type": "object",
+       "properties": {
+        "ref": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        },
+        "value": {
+         "type": "number",
+         "minimum": -1000000,
+         "maximum": 1000000
+        },
+        "revision": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 9007199254740991
+        }
+       },
+       "required": [
+        "ref",
+        "value",
+        "revision"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "parameters"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "device.rename",
    "method": "invoke",
    "request": {

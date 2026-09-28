@@ -71,6 +71,19 @@ interface SessionStructureTransaction {
   recoveryMode?: "apply" | "compensate";
   expiresAt: number; state: "previewed" | "applying" | "applied" | "undoing" | "uncertain" | "undone"; applyKey?: string; undoKey?: string;
 }
+/** Several parameters of one device changed as one transaction: one apply, one undo. */
+interface DeviceParametersTransaction {
+  id: string;
+  confirmation: string;
+  epoch: number;
+  deviceRef: LiveRef;
+  parameters: Array<{ ref: LiveRef; authority: JsonObject; priorValue: number; proposedValue: number; priorRevision: number; appliedRevision?: number; appliedDisplay?: string }>;
+  expiresAt: number;
+  state: "previewed" | "applying" | "applied" | "uncertain" | "undoing" | "undone";
+  applyKey?: string;
+  undoKey?: string;
+}
+
 interface DeviceParameterTransaction {
   id: string;
   epoch: number;
@@ -408,6 +421,7 @@ export class McpHost {
   private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>();
   private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>();
   private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>();
+  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>();
   private readonly midiTransactions: SessionMidiTransactionManager;
   private readonly batchTransactions: BatchTransactionManager;
   private readonly deviceStateTransactions: DeviceStateTransactionManager;
@@ -7052,6 +7066,7 @@ export class McpHost {
   }
 
   private async liveDeviceParameterPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (isObject(params) && params.values !== undefined) return this.liveDeviceParametersPreviewAsync(id, params);
     if (!this.validateDeviceParameterPreview(params)) return error(id, -32602, "deviceRef, parameterRef, and finite value are required");
     try {
       const status = this.requireConnected("device.parameter.write");
@@ -7069,8 +7084,88 @@ export class McpHost {
     } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover an enabled published numeric parameter and retry."); }
   }
 
+  /**
+   * Several parameters of one device as one change: one snapshot before and one after, one Live
+   * request that sets them all or none, and one undo that restores them all.
+   */
+  private async liveDeviceParametersPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
+    const values = params.values;
+    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > 64 || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 64 values, each a parameterRef and a finite value, are required");
+    const requested = values as Array<{ parameterRef: string; value: number }>;
+    if (new Set(requested.map((item) => item.parameterRef)).size !== requested.length) return error(id, -32602, "each parameter takes one value");
+    try {
+      const status = this.requireConnected("device.parameter.write");
+      if (!(status.operations ?? []).includes("device.parameters.set")) throw new Error("parameter changes on several parameters at once are unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const parameters: DeviceParametersTransaction["parameters"] = []; const shown: JsonObject[] = [];
+      let device: ReturnType<McpHost["parameterTarget"]> | undefined;
+      for (const item of requested) {
+        const target = this.parameterTarget(snapshot, params.deviceRef as string, item.parameterRef);
+        const authority = this.parameterAuthority(snapshot, target.parameter.ref);
+        if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
+        const quantization = target.parameter.quantization ?? 0;
+        if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
+        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value does not match authoritative quantization`);
+        // One device: the same owner, track and sibling parameters for every one.
+        if (parameters.length && JSON.stringify({ ...authority, ref: null, parameterIdentity: null }) !== JSON.stringify({ ...parameters[0]!.authority, ref: null, parameterIdentity: null })) throw new Error("parameter changes must all be on one device");
+        device ??= target;
+        parameters.push({ ref: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: item.value, priorRevision: this.parameterRevision(target.parameter) });
+        shown.push({ ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: item.value, min: target.parameter.min, max: target.parameter.max, ...(typeof target.parameter.displayValue === "string" ? { displayValue: target.parameter.displayValue } : {}) });
+      }
+      const transaction: DeviceParametersTransaction = { id: `parameters_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: device!.device.ref, parameters, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.deviceParametersTransactions.set(transaction.id, transaction);
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: device!.device.ref, name: device!.device.name, kind: device!.device.kind, trackRef: device!.trackRef, enabled: device!.device.enabled !== false }, parameters: shown, confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
+    } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover enabled published numeric parameters of one device and retry."); }
+  }
+
+  private parametersMutationArgs(transaction: DeviceParametersTransaction, values: (parameter: DeviceParametersTransaction["parameters"][number], index: number) => { value: number; revision: number }): JsonObject {
+    const shared = transaction.parameters[0]!.authority;
+    return { expectedOwnerRef: shared.ownerRef, expectedOwnerIdentity: shared.ownerIdentity, expectedTrackRef: shared.trackRef, expectedTrackIdentity: shared.trackIdentity, expectedSiblings: structuredClone(shared.siblings),
+      parameters: transaction.parameters.map((parameter, index) => { const next = values(parameter, index); return { ref: parameter.ref, value: next.value, expectedRevision: next.revision, expectedObjectIdentity: parameter.authority.parameterIdentity }; }) };
+  }
+
+  private async liveDeviceParametersApplyAsync(id: RequestId, params: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
+    const transaction = this.deviceParametersTransactions.get(params.transactionId as string);
+    if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
+    if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
+    const shown = () => transaction.parameters.map((parameter) => ({ ref: parameter.ref, value: parameter.proposedValue, ...(parameter.appliedDisplay === undefined ? {} : { displayValue: parameter.appliedDisplay }), revision: parameter.appliedRevision }));
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", parameters: shown(), epoch: transaction.epoch, idempotent: true });
+    const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
+    if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
+    if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
+    try {
+      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = this.requireConnected("device.parameter.write");
+      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) {
+        const current = await adapter.snapshotAsync(context);
+        for (const parameter of transaction.parameters) {
+          const target = this.parameterTarget(current, transaction.deviceRef, parameter.ref).parameter;
+          if (this.parameterRevision(target) !== parameter.priorRevision || target.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(current, parameter.ref)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after preview; preview again");
+        }
+      }
+      transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
+      await adapter.invokeAsync({ operation: "device.parameters.set", args: this.parametersMutationArgs(transaction, (parameter) => ({ value: parameter.proposedValue, revision: parameter.priorRevision })) }, context);
+      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      for (const parameter of transaction.parameters) {
+        const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, parameter.ref).parameter;
+        if (!sameLiveValue(verified.value, parameter.proposedValue) || this.parameterRevision(verified) <= parameter.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the parameter changes"); }
+        parameter.appliedRevision = this.parameterRevision(verified);
+        if (typeof verified.displayValue === "string") parameter.appliedDisplay = verified.displayValue;
+      }
+      transaction.state = "applied";
+      return this.successText(id, { transactionId: transaction.id, state: "applied", parameters: shown(), epoch: transaction.epoch, idempotent: false });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (transaction.state === "applying") { transaction.state = /cancelled before dispatch/.test(message) ? "previewed" : "uncertain"; if (transaction.state === "previewed") delete transaction.applyKey; }
+      return this.adapterToolError(id, cause, "Device-parameter apply may be uncertain; perform fresh authoritative discovery and do not retry blindly.");
+    }
+  }
+
   private async liveDeviceParameterApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validDeviceParameterApply(params)) return error(id, -32602, "transactionId, confirmation token, and idempotencyKey are required");
+    if (String(params.transactionId).startsWith("parameters_")) return this.liveDeviceParametersApplyAsync(id, params, signal);
     const transaction = this.deviceParameterTransactions.get(params.transactionId as string);
     if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
     if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
@@ -7257,7 +7352,7 @@ export class McpHost {
     if (this.activeAsyncOperations > 0 || IN_FLIGHT_TRANSACTION_IDS.size > 0) return this.recoveryFinalizeError(id, "Another asynchronous operation, mutation, or reconciliation is in flight; global safety finalization refused.");
     this.recoveryFinalizationInFlight = true; IN_FLIGHT_TRANSACTION_IDS.add(transactionId);
     try {
-      const maps = [this.transactions, this.arrangementTransactions, this.sessionStructureTransactions, this.deviceParameterTransactions, this.auditionTransactions, this.transportTransactions, this.clipLaunchTransactions, this.noteEditTransactions, this.clipLifecycleTransactions, this.audioCaptureTransactions] as unknown as Array<Map<string, { state: string; kind?: string; epoch: number }>>;
+      const maps = [this.transactions, this.arrangementTransactions, this.sessionStructureTransactions, this.deviceParameterTransactions, this.deviceParametersTransactions, this.auditionTransactions, this.transportTransactions, this.clipLaunchTransactions, this.noteEditTransactions, this.clipLifecycleTransactions, this.audioCaptureTransactions] as unknown as Array<Map<string, { state: string; kind?: string; epoch: number }>>;
       const owner = maps.find((candidate) => candidate.has(transactionId)); const midiFinalizable = !owner && this.midiTransactions.isFinalizable(transactionId);
       const batchFinalizable = !owner && !midiFinalizable && this.batchTransactions.isFinalizable(transactionId);
       const deviceStateFinalizable = !owner && !midiFinalizable && !batchFinalizable && this.deviceStateTransactions.isFinalizable(transactionId);
@@ -8221,6 +8316,32 @@ export class McpHost {
         return this.successText(id, { transactionId: arrangement.id, state: "undone", restored: arrangement.prior, idempotent: false });
       } catch (cause) { return this.adapterToolError(id, cause, "Arrangement undo refused; inspect authoritative locators."); }
     }
+    if (!transaction && String(params.transactionId).startsWith("parameters_")) {
+      const batch = this.deviceParametersTransactions.get(params.transactionId as string);
+      const reconciliation = batch?.state === "uncertain" && batch.undoKey === params.idempotencyKey;
+      if (batch?.state === "undone" && batch.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: batch.id, state: "undone", idempotent: true });
+      if (!batch || (batch.state !== "applied" && !reconciliation) || batch.parameters.some((parameter) => parameter.appliedRevision === undefined)) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
+      try {
+        this.beginUndoRecovery(batch, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== batch.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
+        const currentSnapshot = await adapter.snapshotAsync(context);
+        const currents = batch.parameters.map((parameter) => this.parameterTarget(currentSnapshot, batch.deviceRef, parameter.ref).parameter);
+        const unchanged = (index: number) => JSON.stringify(this.parameterAuthority(currentSnapshot, batch.parameters[index]!.ref)) === JSON.stringify(batch.parameters[index]!.authority);
+        if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
+        else {
+          if (currents.some((current, index) => !sameLiveValue(current.value, batch.parameters[index]!.proposedValue) || this.parameterRevision(current) !== batch.parameters[index]!.appliedRevision || !unchanged(index))) return this.transactionError(id, "A device parameter changed after apply; undo refused");
+          batch.state = "undoing";
+          await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
+        }
+        const restoredSnapshot = await adapter.snapshotAsync(context);
+        for (const parameter of batch.parameters) {
+          const restored = this.parameterTarget(restoredSnapshot, batch.deviceRef, parameter.ref).parameter;
+          if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { batch.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
+        }
+        batch.state = "undone";
+        return this.successText(id, { transactionId: batch.id, state: "undone", idempotent: false });
+      } catch (cause) { if (batch.state === "undoing" || batch.state === "uncertain") batch.state = "uncertain"; return this.adapterToolError(id, cause, "Device-parameter undo is uncertain; inspect authoritative parameter state."); }
+    }
     if (!transaction && String(params.transactionId).startsWith("parameter_")) {
       const parameter = this.deviceParameterTransactions.get(params.transactionId as string);
       const reconciliation = parameter?.state === "uncertain" && parameter.undoKey === params.idempotencyKey;
@@ -8763,7 +8884,7 @@ export class McpHost {
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
     // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad |track or scene )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

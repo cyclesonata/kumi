@@ -778,7 +778,7 @@ class LiveObjectMapper:
             return any(callable(getattr(getattr(slot, "clip", None), "apply_note_modifications", None)) and callable(getattr(getattr(slot, "clip", None), "get_notes_extended", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
         if operation == "note.delete":
             return any(callable(getattr(getattr(slot, "clip", None), "remove_notes_by_id", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
-        if operation == "device.parameter.set":
+        if operation in {"device.parameter.set", "device.parameters.set"}:
             return any(
                 any(device.get("parameters") for device in self._device_items(track, track_index))
                 for track_index, track in enumerate(tracks)
@@ -2648,23 +2648,55 @@ class LiveObjectMapper:
         if operation in {"track.rename", "scene.rename", "clip.rename", "device.rename", "locator.rename"}:
             return self._rename(operation, args)
         if operation == "device.parameter.set":
-            reference, expected = str(args.get("ref")), args.get("expectedRevision")
-            authority = self._realtime_parameter_authority(reference)
-            expected_authority = {
-                "ref": reference,
-                "parameterIdentity": args.get("expectedObjectIdentity"),
-                "ownerRef": args.get("expectedOwnerRef"),
-                "ownerIdentity": args.get("expectedOwnerIdentity"),
-                "trackRef": args.get("expectedTrackRef"),
-                "trackIdentity": args.get("expectedTrackIdentity"),
-                "siblings": args.get("expectedSiblings"),
-            }
-            if any(not isinstance(expected_authority[key], str) for key in ("parameterIdentity", "ownerRef", "ownerIdentity", "trackRef", "trackIdentity")) or not isinstance(expected_authority["siblings"], list) or not hmac.compare_digest(self._bounded_canonical(authority), self._bounded_canonical(expected_authority)):
-                raise ValueError("parameter identity or hierarchy changed since preview")
-            if not isinstance(expected, int) or isinstance(expected, bool) or self.refs.revision(reference) != expected:
-                raise ValueError("parameter revision changed since preview")
+            reference = str(args.get("ref"))
+            self._check_parameter_authority(reference, args)
             return self._set_parameter_value(reference, args.get("value"))
+        if operation == "device.parameters.set":
+            return self._device_parameters_set(args)
         raise ValueError("live operation unavailable")
+
+    def _check_parameter_authority(self, reference: str, args: dict[str, Any]) -> None:
+        """The parameter, its device, track and sibling parameters are exactly as previewed."""
+        expected = args.get("expectedRevision")
+        authority = self._realtime_parameter_authority(reference)
+        expected_authority = {
+            "ref": reference,
+            "parameterIdentity": args.get("expectedObjectIdentity"),
+            "ownerRef": args.get("expectedOwnerRef"),
+            "ownerIdentity": args.get("expectedOwnerIdentity"),
+            "trackRef": args.get("expectedTrackRef"),
+            "trackIdentity": args.get("expectedTrackIdentity"),
+            "siblings": args.get("expectedSiblings"),
+        }
+        if any(not isinstance(expected_authority[key], str) for key in ("parameterIdentity", "ownerRef", "ownerIdentity", "trackRef", "trackIdentity")) or not isinstance(expected_authority["siblings"], list) or not hmac.compare_digest(self._bounded_canonical(authority), self._bounded_canonical(expected_authority)):
+            raise ValueError("parameter identity or hierarchy changed since preview")
+        if not isinstance(expected, int) or isinstance(expected, bool) or self.refs.revision(reference) != expected:
+            raise ValueError("parameter revision changed since preview")
+
+    def _device_parameters_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Several parameters of one device in one request, in order: all change, or none stays changed.
+
+        Each is checked as device.parameter.set checks one, against the same device, track and
+        sibling parameters, before any changes; if one then fails, the ones before it go back."""
+        shared = {"expectedOwnerRef", "expectedOwnerIdentity", "expectedTrackRef", "expectedTrackIdentity", "expectedSiblings"}
+        items = args.get("parameters")
+        if set(args) - shared - {"parameters"} or not isinstance(items, list) or not 1 <= len(items) <= 64 or not all(isinstance(item, dict) and not set(item) - {"ref", "value", "expectedRevision", "expectedObjectIdentity"} for item in items): raise ValueError("parameter authority is invalid")
+        references = [str(item.get("ref")) for item in items]
+        if len(set(references)) != len(references): raise ValueError("parameter changes name the same parameter twice")
+        common = {key: args.get(key) for key in shared}
+        for reference, item in zip(references, items): self._check_parameter_authority(reference, {**common, **item})
+        changed: list[dict[str, Any]] = []; priors: list[tuple[Any, Any]] = []
+        for index, (reference, item) in enumerate(zip(references, items)):
+            parameter = self.refs.get(reference)
+            try:
+                prior = self._read_attr(parameter, "value")
+                changed.append(self._set_parameter_value(reference, item.get("value"))); priors.append((parameter, prior))
+            except BaseException as error:
+                for earlier, value in reversed(priors):
+                    try: earlier.value = float(value)
+                    except BaseException: pass
+                raise ValueError(f"parameter {index + 1} of {len(items)}: {str(error)[:200]}") from error
+        return {"parameters": [{"ref": row["ref"], "value": row["value"], "revision": row["revision"]} for row in changed]}
 
     def _rename_authority_revision(self, kind: str, reference: str) -> str:
         if kind in {"track", "scene"}: return self._structure_revision()

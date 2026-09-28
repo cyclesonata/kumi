@@ -1784,6 +1784,38 @@ test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clear
   assert.equal(other.chains.length, 0, "no other pad changed");
 });
 
+test("several parameters of one device change as one transaction: one Live request, one undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const device = (simulator as any).state.tracks[0].devices[0];
+  device.parameters.push(
+    { ref: "parameter:width-1", objectIdentity: "simulator:parameter:width-1", name: "Width", value: 1, min: 0, max: 4, automatable: true, quantization: 0, enabled: true, revision: 1 },
+    { ref: "parameter:mono-1", objectIdentity: "simulator:parameter:mono-1", name: "Bass Mono", value: 0, min: 0, max: 1, automatable: true, quantization: 1, enabled: true, revision: 1 });
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const invokes: string[] = [];
+  const invoke = simulator.invoke.bind(simulator);
+  (simulator as any).invoke = (invocation: any) => { invokes.push(invocation.operation); return invoke(invocation); };
+  const values = [{ parameterRef: "parameter:gain-1", value: 0.25 }, { parameterRef: "parameter:width-1", value: 2 }, { parameterRef: "parameter:mono-1", value: 1 }];
+  assert.equal(((await call(11, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], values[0]] })) as any).error.code, -32602, "one value per parameter");
+  assert.match(text(await call(12, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], { parameterRef: "parameter:mono-1", value: 0.5 }] })).reason, /Bass Mono.*quantization/);
+  const preview = text(await call(13, "live_device_parameter_preview", { deviceRef: "device:utility-1", values }));
+  assert.deepEqual(preview.parameters.map((row: any) => [row.name, row.currentValue, row.proposedValue]), [["Gain", 0.5, 0.25], ["Width", 1, 2], ["Bass Mono", 0, 1]]);
+  const applied = text(await call(14, "live_device_parameter_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "three-parameters" }));
+  assert.equal(applied.state, "applied", JSON.stringify(applied)); assert.equal(applied.parameters.length, 3);
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.25, 2, 1]);
+  assert.deepEqual(invokes.filter((operation) => operation.startsWith("device.")), ["device.parameters.set"], "one Live request for the three");
+  const undone = text(await call(15, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "three-parameters-undo" }));
+  assert.equal(undone.state, "undone", JSON.stringify(undone));
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.5, 1, 0], "one undo restores them all");
+  const again = text(await call(16, "live_device_parameter_preview", { deviceRef: "device:utility-1", values }));
+  device.parameters[1].value = 3; device.parameters[1].revision = (device.parameters[1].revision ?? 1) + 1;
+  const refused = text(await call(17, "live_device_parameter_apply", { transactionId: again.transactionId, confirmation: again.confirmation, idempotencyKey: "changed-meanwhile" }));
+  assert.match(refused.reason ?? refused.message ?? JSON.stringify(refused), /changed after preview/);
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.5, 3, 0], "nothing changes when one moved since the preview");
+});
+
 test("devices can be listed Set-wide in pages, for an overview; parameters still need their device", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);

@@ -150,7 +150,7 @@ export type LiveOperation =
   | "arrangement.clip.create" | "arrangement.clip.delete" | "arrangement.clip.move" | "arrangement.audio-clip.create" | "arrangement.automation.read" | "arrangement.automation.create" | "arrangement.automation.delete" | "arrangement.automation.point.insert" | "arrangement.automation.point.delete"
   | "audio.capture.cleanup" | "audio.capture.emergency-stop" | "audio.capture.inspect" | "audio.capture.start" | "audio.capture.status" | "audio.capture.stop" | "audio.clip.set" | "audio.warp-marker.read" | "audio.warp-marker.add" | "audio.warp-marker.move" | "audio.warp-marker.delete" | "audio.take-lane.read" | "audio.comp.read"
   | "automation.envelope.clear" | "automation.envelope.create" | "automation.envelope.delete" | "automation.envelope.read" | "automation.point.delete" | "automation.point.insert"
-  | "browser.inspect" | "browser.load" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
+  | "browser.inspect" | "browser.load" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "device.parameters.set" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
   | "application.dialog" | "clip.view.set" | "device.bank.set" | "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "looper.action" | "looper.set" | "meld.set" | "plugin.set" | "simpler.replace-sample" | "device.comparison.save-to-slot" | "device.delete" | "device.enable" | "device.insert" | "device.move" | "device.parameter.set" | "device.rename" | "device.view.set" | "observe.poll" | "observe.subscribe" | "observe.unsubscribe" | "parameter.re-enable-automation" | "selection.set" | "song.view.set"
   | "chain-mixer.set" | "compressor.sidechain.set" | "device-io.set" | "locator.add" | "locator.delete" | "locator.jump" | "locator.jump-to" | "locator.rename" | "mixer.extended.set" | "mixer.set" | "note.add" | "note.add-batch" | "note.delete" | "note.duplicate" | "note.quantize" | "note.read-by-id" | "note.read-selected" | "note.update"
   | "project.bounce" | "project.collect" | "project.export" | "project.new" | "project.open" | "project.save" | "project.save-as"
@@ -236,7 +236,7 @@ export function ownedDeviceFingerprintRow(row: unknown): unknown {
     .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
 }
 
-export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
+export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
 
 export class DeterministicLiveSimulator implements LiveAdapter {
   private state = createSimulatorState();
@@ -1867,16 +1867,23 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         return { deleted: ids.length };
       }
       case "device.parameter.set": {
-        const target = this.find(objectRef("ref")) as Parameter; const requested = args.value;
-        if (!target || typeof requested !== "number" || !Number.isFinite(requested) || requested < target.min || requested > target.max) throw new RangeError("parameter value is outside numeric bounds");
-        const currentAuthority = this.parameterAuthority(target.ref); const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, siblings: args.expectedSiblings };
-        if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
-        if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
-        const quantization = target.quantization ?? 0;
-        if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
-        if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");
+        const target = this.checkedParameter(args);
         // Live keeps parameter values as 32-bit floats: 0.3 comes back as 0.29999998.
-        this.set(target.ref, "value", Math.fround(requested)); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
+        this.set(target.ref, "value", Math.fround(args.value as number)); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
+      }
+      case "device.parameters.set": {
+        // Every one checked first, then set in order; if one fails, the ones before it go back, as the Remote Script does.
+        const items = args.parameters;
+        if (!Array.isArray(items) || items.length < 1 || items.length > 64) throw new Error("parameter authority is invalid");
+        const shared = { expectedOwnerRef: args.expectedOwnerRef, expectedOwnerIdentity: args.expectedOwnerIdentity, expectedTrackRef: args.expectedTrackRef, expectedTrackIdentity: args.expectedTrackIdentity, expectedSiblings: args.expectedSiblings };
+        const targets = (items as Record<string, unknown>[]).map((item) => this.checkedParameter({ ...shared, ...item }));
+        if (new Set(targets.map((target) => target.ref)).size !== targets.length) throw new Error("parameter changes name the same parameter twice");
+        const priors: Array<[Parameter, number]> = [];
+        for (const [index, target] of targets.entries()) {
+          try { const prior = target.value; this.set(target.ref, "value", Math.fround((items[index] as Record<string, unknown>).value as number)); priors.push([target, prior]); }
+          catch (error) { for (const [parameter, value] of priors.reverse()) this.set(parameter.ref, "value", value); throw new Error(`parameter ${index + 1} of ${items.length}: ${error instanceof Error ? error.message : "change failed"}`); }
+        }
+        return { parameters: targets.map((target) => ({ ref: target.ref, value: target.value, revision: target.revision ?? 1 })) };
       }
       case "routing.set": {
         const track = this.findTrack(objectRef("ref"));
@@ -2065,6 +2072,21 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
     }
     return undefined;
+  }
+
+  /** device.parameter.set's checks for one parameter: the parameter they pass for. */
+  private checkedParameter(args: Record<string, unknown>): Parameter {
+    const reference = args.ref; const requested = args.value;
+    if (typeof reference !== "string" || !reference || reference.length > 256) throw new TypeError("ref must be a non-empty string");
+    const target = this.find(reference as LiveRef) as Parameter;
+    if (!target || typeof requested !== "number" || !Number.isFinite(requested) || requested < target.min || requested > target.max) throw new RangeError("parameter value is outside numeric bounds");
+    const currentAuthority = this.parameterAuthority(target.ref); const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, siblings: args.expectedSiblings };
+    if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
+    if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
+    const quantization = target.quantization ?? 0;
+    if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
+    if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");
+    return target;
   }
 
   /** Like Live: a chain with a Simpler holding the sample, on an empty pad. */

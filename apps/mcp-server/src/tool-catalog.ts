@@ -672,8 +672,9 @@ const toolDescriptors = [
   },
   {
     name: "live_device_parameter_preview",
-    description: "Discover an authoritative device parameter and preview a bounded numeric change without mutation.",
-    inputSchema: { type: "object", properties: { deviceRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" } }, required: ["deviceRef", "parameterRef", "value"], additionalProperties: false },
+    description: "Discover an authoritative device parameter and preview a bounded numeric change without mutation. values (instead of parameterRef and value) previews up to 64 parameters of the device as one change: one apply sets them all or none, and one undo restores them.",
+    inputSchema: { type: "object", properties: { deviceRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" },
+      values: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", properties: { parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" } }, required: ["parameterRef", "value"], additionalProperties: false } } }, required: ["deviceRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {

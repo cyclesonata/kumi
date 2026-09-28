@@ -616,7 +616,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "fa13c41c7138b0e79746e91cd9acae733c8606f4321412c8a050a4da5435d0ab")
+        self.assertEqual(digest, "fd6dd68336ff8447d47c0f200bd38bd16c747f2061ca0a7e353d2c502def3c88")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -1412,6 +1412,33 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(changed["revision"], 2)
         with self.assertRaises(ValueError):
             mapper.invoke("device.parameter.set", {"ref": parameter["ref"], "value": 0.7})
+
+    def test_several_parameters_of_a_device_change_in_one_request_all_or_none(self):
+        song = FakeSong(); device = song.tracks[0].devices[0]
+        device.parameters = [FakeParameter() for _ in range(3)]
+        for index, parameter in enumerate(device.parameters): parameter.name = f"P{index}"
+        mapper = LiveObjectMapper(song)
+        track = mapper.discover("track")["items"][0]
+        device_row = mapper.discover("device", parent=track["ref"])["items"][0]
+        rows = mapper.discover("parameter", parent=device_row["ref"])["items"]
+        authority = self.parameter_authority(mapper, rows[0]["ref"])
+        shared = {key: value for key, value in authority.items() if key != "expectedObjectIdentity"}
+        def item(row, value): return {"ref": row["ref"], "value": value, "expectedRevision": row["revision"], "expectedObjectIdentity": self.parameter_authority(mapper, row["ref"])["expectedObjectIdentity"]}
+        self.assertTrue(mapper._operation_supported("device.parameters.set"))
+        result = mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[0], 0.75), item(rows[2], 0.25)]})
+        validate_operation_payload("device.parameters.set", "result", result)
+        self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25])
+        self.assertEqual([row["revision"] for row in result["parameters"]], [2, 2])
+        rows = mapper.discover("parameter", parent=device_row["ref"])["items"]
+        with self.assertRaisesRegex(ValueError, "parameter 2 of 2: parameter value is outside authoritative bounds"):
+            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.75), item(rows[2], 5.0)]})
+        self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25], "the first one went back")
+        stale = item(rows[0], 0.5); stale["expectedRevision"] = 1
+        with self.assertRaisesRegex(ValueError, "revision changed since preview"):
+            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.25), stale]})
+        self.assertEqual(device.parameters[1].value, 0.5, "every parameter is checked before any changes")
+        with self.assertRaisesRegex(ValueError, "same parameter twice"):
+            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.25), item(rows[1], 0.5)]})
 
     def test_capabilities_are_derived_from_negotiated_operation_sets(self):
         mapper = LiveObjectMapper(FakeSong()); status = mapper.status(); operations, capabilities = set(status["operations"]), set(status["capabilities"])
