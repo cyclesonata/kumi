@@ -26,6 +26,7 @@ chosen one; access depends on your account.
 npm run kumi -- model                         # show the model
 npm run kumi -- model anthropic/<model>       # choose another; saved in ~/.kumi/settings.json
 npm run kumi -- auth                          # which providers are usable; never prints secrets
+npm run kumi -- doctor                        # check Node, sign-in, the bridge, Live and the terminal
 npm run kumi -- logout openai-codex           # remove the local sign-in
 npm run kumi -- --inference-only              # chat without Live
 ```

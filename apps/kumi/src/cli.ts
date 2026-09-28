@@ -2,7 +2,9 @@
 import {
   createAbletonIntegration, createAgentKernel, createInferenceOnlyIntegration, createProjectStore, createSession, openCredentialStore, resolveModel,
 } from "@kumi/runtime";
+import { readFileSync } from "node:fs";
 import { loadConfig, loadProjectsDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
@@ -19,6 +21,7 @@ More:
   npm run kumi -- --bridge-config /absolute/path/bridge-config.json
   npm run kumi -- model [<provider>/<model>]   Show or choose the model
   npm run kumi -- auth                   Show which providers are usable (no secrets)
+  npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
   npm run kumi -- logout openai-codex    Remove the local ChatGPT sign-in
 
 Providers: openai-codex (ChatGPT sign-in), openai (OPENAI_API_KEY), anthropic (ANTHROPIC_API_KEY),
@@ -32,12 +35,33 @@ const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't se
 const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY]
   .filter((value): value is string => Boolean(value));
 
+/** Start the bridge the way Kumi does, ask Live how it is, and stop again. */
+async function probeLive(bridgeConfig: string): Promise<LiveProbe> {
+  const integration = createAbletonIntegration({ bridgeConfig, onConnection: () => {} });
+  try { await integration.start(AbortSignal.timeout(20_000)); }
+  catch { await integration.close().catch(() => {}); return { started: false }; }
+  try {
+    const observation = await integration.observe(AbortSignal.timeout(20_000));
+    const context = JSON.parse(observation.context) as { mode?: string; liveVersion?: unknown; provenance?: unknown; set?: { name?: unknown } };
+    if (context.mode === "inference-only" || !observation.tools.length) return { started: true, connected: false };
+    return { started: true, connected: true, ...(typeof context.liveVersion === "string" ? { liveVersion: context.liveVersion } : {}),
+      ...(typeof context.set?.name === "string" ? { set: context.set.name } : {}), realLive: context.provenance === "real-live" };
+  } catch { return { started: true, connected: false }; }
+  finally { await integration.close().catch(() => {}); }
+}
+const bundledBridgeVersion = (() => {
+  try { return (JSON.parse(readFileSync(new URL("../../../mcp-server/package.json", import.meta.url), "utf8")) as { version?: string }).version; } catch { return undefined; }
+})();
+
 try {
-  if (!SUPPORTED_NODE_MAJORS.includes(Number(process.versions.node.split(".")[0]))) {
+  // The doctor runs on any Node, so it can report that along with everything else.
+  const doctor = process.argv.length === 3 && process.argv[2] === "doctor";
+  if (!doctor && !SUPPORTED_NODE_MAJORS.includes(Number(process.versions.node.split(".")[0]))) {
     throw new Error(`Kumi needs Node.js 22 or 24 (this is ${process.version}); install Node 24 LTS from https://nodejs.org.`);
   }
   const config = loadConfig(process.argv.slice(2));
-  if (config.mode === "help") process.stdout.write(HELP);
+  if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
+  else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "auth") await authStatus(config, { out: process.stdout, env: process.env });
   else if (config.mode === "logout") await logout(config, { out: process.stdout });
   else if (config.mode === "model") {

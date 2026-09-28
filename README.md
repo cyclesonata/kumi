@@ -20,6 +20,7 @@ repository root:
 npm run setup                          # install and build everything, about a minute
 npm run kumi -- login openai-codex     # sign in with your ChatGPT plan (--device without a browser)
 npm run kumi                           # talk about the open Live Set
+npm run kumi -- doctor                 # if anything's off: checks everything and says what to run
 ```
 
 Signing in also picks a default model; change it any time with

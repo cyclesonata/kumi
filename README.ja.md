@@ -19,6 +19,7 @@ Node 24 LTS インストーラーで構いません。Node 25 はサポート終
 npm run setup                          # すべてをインストール・ビルド（約 1 分）
 npm run kumi -- login openai-codex     # ChatGPT プランでサインイン（ブラウザがない環境では --device）
 npm run kumi                           # 開いている Live Set について話す
+npm run kumi -- doctor                 # うまくいかないとき：すべてを確認し、実行すべきことを表示
 ```
 
 サインインするとデフォルトのモデルも設定されます。`npm run kumi -- model <provider>/<model>`

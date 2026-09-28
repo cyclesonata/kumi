@@ -23,6 +23,7 @@ export type AppConfig =
   | { mode: "login"; method: LoginMethod; authFile: string; piAuthFile: string; settingsFile: string }
   | { mode: "logout"; authFile: string }
   | { mode: "model"; settingsFile: string; model?: string }
+  | { mode: "doctor" }
   | (InferenceConfig & { mode: "inference-only"; bridgeMissing?: true })
   | (InferenceConfig & { mode: "live"; bridgeConfig: string });
 
@@ -81,6 +82,7 @@ const LOGIN_METHODS: Record<string, LoginMethod> = { "": "browser", "--device": 
 export function loadConfig(args: readonly string[], env: Env = process.env): AppConfig {
   if (args.length === 1 && args[0] === "--help") return { mode: "help" };
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
+  if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
   if (args[0] === "model" && args.length <= 2) {
     if (args[1] !== undefined && !validModel(args[1])) throw new Error(`Use: model <provider>/<model>, with provider one of ${PROVIDERS.join(", ")}.`);
     return { mode: "model", settingsFile: loadSettingsFile(env), ...(args[1] ? { model: args[1] } : {}) };
@@ -104,7 +106,7 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
       : { mode: "inference-only", bridgeMissing: true, ...loadInferenceConfig(env) };
   }
   if (args.length !== 2 || args[0] !== "--bridge-config" || !args[1] || args[1].startsWith("-")) {
-    throw new Error("Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or auth, login, logout, model; --help must be used alone.");
+    throw new Error("Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.");
   }
   const bridgeConfig = args[1];
   if (!isAbsolute(bridgeConfig)) throw new Error("--bridge-config requires an absolute path.");

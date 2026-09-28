@@ -17,6 +17,7 @@ HISTORY 中，并可单独撤销。它会记住每个已保存的工程，下次
 npm run setup                          # 安装并构建全部组件，约一分钟
 npm run kumi -- login openai-codex     # 使用 ChatGPT 套餐登录（无浏览器环境用 --device）
 npm run kumi                           # 讨论当前打开的 Live 工程
+npm run kumi -- doctor                 # 遇到问题时：检查所有环节并告诉你该运行什么
 ```
 
 登录后会自动选择默认模型，可随时用 `npm run kumi -- model <provider>/<model>` 更改。
