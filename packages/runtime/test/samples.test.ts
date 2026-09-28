@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { resolve, join } from "node:path";
 import { test } from "node:test";
 import { audioSeconds, findSamples, folderPath, userLibrary } from "../src/integrations/ableton/samples.js";
 
@@ -69,8 +69,9 @@ test("random picks come from the matches; missing folders are reported", async (
 });
 
 test("folders are full paths or ~/…; the User Library is where Live keeps it", () => {
-  assert.equal(folderPath("~/Samples", "/home/me"), join("/home/me", "Samples"));
-  assert.equal(folderPath("~", "/home/me"), "/home/me");
+  // Resolved as the platform resolves it: Windows puts the current drive in front of a rootless path.
+  assert.equal(folderPath("~/Samples", "/home/me"), resolve(join("/home/me", "Samples")));
+  assert.equal(folderPath("~", "/home/me"), resolve("/home/me"));
   assert.equal(folderPath("Samples", "/home/me"), undefined, "a relative folder isn't a place Kumi can find");
   assert.equal(userLibrary("darwin", "/Users/me"), join("/Users/me", "Music", "Ableton", "User Library"));
   assert.equal(userLibrary("win32", "C:\\Users\\me"), join("C:\\Users\\me", "Documents", "Ableton", "User Library"));
