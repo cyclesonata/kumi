@@ -154,6 +154,8 @@ export class TuiApp {
   private bytes = 0;
   /** A submitted message waiting for its turn to start; other operations also report "running". */
   private pendingTurn = false;
+  /** A message typed while Kumi was connecting or reading the Set; sent as soon as it's ready. */
+  private queued: string | undefined;
   private activity = "connecting to Live";
   private readonly done: Promise<number>;
   private resolveDone!: (code: number) => void;
@@ -217,6 +219,9 @@ export class TuiApp {
           this.suppress = true; this.stream.discard();
         } else if (event.state === "idle" && this.pendingTurn) {
           this.pendingTurn = false;
+        } else if (event.state === "idle" && this.queued !== undefined) {
+          const raw = this.queued; this.queued = undefined;
+          void Promise.resolve().then(() => this.send(raw));
         } else if (this.current) {
           this.current.status = this.failed ? "failed" : "stopped";
           this.transcript.touch(this.current);
@@ -440,6 +445,15 @@ export class TuiApp {
       this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.options.model} · ${status.turns} of ${status.maxTurns} turns${status.observation ? ` · ${status.observation}` : ""}`, "info");
       return;
     }
+    // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
+    if (this.busy && !this.current && !this.pendingTurn && !command.startsWith("/") && this.queued === undefined) {
+      this.editor.clear();
+      this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
+      this.queued = raw;
+      this.activity = "getting ready";
+      this.scheduler.request();
+      return;
+    }
     if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
     if (command === "/undo") { this.editor.clear(); await this.undo(); return; }
     if (command === "/copy") { this.editor.clear(); this.copyLastAnswer(); return; }
@@ -454,15 +468,31 @@ export class TuiApp {
         await controller.newConversation();
         this.transcript.clear();
         this.current = undefined;
+        // A fresh start is a new bridge connection: earlier changes stay listed, without their undo.
+        this.changes = this.changes.map((change) => change.state === "applied" || change.state === "unsure"
+          ? { ...change, state: "expired", note: "Kumi started fresh (/new), so it can't undo this; Live's own undo still can." } : change);
       } else if (command.startsWith("/")) this.notice(`There's no ${command.split(/\s/)[0]} command. Type / to see them.`, "info");
       else {
         this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
-        this.activity = "thinking";
-        this.pendingTurn = true;
-        this.scheduler.request();
-        await controller.submit(raw);
+        await this.send(raw);
+        return;
       }
     } catch (error) {
+      // Refused before it started (busy, closed): no turn is coming.
+      this.pendingTurn = false;
+      if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
+    }
+    this.scheduler.request();
+  }
+
+  /** Start a turn for a message already shown in the conversation. */
+  private async send(raw: string): Promise<void> {
+    if (this.closing) return;
+    this.activity = "thinking";
+    this.pendingTurn = true;
+    this.scheduler.request();
+    try { await this.options.controller.submit(raw); }
+    catch (error) {
       // Refused before it started (busy, closed): no turn is coming.
       this.pendingTurn = false;
       if (!this.closing) this.notice(safeError(error, this.secrets), "warn");

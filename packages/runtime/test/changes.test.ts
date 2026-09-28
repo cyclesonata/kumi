@@ -15,7 +15,7 @@ function bridge() {
   let live = true; let epoch = 7;
   let tracks = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 }];
   let undoRefusal: string | undefined;
-  let applyFailure: "throw" | "uncertain" | undefined;
+  let applyFailure: "throw" | "uncertain" | "unreadable" | undefined;
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo",
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
@@ -56,6 +56,7 @@ function bridge() {
         if (gate) { const held = gate; gate = undefined; held.sent(); await held.wait; }
         if (applyFailure === "throw") throw new Error("socket closed");
         if (applyFailure === "uncertain") return refusal("Apply is uncertain; perform fresh discovery.", { state: "uncertain" });
+        if (applyFailure === "unreadable") return { content: [{ type: "text", text: "not json" }] };
         if (transaction.name === "live_tempo_preview") tempo = Number(transaction.args.tempo);
         if (transaction.name === "live_session_structure_preview") {
           const added = (transaction.args.tracks as JsonObject[]).map((item) => ({ name: String(item.name), color: 0 }));
@@ -86,7 +87,7 @@ function bridge() {
     refuseUndo: (text: string) => { undoRefusal = text; },
     /** The bridge re-negotiates its tools after content changes and says so. */
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
-    failApply: (how: "throw" | "uncertain") => { applyFailure = how; },
+    failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     holdApply: () => {
       let sent!: () => void; let release!: () => void;
       const began = new Promise<void>((resolve) => { sent = resolve; });
@@ -228,7 +229,7 @@ test("a change that reached Live is recorded even when the turn is cancelled mea
 });
 
 test("an apply Live didn't confirm is recorded as unsure, and the model is told to check", async () => {
-  for (const how of ["throw", "uncertain"] as const) {
+  for (const how of ["throw", "uncertain", "unreadable"] as const) {
     const b = await opened();
     try {
       b.failApply(how);

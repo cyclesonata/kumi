@@ -124,6 +124,9 @@ export function createTerminal(options: Options): Terminal {
   const notice = (message: string) => { if (!output.destroyed) presentation?.notice(line(message)); };
   const reportError = (error: unknown) => notice(`[error] ${safeError(error, secrets)}`);
   const busy = () => ["running", "cancelling"].includes(controller.status().state);
+  /** A message typed while Kumi was connecting; `answering` is true while a turn of ours runs. */
+  let queued: string | undefined;
+  let answering = false;
 
   async function finish(code = 0): Promise<number> {
     if (closing) return done;
@@ -165,6 +168,8 @@ export function createTerminal(options: Options): Terminal {
       notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}/${status.maxTurns}; ${status.observation ?? "No current Live observation"}`);
       return;
     }
+    // Connecting or reading the Set, not answering: keep the message and send it when Kumi is ready.
+    if (busy() && !answering && !command.startsWith("/") && queued === undefined) { queued = inputLine; notice("[waiting] Kumi is getting ready; your message goes as soon as it is."); return; }
     if (busy()) { notice("[busy] Busy; cancel first. No second turn was submitted."); return; }
     try {
       if (command === "/undo") {
@@ -173,7 +178,7 @@ export function createTerminal(options: Options): Terminal {
       } else if (command === "/refresh") await controller.refresh();
       else if (command === "/new") await controller.newConversation();
       else if (command.startsWith("/")) notice("Unknown command. Use /help.");
-      else await controller.submit(inputLine);
+      else { answering = true; try { await controller.submit(inputLine); } finally { answering = false; } }
     } catch (error) { if (!closing) reportError(error); }
     finally { if (!closing && input.isTTY && output.isTTY) rl?.prompt(true); }
   }
@@ -181,6 +186,7 @@ export function createTerminal(options: Options): Terminal {
     if (closing) return;
     switch (event.type) {
       case "state":
+        if (event.state === "idle" && queued !== undefined && !answering) { const line = queued; queued = undefined; void Promise.resolve().then(() => submitted(line)); }
         if (event.state === "running") { suppressOutput = false; displayedBytes = 0; text.discard(); startedAt = performance.now(); firstTextMs = undefined; }
         if (event.state === "cancelling") { suppressOutput = true; text.discard(); }
         break;

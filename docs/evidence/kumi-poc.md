@@ -393,9 +393,10 @@ Live was quit (Don't Save) and reopened:
   confirmed): header "Live not connected" and "Live disconnected. Kumi keeps the
   conversation and reconnects when Live is back".
 - The running bridge refuses to continue across a Live restart by design (its
-  reconciliation channel is "poisoned" by the new epoch), so Kumi started a fresh
-  bridge once Live answered: "Live is back." about 30 s after reopening, which is
-  Live's own start-up time.
+  reconciliation channel is "poisoned" by the new epoch), so Kumi starts a fresh
+  bridge once Live's Remote Script answers on its port: "Live is back." 5 s after
+  reopening Live (UTC `2026-09-28T07:08Z`). A first version waited on a 30 s
+  throttle, because the bridge reports the restart as a failed reconnect.
 - HISTORY marked the earlier tempo change "no undo"; the catch-up note said
   "While Live was away, Kumi Focus Demo changed: Tempo 117 → 120 BPM", that is, the
   unsaved change was gone.

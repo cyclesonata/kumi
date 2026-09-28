@@ -88,6 +88,7 @@ test("each saved Set's last state is kept privately, one folder per Set", async 
 function bridge(options: { path?: string; pages: JsonObject[] }) {
   const calls: string[] = [];
   let pages = options.pages;
+  let path = options.path; let setName = "Night Drive";
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo", "live_tempo_preview", "live_tempo_apply",
     "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
   const catalog: Tool[] = names.map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {}, additionalProperties: true } }));
@@ -98,8 +99,8 @@ function bridge(options: { path?: string; pages: JsonObject[] }) {
     async call(name, args) {
       calls.push(name);
       if (name === "live_status") return wrap({ connected: true, adapter: "remote-script", provenance: "fake-live", epoch: 3 });
-      if (name === "live_discover") return wrap({ epoch: 3, kind: args.kind, items: args.kind === "set" ? [{ ref: "3:set:song", objectIdentity: "song", name: "Night Drive", tempo: 124 }] : [], revision: "r", truncated: false });
-      if (name === "live_project_info") return wrap(options.path ? { path: options.path, exists: true, tracks: 3 } : { path: null, exists: false });
+      if (name === "live_discover") return wrap({ epoch: 3, kind: args.kind, items: args.kind === "set" ? [{ ref: "3:set:song", objectIdentity: "song", name: setName, tempo: 124 }] : [], revision: "r", truncated: false });
+      if (name === "live_project_info") return wrap(path ? { path, exists: true, tracks: 3 } : { path: null, exists: false });
       if (name === "live_project_snapshot_export") return wrap(pages[0]!);
       if (name === "live_project_snapshot_diff") return wrap(fixture.diff);
       if (name === "live_tempo_preview") return wrap({ transactionId: "t1", epoch: 3, priorTempo: 124, proposedTempo: 126, confirmation: "apply" });
@@ -110,7 +111,7 @@ function bridge(options: { path?: string; pages: JsonObject[] }) {
     onDisconnect() { return () => {}; },
     async close() {},
   };
-  return { endpoint, calls, setPages: (next: JsonObject[]) => { pages = next; } };
+  return { endpoint, calls, setPages: (next: JsonObject[]) => { pages = next; }, saveAs: (next: string, name: string) => { path = next; setName = name; } };
 }
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ms = 2_000): Promise<T> {
   const end = Date.now() + ms;
@@ -167,6 +168,21 @@ test("an unchanged Set says nothing changed; an unsaved Set isn't remembered", a
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(none.length, 0); assert(!unsaved.calls.includes("live_project_snapshot_export"), "nothing to remember without a file");
     await other.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Save As moves the Set's conversation to the new file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "kumi-projects-"));
+  try {
+    const b = bridge({ path: "/Music/Night Drive.als", pages: fixture.after });
+    const integration = createAbletonIntegration({ connect: async () => b.endpoint, onConnection: () => {}, projectStore: createProjectStore(directory) });
+    await integration.start(AbortSignal.timeout(5_000));
+    const first = await integration.observe(AbortSignal.timeout(5_000));
+    b.saveAs("/Music/Night Drive v2.als", "Night Drive v2");
+    const second = await integration.observe(AbortSignal.timeout(5_000));
+    assert.equal(second.key, first.key, "the same conversation continues");
+    assert.deepEqual(second.project, { id: projectIdOf("/Music/Night Drive v2.als"), name: "Night Drive v2" }, "and is kept with the new file");
+    await integration.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

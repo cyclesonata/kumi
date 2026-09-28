@@ -191,10 +191,11 @@ terminal is restored on exit, on crashes and on signals.
   after a first clip, say) keeps it. Same-name/unsaved Set switches the bridge
   cannot distinguish are a limitation; use `/new` explicitly.
 - **Live closing or crashing:** Kumi notices within a second, keeps the
-  conversation and reconnects on its own when Live is back (starting a fresh
-  bridge, which the bridge requires after a Live restart). Work in progress when
-  Live went away is stopped. If the same saved Set comes back, the conversation
-  carries on, and a note says what differs from what Kumi last saw.
+  conversation and reconnects on its own within seconds of Live being back
+  (starting a fresh bridge, which the bridge requires after a Live restart). Work
+  in progress when Live went away is stopped; messages sent meanwhile are answered
+  without Live and stay in the conversation. If the same Set file comes back, the
+  conversation carries on, and a note says what differs from what Kumi last saw.
 - Undo lasts as long as Live and Kumi's bridge connection: after Live restarts,
   `/new` or a Kumi restart, earlier changes show **no undo** and can be undone
   only in Live (Cmd-Z). One answer makes at most 40 changes.

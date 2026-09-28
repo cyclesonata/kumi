@@ -215,7 +215,8 @@ test("MCP disconnect removes access without hidden reconnection; subsequent cont
     const before = await f.integration.observe(signal()); f.disconnect();
     const count = f.requests.length; const after = await f.integration.observe(signal());
     assert.equal(f.requests.length, count); assert.equal(after.tools.length, 0); assert.match(after.context, /No Live access/);
-    assert(!after.context.includes("Fixture Set")); assert.notEqual(before.key, after.key);
+    assert(!after.context.includes("Fixture Set"));
+    assert.equal(after.key, before.key, "the conversation stays with its Set; only the access is gone");
     assert.equal((await tool(before.tools).execute({ kind: "track" }, signal())).isError, true);
     assert.equal(f.states.at(-1), "disconnected");
   } finally { await f.integration.close(); await f.integration.close(); assert.equal(f.closes, 1); }
@@ -228,7 +229,9 @@ test("when Live goes away Kumi waits for it, and the same Set coming back contin
     f.liveAway();
     assert.equal((await tool(before.tools).execute({ kind: "track" }, signal())).isError, true);
     assert.equal(f.states.at(-1), "disconnected");
-    assert.match((await f.integration.observe(signal())).context, /No Live access/);
+    const away = await f.integration.observe(signal());
+    assert.match(away.context, /No Live access/);
+    assert.equal(away.key, before.key, "while Live is away the conversation stays with its Set");
     f.liveBack();
     const deadline = Date.now() + 2_000;
     while (f.states.at(-1) !== "connected" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));

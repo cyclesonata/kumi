@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
@@ -15,8 +17,8 @@ const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "liv
 const MAX_CHANGES_PER_TURN = 40;
 const MAX_CHANGE_RECORDS = 500;
 
-function noAccess(key: string, now: Date): Observation {
-  return { key, label: "Inference-only — No Live access", instructions: INSTRUCTIONS, tools: [],
+function noAccess(key: string, now: Date, project?: Observation["project"]): Observation {
+  return { key, label: "Inference-only — No Live access", instructions: INSTRUCTIONS, tools: [], revision: "no-live", ...(project ? { project } : {}),
     context: JSON.stringify({ observedAt: now.toISOString(), mode: "inference-only", access: "No Live access; do not describe remembered Set data as current. /new or restart establishes a fresh connection." }) };
 }
 export function createInferenceOnlyIntegration(onConnection: (state: ConnectionState) => void): Integration {
@@ -90,16 +92,18 @@ export function createAbletonIntegration(options: Options): Integration {
   let lastEpoch: number | undefined;
   let lostEpoch: number | undefined;
   let lastFreshBridge = 0;
+  let closingStarted = false;
   /** Live came back after going away; the next observation may continue the same conversation. */
   let reconnected = false;
-  let previous: { key: string; name: string; identity: string } | undefined;
+  /** The Set the conversation is about: its key, and its file when saved. */
+  let previous: { key: string; name: string; identity: string; path?: string; project?: { id: string; name: string } } | undefined;
 
   const invalidate = () => { refs.clear(); cursors.clear(); known.clear(); currentEpoch = undefined; observationGeneration++; };
   /** The bridge itself is gone: a new connection (/new) is needed. */
   const loseAccess = () => { if (closed || (lost && !available)) return; lost = true; available = false; clearInterval(watcher); invalidate(); focusFeed?.stop(); options.onConnection("disconnected"); };
   /** Live is gone but the bridge is still here: wait for Live and carry on when it's back. */
   const loseLive = () => {
-    if (closed || lost) return;
+    if (closed || closingStarted || lost) return;
     lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected");
     clearInterval(watcher);
     watcher = setInterval(() => { void lookForLive(); }, options.reconnectIntervalMs ?? 2_000);
@@ -110,6 +114,23 @@ export function createAbletonIntegration(options: Options): Integration {
     if (!options.bridgeConfig) throw new ObservationError("Bridge configuration is required; choose explicit inference-only mode otherwise");
     return connectMcp({ signal, bridgeConfig: options.bridgeConfig, allowTools: [...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS],
       ...(options.onDispatch ? { onDispatch: options.onDispatch } : {}) });
+  }
+  /** Whether Live's Remote Script answers on the bridge's port (a plain connect, closed at once). */
+  function remoteScriptListening(): Promise<boolean> {
+    let target: { host: string; port: number } | undefined;
+    try {
+      const config = options.bridgeConfig ? JSON.parse(readFileSync(options.bridgeConfig, "utf8")) as { bridge?: { host?: unknown; port?: unknown } } : undefined;
+      const host = config?.bridge?.host; const port = config?.bridge?.port;
+      if (typeof host === "string" && (host === "127.0.0.1" || host === "localhost" || host === "::1") && Number.isInteger(port)) target = { host, port: port as number };
+    } catch { target = undefined; }
+    if (!target) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const socket = connectSocket({ host: target!.host, port: target!.port });
+      const done = (listening: boolean) => { socket.destroy(); resolve(listening); };
+      socket.setTimeout(500, () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
   }
   /** Use this bridge connection from now on: its tools, its disconnect signal and the focus feed. */
   function attach(connected: McpEndpoint) {
@@ -134,8 +155,9 @@ export function createAbletonIntegration(options: Options): Integration {
       const status = await readStatus(AbortSignal.any([lifetime.signal, AbortSignal.timeout(1_500)]));
       if (status.connected) { back(status.epoch !== lostEpoch); return; }
       // The bridge won't carry on across a Live restart (its old transactions can't be reconciled),
-      // so a restarted Live needs a fresh bridge. Also try one now and then in case the reason is unclear.
-      const restarted = status.reason === "remote-bridge-or-live-epoch-changed";
+      // so a restarted Live needs a fresh bridge: start one as soon as Live's Remote Script answers
+      // on its port, and otherwise only now and then.
+      const restarted = status.reason === "remote-bridge-or-live-epoch-changed" || await remoteScriptListening();
       if (!restarted && Date.now() - lastFreshBridge < 30_000) return;
       lastFreshBridge = Date.now();
       const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(20_000)]);
@@ -148,6 +170,8 @@ export function createAbletonIntegration(options: Options): Integration {
       const old = tools;
       for (const remove of unlisten.splice(0)) remove();
       attach(fresh);
+      // The fresh bridge is the connection now, even if the old one dropped meanwhile.
+      available = true;
       void old?.close().catch(() => {});
       back(true);
     } catch { /* still away */ } finally { looking = false; }
@@ -264,6 +288,8 @@ export function createAbletonIntegration(options: Options): Integration {
       await guardEpoch(signal, epoch, lease);
       const result = await tools.call(name, args, signal, { host: true });
       assertLease(lease, signal);
+      // The model gets bounded reads: too big means narrowing the request, whatever the answer holds.
+      if (Buffer.byteLength(JSON.stringify(result)) > 64 * 1024) { refs.clear(); cursors.clear(); return { text: "Result too large; narrow fields/parent/page instead of requesting a whole Set dump.", isError: true }; }
       await guardEpoch(signal, epoch, lease);
       if (!result.isError) {
         if (name === "live_discover") {
@@ -363,17 +389,21 @@ export function createAbletonIntegration(options: Options): Integration {
       const pages = await exportPages(signal);
       const baseline: Baseline | undefined = await store.load(path);
       if (baseline && project?.identity === identity) {
-        let described = { lines: [] as string[], more: 0 };
+        let described: { lines: string[]; more: number } | undefined = { lines: [], more: 0 };
         if (baseline.artifactId !== artifactOf(pages)) {
           try {
             const diff = payload(await tools!.call("live_project_snapshot_diff", { beforePages: baseline.pages, afterPages: pages, limit: 200 }, signal, { host: true }));
             described = describeDiff(diff, baseline.pages, pages);
-            if (!described.lines.length) described = { lines: ["Small changes Kumi can't name yet"], more: 0 };
+            // Differences Kumi can't put into words (recomputed hashes, a moved return track) aren't worth a
+            // catch-up, and "nothing changed" wouldn't be true either: say nothing.
+            if (!described.lines.length) described = undefined;
           } catch { described = { lines: ["The Set changed, but it's too big for Kumi to compare yet"], more: 0 }; }
         }
-        const summary = { ...catchUpFrom(name, baseline, described), ...(afterReconnect ? { afterReconnect: true } : {}) };
-        catchUpContext = { lastSeen: since(baseline.savedAt, now().getTime()), changes: summary.lines, ...(summary.more ? { more: summary.more } : {}) };
-        try { options.onCatchUp?.(summary); } catch { /* a listener failure must not affect Live */ }
+        if (described) {
+          const summary = { ...catchUpFrom(name, baseline, described), ...(afterReconnect ? { afterReconnect: true } : {}) };
+          catchUpContext = { lastSeen: since(baseline.savedAt, now().getTime()), changes: summary.lines, ...(summary.more ? { more: summary.more } : {}) };
+          try { options.onCatchUp?.(summary); } catch { /* a listener failure must not affect Live */ }
+        }
       }
       await store.save({ version: 1, path, name, savedAt: now().getTime(), artifactId: artifactOf(pages), pages });
       lastSaved = Date.now();
@@ -432,7 +462,11 @@ export function createAbletonIntegration(options: Options): Integration {
         remember(newRecord(kind, summary, "unsure", now().getTime()), transactionId);
         return { text: `Live couldn't confirm this change: ${JSON.stringify(applied)}`, isError: true };
       }
-      const result = payload(applied);
+      let result: JsonObject;
+      try { result = payload(applied); } catch {
+        remember(newRecord(kind, summary, "unsure", now().getTime()), transactionId);
+        return { text: "Kumi couldn't read Live's answer to this change, so it can't confirm whether it happened. Tell the producer to check Live; discover again before more changes.", isError: true };
+      }
       const record = newRecord(kind, kind.summarize(preview, args, knownTrack, result), result.state === "applied" ? "applied" : "unsure", now().getTime());
       remember(record, transactionId);
       // A renamed track keeps its new name in later HISTORY entries.
@@ -520,11 +554,13 @@ export function createAbletonIntegration(options: Options): Integration {
       signal.throwIfAborted();
       if (!started || closed) throw new ObservationError("Integration is not open");
       invalidate(); const lease = observationGeneration; changesThisTurn = 0;
-      if (!available || lost) return noAccess(`${generation}:no-live`, now());
+      // While Live is away the conversation stays with its Set (and keeps being saved there).
+      const away = () => noAccess(previous?.key ?? `${generation}:no-live`, now(), previous?.path && previous.project ? previous.project : undefined);
+      if (!available || lost) return away();
       try {
         await tools!.refresh(signal); assertLease(lease, signal);
         const status = await readStatus(signal); assertLease(lease, signal);
-        if (!status.connected) { loseLive(); return noAccess(`${generation}:no-live`, now()); }
+        if (!status.connected) { loseLive(); return away(); }
         // Checked straight after reading the list: later notifications can't interleave with synchronous code.
         await ensureCatalog(signal); assertLease(lease, signal);
         if (!tools!.has("live_discover")) throw new ObservationError("Required Set discovery capability is unavailable");
@@ -537,23 +573,26 @@ export function createAbletonIntegration(options: Options): Integration {
         const row = page.items[0]!;
         const identity = setIdentity(row);
         await guardEpoch(signal, epoch, lease);
-        const seenBefore = currentSet === identity;
         currentEpoch = epoch; currentSet = identity; lastEpoch = epoch;
         registerRows("set", page.items, args, page.nextCursor);
         options.onConnection("connected");
         const name = typeof row.name === "string" && row.name.trim() ? row.name.slice(0, 256) : "(unnamed/unsaved)";
-        // Back after Live went away with the same saved Set: carry the conversation on. References
-        // from before are gone either way; the model discovers again every turn.
-        // The key stays with the Set: the same Set keeps it, and so does the same saved Set after Live restarts.
-        const continues = previous && (previous.identity === identity || (reconnected && previous.name === name && name !== "(unnamed/unsaved)"));
+        // Its file says which saved Set this is (for its conversation and catching up). It's read for a
+        // newly seen Set, and again when the name changes: Save As, or an unsaved Set's first save.
+        const newSet = project?.identity !== identity;
+        let path = newSet ? undefined : project!.path;
+        if (newSet || project!.name !== name) { path = await projectPath(signal); assertLease(lease, signal); }
+        // The conversation stays with the Set: the same Set keeps its key, and so does the same file after
+        // Live restarts (an unsaved Set by its name). References from before are gone either way; the
+        // model discovers again every turn.
+        const sameFile = previous?.path !== undefined ? previous.path === path : previous?.name === name && name !== "(unnamed/unsaved)";
+        const continues = previous !== undefined && (previous.identity === identity || (reconnected && sameFile));
         const key = continues ? previous!.key : JSON.stringify([generation, epoch, identity]);
-        const afterReconnect = reconnected; reconnected = false; previous = { key, name, identity };
-        if (!seenBefore || project?.identity !== identity) {
-          // Once per Set: its file says which saved Set it is (for its conversation and catching up).
-          const path = await projectPath(signal); assertLease(lease, signal);
-          project = { identity, name, ...(path ? { path } : {}) };
-          catchUp(identity, name, afterReconnect);
-        } else if (Date.now() - lastSaved > 5 * 60_000) scheduleSave(1_000);
+        const afterReconnect = reconnected; reconnected = false;
+        project = { identity, name, ...(path ? { path } : {}) };
+        previous = { key, name, identity, ...(path ? { path, project: { id: projectIdOf(path), name } } : {}) };
+        if (newSet) catchUp(identity, name, afterReconnect);
+        else if (Date.now() - lastSaved > 5 * 60_000) scheduleSave(1_000);
         await ensureCatalog(signal); assertLease(lease, signal);
         const provenance = typeof status.provenance === "string" ? status.provenance : "unknown";
         const source = provenance === "real-live" && status.adapter === "remote-script" ? "Remote Script · real-live" : `unverified/synthetic fixture · ${provenance}`;
@@ -585,6 +624,7 @@ export function createAbletonIntegration(options: Options): Integration {
     },
     close() {
       if (closing) return closing;
+      closingStarted = true;
       clearTimeout(saveTimer); clearInterval(watcher);
       // Remember the Set as Kumi leaves it, so next time's catch-up starts here (bounded).
       const remembered = project?.path && options.projectStore && available && !lost

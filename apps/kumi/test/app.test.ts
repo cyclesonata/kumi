@@ -368,6 +368,33 @@ test("the narrow strip offers undo for the latest change", async () => {
   await h.app.close();
 });
 
+test("a message typed while Kumi connects is kept and sent as soon as it's ready", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  h.emit({ type: "state", state: "running" });
+  await h.type("what's the tempo?\r");
+  assert.ok(has(h.screen(), "what's the tempo?"), "shown straight away");
+  assert.ok(!h.calls.some((call) => call.startsWith("submit:")), "not sent while Kumi is still connecting");
+  h.emit({ type: "state", state: "idle" });
+  await delay(10);
+  assert.ok(h.calls.includes("submit:what's the tempo?"));
+  await h.app.close();
+});
+
+test("after /new, earlier changes stay listed without their undo", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "change", change: { id: "c5", family: "tempo", title: "Tempo 120 → 126 BPM", state: "applied", at: 1 } });
+  await h.type("/new\r");
+  await delay(10);
+  const lines = h.screen();
+  assert.ok(lines.some((line) => /Tempo 120 → 126 BPM +no undo/.test(line)));
+  await h.app.close();
+});
+
 test("a resumed conversation shows its earlier exchanges", async () => {
   const h = harness();
   void h.app.run();

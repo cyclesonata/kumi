@@ -5,6 +5,7 @@ import type { McpEndpoint } from "./client.js";
 /** Tools the model may call directly: reads. */
 export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read"]);
 const MAX_RESULT_BYTES = 64 * 1024;
+const MAX_HOST_RESULT_BYTES = 4 * 1024 * 1024;
 const MAX_CATALOG_BYTES = 1024 * 1024;
 
 /** Host-owned authorization boundary; model instructions and annotations confer no authority. */
@@ -84,7 +85,8 @@ export class AllowedTools {
     const result = await this.endpoint.call(name, args, signal);
     signal.throwIfAborted();
     if (!options.host && (!this.isValid || invalidation !== this.invalidation)) throw new Error("MCP catalog changed during the call; result discarded");
-    if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) {
+    // Kumi's own calls (a Set export, a large clip's apply) may be bigger; what reaches the model is bounded where it's encoded.
+    if (Buffer.byteLength(JSON.stringify(result)) > (options.host ? MAX_HOST_RESULT_BYTES : MAX_RESULT_BYTES)) {
       return { isError: true, content: [{ type: "text", text: "Result too large; narrow fields/parent/page instead of requesting a whole Set dump." }] };
     }
     return result; // Preserve isError, structuredContent, content and original schemas/names.

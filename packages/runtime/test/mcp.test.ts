@@ -132,6 +132,17 @@ test("the bridge is asked to expose exactly Kumi's tools, or only reads when non
   } finally { await tools.close(); }
 });
 
+test("Kumi's own calls may bring back more than the model's 64 KB; the model's stay bounded", async () => {
+  const { tools } = await open();
+  try {
+    await tools.refresh(freshSignal());
+    const model = await tools.call("server_status", { action: "oversized" }, freshSignal());
+    assert.equal(model.isError, true, "the model's read is refused when too large");
+    const host = await tools.call("server_status", { action: "oversized" }, freshSignal(), { host: true });
+    assert.notEqual(host.isError, true, "Kumi's own call gets the whole answer (a Set export, a large clip)");
+  } finally { await tools.close(); }
+});
+
 test("the bridge's word on bad arguments comes back as a tool error; other failures stay generic", async () => {
   const { tools } = await open();
   try {

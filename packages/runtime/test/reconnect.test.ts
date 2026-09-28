@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ConnectionState, JsonObject } from "../src/core/contracts.js";
@@ -23,7 +27,8 @@ function world() {
         if (own.closed) throw new Error("closed");
         if (live && own.epoch !== epoch) own.poisoned = true;
         const connected = live && !own.poisoned;
-        if (name === "live_status") return wrap({ connected, adapter: "remote-script", provenance: "fake-live", epoch: connected ? epoch : null, ...(own.poisoned ? { reason: "remote-bridge-or-live-epoch-changed" } : {}) });
+        // Like the real bridge, a failed recovery ends up reported as a failed reconnect.
+        if (name === "live_status") return wrap({ connected, adapter: "remote-script", provenance: "fake-live", epoch: connected ? epoch : null, ...(own.poisoned ? { reason: "remote-reconnect-failed" } : {}) });
         if (!connected) return { isError: true, content: [{ type: "text", text: "Live adapter is not connected" }] };
         return wrap({ epoch, kind: args.kind, items: args.kind === "set" ? [{ ref: `${epoch}:set:song`, objectIdentity: `song-${epoch}`, name: "Night Drive" }] : [], revision: "r", truncated: false });
       },
@@ -38,7 +43,13 @@ function world() {
 test("after Live restarts, Kumi starts a fresh bridge, keeps the conversation and never needs /new", async () => {
   const w = world();
   const states: ConnectionState[] = [];
-  const integration = createAbletonIntegration({ connect: async () => w.bridge(), onConnection: (state) => states.push(state), reconnectIntervalMs: 10 });
+  // Live's Remote Script answering on its port is the cue for a fresh bridge.
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const directory = mkdtempSync(join(tmpdir(), "kumi-reconnect-"));
+  const bridgeConfig = join(directory, "bridge-config.json");
+  writeFileSync(bridgeConfig, JSON.stringify({ bridge: { host: "127.0.0.1", port: (server.address() as { port: number }).port } }));
+  const integration = createAbletonIntegration({ connect: async () => w.bridge(), bridgeConfig, onConnection: (state) => states.push(state), reconnectIntervalMs: 10 });
   try {
     await integration.start(AbortSignal.timeout(5_000));
     const before = await integration.observe(AbortSignal.timeout(5_000));
@@ -56,5 +67,5 @@ test("after Live restarts, Kumi starts a fresh bridge, keeps the conversation an
     assert.equal(after.key, before.key, "the same Set continues the conversation");
     assert.equal((await integration.observe(AbortSignal.timeout(5_000))).key, before.key, "on every later turn too");
     assert.equal(JSON.parse(after.context).epoch, 2);
-  } finally { await integration.close(); }
+  } finally { await integration.close(); server.close(); rmSync(directory, { recursive: true, force: true }); }
 });

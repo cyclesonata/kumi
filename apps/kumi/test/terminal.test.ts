@@ -59,6 +59,18 @@ test("plain mode prints each change, and /undo takes back the latest", async () 
   assert(f.calls.includes("undo"));
 });
 
+test("plain mode keeps a line typed while Kumi connects and sends it when ready", async () => {
+  const f = fixture(); await delay(0);
+  (f.controller as unknown as { status(): { state: string } }).status = () => ({ state: "running", connection: "connecting", turns: 0, maxTurns: 30 } as never);
+  f.input.write("early question\n"); await delay(5);
+  assert(!f.calls.includes("submit:early question"), "held while connecting");
+  assert.match(f.output, /\[waiting\] Kumi is getting ready/);
+  (f.controller as unknown as { status(): { state: string } }).status = () => ({ state: "idle", connection: "connected", turns: 0, maxTurns: 30 } as never);
+  f.emit({ type: "state", state: "idle" }); await delay(10);
+  assert(f.calls.includes("submit:early question"));
+  f.input.write("/quit\n"); assert.equal(await f.done, 0);
+});
+
 test("an optional startup notice follows the header once", async () => {
   const f = fixture(false, false, "The Ableton bridge isn't installed yet");
   await delay(0); f.input.write("/quit\n"); assert.equal(await f.done, 0);
