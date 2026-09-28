@@ -2,8 +2,9 @@
 
 Kumi is a streaming producer-assistant conversation about the **current open
 Ableton Live Set**: it reads the Set and makes the changes you ask for, each with
-its own undo ([how changes work](KUMI_CHANGES.md)). Playback control, recording,
-listening and memory are not implemented yet. It runs its own agent core and the
+its own undo ([how changes work](KUMI_CHANGES.md)). For a saved Set it picks up
+the conversation next time and says what changed meanwhile. Playback control,
+recording, listening and learned preferences are not implemented yet. It runs its own agent core and the
 independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
@@ -172,8 +173,11 @@ terminal is restored on exit, on crashes and on signals.
 
 ## Limits and failure behavior
 
-- **Ephemeral:** no saved history, memory, resume, learned skills or compaction.
-  After 30 submitted turns (including failed/cancelled submissions), use `/new`.
+- **Conversations** are kept for saved Sets, in `~/.kumi/projects` next to what Kumi
+  last saw of each Set (readable only by you); the oldest exchanges drop off past
+  about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
+  end with Kumi. There's no learned memory, skills or compaction yet. After 30
+  submitted turns in one session (including failed/cancelled ones), use `/new`.
 - Prompts are capped at 16 KiB; turns at 120 seconds and 24 model steps; MCP
   requests at 15 seconds. A cancelled or failed turn leaves no trace in the
   conversation. One automatic retry happens only for a retryable provider failure

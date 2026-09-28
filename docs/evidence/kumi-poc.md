@@ -357,6 +357,16 @@ Growing the disposable Set through the bridge (UTC `2026-09-28T06:10Z`–`06:20Z
   devices is 54 KB, about 13 KB a track); a device exposing more than 256
   parameters fails the snapshot too. Most edits verify through that snapshot.
 
+## Conversations that continue
+
+On real Live (UTC `2026-09-28T06:38Z`–`06:44Z`): in one Kumi session, "Remember this
+for later: the chorus starts at bar 17." Kumi was closed and started again on the
+same Set, which opened with "Continuing your conversation from 3 minutes ago. /new
+starts fresh.", the earlier exchange, and "Nothing changed in Kumi Focus Demo since
+you were last here". Asked "Where does the chorus start?", it answered "Bar 17, as
+you noted." The conversation is kept as `conversation.json` (mode 0600) beside the
+Set's last-seen state. Screens: `.pi/kumi-evidence/tui/19-*.txt`, `20-*.txt`.
+
 ## Live quitting and coming back
 
 With Kumi full screen (UTC `2026-09-28T05:52Z`–`05:56Z`), Kumi set the tempo, then

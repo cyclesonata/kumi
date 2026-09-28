@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { createSession } from "../src/core/session.js";
-import type { ConnectionState, Kernel, KernelEvent, KernelFactory, Observation, SessionEvent, TurnResult } from "../src/core/contracts.js";
+import type { ConnectionState, ConversationStore, Kernel, KernelEvent, KernelFactory, KernelOptions, Observation, SavedConversation, SessionEvent, TurnResult } from "../src/core/contracts.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -197,6 +197,42 @@ test("Live going away while idle keeps the conversation; when it's back Kumi say
   assert.equal(h.kernels.length, 1, "the same conversation continues");
   assert(!h.events.some((e) => e.type === "notice" && /fresh conversation/.test(e.message)));
   await h.session.close();
+});
+
+test("a saved Set's conversation continues next time; /new starts it afresh", async () => {
+  const project = "a".repeat(32);
+  const saved = new Map<string, SavedConversation>();
+  const store: ConversationStore = { async load(id) { return saved.get(id); }, async save(id, conversation) { saved.set(id, structuredClone(conversation)); }, async clear(id) { saved.delete(id); } };
+  const created: KernelOptions[] = [];
+  const factory: KernelFactory = async (options) => {
+    created.push(options);
+    const history = [...(options.checkpoint?.messages ?? [])] as string[];
+    return {
+      async run(input) { history.push(input.split("\n\n<current_observation_untrusted>")[0]!); return { stopReason: "completed" }; },
+      async close() {},
+      checkpoint() { return { version: 1, messages: [...history] }; },
+      transcript() { return history.map((text) => ({ role: "user" as const, text })); },
+    };
+  };
+  const open = () => {
+    const events: SessionEvent[] = [];
+    const session = createSession({ kernelFactory: factory, onEvent: (event) => events.push(event), conversations: store, cancelGraceMs: 10, closeTimeoutMs: 25,
+      integrationFactory: (listener) => ({ async start() { listener("connected"); }, async close() {},
+        async observe() { return { key: "night-drive", label: "Night Drive", context: "ctx", instructions: "i", tools: [], project: { id: project, name: "Night Drive" } }; } }) });
+    return { session, events };
+  };
+  const one = open();
+  await one.session.start(); await one.session.submit("remember 42"); await delay(5); await one.session.close();
+  assert.deepEqual(saved.get(project)?.checkpoint.messages, ["remember 42"], "kept after the turn");
+  const two = open();
+  await two.session.start();
+  const resumed = two.events.find((event): event is Extract<SessionEvent, { type: "resumed" }> => event.type === "resumed");
+  assert.deepEqual(resumed?.lines, [{ role: "user", text: "remember 42" }]);
+  assert.deepEqual(created.at(-1)?.checkpoint?.messages, ["remember 42"], "the kernel carries it on");
+  await two.session.newConversation();
+  assert.equal(saved.has(project), false, "/new discards the saved conversation too");
+  assert.equal(created.at(-1)?.checkpoint, undefined);
+  await two.session.close();
 });
 
 test("new conversation closes old resources, reconnects, and resets submitted-turn limit", async () => {

@@ -84,7 +84,7 @@ test("Kumi opens full screen with the header, the Live pane and the input box, a
   assert.equal(await done, 0);
   assert.ok(h.calls.includes("close"));
   assert.equal(h.input.isRaw, false);
-  assert.ok(h.written.endsWith(`${RESTORE}Kumi closed. This conversation wasn't saved.\n`), "the terminal is restored before the goodbye");
+  assert.ok(h.written.endsWith(`${RESTORE}Kumi closed. Conversations about saved Sets continue next time.\n`), "the terminal is restored before the goodbye");
 });
 
 test("typing and sending, then streaming text and steps in plain words, then the finished turn", async () => {
@@ -351,6 +351,17 @@ test("the narrow strip offers undo for the latest change", async () => {
   h.onUndo(() => ({ id: "c3", family: "tempo", title: "Tempo 120 → 96 BPM", state: "undone", at: 1 }));
   await h.type(click(lines, row, "undo"));
   assert.ok(h.calls.includes("undo:c3"));
+  await h.app.close();
+});
+
+test("a resumed conversation shows its earlier exchanges", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "resumed", savedAt: Date.now() - 2 * 60 * 60_000, lines: [{ role: "user", text: "Make the pad wider" }, { role: "assistant", text: "Widened the **Pad** chorus." }] });
+  const lines = h.screen();
+  for (const text of ["Continuing your conversation from 2 hours ago. /new starts fresh.", "Make the pad wider", "Widened the Pad chorus."]) assert.ok(has(lines, text), text);
   await h.app.close();
 });
 

@@ -133,7 +133,7 @@ export function createTerminal(options: Options): Terminal {
       await Promise.race([controller.close(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("Shutdown deadline exceeded")), options.closeTimeoutMs ?? 6_000);
       })]);
-      if (!output.destroyed) presentation?.notice("Kumi closed. Ephemeral conversation discarded.", true);
+      if (!output.destroyed) presentation?.notice("Kumi closed. Conversations about saved Sets continue next time.", true);
     } catch (error) {
       code = 1;
       if (!output.destroyed) presentation?.notice(line(`[error] ${safeError(error, secrets)}`), true);
@@ -186,6 +186,7 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
+      case "resumed": notice(`[resumed] Continuing your conversation from ${since(event.savedAt, Date.now())} (/new starts fresh).`); break;
       case "catch-up": {
         const { catchUp } = event;
         const when = since(catchUp.lastSeenAt, Date.now());
@@ -233,7 +234,7 @@ export function createTerminal(options: Options): Terminal {
       rl.on("close", () => { void finish(); });
       input.on("error", () => { void finish(1); }); output.on("error", () => { void finish(1); });
       notice(`Kumi · ${options.model} · ${options.mode === "inference-only" ? "MCP disconnected / No Live access" : "MCP connecting / Live unverified"}`);
-      notice("Ephemeral session: quitting loses conversation history. /help for commands.");
+      notice("Conversations about saved Sets continue next time; others end when Kumi closes. /help for commands.");
       if (options.startupNotice) notice(options.startupNotice);
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {
         if (!closing) { reportError(error); await finish(1); }

@@ -8,7 +8,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, JsonObject } from "../src/core/contracts.js";
 import type { McpEndpoint } from "../src/mcp/client.js";
 import { createAbletonIntegration } from "../src/integrations/ableton/index.js";
-import { createProjectStore, describeDiff, since, type Baseline } from "../src/integrations/ableton/project.js";
+import { createConversationStore, createProjectStore, describeDiff, projectIdOf, since, type Baseline } from "../src/integrations/ableton/project.js";
 
 // Generated from the bridge's own semantic snapshot code by fixtures/make-catch-up.mjs: a Set with
 // Drums and Bass, then tempo 120 → 124, Drums renamed Beats and its device removed, a Pad track
@@ -36,6 +36,26 @@ test("look-alike tracks the bridge can't tell apart still read as a rename and a
   const { ambiguous } = fixture;
   assert(Array.isArray(ambiguous.diff.items) && (ambiguous.diff.items as JsonObject[]).some((item) => item.type === "ambiguity"), "the bridge reports a group, as on real Live");
   assert.deepEqual(describeDiff(ambiguous.diff, ambiguous.before, ambiguous.after).lines, ["Renamed track “Vox” → “Lead Vox”", "Added track “Bells”"]);
+});
+
+test("each saved Set's conversation is kept privately, trimmed from the front when long", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "kumi-conversations-"));
+  try {
+    const store = createConversationStore(directory);
+    const id = projectIdOf("/Music/Night Drive.als");
+    assert.equal(await store.load(id), undefined);
+    await store.save(id, { savedAt: 5, checkpoint: { version: 1, messages: [{ role: "user", content: "hi" }], origin: "openai-codex" } });
+    assert.deepEqual(await store.load(id), { savedAt: 5, checkpoint: { version: 1, messages: [{ role: "user", content: "hi" }], origin: "openai-codex" } });
+    if (process.platform !== "win32") assert.equal(statSync(join(directory, id, "conversation.json")).mode & 0o777, 0o600);
+    const long = Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `${index}:${"x".repeat(10_000)}` }));
+    await store.save(id, { savedAt: 6, checkpoint: { version: 1, messages: long } });
+    const kept = (await store.load(id))!.checkpoint.messages as { role: string; content: string }[];
+    assert(kept.length < long.length && Buffer.byteLength(JSON.stringify(kept)) <= 256 * 1024);
+    assert.equal(kept[0]!.role, "user", "it starts where the producer spoke"); assert.equal(kept.at(-1)!.content, long.at(-1)!.content, "the newest part is kept");
+    await store.clear(id);
+    assert.equal(await store.load(id), undefined);
+    assert.equal(await store.load("../escape"), undefined, "an invalid id reads as nothing");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("time since reads in plain words", () => {
@@ -110,6 +130,7 @@ test("seeing a saved Set again catches up on what changed, tells the model, and 
   try {
     await integration.start(AbortSignal.timeout(5_000));
     const first = await integration.observe(AbortSignal.timeout(5_000));
+    assert.deepEqual(first.project, { id: projectIdOf("/Music/Night Drive.als"), name: "Night Drive" }, "the observation names the saved Set");
     const catchUp = await waitFor(() => caught[0]);
     assert.equal(catchUp.set, "Night Drive"); assert.equal(catchUp.lastSeenAt, now - threeDays);
     assert.deepEqual(catchUp.lines.slice(0, 3), ["Tempo 120 → 124 BPM", "“Drums” → “Beats” (renamed and changed)", "Added track “Pad”"]);

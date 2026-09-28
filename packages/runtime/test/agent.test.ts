@@ -249,6 +249,25 @@ test("steering enters at the next model boundary, even after a final answer", as
   await h.kernel.close();
 });
 
+test("a checkpoint says which provider wrote it; another provider continues from a portable copy", async () => {
+  const thinking: LanguageModelV4StreamPart[] = [
+    { type: "reasoning-start", id: "r1", providerMetadata: { test: { replay: "provider-only" } } }, { type: "reasoning-delta", id: "r1", delta: "thinking" }, { type: "reasoning-end", id: "r1" },
+  ];
+  const first = harness(() => [...thinking, ...text("Try a shorter release."), finish()]);
+  await first.kernel.run("How do I tame the snare?\n\n<current_observation_untrusted>\n{\"tempo\":120}\n</current_observation_untrusted>", new AbortController().signal, () => {});
+  const checkpoint = first.kernel.checkpoint();
+  assert.equal(checkpoint.origin, "test");
+  assert.deepEqual(first.kernel.transcript(), [{ role: "user", text: "How do I tame the snare?" }, { role: "assistant", text: "Try a shorter release." }], "the producer's words, without the host's observation");
+  const same = harness(() => [...text("ok"), finish()], { checkpoint: JSON.parse(JSON.stringify(checkpoint)) });
+  await same.kernel.run("next", new AbortController().signal, () => {});
+  assert.match(JSON.stringify(same.requests[0]!.prompt[1]), /provider-only/, "the same provider replays everything");
+  const other = harness(() => [...text("ok"), finish()], { checkpoint: { ...JSON.parse(JSON.stringify(checkpoint)), origin: "elsewhere" } });
+  await other.kernel.run("next", new AbortController().signal, () => {});
+  const replayed = JSON.stringify(other.requests[0]!.prompt[1]);
+  assert.doesNotMatch(replayed, /provider-only|reasoning/); assert.match(replayed, /Try a shorter release/);
+  await first.kernel.close(); await same.kernel.close(); await other.kernel.close();
+});
+
 test("a checkpoint restores settled history into a fresh kernel", async () => {
   const first = harness(() => [...text("remembered"), finish()]);
   await first.kernel.run("marker-123", new AbortController().signal, () => {});

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createInferenceOnlyIntegration, createProjectStore, createSession, openCredentialStore, resolveModel,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createProjectStore, createSession, openCredentialStore, resolveModel,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
 import { loadConfig, loadProjectsDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
@@ -95,6 +95,7 @@ try {
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
       onEvent: (event) => terminal?.handleEvent(event),
+      ...(config.mode === "live" ? { conversations: createConversationStore(loadProjectsDir()) } : {}),
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";

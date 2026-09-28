@@ -32,13 +32,20 @@ export interface TurnResult {
 export interface KernelCheckpoint {
   readonly version: 1;
   readonly messages: readonly unknown[];
+  /** The provider that wrote it; another provider continues from a portable copy (text and tool calls). */
+  readonly origin?: string;
 }
+
+/** One exchange of a conversation, as the producer saw it. */
+export interface TranscriptLine { role: "user" | "assistant"; text: string }
 
 export interface Kernel {
   run(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void): Promise<TurnResult>;
   close(): Promise<void>;
   /** The settled conversation, so a kernel with other tools can carry it on. */
   checkpoint?(): KernelCheckpoint;
+  /** The settled conversation's words, for showing a resumed conversation. */
+  transcript?(): TranscriptLine[];
 }
 
 export interface KernelOptions {
@@ -63,6 +70,16 @@ export interface Observation {
   context: string;
   instructions: string;
   tools: readonly KernelTool[];
+  /** The saved Set this is about (an opaque id), so its conversation can be kept between sessions. */
+  project?: { id: string; name: string };
+}
+
+/** A Set's conversation, kept between sessions. */
+export interface SavedConversation { savedAt: number; checkpoint: KernelCheckpoint }
+export interface ConversationStore {
+  load(project: string): Promise<SavedConversation | undefined>;
+  save(project: string, conversation: SavedConversation): Promise<void>;
+  clear(project: string): Promise<void>;
 }
 
 export interface Integration {
@@ -133,6 +150,8 @@ export type SessionEvent = KernelEvent
   | { type: "focus"; focus: LiveFocus | null }
   | { type: "change"; change: ChangeRecord }
   | { type: "catch-up"; catchUp: CatchUp }
+  /** A saved Set's conversation continues; `lines` are its recent exchanges. */
+  | { type: "resumed"; savedAt: number; lines: TranscriptLine[] }
   | { type: "state"; state: TurnState }
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }

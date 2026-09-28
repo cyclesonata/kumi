@@ -47,7 +47,7 @@ const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops 
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
 const MAX_OUTPUT_BYTES = 256 * 1024;
-const FAREWELL = "Kumi closed. This conversation wasn't saved.";
+const FAREWELL = "Kumi closed. Conversations about saved Sets continue next time.";
 
 const st = {
   ground: { bg: palette.ground } as Style,
@@ -234,6 +234,14 @@ export class TuiApp {
       case "focus":
         this.focus = event.focus;
         break;
+      case "resumed": {
+        this.notice(`Continuing your conversation from ${since(event.savedAt, Date.now())}. /new starts fresh.`, "info");
+        for (const line of event.lines) {
+          const text = sanitizeText(line.text, this.secrets).slice(0, 16 * 1024);
+          this.transcript.add(line.role === "user" ? { kind: "user", text } : { kind: "assistant", text, steps: [], status: "done" });
+        }
+        break;
+      }
       case "catch-up":
         this.catchUp = event.catchUp;
         // The welcome screen shows it; once the conversation has started, it becomes a note.
@@ -611,7 +619,7 @@ export class TuiApp {
       add("  “How do I make my kick punchier?”");
     }
     add();
-    add("Conversations aren't saved yet.", st.faint);
+    add("Kumi keeps the conversation for each saved Set.", st.faint);
     rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
   }
 

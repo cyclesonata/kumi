@@ -43,7 +43,7 @@ test("header, transcript, tool timing, usage and command dispatch are concise an
   f.emit({ type: "turn-complete", elapsedMs: 55, result: { stopReason: "completed", usage: { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 } } });
   f.emit({ type: "error", message: "token=private-token\u001b[31m bad" });
   f.input.write("/quit\n"); assert.equal(await f.done, 0);
-  assert.match(f.output, /Kumi/); assert.match(f.output, /ephemeral|history is lost/i);
+  assert.match(f.output, /Kumi/); assert.match(f.output, /continue next time/i);
   assert.match(f.output, /No Live access/); assert.match(f.output, /hello world/); assert.equal(f.output.split("hello world").length, 2);
   assert.match(f.output, /live_status.*7 ms/); assert.match(f.output, /3.*2/); assert(!f.output.includes("private-token"));
   assert.deepEqual(f.calls, ["start", "refresh", "new", "submit:question", "close"]);
@@ -76,7 +76,7 @@ test("partial input and cursor survive streaming, notices and tool lines, includ
   f.input.write("XY\r"); await delay(0);
   assert(f.calls.includes(`submit:${prefix}abXYcd`));
   f.input.write("/quit\r"); await f.done; assert.equal(f.input.isRaw, false);
-  assert(stripVTControlCharacters(f.output).endsWith("Kumi closed. Ephemeral conversation discarded.\n"), "do not leave a dead Kumi prompt at exit");
+  assert(stripVTControlCharacters(f.output).endsWith("Kumi closed. Conversations about saved Sets continue next time.\n"), "do not leave a dead Kumi prompt at exit");
 });
 
 test("busy submit and refresh/new are rejected; Ctrl-C cancels work but preserves partly typed next input", async () => {

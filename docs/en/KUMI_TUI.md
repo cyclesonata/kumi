@@ -75,7 +75,9 @@ old line-by-line interface (`terminal.ts`).
    each change for a moment as it lands.
 3. **NOW building blocks**: knob, fader, device chain and piano roll drawn from
    each change's before and after values, and producer units (dB, pan, bars).
-4. **Saved sessions**, since the full-screen view is gone once Kumi closes.
+4. ~~**Saved sessions**~~: done for saved Sets. Opening Kumi on a Set picks up
+   its conversation and shows the recent exchanges ("Continuing your conversation
+   from 2 hours ago"); `/new` starts afresh.
 
 Done alongside: the welcome screen catches you up on a saved Set ("Since you were
 last here · 3 days ago", a few plain-words lines); once the conversation has

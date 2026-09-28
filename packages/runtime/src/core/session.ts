@@ -1,5 +1,5 @@
 import type {
-  ChangeRecord, ConnectionState, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation,
+  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation, SavedConversation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
@@ -12,6 +12,8 @@ interface Options {
   closeTimeoutMs?: number;
   cancelGraceMs?: number;
   maxTurns?: number;
+  /** Keeps each saved Set's conversation between sessions; without it conversations end with Kumi. */
+  conversations?: ConversationStore;
 }
 interface Operation {
   id: number;
@@ -36,6 +38,8 @@ export function createSession(options: Options): SessionController {
   let mustReset = false;
   /** Live went away while connected; cleared when it's back. */
   let away = false;
+  /** The saved Set the conversation is about, when known. */
+  let currentProject: string | undefined;
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -90,26 +94,48 @@ export function createSession(options: Options): SessionController {
       if (kernel.value.checkpoint) carried = kernel.value.checkpoint();
       if (carried) { await dropKernel(); assertCurrent(op); }
     }
+    let reason: "set" | "cancelled" | "tools" | undefined;
+    const first = kernel === undefined && !mustReset;
     if (kernel && (identityChanged || mustReset || kernel.revision !== revision)) {
       await dropKernel(); assertCurrent(op);
-      emit({ type: "notice", message: identityChanged ? "The open Set changed; starting a fresh conversation."
-        : mustReset ? "Cancelled work was discarded; starting a fresh conversation." : "Kumi's tools changed; starting a fresh conversation." });
+      reason = identityChanged ? "set" : mustReset ? "cancelled" : "tools";
       if (identityChanged) turns = op.isTurn ? 1 : 0;
-    }
+    } else if (!kernel && mustReset) reason = "cancelled";
     if (!kernel) {
-      if (mustReset) emit({ type: "notice", message: "Unsettled work was discarded; starting a fresh conversation." });
+      // A saved Set's conversation carries on from its last settled turn.
+      let resumed: SavedConversation | undefined;
+      if (!carried && observation.project && options.conversations) {
+        resumed = await options.conversations.load(observation.project.id).catch(() => undefined);
+        assertCurrent(op);
+      }
+      const checkpoint = carried ?? resumed?.checkpoint;
       const lifetime = new AbortController();
       const abortCreation = () => lifetime.abort();
       op.controller.signal.addEventListener("abort", abortCreation, { once: true });
       let value: Kernel | undefined;
       try {
-        value = await options.kernelFactory({ instructions: observation.instructions, tools: observation.tools, signal: lifetime.signal, ...(carried ? { checkpoint: carried } : {}) });
+        value = await options.kernelFactory({ instructions: observation.instructions, tools: observation.tools, signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
         if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
         kernel = { value, key: observation.key, revision, lifetime };
       } catch (error) { lifetime.abort(); throw error; }
       finally { op.controller.signal.removeEventListener("abort", abortCreation); }
+      const set = observation.project?.name ?? "this Set";
+      if (reason === "set") emit({ type: "notice", message: resumed ? `The open Set changed; continuing your conversation about ${set}.` : "The open Set changed; starting a fresh conversation." });
+      else if (reason === "cancelled") emit({ type: "notice", message: resumed ? "Cancelled work was discarded; the conversation continues from before it." : "Cancelled work was discarded; starting a fresh conversation." });
+      else if (reason === "tools") emit({ type: "notice", message: resumed ? "Kumi's tools changed; the conversation continues." : "Kumi's tools changed; starting a fresh conversation." });
+      // Show the earlier exchanges when this conversation isn't already on screen.
+      if (resumed && (first || reason === "set")) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.().slice(-20) ?? [] });
     }
     mustReset = false;
+  }
+  /** Keep the settled conversation for its saved Set; best effort, never in the way of the answer. */
+  function saveConversation() {
+    const held = kernel; const project = currentProject;
+    if (!options.conversations || !held?.value.checkpoint || !project) return;
+    try {
+      const checkpoint = held.value.checkpoint();
+      void options.conversations.save(project, { savedAt: Date.now(), checkpoint }).catch(() => {});
+    } catch { /* the kernel was busy */ }
   }
   async function observe(op: Operation) {
     assertCurrent(op);
@@ -118,6 +144,7 @@ export function createSession(options: Options): SessionController {
     observationLabel = undefined;
     const snapshot = await integration.observe(op.controller.signal);
     assertCurrent(op);
+    currentProject = snapshot.project?.id;
     await ensureKernel(op, snapshot); assertCurrent(op);
     observationLabel = snapshot.label;
     emit({ type: "observation", label: snapshot.label });
@@ -153,7 +180,10 @@ export function createSession(options: Options): SessionController {
         const result = await Promise.race([working, aborted]);
         settledResult = result;
         if (op.controller.signal.aborted) throw new Error("Operation cancelled");
-        if (isTurn && result) emit({ type: "turn-complete", result, elapsedMs: Math.round(performance.now() - startedAt) });
+        if (isTurn && result) {
+          emit({ type: "turn-complete", result, elapsedMs: Math.round(performance.now() - startedAt) });
+          if (result.stopReason !== "cancelled") saveConversation();
+        }
       } catch (error) {
         if (op.controller.signal.aborted) {
           if (!workSettled || timedOut) {
@@ -203,7 +233,15 @@ export function createSession(options: Options): SessionController {
       if (!started) return Promise.reject(new Error("Session is not started"));
       return perform(false, "refresh", async (op) => { await observe(op); return undefined; });
     },
-    newConversation() { return perform(false, "start", async (op) => { await reset(op); emit({ type: "notice", message: "New ephemeral conversation; previous history discarded." }); return undefined; }); },
+    newConversation() {
+      return perform(false, "start", async (op) => {
+        // A fresh start means the saved Set's conversation is gone too.
+        if (currentProject && options.conversations) await options.conversations.clear(currentProject).catch(() => {});
+        await reset(op);
+        emit({ type: "notice", message: "New conversation; the previous one is discarded." });
+        return undefined;
+      });
+    },
     async undo(id) {
       if (!started) throw new Error("Session is not started");
       let outcome: ChangeRecord | undefined;

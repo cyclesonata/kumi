@@ -6,7 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { CatchUp, JsonObject } from "../../core/contracts.js";
+import type { CatchUp, ConversationStore, JsonObject, SavedConversation } from "../../core/contracts.js";
 
 /** A Set's state as Kumi last saw it. */
 export interface Baseline {
@@ -26,9 +26,21 @@ export interface ProjectStore {
 
 const MAX_BASELINE_BYTES = 8 * 1024 * 1024;
 
+/** A saved Set's id for Kumi: a hash of its file path, which is also its folder's name. */
+export const projectIdOf = (path: string) => createHash("sha256").update(path).digest("hex").slice(0, 32);
+
+async function writePrivately(folder: string, name: string, text: string): Promise<void> {
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  const temporary = join(folder, `.${name}-${randomUUID()}`);
+  try {
+    await writeFile(temporary, text, { mode: 0o600 });
+    await rename(temporary, join(folder, name));
+  } catch (error) { await rm(temporary, { force: true }); throw error; }
+}
+
 /** One folder per saved Set, named by a hash of its path; files readable only by this user. */
 export function createProjectStore(directory: string): ProjectStore {
-  const folder = (path: string) => join(directory, createHash("sha256").update(path).digest("hex").slice(0, 32));
+  const folder = (path: string) => join(directory, projectIdOf(path));
   return {
     async load(path) {
       try {
@@ -42,14 +54,40 @@ export function createProjectStore(directory: string): ProjectStore {
     async save(baseline) {
       const text = JSON.stringify(baseline);
       if (Buffer.byteLength(text) > MAX_BASELINE_BYTES) return;
-      const target = folder(baseline.path);
-      await mkdir(target, { recursive: true, mode: 0o700 });
-      const temporary = join(target, `.last-seen-${randomUUID()}.json`);
-      try {
-        await writeFile(temporary, text, { mode: 0o600 });
-        await rename(temporary, join(target, "last-seen.json"));
-      } catch (error) { await rm(temporary, { force: true }); throw error; }
+      await writePrivately(folder(baseline.path), "last-seen.json", text);
     },
+  };
+}
+
+/** About 64k tokens: older exchanges drop off the front so a long-lived conversation stays quick. */
+const MAX_CONVERSATION_BYTES = 256 * 1024;
+const ID = /^[0-9a-f]{32}$/;
+
+/** Each saved Set's conversation, next to its last-seen state; readable only by this user. */
+export function createConversationStore(directory: string): ConversationStore {
+  const file = (project: string) => { if (!ID.test(project)) throw new Error("invalid project id"); return join(directory, project, "conversation.json"); };
+  return {
+    async load(project) {
+      try {
+        const value = JSON.parse(await readFile(file(project), "utf8")) as SavedConversation;
+        if (typeof value?.savedAt !== "number" || value.checkpoint?.version !== 1 || !Array.isArray(value.checkpoint.messages)) return undefined;
+        return value;
+      } catch { return undefined; }
+    },
+    async save(project, conversation) {
+      let messages = [...conversation.checkpoint.messages] as { role?: unknown }[];
+      const size = (items: unknown[]) => Buffer.byteLength(JSON.stringify(items));
+      // Drop whole exchanges from the front: the kept part starts where the producer spoke.
+      while (messages.length && size(messages) > MAX_CONVERSATION_BYTES) {
+        messages = messages.slice(1);
+        while (messages.length && messages[0]!.role !== "user") messages = messages.slice(1);
+      }
+      if (!messages.length) return;
+      const saved: SavedConversation = { savedAt: conversation.savedAt, checkpoint: { ...conversation.checkpoint, messages } };
+      file(project);
+      await writePrivately(join(directory, project), "conversation.json", JSON.stringify(saved));
+    },
+    async clear(project) { await rm(file(project), { force: true }); },
   };
 }
 

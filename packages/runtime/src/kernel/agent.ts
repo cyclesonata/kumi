@@ -5,7 +5,7 @@ import type {
   LanguageModelV4Message, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolCall, LanguageModelV4ToolResultPart,
   LanguageModelV4Usage, SharedV4ProviderMetadata,
 } from "@ai-sdk/provider";
-import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, TurnResult, Usage } from "../core/contracts.js";
+import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
 
@@ -40,6 +40,7 @@ export interface AgentKernel extends Kernel {
   steer(text: string): boolean;
   /** Settled conversation only; an in-flight turn is never included. */
   checkpoint(): Checkpoint;
+  transcript(): TranscriptLine[];
 }
 
 interface StepResult {
@@ -69,7 +70,8 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   }));
   const sessionId = randomUUID();
   const lifetime = new AbortController();
-  let history = options.checkpoint ? restore(options.checkpoint) : [];
+  const provider = binding.id.split("/")[0] ?? binding.id;
+  let history = options.checkpoint ? restore(options.checkpoint, provider) : [];
   let running: { steering: string[] } | undefined;
   let active: Promise<TurnResult> | undefined;
   let closing: Promise<void> | undefined;
@@ -162,7 +164,16 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     },
     checkpoint() {
       if (running) throw new Error("Kernel is busy; checkpoint between turns");
-      return { version: 1, messages: structuredClone(history) };
+      return { version: 1, messages: structuredClone(history), origin: provider };
+    },
+    transcript() {
+      return history.flatMap((message): TranscriptLine[] => {
+        if (message.role !== "user" && message.role !== "assistant") return [];
+        const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+        // The host appends each turn's Live observation to the producer's words; that isn't theirs.
+        const words = message.role === "user" ? text.split("\n\n<current_observation_untrusted>")[0]! : text;
+        return words.trim() ? [{ role: message.role, text: words.trim() }] : [];
+      });
     },
     close() {
       return closing ??= (async () => { lifetime.abort(); await active?.catch(() => {}); })();
@@ -253,9 +264,16 @@ function user(text: string): LanguageModelV4Message {
   return { role: "user", content: [{ type: "text", text }] };
 }
 
-function restore(checkpoint: KernelCheckpoint): LanguageModelV4Message[] {
+function restore(checkpoint: KernelCheckpoint, provider: string): LanguageModelV4Message[] {
   if (checkpoint?.version !== 1 || !Array.isArray(checkpoint.messages)) throw new Error("Unsupported checkpoint version.");
-  return structuredClone(checkpoint.messages) as LanguageModelV4Message[];
+  const messages = structuredClone(checkpoint.messages) as LanguageModelV4Message[];
+  if (!checkpoint.origin || checkpoint.origin === provider) return messages;
+  // Another provider's reasoning and replay metadata mean nothing here: keep words, tool calls and results.
+  const plain = <T extends { providerOptions?: unknown }>(part: T): T => { const { providerOptions: _metadata, ...rest } = part; return rest as T; };
+  return messages.map((message) => (message.role === "system" ? message : {
+    ...message,
+    content: (message.content as { type: string; providerOptions?: unknown }[]).filter((part) => part.type !== "reasoning").map(plain),
+  }) as LanguageModelV4Message);
 }
 
 /** Resolve with the work, or reject as soon as the signal aborts; a late settlement is ignored. */

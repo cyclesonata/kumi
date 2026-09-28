@@ -1,4 +1,4 @@
-export type { CatchUp, ChangeFamily, ChangeRecord, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, TurnResult, TurnState, Usage } from "./core/contracts.js";
+export type { CatchUp, ChangeFamily, ChangeRecord, ConversationStore, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, TurnResult, TurnState, Usage } from "./core/contracts.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";
@@ -7,4 +7,4 @@ export { openCredentialStore, type Credential, type CredentialStore, type OAuthC
 export { DEVICE_VERIFICATION_URL, LOGIN_HINT, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, readPiCodexLogin } from "./auth/openai-codex.js";
 export { createAbletonIntegration, createInferenceOnlyIntegration } from "./integrations/ableton/index.js";
 export { parseFocus } from "./integrations/ableton/focus.js";
-export { createProjectStore, since, type ProjectStore } from "./integrations/ableton/project.js";
+export { createConversationStore, createProjectStore, since, type ProjectStore } from "./integrations/ableton/project.js";

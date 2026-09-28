@@ -7,7 +7,7 @@ import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { CHANGES, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
-import { catchUpFrom, describeDiff, since, type Baseline, type ProjectStore } from "./project.js";
+import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -328,19 +328,25 @@ export function createAbletonIntegration(options: Options): Integration {
     saveTimer.unref?.();
   }
   /** Compare the Set with what Kumi last saw, say what changed, then remember it as it is now. */
+  /** The open Set's file, which identifies a saved Set between sessions; none for an unsaved Set. */
+  async function projectPath(signal: AbortSignal): Promise<string | undefined> {
+    try {
+      await ensureCatalog(signal);
+      if (!tools!.has("live_project_info")) return undefined;
+      const info = payload(await tools!.call("live_project_info", {}, AbortSignal.any([signal, AbortSignal.timeout(5_000)]), { host: true }));
+      return typeof info.path === "string" && info.path && info.exists !== false ? info.path : undefined;
+    } catch { return undefined; }
+  }
   function catchUp(identity: string, name: string, afterReconnect = false): void {
-    project = { identity, name };
     catchUpContext = undefined;
     const store = options.projectStore;
-    if (!store) return;
+    const path = project?.identity === identity ? project.path : undefined;
+    if (!store || !path) return;
     saving = saving.then(async () => {
       const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(60_000)]);
       await ensureCatalog(signal);
       if (!PROJECT_TOOLS.every((tool) => tools!.has(tool))) return;
-      const info = payload(await tools!.call("live_project_info", {}, signal, { host: true }));
-      const path = typeof info.path === "string" && info.path && info.exists !== false ? info.path : undefined;
-      if (project?.identity !== identity || !path) return;
-      project = { identity, path, name };
+      if (project?.identity !== identity) return;
       const pages = await exportPages(signal);
       const baseline: Baseline | undefined = await store.load(path);
       if (baseline && project?.identity === identity) {
@@ -529,8 +535,12 @@ export function createAbletonIntegration(options: Options): Integration {
         const continues = previous && (previous.identity === identity || (reconnected && previous.name === name && name !== "(unnamed/unsaved)"));
         const key = continues ? previous!.key : JSON.stringify([generation, epoch, identity]);
         const afterReconnect = reconnected; reconnected = false; previous = { key, name, identity };
-        if (!seenBefore || project?.identity !== identity) catchUp(identity, name, afterReconnect);
-        else if (Date.now() - lastSaved > 5 * 60_000) scheduleSave(1_000);
+        if (!seenBefore || project?.identity !== identity) {
+          // Once per Set: its file says which saved Set it is (for its conversation and catching up).
+          const path = await projectPath(signal); assertLease(lease, signal);
+          project = { identity, name, ...(path ? { path } : {}) };
+          catchUp(identity, name, afterReconnect);
+        } else if (Date.now() - lastSaved > 5 * 60_000) scheduleSave(1_000);
         await ensureCatalog(signal); assertLease(lease, signal);
         const provenance = typeof status.provenance === "string" ? status.provenance : "unknown";
         const source = provenance === "real-live" && status.adapter === "remote-script" ? "Remote Script · real-live" : `unverified/synthetic fixture · ${provenance}`;
@@ -539,6 +549,7 @@ export function createAbletonIntegration(options: Options): Integration {
           revision: String(tools!.generation),
           label: `Current open Set: ${name} — ${source}`,
           instructions: INSTRUCTIONS, tools: definitions(),
+          ...(project?.identity === identity && project.path ? { project: { id: projectIdOf(project.path), name } } : {}),
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
