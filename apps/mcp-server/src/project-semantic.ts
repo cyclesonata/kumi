@@ -336,7 +336,9 @@ export function createSemanticProjectSnapshot(snapshot: LiveSnapshot, options: C
       return clip ? { kind: clip.kind, content: noteContent(clip.notes).hash, length: clip.length } : null;
     }).filter((value) => value !== null).sort((a, b) => compareSemanticStrings(canonicalSemanticJson(a), canonicalSemanticJson(b)));
     const structureHash = digest(slotContents);
-    const data: Record<string, SemanticJson> = { colorIndex: scene.colorIndex ?? null, tempo: scene.tempo ?? null, tempoEnabled: scene.tempoEnabled ?? null, signatureNumerator: scene.signatureNumerator ?? null, signatureDenominator: scene.signatureDenominator ?? null, isEmpty: scene.isEmpty ?? null, structureHash };
+    // Live reports a scene's unset tempo and time signature as -1.
+    const setValue = (value: number | null | undefined) => (typeof value === "number" && value >= 0 ? value : null);
+    const data: Record<string, SemanticJson> = { colorIndex: scene.colorIndex ?? null, tempo: setValue(scene.tempo), tempoEnabled: scene.tempoEnabled ?? null, signatureNumerator: setValue(scene.signatureNumerator), signatureDenominator: setValue(scene.signatureDenominator), isEmpty: scene.isEmpty ?? null, structureHash };
     push(createRecord("scene", index, name, data, { structureHash }));
   }
 

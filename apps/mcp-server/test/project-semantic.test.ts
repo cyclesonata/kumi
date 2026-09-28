@@ -54,6 +54,18 @@ test("exports deterministic semantic state while ignoring refs, identities, epoc
   validateSemanticProjectArtifact(a);
 });
 
+test("Live's unset scene tempo and time signature (-1) export as unset instead of failing", () => {
+  const snapshot = new DeterministicLiveSimulator().snapshot();
+  for (const scene of snapshot.scenes) Object.assign(scene, { tempo: -1, tempoEnabled: false, signatureNumerator: -1, signatureDenominator: -1, timeSignatureEnabled: false });
+  const artifact = createSemanticProjectSnapshot(snapshot, options());
+  validateSemanticProjectArtifact(artifact);
+  const scene = artifact.records.find((record) => record.kind === "scene")!;
+  assert.deepEqual([scene.data.tempo, scene.data.signatureNumerator, scene.data.signatureDenominator], [null, null, null]);
+  Object.assign(snapshot.scenes[0]!, { tempo: 96, tempoEnabled: true, signatureNumerator: 7, signatureDenominator: 8 });
+  const set = createSemanticProjectSnapshot(snapshot, options()).records.find((record) => record.kind === "scene")!;
+  assert.deepEqual([set.data.tempo, set.data.signatureNumerator, set.data.signatureDenominator], [96, 7, 8], "a scene's own tempo and signature are kept");
+});
+
 test("bundle and combined diff-input bounds reserve space below the transport frame", () => {
   assert.equal(SEMANTIC_PROJECT_MAX_BUNDLE_BYTES, 24 * 1024 * 1024); assert.equal(SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, 50 * 1024 * 1024);
   assert.ok(SEMANTIC_PROJECT_MAX_BUNDLE_BYTES * 2 < SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES); assert.ok(SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES < 64 * 1024 * 1024);
