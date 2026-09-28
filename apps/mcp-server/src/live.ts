@@ -150,7 +150,7 @@ export type LiveOperation =
   | "arrangement.clip.create" | "arrangement.clip.delete" | "arrangement.clip.move" | "arrangement.audio-clip.create" | "arrangement.automation.read" | "arrangement.automation.create" | "arrangement.automation.delete" | "arrangement.automation.point.insert" | "arrangement.automation.point.delete"
   | "audio.capture.cleanup" | "audio.capture.emergency-stop" | "audio.capture.inspect" | "audio.capture.start" | "audio.capture.status" | "audio.capture.stop" | "audio.clip.set" | "audio.warp-marker.read" | "audio.warp-marker.add" | "audio.warp-marker.move" | "audio.warp-marker.delete" | "audio.take-lane.read" | "audio.comp.read"
   | "automation.envelope.clear" | "automation.envelope.create" | "automation.envelope.delete" | "automation.envelope.read" | "automation.point.delete" | "automation.point.insert"
-  | "browser.inspect" | "browser.load" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "device.parameters.set" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
+  | "browser.inspect" | "browser.load" | "ownership.settle" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "device.parameters.set" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
   | "application.dialog" | "clip.view.set" | "device.bank.set" | "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "looper.action" | "looper.set" | "meld.set" | "plugin.set" | "simpler.replace-sample" | "device.comparison.save-to-slot" | "device.delete" | "device.enable" | "device.insert" | "device.move" | "device.parameter.set" | "device.rename" | "device.view.set" | "observe.poll" | "observe.subscribe" | "observe.unsubscribe" | "parameter.re-enable-automation" | "selection.set" | "song.view.set"
   | "chain-mixer.set" | "compressor.sidechain.set" | "device-io.set" | "locator.add" | "locator.delete" | "locator.jump" | "locator.jump-to" | "locator.rename" | "mixer.extended.set" | "mixer.set" | "note.add" | "note.add-batch" | "note.delete" | "note.duplicate" | "note.quantize" | "note.read-by-id" | "note.read-selected" | "note.update"
   | "project.bounce" | "project.collect" | "project.export" | "project.new" | "project.open" | "project.save" | "project.save-as"
@@ -236,7 +236,7 @@ export function ownedDeviceFingerprintRow(row: unknown): unknown {
     .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
 }
 
-export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
+export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
 
 export class DeterministicLiveSimulator implements LiveAdapter {
   private state = createSimulatorState();
@@ -585,8 +585,14 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       case "device.delete": {
         const deviceRef = objectRef("ref"); const expectedIdentity = stringArg("expectedObjectIdentity"); const expectedOwnerRef = objectRef("expectedOwnerRef"); const expectedOwnerIdentity = stringArg("expectedOwnerIdentity");
         for (const track of this.state.tracks) {
-          const index = track.devices.findIndex((device) => device.ref === deviceRef && device.objectIdentity === expectedIdentity && device.parentRef === expectedOwnerRef && track.objectIdentity === expectedOwnerIdentity && args.expectedTrackRef === track.ref && args.expectedTrackIdentity === track.objectIdentity);
-          if (index >= 0) { requireDeviceSiblings(track.devices); track.devices.splice(index, 1); this.emit({ type: "object", ref: track.ref, payload: { operation, ref: deviceRef } }); return { deleted: deviceRef }; }
+          if (args.expectedTrackRef !== track.ref || args.expectedTrackIdentity !== track.objectIdentity) continue;
+          // The device's owner: the track, or a chain of a rack on it at any depth.
+          const owners: Array<{ ref: LiveRef; objectIdentity?: string; devices: Device[] }> = [{ ref: track.ref, objectIdentity: track.objectIdentity, devices: track.devices }];
+          for (let at = 0; at < owners.length && at < 4096; at++) for (const device of owners[at]!.devices) for (const chain of device.chains ?? []) owners.push({ ref: chain.ref, objectIdentity: chain.objectIdentity, devices: chain.devices });
+          for (const owner of owners) {
+            const index = owner.devices.findIndex((device) => device.ref === deviceRef && device.objectIdentity === expectedIdentity && device.parentRef === expectedOwnerRef && owner.ref === expectedOwnerRef && owner.objectIdentity === expectedOwnerIdentity);
+            if (index >= 0) { requireDeviceSiblings(owner.devices); owner.devices.splice(index, 1); this.emit({ type: "object", ref: owner.ref, payload: { operation, ref: deviceRef } }); return { deleted: deviceRef }; }
+          }
         }
         throw new Error("unknown device reference");
       }
@@ -663,10 +669,24 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (!item && itemId.startsWith("user_library/")) return { id: itemId, objectIdentity: `simulator:browser:${itemId}`, name: itemId.split("/").at(-1)!, category: "user_library", path: itemId, isDevice: false };
         if (!item) throw new Error("browser item is not present"); return structuredClone(item);
       }
+      case "ownership.settle": {
+        // The simulator's devices are whole when made; the settled state is the one named.
+        const device = this.findDevice(objectRef("ref"));
+        if (!device || device.objectIdentity !== args.expectedObjectIdentity || typeof args.expectedFingerprint !== "string") throw new Error("ownership settle identity changed");
+        return { settled: true, fingerprint: args.expectedFingerprint };
+      }
       case "browser.load": {
         const itemId = stringArg("itemId"); const item = this.browserCatalog().find((candidate) => candidate.id === itemId);
         if (!item || !item.isDevice || item.name !== args.expectedName || item.objectIdentity !== args.expectedItemIdentity) throw new Error("browser item identity is not an exact loadable device");
         const name = item.name; const track = this.findTrack(objectRef("trackRef"));
+        if (args.chainRef !== undefined && args.chainRef !== null) {
+          // Into a rack's chain: the chain's devices are the siblings, and its identity is checked too.
+          const found = this.findChain(args.chainRef as LiveRef);
+          if (!track || !found || args.expectedTrackIdentity !== track.objectIdentity || args.expectedChainIdentity !== found.chain.objectIdentity) throw new Error("browser target chain changed since preview");
+          if (item.category === "instruments" && found.chain.devices.some((device) => device.kind === "instrument")) throw new Error("this chain already has an instrument, which Live would replace; add another chain for it");
+          const inserted = this.invoke({ operation: "device.insert", args: { trackRef: track.ref, chainRef: found.chain.ref, deviceName: name, expectedTrackIdentity: track.objectIdentity, expectedSiblings: args.expectedSiblings } }) as { ref: LiveRef; objectIdentity: string; createdFingerprint?: string };
+          return { loaded: true, deviceRef: inserted.ref, deviceObjectIdentity: inserted.objectIdentity, createdFingerprint: inserted.createdFingerprint };
+        }
         if (!track || args.expectedTrackIdentity !== track.objectIdentity || simulatorCanonical(args.expectedSiblings) !== simulatorCanonical(track.devices.map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity })))) throw new Error("browser target track or devices changed since preview");
         const inserted = this.invoke({ operation: "device.insert", args: { trackRef: track.ref, deviceName: name, expectedTrackIdentity: track.objectIdentity, expectedSiblings: args.expectedSiblings } }) as { ref: LiveRef; objectIdentity: string };
         return { loaded: true, deviceRef: inserted.ref, deviceObjectIdentity: inserted.objectIdentity, createdFingerprint: (inserted as { createdFingerprint?: string }).createdFingerprint };
@@ -1611,7 +1631,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         return { changed: true, revision: ++this.sequence };
       }
       case "rack.action": {
-        const device = this.state.tracks.flatMap((track) => track.devices).find((candidate) => candidate.ref === objectRef("ref"));
+        const device = this.findDevice(objectRef("ref"));
         if (!device || device.canHaveChains !== true) throw new Error("rack actions require a rack device");
         if (device.objectIdentity !== args.expectedObjectIdentity) throw new Error("rack identity changed since preview");
         const state = { visibleMacroCount: device.visibleMacroCount ?? null, selectedVariationIndex: device.selectedVariationIndex ?? null, variationCount: device.variationCount ?? null, macros: (device.macros ?? []).map((macro) => macro.objectIdentity), chains: (device.chains ?? []).map((chain) => chain.objectIdentity), drumPads: (device.drumPads ?? []).map((pad) => pad.objectIdentity) };
@@ -1631,7 +1651,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (action === "delete-variation") { device.variationCount = Math.max(0, (device.variationCount ?? 0) - 1); }
         else throw new RangeError("rack action is invalid");
         this.emit({ type: "object", ref: device.ref, payload: { operation } });
-        return { done: true, revision: ++this.sequence };
+        const inserted = action === "insert-chain" ? (device.chains ?? []).at(-1) : undefined;
+        return { done: true, revision: ++this.sequence, ...(inserted ? { chainRef: inserted.ref, chainObjectIdentity: inserted.objectIdentity } : {}) };
       }
       case "rack.view.set": {
         const device = this.state.tracks.flatMap((track) => track.devices).find((candidate) => candidate.ref === objectRef("ref"));
@@ -1895,7 +1916,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         this.emit({ type: "object", ref: track.ref, payload: { operation, input: track.input, output: track.output } }); return structuredClone(track);
       }
       case "browser.roots": {
-        const searchable = new Set(["instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"]);
+        const searchable = new Set(["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"]);
         const roots = ["instruments", "sounds", "samples", "user_library", "current_project", "legacy_libraries", "tunings"].map((name) => ({ name, binding: "unofficial-internal", searchable: searchable.has(name) }));
         const state = { roots, previewAvailable: false, bindingEvidence: "shape-probed on the connected build (Live simulator); undocumented Remote Script internals, version-specific" };
         return { ...state, revision: simulatorRevision(state) };
@@ -1926,7 +1947,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   reconnect(): LiveStatus { this.epoch += 1; this.state.playback.epoch = this.epoch; this.state.playback.revision = `${this.epoch}:reconnected`; this.emit({ type: "state", payload: { epoch: this.epoch, snapshot: this.snapshot() } }); return this.status(); }
   async snapshotAsync(): Promise<LiveSnapshot> { return this.snapshot(); }
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.state.tracks.flatMap((track) => track.devices) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
+    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
     return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
@@ -1987,12 +2008,33 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     { id: "instruments/Drum Rack", objectIdentity: "simulator:browser:instruments/Drum Rack", name: "Drum Rack", category: "instruments", path: "instruments/Drum Rack", isDevice: true },
     { id: "instruments/Analog", objectIdentity: "simulator:browser:instruments/Analog", name: "Analog", category: "instruments", path: "instruments/Analog", isDevice: true },
     { id: "instruments/Collision", objectIdentity: "simulator:browser:instruments/Collision", name: "Collision", category: "instruments", path: "instruments/Collision", isDevice: true },
+    { id: "instruments/Instrument Rack", objectIdentity: "simulator:browser:instruments/Instrument Rack", name: "Instrument Rack", category: "instruments", path: "instruments/Instrument Rack", isDevice: true },
+    { id: "audio_effects/Audio Effect Rack", objectIdentity: "simulator:browser:audio_effects/Audio Effect Rack", name: "Audio Effect Rack", category: "audio_effects", path: "audio_effects/Audio Effect Rack", isDevice: true },
     { id: "audio_effects/Utility", objectIdentity: "simulator:browser:audio_effects/Utility", name: "Utility", category: "audio_effects", path: "audio_effects/Utility", isDevice: true },
     { id: "audio_effects/Echo", objectIdentity: "simulator:browser:audio_effects/Echo", name: "Echo", category: "audio_effects", path: "audio_effects/Echo", isDevice: true },
     { id: "midi_effects/Arpeggiator", objectIdentity: "simulator:browser:midi_effects/Arpeggiator", name: "Arpeggiator", category: "midi_effects", path: "midi_effects/Arpeggiator", isDevice: true },
     { id: "drums/Kick Core", objectIdentity: "simulator:browser:drums/Kick Core", name: "Kick Core", category: "drums", path: "drums/Kick Core", isDevice: false },
   ]; }
   private findClipWithTrack(objectRef: LiveRef): { track: Track; clip: Clip } | undefined { for (const track of this.state.tracks) { const clip = track.clips.find((item) => item.ref === objectRef); if (clip) return { track, clip }; } return undefined; }
+  /** Every device in the Set, as Live's discovery lists them: each track's, then those in racks' chains. */
+  private allDevices(): Device[] {
+    const all: Device[] = [];
+    const visit = (devices: Device[], depth: number): void => { for (const device of devices) { all.push(device); if (depth < 8) for (const chain of device.chains ?? []) visit(chain.devices, depth + 1); } };
+    for (const track of this.state.tracks) visit(track.devices, 0);
+    return all;
+  }
+
+  /** A device anywhere: on a track, or in a rack's chain at any depth. */
+  private findDevice(reference: LiveRef): Device | undefined {
+    const pending = this.state.tracks.flatMap((track) => track.devices);
+    for (let at = 0; at < pending.length && at < 16_384; at++) {
+      const device = pending[at]!;
+      if (device.ref === reference) return device;
+      for (const chain of device.chains ?? []) pending.push(...chain.devices);
+    }
+    return undefined;
+  }
+
   private find(objectRef: LiveRef): Track | Clip | Device | Parameter | undefined { for (const track of this.state.tracks) { if (track.ref === objectRef) return track; const clip = track.clips.find((item) => item.ref === objectRef); if (clip) return clip; for (const lane of track.takeLanes ?? []) { const laneClip = lane.clips.find((item) => item.ref === objectRef); if (laneClip) return laneClip; } for (const device of track.devices) { if (device.ref === objectRef) return device; const parameter = device.parameters.find((item) => item.ref === objectRef); if (parameter) return parameter; } } return undefined; }
   private observeSequence = 0;
   private observeSubscriptions?: Map<string, { topics: Array<{ kind: string; ref?: string; revision: string }>; minIntervalMs: number; sequence: number; lastPollMs: number }>;

@@ -165,7 +165,7 @@ test("loopback signing rejects oversized, deeply nested, and non-finite wire val
   const transport = new AuthenticatedLoopback(new DeterministicLiveSimulator(), secret);
   assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "large", method: "invoke", operation: "browser.search", args: { query: "x".repeat(16_385) }, nonce: "large-wire-value-0001" }), /wire string is too large/);
   let nested: unknown = "value";
-  for (let index = 0; index < 17; index += 1) nested = { value: nested };
+  for (let index = 0; index < 65; index += 1) nested = { value: nested };
   assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "deep", method: "invoke", operation: "browser.search", args: nested as Record<string, unknown>, nonce: "deep-wire-value-0001" }), /too deeply nested/);
   assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "nan", method: "invoke", operation: "browser.search", args: { value: Number.NaN }, nonce: "nan-wire-value-0001" }), /not finite/);
   const notes = Array.from({ length: 512 }, (_, index) => ({ pitch: index % 128, start: index, duration: 0.25, velocity: 100, channel: 1 }));

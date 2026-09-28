@@ -15,6 +15,7 @@ import secrets
 import base64
 import re
 import math
+from decimal import Decimal
 import os
 import queue
 import socket
@@ -33,6 +34,23 @@ _DIAGNOSTICS_QUEUE_LIMIT = 64
 _DIAGNOSTICS_RECORD_LIMIT = 512
 _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure", "bridge-accept-failure"}
 
+
+
+def _js_number(value: float) -> str:
+    """A float as JavaScript writes it (Number::toString), so both ends of the wire sign the
+    same text: Python writes 0.0000022 as "2.2e-06", JavaScript as "0.0000022". The digits are
+    Python's shortest round-trip ones; only where the point goes differs."""
+    sign, digits, exponent = Decimal(repr(value)).as_tuple()
+    text = "".join(str(digit) for digit in digits).rstrip("0") or "0"
+    exponent += len(digits) - len(text)
+    point = len(text) + exponent  # the value is 0.<text> x 10^point
+    if len(text) <= point <= 21: body = text + "0" * (point - len(text))
+    elif 0 < point <= 21: body = f"{text[:point]}.{text[point:]}"
+    elif -6 < point <= 0: body = f"0.{'0' * -point}{text}"
+    else:
+        power = point - 1
+        body = f"{text[0]}{'.' + text[1:] if len(text) > 1 else ''}e{'+' if power >= 0 else '-'}{abs(power)}"
+    return f"-{body}" if sign else body
 
 class _DiagnosticsSink:
     """Bounded owner-file diagnostics writer; callers only enqueue constants."""
@@ -363,7 +381,9 @@ def validate_operation_payload(operation_id: str, side: str, value: Any) -> None
 
 MAX_NONCE_LENGTH = 256
 MAX_WIRE_BYTES = 4 * 1_048_576
-MAX_WIRE_DEPTH = 16
+# Racks nest inside racks' chains: each level is four deep on the wire (chains, a chain, its devices, a
+# device), so a device two racks down with its parameters' names already passed 16.
+MAX_WIRE_DEPTH = 64
 MAX_WIRE_STRING_LENGTH = 16_384
 MAX_WIRE_ARRAY_LENGTH = 512
 MAX_WIRE_OBJECT_PROPERTIES = 256
@@ -450,8 +470,7 @@ class AuthenticatedRemoteScript:
                 raise ValueError("non-finite wire number")
             if value == 0 or (value.is_integer() and abs(value) < 1e21):
                 return str(int(value))
-            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            return re.sub(r"e([+-])0+(\d+)", r"e\1\2", encoded)
+            return _js_number(value)
         if isinstance(value, list):
             if len(value) > MAX_WIRE_ARRAY_LENGTH:
                 raise ValueError("wire array is too large")
@@ -918,6 +937,8 @@ class LiveObjectMapper:
             return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
         if operation in {"drum-pad.load-sample", "drum-pad.load-samples"}:
             return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
+        if operation == "ownership.settle":
+            return self._operation_supported("browser.load")
         if operation == "rack.set":
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
         if operation == "rack.action":
@@ -1289,7 +1310,7 @@ class LiveObjectMapper:
                 "ref": parameter_ref, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(parameter),
                 "name": str(self._read_attr(parameter, "name") or f"Parameter {parameter_index + 1}"),
                 "value": float(value), "min": float(minimum), "max": float(maximum),
-                "quantization": float(self._read_attr(parameter, "quantization") or 0),
+                "quantization": self._parameter_step(parameter),
                 "enabled": bool(self._read_attr(parameter, "is_enabled", "enabled") if self._read_attr(parameter, "is_enabled", "enabled") is not None else True),
                 "automatable": bool(self._read_attr(parameter, "is_automatable", "automatable") if self._read_attr(parameter, "is_automatable", "automatable") is not None else True),
                 "automationState": str(self._read_attr(parameter, "automation_state") or "none"),
@@ -1689,13 +1710,21 @@ class LiveObjectMapper:
             raise ValueError("unknown live ref")
         return result
 
+    def _parameter_step(self, parameter: Any) -> float:
+        """The step between a parameter's values: 1 for Live's stepped parameters (a switch, a
+        waveform choice), which only take whole numbers; 0 for continuous ones. Live's API has no
+        step size of its own; an explicit one (the simulator's) is used as given."""
+        step = self._read_attr(parameter, "quantization")
+        if isinstance(step, (int, float)) and not isinstance(step, bool) and math.isfinite(float(step)) and step > 0: return float(step)
+        return 1.0 if self._read_attr(parameter, "is_quantized") is True else 0.0
+
     def _set_parameter_value(self, reference: str, value: Any) -> dict[str, Any]:
         parameter = self.refs.get(reference)
         if not hasattr(parameter, "value"):
             raise ValueError("parameter value is unavailable")
         minimum = getattr(parameter, "min", getattr(parameter, "min_value", None))
         maximum = getattr(parameter, "max", getattr(parameter, "max_value", None))
-        quantization = float(getattr(parameter, "quantization", 0) or 0)
+        quantization = self._parameter_step(parameter)
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
             raise ValueError("parameter value is invalid")
         if not bool(getattr(parameter, "is_enabled", getattr(parameter, "enabled", True))) or not bool(getattr(parameter, "is_automatable", getattr(parameter, "automatable", True))):
@@ -1710,7 +1739,10 @@ class LiveObjectMapper:
         try: parameter.value = target_value
         except BaseException as error: setter_error = error
         observed = self._read_attr(parameter, "value")
-        if setter_error is not None or not isinstance(observed, (int, float)) or isinstance(observed, bool) or not _same_number(observed, target_value):
+        # Some parameters hold whole numbers without being marked stepped (a scale's root note, a MIDI
+        # controller's 0-127): Live keeps the nearest one. That's the change made, at Live's value.
+        rounded = isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(minimum).is_integer() and float(maximum).is_integer() and float(observed).is_integer() and abs(float(observed) - target_value) <= 0.5 + 1e-9 and abs(float(observed) - target_value) > 0
+        if setter_error is not None or not isinstance(observed, (int, float)) or isinstance(observed, bool) or not (_same_number(observed, target_value) or rounded):
             try: parameter.value = float(prior_value)
             except BaseException: pass
             restored = self._read_attr(parameter, "value")
@@ -1752,7 +1784,9 @@ class LiveObjectMapper:
         elif kind == "arrangement_clip": items = self._arrangement_clip_items()
         elif kind == "note": items = [note | {"ref": f"{clip['ref']}:note:{index}", "parentRef": clip["ref"]} for track in snapshot["tracks"] for clip in track["clips"] for index, note in enumerate(clip["notes"])]
         elif kind == "locator": items = snapshot["arrangement"]["locators"]
-        elif kind == "device": items = [device for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"])]
+        elif kind == "device":
+            # A rack's chains by name, empty ones too: what a device can be loaded into, without its whole tree.
+            items = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device.get("chains") or [] if isinstance(chain, dict)]} if device.get("chains") else device for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"])]
         elif kind == "parameter": items = [parameter for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
         elif kind == "session_playback": items = [snapshot["playback"]]
         elif kind == "selection":
@@ -2344,6 +2378,7 @@ class LiveObjectMapper:
             self.refs.restore(checkpoint); raise
 
     def invoke(self, operation: str, args: dict[str, Any], transaction_id: str | None = None, ownership_token: str | None = None) -> Any:
+        if operation == "ownership.settle": return self._ownership_settle(args, transaction_id, ownership_token)
         enforce_ownership = transaction_id is not None or self.provenance == "real-live"
         if enforce_ownership and operation in _TRANSACTION_CREATIONS.union(_TRANSACTION_DELETIONS) and (not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128): raise ValueError("mutation transaction identity is required")
         if enforce_ownership and operation in _TRANSACTION_CREATIONS:
@@ -2786,11 +2821,36 @@ class LiveObjectMapper:
         identity = {"tracks": [[item["ref"], item.get("objectIdentity"), item["name"], item["kind"], index] for index, item in enumerate(snapshot["tracks"])], "scenes": [[item["ref"], item.get("objectIdentity"), item["name"], index] for index, item in enumerate(snapshot["scenes"])]}
         return hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
+    def _owned_row_exists(self, row: dict[str, Any]) -> bool:
+        """Whether a transaction-owned object is still in the Set, wherever it is now. One that's
+        gone (the producer deleted it by hand, Live replaced it) holds no position: its own cleanup
+        would be refused anyway, and it mustn't block every later track or scene until Live restarts."""
+        kind = str(row.get("ref", "")).split(":")[1:2]; identity = str(row.get("objectIdentity"))
+        same = lambda value: value is not None and hmac.compare_digest(self._capture_object_identity(value), identity)
+        try:
+            tracks = self._all_track_objects()
+            if kind == ["track"]: return any(same(track) for track in tracks)
+            if kind == ["scene"]: return any(same(scene) for scene in self._items(getattr(self.song, "scenes", [])))
+            if kind == ["clip"]: return any(same(self._read_attr(slot, "clip")) for track in tracks for slot in self._items(self._read_attr(track, "clip_slots") or []))
+            if kind == ["device"]:
+                pending = [device for track in tracks for device in self._items(self._read_attr(track, "devices") or [])]
+                for at, device in enumerate(pending):
+                    if at > 16384: return True
+                    if same(device): return True
+                    for chain in self._items(self._read_attr(device, "chains") or []): pending.extend(self._items(self._read_attr(chain, "devices") or []))
+                    for pad in self._items(self._read_attr(device, "drum_pads") or []):
+                        for chain in self._items(self._read_attr(pad, "chains") or []): pending.extend(self._items(self._read_attr(chain, "devices") or []))
+                return False
+            return True
+        except BaseException:
+            return True
+
     def _owned_positional_conflict(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> bool:
         for token, row in self._owned_cleanup_tokens.items():
             if token == exclude_token or row.get("deleted") is True: continue
             reference = str(row.get("ref", "")); parts = reference.split(":")
             if len(parts) < 3 or parts[0] != str(self.refs.epoch): continue
+            if not self._owned_row_exists(row): continue
             kind, path = parts[1], parts[2:]; position: int | None = None
             if axis == "track" and kind in {"track", "clip", "arrangement_clip", "device"} and path and path[0].isdigit(): position = int(path[0])
             if axis == "scene" and kind == "scene" and path and path[0].isdigit(): position = int(path[0])
@@ -3196,8 +3256,23 @@ class LiveObjectMapper:
             normalized.append((row, reference, identity, fingerprint))
         if len(self._owned_cleanup_tokens) + len(normalized) > 4096: raise ValueError("transaction-owned cleanup ledger is full")
         for row, reference, identity, fingerprint in normalized:
-            token = secrets.token_urlsafe(32); self._owned_cleanup_tokens[token] = {"transactionId": transaction_id, "ref": reference, "objectIdentity": identity, "fingerprint": fingerprint}; row["ownershipToken"] = token
+            token = secrets.token_urlsafe(32); self._owned_cleanup_tokens[token] = {"transactionId": transaction_id, "ref": reference, "objectIdentity": identity, "fingerprint": fingerprint, "createdAt": time.monotonic()}; row["ownershipToken"] = token
         return result
+
+    def _ownership_settle(self, args: dict[str, Any], transaction_id: str | None, ownership_token: str | None) -> dict[str, Any]:
+        """A Max for Live device builds itself after its load returns, so the state recorded at
+        creation isn't the one it settles in. Right after the load (and once), the transaction that
+        made it records the settled state, which the host read twice alike and names here; undo
+        then finds the device as it was made."""
+        row = self._owned_cleanup_tokens.get(str(ownership_token)) if isinstance(ownership_token, str) else None
+        reference = args.get("ref")
+        if row is None or row.get("deleted") is True or row.get("transactionId") != transaction_id or not isinstance(reference, str) or row.get("ref") != reference: raise ValueError("ownership settle lacks the creating transaction's authority")
+        if row.get("settled") is True or time.monotonic() - float(row.get("createdAt") or 0) > 30: raise ValueError("ownership settle is only for a device just made")
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(str(row.get("objectIdentity")), args["expectedObjectIdentity"]) or not hmac.compare_digest(self._capture_object_identity(self.refs.get(reference)), args["expectedObjectIdentity"]): raise ValueError("ownership settle identity changed")
+        current = self._ownership_fingerprint(reference)
+        if not isinstance(args.get("expectedFingerprint"), str) or not hmac.compare_digest(current, args["expectedFingerprint"]): raise ValueError("ownership settle state is still changing")
+        row["fingerprint"] = current; row["settled"] = True
+        return {"settled": True, "fingerprint": current}
 
     def _require_cleanup_ownership(self, operation: str, args: dict[str, Any], transaction_id: str, ownership_token: str | None) -> None:
         reference, expected_identity = args.get("ref"), args.get("expectedObjectIdentity")
@@ -5899,6 +5974,13 @@ class LiveObjectMapper:
         if action == "store-variation" and (after["variationCount"] is not None and state["variationCount"] is not None and after["variationCount"] <= state["variationCount"]): raise ValueError("variation store was not confirmed")
         if action == "delete-variation" and (after["variationCount"] is not None and state["variationCount"] is not None and after["variationCount"] >= state["variationCount"]): raise ValueError("variation delete was not confirmed")
         revision = self.refs.touch(reference)
+        if action == "insert-chain":
+            # The new chain, keyed as the snapshot keys it, so the next step can load into it.
+            chains = self._items(self._read_attr(device, "chains") or []); known = set(state["chains"])
+            fresh = [(chain_index, chain) for chain_index, chain in enumerate(chains) if self._capture_object_identity(chain) not in known]
+            if len(fresh) == 1:
+                chain_index, chain = fresh[0]; device_path = ":".join(reference.split(":")[2:])
+                return {"done": True, "revision": revision, "chainRef": self.refs.put("chain", chain, f"{device_path}:{chain_index}"), "chainObjectIdentity": self._capture_object_identity(chain)}
         return {"done": True, "revision": revision}
 
     def _rack_view_set(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -6540,8 +6622,10 @@ class LiveObjectMapper:
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         volume_param = self._read_attr(mixer, "volume"); pan_param = self._read_attr(mixer, "panning")
         send_params = self._items(self._read_attr(mixer, "sends") or [])
-        activator = self._read_attr(mixer, "chain_activator")
+        activator = self._read_attr(mixer, "chain_activator"); active = param_value(activator)
         return {
+            # The mixer itself, which chain-mixer.set checks, and whether the chain is on.
+            "mixerIdentity": self._capture_object_identity(mixer), "chainActivator": active >= 0.5 if active is not None else None,
             "volume": param_value(volume_param), "pan": param_value(pan_param),
             "sends": [param_value(send) for send in send_params],
             "volumeRef": self.refs.put("parameter", volume_param, f"{chain_key}:volume") if volume_param is not None else None,
@@ -6587,7 +6671,7 @@ class LiveObjectMapper:
         budget = [0]
         def consume(amount: int = 1) -> None:
             budget[0] += amount
-            if budget[0] > 1024: raise ValueError("realtime parameter identity traversal exceeded its bound")
+            if budget[0] > 16384: raise ValueError("realtime parameter identity traversal exceeded its bound")
         def descriptor(current_ref: str, parameter: Any, owner_ref: str, owner: Any, track_ref: str, track: Any, siblings: list[dict[str, str]]) -> dict[str, Any]:
             return {"ref": current_ref, "parameterIdentity": self._capture_object_identity(parameter), "ownerRef": owner_ref, "ownerIdentity": self._capture_object_identity(owner), "trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "siblings": siblings}
         for track_index, track in enumerate(tracks):
@@ -6622,7 +6706,9 @@ class LiveObjectMapper:
                     if len(parameters) + len(macros) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device parameter collection exceeds its bound")
                     parameter_rows = [(self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}"), parameter) for parameter_index, parameter in parameters]
                     parameter_rows.extend((self.refs.put("parameter", macro, f"{device_ref}:macro:{macro_index}"), macro) for macro_index, macro in enumerate(macros))
-                    siblings = [{"ref": current_ref, "objectIdentity": self._capture_object_identity(parameter)} for current_ref, parameter in parameter_rows]; consume(len(siblings))
+                    # Only the device holding the parameter costs its siblings; others are passed by.
+                    siblings = [{"ref": current_ref, "objectIdentity": self._capture_object_identity(parameter)} for current_ref, parameter in parameter_rows] if any(current_ref == reference for current_ref, _ in parameter_rows) else []
+                    consume(len(siblings))
                     for sibling, (_, parameter) in zip(siblings, parameter_rows):
                         if sibling["ref"] == reference and self._capture_same_object(parameter, target, target_identity): return descriptor(sibling["ref"], parameter, device_ref, device, track_ref, track, siblings)
                     chains = self._items(self._read_attr(device, "chains") or []) if self._read_attr(device, "can_have_chains") is True else []
@@ -6919,7 +7005,7 @@ class LiveObjectMapper:
             if len(devices) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device sibling collection exceeds the authoritative bound")
             for device in devices:
                 traversed += 1
-                if traversed > 1024: raise ValueError("device hierarchy traversal exceeds its bound")
+                if traversed > 16384: raise ValueError("device hierarchy traversal exceeds its bound")
                 if self._capture_object_identity(device) == target_identity: target_occurrences += 1
                 for chain in self._items(self._read_attr(device, "chains") or []): count(chain)
                 for pad in self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or []):
@@ -6980,7 +7066,8 @@ class LiveObjectMapper:
             if not callable(inserter): raise ValueError("chain device insertion is unavailable on this Live shape")
             owner = chain
             sibling_source = self._items(self._read_attr(chain, "devices") or [])
-            current_siblings = [{"ref": self.refs.put("device", device, f"{chain_ref}:{index}"), "objectIdentity": self._capture_object_identity(device)} for index, device in enumerate(sibling_source)]
+            chain_path = ":".join(chain_ref.split(":")[2:])
+            current_siblings = [{"ref": self.refs.put("device", device, f"{chain_path}:{index}"), "objectIdentity": self._capture_object_identity(device)} for index, device in enumerate(sibling_source)]
             expected_siblings = args.get("expectedSiblings")
             if not isinstance(expected_siblings, list) or not hmac.compare_digest(self._bounded_canonical(current_siblings), self._bounded_canonical(expected_siblings)): raise ValueError("chain device collection changed since preview")
             expected_track_identity = args.get("expectedTrackIdentity")
@@ -7006,8 +7093,9 @@ class LiveObjectMapper:
             raise ValueError("device index is invalid")
         all_tracks = self._all_track_objects(); track_index = self._capture_index(all_tracks, track, str(args.get("expectedTrackIdentity")))
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("device insertion track hierarchy is stale")
+        # Other devices may be there: the new one is found by identity, their order is checked, and
+        # cleanup removes only what this insertion made.
         before_devices = self._items(self._read_attr(owner, "devices") or [])
-        if before_devices: raise ValueError("device insertion requires an empty exact owner so cleanup cannot affect siblings")
         owner_path = ":".join(str(owner is track and track_ref or chain_ref).split(":")[2:])
         before_identity_order = [self._capture_object_identity(device) for device in before_devices]; before_identities = set(before_identity_order); checkpoint = self.refs.checkpoint(); expected_position = len(before_devices) if index is None or index == -1 else index
         if expected_position > len(before_devices): raise ValueError("device insertion index exceeds the exact sibling boundary")
@@ -7041,8 +7129,9 @@ class LiveObjectMapper:
         deleter = getattr(owner, "delete_device", None)
         if not callable(deleter):
             raise ValueError("device deletion is unavailable")
+        # Its siblings were checked device by device above, and are checked again after: the one
+        # device goes, the rest stay in their order.
         devices_before = self._items(getattr(owner, "devices", []))
-        if len(devices_before) != 1: raise ValueError("transaction-owned device cleanup requires the target to be the sole sibling")
         index = self._capture_index(devices_before, device, str(args.get("expectedObjectIdentity")))
         if index is None: raise ValueError("device deletion target identity is stale or ambiguous")
         before_identity_order = [self._capture_object_identity(candidate) for candidate in devices_before]; expected_order = list(before_identity_order); expected_order.pop(index); deletion_error: BaseException | None = None
@@ -7175,12 +7264,12 @@ class LiveObjectMapper:
             raise ValueError("the Live application is unavailable")
         return application
 
-    _BROWSER_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"}
-    _DEVICE_BROWSER_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "plugins"}
+    _BROWSER_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"}
+    _DEVICE_BROWSER_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "modulators", "plugins"}
     # The current Cycling '74 LOM has no Browser class; Application.browser and
     # its item tree are undocumented Python Remote Script internals. No root is
     # a stable public binding; the tier labels below say so explicitly.
-    _BROWSER_SEARCHABLE_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips"}
+    _BROWSER_SEARCHABLE_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"}
 
     def _browser_item_identity(self, path: str) -> str:
         return f"browser-path:{hashlib.sha256(path.encode('utf-8')).hexdigest()}"
@@ -7288,6 +7377,7 @@ class LiveObjectMapper:
             raise ValueError("browser loading is unavailable")
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("an exact regular-track reference is required")
+        if args.get("chainRef") is not None: return self._browser_load_into_chain(args, item, metadata, loader)
         self.snapshot(); track = self.refs.get(track_ref); regular_tracks = self._items(getattr(self.song, "tracks", [])); track_identity = self._capture_object_identity(track); track_matches = [(index, candidate) for index, candidate in enumerate(regular_tracks) if self._capture_same_object(candidate, track, track_identity)]
         if len(track_matches) != 1:
             raise ValueError("browser loading is limited to one exact regular Set track")
@@ -7301,7 +7391,10 @@ class LiveObjectMapper:
         if view is None or not hasattr(view, "selected_track"):
             raise ValueError("track-targeted browser loading is unavailable")
         previous_selection = getattr(view, "selected_track", None); previous_identity = self._capture_object_identity(previous_selection) if previous_selection is not None else None; before_devices = self._items(getattr(track, "devices", []))
-        if before_devices: raise ValueError("Browser loading requires an empty exact device owner so cleanup cannot affect siblings")
+        # Live replaces a track's instrument with a new one, which cleanup couldn't bring back.
+        if metadata["category"] in {"instruments", "drums", "sounds"} and any(self._read_attr(device, "type") == 1 for device in before_devices): raise ValueError("this track already has an instrument, which Live would replace; load it onto a new track or into an Instrument Rack")
+        # The new device goes after the last one, not wherever the producer last clicked.
+        track_view = self._read_attr(track, "view"); previous_device = self._read_attr(track_view, "selected_device") if track_view is not None else None
         before_identities = [self._capture_object_identity(prior) for prior in before_devices]
         if len(set(before_identities)) != len(before_identities): raise ValueError("browser target device identities are ambiguous")
         registry_checkpoint = self.refs.checkpoint()
@@ -7309,8 +7402,12 @@ class LiveObjectMapper:
         try:
             view.selected_track = track
             if not self._capture_same_object(getattr(view, "selected_track", None), track, track_identity): raise ValueError("target-track selection was not confirmed")
+            if before_devices and callable(getattr(view, "select_device", None)): view.select_device(before_devices[-1])
             loader(item)
         except BaseException as error: failure = error
+        if before_devices and previous_device is not None and callable(getattr(view, "select_device", None)):
+            try: view.select_device(previous_device)
+            except BaseException: pass
         try:
             view.selected_track = previous_selection; restored_selection = getattr(view, "selected_track", None)
             if (previous_selection is None and restored_selection is not None) or (previous_selection is not None and not self._capture_same_object(restored_selection, previous_selection, str(previous_identity))): raise ValueError("selection restoration was not confirmed")
@@ -7356,6 +7453,113 @@ class LiveObjectMapper:
             self.refs.restore(registry_checkpoint)
             raise ValueError("browser load result mapping failed without a residual device") from error
         return {"loaded": True, "deviceRef": created_ref, "deviceObjectIdentity": device_identity, "createdFingerprint": fingerprint}
+
+    @staticmethod
+    def _chain_placeholder(metadata: dict[str, Any]) -> tuple[str, int] | None:
+        """The native device that holds a place in a chain while a Browser item is hot-swapped onto
+        it, by the item's kind: its name and Live's device type (1 instrument, 2 audio, 4 MIDI)."""
+        category = metadata.get("category"); words = f"{metadata.get('name') or ''} {metadata.get('path') or ''}"
+        if category in {"instruments", "drums", "sounds"}: return ("Simpler", 1)
+        if category == "midi_effects": return ("Velocity", 4)
+        if category == "audio_effects": return ("Utility", 2)
+        if category in {"modulators", "max_for_live"}:
+            if re.search(r"instrument", words, re.I): return ("Simpler", 1)
+            if re.search(r"\bmidi\b|expression control", words, re.I): return ("Velocity", 4)
+            return ("Utility", 2)
+        return None
+
+    def _browser_load_into_chain(self, args: dict[str, Any], item: Any, metadata: dict[str, Any], loader: Any) -> dict[str, Any]:
+        """A Browser item into one chain of a rack (at any depth). Live's Browser loads next to
+        what's selected, and an instrument replaces the track's instrument whatever is selected, so
+        the place is held explicitly: a native device of the item's kind goes where the item
+        belongs (an audio effect at the end, an instrument or MIDI effect after the chain's MIDI
+        effects), and the item is hot-swapped onto it. The result is checked: exactly one new device
+        in that chain where the placeholder was, nothing new anywhere else on the track."""
+        track_ref = args["trackRef"]; chain_ref = args.get("chainRef")
+        if not isinstance(chain_ref, str) or not chain_ref.startswith(f"{self.refs.epoch}:chain:"): raise ValueError("chain reference is stale or invalid")
+        self.snapshot(); track = self.refs.get(track_ref); chain = self.refs.get(chain_ref)
+        track_index = self._capture_index(self._all_track_objects(), track, str(args.get("expectedTrackIdentity")))
+        if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("browser target track reference is stale")
+        chain_path = ":".join(chain_ref.split(":")[2:])
+        if chain_path.split(":")[0] != str(track_index): raise ValueError("browser target chain isn't on that track")
+        if not isinstance(args.get("expectedChainIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(chain), args["expectedChainIdentity"]): raise ValueError("browser target chain changed since preview")
+        before = self._items(self._read_attr(chain, "devices") or [])
+        siblings = [{"ref": self.refs.put("device", device, f"{chain_path}:{index}"), "objectIdentity": self._capture_object_identity(device)} for index, device in enumerate(before)]
+        if not isinstance(args.get("expectedSiblings"), list) or not hmac.compare_digest(self._bounded_canonical(siblings), self._bounded_canonical(args["expectedSiblings"])): raise ValueError("browser target chain's devices changed since preview")
+        spec = self._chain_placeholder(metadata)
+        if spec is None: raise ValueError("browser items of this kind load onto a track, not into a chain")
+        holder, holder_type = spec
+        if holder_type == 1 and any(self._read_attr(device, "type") == 1 for device in before): raise ValueError("this chain already has an instrument, which Live would replace; add another chain for it")
+        inserter = getattr(chain, "insert_device", None); deleter = getattr(chain, "delete_device", None); browser = self._browser()
+        if not callable(inserter) or not callable(deleter): raise ValueError("this Live can't load into a chain")
+        # A Browser device itself (not a preset) is a native one when Live can insert it by that name.
+        native_name = str(metadata.get("name") or "") if str(metadata.get("id") or "").count("/") == 1 else None
+        leading_midi = next((index for index, device in enumerate(before) if self._read_attr(device, "type") != 4), len(before))
+        position = len(before) if holder_type == 2 else leading_midi
+        before_order = [self._capture_object_identity(device) for device in before]; before_set = set(before_order)
+        track_before = [self._capture_object_identity(device) for device in self._items(getattr(track, "devices", []))]
+        view = getattr(self.song, "view", None); previous_track = getattr(view, "selected_track", None) if view is not None else None
+        track_view = self._read_attr(track, "view"); previous_device = self._read_attr(track_view, "selected_device") if track_view is not None else None
+        checkpoint = self.refs.checkpoint(); failure: BaseException | None = None
+        placeholder: Any = None; placeholder_identity: str | None = None
+        inserted_natively = False
+        if native_name:
+            try: inserter(native_name, position); inserted_natively = True
+            except BaseException: inserted_natively = False  # not a native device's name: hot-swapped below
+        if not inserted_natively:
+            # Hot-swapping onto a MIDI effect has crashed Live (12.4 beta); a Max for Live MIDI effect or a
+            # MIDI effect preset goes onto a track instead.
+            if holder_type == 4: raise ValueError("Live can't put a Max for Live MIDI effect or a MIDI effect preset into a chain from outside; load it onto the track")
+            if not hasattr(browser, "hotswap_target"): raise ValueError("this Live can't load into a chain")
+            try:
+                inserter(holder, position)
+                made = [device for device in self._items(self._read_attr(chain, "devices") or []) if self._capture_object_identity(device) not in before_set]
+                if len(made) != 1: raise ValueError("the chain's placeholder wasn't confirmed")
+                placeholder = made[0]; placeholder_identity = self._capture_object_identity(placeholder)
+                browser.hotswap_target = placeholder; target = self._read_attr(browser, "hotswap_target")
+                # Only with the placeholder confirmed as the target: otherwise Live would load onto the track.
+                if target is None or self._capture_object_identity(target) != placeholder_identity: raise ValueError("the placeholder can't be a hot-swap target")
+                loader(item)
+            except BaseException as error: failure = error
+            finally:
+                try: browser.hotswap_target = None
+                except BaseException: pass
+        # A placeholder the swap didn't replace goes.
+        if placeholder is not None:
+            index = self._capture_index(self._items(self._read_attr(chain, "devices") or []), placeholder, str(placeholder_identity))
+            if index is not None:
+                try: deleter(index)
+                except BaseException as error:
+                    if failure is None: failure = error
+                if failure is None: failure = ValueError("Live didn't swap the item in")
+        for step in (lambda: previous_device is not None and view is not None and view.select_device(previous_device), lambda: view is not None and setattr(view, "selected_track", previous_track)):
+            try: step()
+            except BaseException: pass
+        after = self._items(self._read_attr(chain, "devices") or [])
+        created = [(index, device) for index, device in enumerate(after) if self._capture_object_identity(device) not in before_set]
+        stray = [(index, device) for index, device in enumerate(self._items(getattr(track, "devices", []))) if self._capture_object_identity(device) not in set(track_before)]
+        kept_order = [self._capture_object_identity(device) for device in after if self._capture_object_identity(device) in before_set]
+        if failure is not None or len(created) != 1 or len(after) != len(before) + 1 or kept_order != before_order or stray or [self._capture_object_identity(device) for device in self._items(getattr(track, "devices", [])) if self._capture_object_identity(device) in set(track_before)] != track_before:
+            where = ("Live put it on the track, not in the chain" if stray and not created else f"Live made {len(created)} devices in the chain" if len(created) > 1
+                     else "Live changed the order of the chain's devices" if created else f"Live didn't load it ({str(failure)[:80]})" if failure is not None else "Live didn't load it")
+            rollback_failed = False
+            for owner, owned in ((chain, created), (track, stray)):
+                owner_deleter = getattr(owner, "delete_device", None)
+                for _, candidate in reversed(owned):
+                    index = self._capture_index(self._items(self._read_attr(owner, "devices") or []), candidate, self._capture_object_identity(candidate))
+                    if index is None or not callable(owner_deleter): rollback_failed = True; continue
+                    try: owner_deleter(index)
+                    except BaseException: rollback_failed = True
+            if [self._capture_object_identity(device) for device in self._items(self._read_attr(chain, "devices") or [])] != before_order or [self._capture_object_identity(device) for device in self._items(getattr(track, "devices", []))] != track_before: rollback_failed = True
+            if rollback_failed:
+                try: self.snapshot()
+                except BaseException: pass
+                raise ValueError(f"browser load into the chain failed and exact transaction-owned cleanup failed: {where}") from failure
+            self.refs.restore(checkpoint)
+            raise ValueError(f"browser load into the chain failed: {where}; nothing was left behind") from failure
+        device_index, device = created[0]
+        created_ref = self.refs.put("device", device, f"{chain_path}:{device_index}")
+        return {"loaded": True, "deviceRef": created_ref, "deviceObjectIdentity": self._capture_object_identity(device), "createdFingerprint": self._mapped_fingerprint(created_ref)}
 
     @staticmethod
     def _capture_object_identity(value: Any) -> str:

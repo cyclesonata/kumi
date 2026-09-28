@@ -336,7 +336,7 @@ function isDiscoveryFilter(value: unknown): value is Record<string, string | num
 function isIdempotencyKey(value: unknown): value is string { return typeof value === "string" && value.length >= 8 && value.length <= 128; }
 
 function canonicalMutationIdentity(value: unknown, depth = 0): string {
-  if (depth > 16) throw new Error("mutation authority is too deeply nested");
+  if (depth > 64) throw new Error("mutation authority is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("mutation authority contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
   if (typeof value === "string") { if (value.length > 16_384) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
@@ -401,10 +401,32 @@ class BoundedTransactionMap<T extends { expiresAt: number; state: string }> exte
 
 /** Live keeps mixer and device values as 32-bit floats (a written 0.6 reads back as 0.6000000238),
  * so numeric postconditions compare within float32 precision; everything else must match exactly. */
+/**
+ * A parameter Live keeps in whole numbers without marking it stepped (a scale's root note, a MIDI
+ * controller's 0-127) takes the nearest one: that value, when it's what Live did; otherwise undefined.
+ */
+function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { min?: unknown; max?: unknown }): number | undefined {
+  return typeof observed === "number" && Number.isInteger(observed) && Number.isInteger(parameter.min) && Number.isInteger(parameter.max) && Math.abs(observed - proposed) <= 0.5 + 1e-9 ? observed : undefined;
+}
+
 function sameLiveValue(observed: unknown, expected: unknown): boolean {
   if (typeof observed === "number" && typeof expected === "number") return Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
   if (Array.isArray(observed) && Array.isArray(expected)) return observed.length === expected.length && observed.every((value, index) => sameLiveValue(value, expected[index]));
   return JSON.stringify(observed) === JSON.stringify(expected);
+}
+
+/**
+ * Why a value between a stepped parameter's steps is refused, with the steps it takes: a switch or
+ * a waveform choice takes the number of one of its items (0 is the first).
+ */
+function steppedValueMessage(parameter: { name?: unknown; min: number; max: number; quantization?: number; valueItems?: unknown }): string {
+  const name = `parameter “${String(parameter.name ?? "").slice(0, 64)}”`;
+  const items = Array.isArray(parameter.valueItems) ? parameter.valueItems.filter((item): item is string => typeof item === "string") : [];
+  if (parameter.quantization === 1 && items.length) {
+    const listed = items.slice(0, 12).map((item, index) => `${parameter.min + index} ${item.slice(0, 32)}`).join(", ");
+    return `${name} takes one of its steps: ${listed}${items.length > 12 ? ", …" : ""}`;
+  }
+  return parameter.quantization === 1 ? `${name} takes whole numbers from ${parameter.min} to ${parameter.max}` : `${name} takes steps of ${parameter.quantization} from ${parameter.min} to ${parameter.max}`;
 }
 
 export class McpHost {
@@ -2396,6 +2418,9 @@ export class McpHost {
   }
 
   private realtimeParameterTargets(snapshot: LiveSnapshot, references: string[]): JsonObject[] {
+    // Only a track or device that holds a requested parameter costs its parameters: the rest of a
+    // real Set (a loaded Drum Rack is hundreds of parameters) is passed by for one unit each.
+    const wanted = new Set(references);
     const available = new Map<string, JsonObject>();
     const add = (reference: string, value: unknown, details: JsonObject, authority: JsonObject): void => {
       available.set(reference, { ref: reference, value: typeof value === "number" && Number.isFinite(value) ? value : null, ...details, authority });
@@ -2403,12 +2428,12 @@ export class McpHost {
     let authorityBudget = 0;
     let exhausted = false;
     const consumeAuthority = (amount: number): boolean => {
-      if (authorityBudget + amount > 1024) { exhausted = true; return false; }
+      if (authorityBudget + amount > 16_384) { exhausted = true; return false; }
       authorityBudget += amount;
       return true;
     };
     for (const track of snapshot.tracks as unknown as JsonObject[]) {
-      if (exhausted) break;
+      if (exhausted || [...wanted].every((reference) => available.has(reference))) break;
       const trackRef = typeof track.ref === "string" ? track.ref : undefined;
       const trackIdentity = typeof track.objectIdentity === "string" ? track.objectIdentity : undefined;
       const mixer = isObject(track.mixer) ? track.mixer : undefined;
@@ -2428,9 +2453,10 @@ export class McpHost {
           if (typeof ref !== "string" || typeof sendIdentities[index] !== "string") { complete = false; return; }
           mixerRows.push({ ref, objectIdentity: sendIdentities[index], value: sends[index], kind: "mixer-send", sendIndex: index });
         });
-        if (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length)) { exhausted = true; break; }
+        const holdsMixer = mixerRows.some((row) => wanted.has(row.ref));
+        if (holdsMixer && (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
         const siblings = mixerRows.map(({ ref, objectIdentity }) => ({ ref, objectIdentity }));
-        for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
+        if (holdsMixer) for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
       }
       const visitDevices = (candidate: unknown): void => {
         if (exhausted) return;
@@ -2441,10 +2467,11 @@ export class McpHost {
           const deviceIdentity = typeof device.objectIdentity === "string" ? device.objectIdentity : undefined;
           const rawParameters = Array.isArray(device.parameters) ? device.parameters : [];
           const rawMacros = Array.isArray(device.macros) ? device.macros : [];
+          const holds = [...rawParameters, ...rawMacros].some((row) => isObject(row) && typeof row.ref === "string" && wanted.has(row.ref));
           const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= 256;
-          if (!rowsComplete) { exhausted = true; return; }
+          if (holds && !rowsComplete) { exhausted = true; return; }
           const parameters = rawParameters as JsonObject[];
-          const rows = [...parameters, ...rawMacros as JsonObject[]];
+          const rows = holds ? [...parameters, ...rawMacros as JsonObject[]] : [];
           if (!consumeAuthority(rows.length)) return;
           const siblingRows = rows.map((row) => typeof row.ref === "string" && typeof row.objectIdentity === "string" ? { ref: row.ref, objectIdentity: row.objectIdentity } : undefined);
           const siblings = siblingRows.every((row) => row !== undefined) ? siblingRows as Array<{ ref: string; objectIdentity: string }> : undefined;
@@ -2608,6 +2635,40 @@ export class McpHost {
     return JSON.stringify({ ref: row.device.ref, objectIdentity: row.device.objectIdentity, track: row.track.ref, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, enabled: row.device.enabled ?? null });
   }
 
+  /**
+   * Where a device sits, by name, for a picture of it: its neighbours in order and its place among
+   * them, and when it's in a rack's chain, the rack's chains side by side.
+   */
+  private devicePlacement(snapshot: LiveSnapshot, located: ReturnType<McpHost["deviceRow"]>): JsonObject {
+    const names = (devices: unknown) => (Array.isArray(devices) ? devices : []).filter(isObject).slice(0, 16).map((device) => String(device.name ?? "").slice(0, 64));
+    const index = located.siblings.findIndex((sibling) => sibling.ref === located.device.ref);
+    if (located.ownerRef === located.track.ref) return { owner: "track", devices: names(located.track.devices), index };
+    try {
+      const { device: rack, chain } = this.chainOnTrack(snapshot, located.ownerRef as LiveRef);
+      const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
+      return { owner: "chain", rack: String(rack.name ?? "").slice(0, 64), chain: chains.findIndex((candidate) => candidate.ref === chain.ref), index,
+        chains: chains.slice(0, 8).map((candidate) => ({ name: String(candidate.name ?? "").slice(0, 64), devices: names(candidate.devices) })) };
+    } catch { return { owner: "chain", devices: [], index }; }
+  }
+
+  /** A chain's device authority, for loading into it: the track, the chain, and the chain's devices in order. */
+  private chainDeviceAuthority(track: JsonObject, chain: JsonObject): { expectedTrackIdentity: string; chainRef: string; expectedChainIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
+    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? []) || ((chain.devices as unknown[] | undefined) ?? []).length > 256) throw new Error("chain device authority is incomplete");
+    const siblings = ((chain.devices as unknown[] | undefined) ?? []).map((device) => {
+      if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
+      return { ref: device.ref, objectIdentity: device.objectIdentity };
+    });
+    return { expectedTrackIdentity: track.objectIdentity, chainRef: chain.ref, expectedChainIdentity: chain.objectIdentity, expectedSiblings: siblings };
+  }
+
+  /** A chain anywhere in a track's devices (a rack's, a nested rack's, a drum pad's), with its track and rack. */
+  private chainOnTrack(snapshot: LiveSnapshot, chainRef: LiveRef): { track: JsonObject; device: JsonObject; chain: JsonObject } {
+    for (const track of snapshot.tracks as unknown as JsonObject[]) {
+      try { return { track, ...this.chainRow({ ...snapshot, tracks: [track] } as unknown as LiveSnapshot, chainRef) }; } catch { continue; }
+    }
+    throw new Error("chain reference is not authoritative");
+  }
+
   private trackDeviceAuthority(track: JsonObject): { expectedTrackIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
     if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices) || track.devices.length > 256) throw new Error("track device authority is incomplete");
     const siblings = (track.devices as unknown[]).map((device) => {
@@ -2624,7 +2685,8 @@ export class McpHost {
     if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
-    try { this.deviceRow(await adapter.snapshotAsync(context), reference); } catch { return; }
+    // Gone, or another device slid into its place: either way this one isn't there any more.
+    try { if (this.deviceRow(await adapter.snapshotAsync(context), reference).device.objectIdentity !== objectIdentity) return; } catch { return; }
     throw new Error("owned device cleanup was not confirmed");
   }
 
@@ -2657,7 +2719,7 @@ export class McpHost {
   }
 
   private async liveBrowserSearchAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const categories = ["instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips"];
+    const categories = ["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"];
     if (!isObject(params) || !hasOnly(params, ["category", "query", "limit", "matchMode", "refresh"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.matchMode !== undefined && params.matchMode !== "ranked" && params.matchMode !== "substring") || (params.refresh !== undefined && typeof params.refresh !== "boolean")) return error(id, -32602, "category, query, limit, matchMode, and refresh are invalid");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
@@ -3157,7 +3219,7 @@ export class McpHost {
   }
 
   private async liveBrowserLoadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef"]) || !isNonEmptyString(params.itemId, 256) || !isNonEmptyString(params.trackRef, 256)) return error(id, -32602, "itemId and trackRef are required");
+    if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef", "chainRef"]) || !isNonEmptyString(params.itemId, 256) || (params.trackRef === undefined && params.chainRef === undefined) || (params.trackRef !== undefined && !isNonEmptyString(params.trackRef, 256)) || (params.chainRef !== undefined && !isNonEmptyString(params.chainRef, 256))) return error(id, -32602, "itemId and a trackRef or chainRef are required");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -3166,13 +3228,17 @@ export class McpHost {
       const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
       if (item.id !== params.itemId || item.isDevice !== true || typeof item.name !== "string" || !isNonEmptyString(item.objectIdentity, 256)) throw new Error("browser item lacks exact track-loadable identity");
       const snapshot = await adapter.snapshotAsync();
-      const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.trackRef);
+      // Into a rack's chain: the chain's track is the one checked, and the chain's devices are the siblings.
+      const target = params.chainRef !== undefined ? this.chainOnTrack(snapshot, params.chainRef as LiveRef) : undefined;
+      if (target && params.trackRef !== undefined && target.track.ref !== params.trackRef) throw new Error("browser target chain isn't on that track");
+      const trackRef = (target?.track.ref ?? params.trackRef) as LiveRef;
+      const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === trackRef);
       if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind))) throw new Error("browser loading is limited to regular Set tracks");
-      const authority = this.trackDeviceAuthority(track);
-      const fence = JSON.stringify({ track: params.trackRef, ...authority });
-      const transaction: ClipLifecycleTransaction = { id: `browserload_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "browser-load", fence, clipRef: params.trackRef as LiveRef, payload: { itemId: params.itemId, trackRef: params.trackRef, expectedName: item.name, expectedItemIdentity: item.objectIdentity, ...authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const authority = target ? this.chainDeviceAuthority(track, target.chain) : this.trackDeviceAuthority(track);
+      const fence = JSON.stringify({ track: trackRef, ...authority });
+      const transaction: ClipLifecycleTransaction = { id: `browserload_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "browser-load", fence, clipRef: trackRef, payload: { itemId: params.itemId, trackRef, expectedName: item.name, expectedItemIdentity: item.objectIdentity, ...authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "browser load");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, item: { id: item.id, name: item.name, path: item.path, category: item.category, isDevice: true }, trackRef: params.trackRef, impact: "loads-browser-device", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, item: { id: item.id, name: item.name, path: item.path, category: item.category, isDevice: true }, trackRef, ...(target ? { chainRef: target.chain.ref as string, chainName: typeof target.chain.name === "string" ? target.chain.name : null, rackName: typeof target.device.name === "string" ? target.device.name : null } : {}), impact: "loads-browser-device", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Browser-load preview requires fresh authoritative state."); }
   }
 
@@ -3191,16 +3257,38 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
-        if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
+        let current: string | undefined;
+        try { current = track ? JSON.stringify({ track: transaction.payload.trackRef, ...(typeof transaction.payload.chainRef === "string" ? this.chainDeviceAuthority(track, this.chainOnTrack(snapshot, transaction.payload.chainRef as LiveRef).chain) : this.trackDeviceAuthority(track)) }) : undefined; } catch { current = undefined; }
+        if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || current !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "browser.load", args: transaction.payload }, context) as { loaded?: unknown; deviceRef?: unknown; deviceObjectIdentity?: unknown; createdFingerprint?: unknown };
       if (result.loaded !== true || !isNonEmptyString(result.deviceRef, 256) || !isNonEmptyString(result.deviceObjectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("browser load did not return exact created device identity");
-      const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
-      if (this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("browser-loaded device creation fingerprint was not confirmed");
-      transaction.created = { deviceRef: result.deviceRef, objectIdentity: result.deviceObjectIdentity, fingerprint: result.createdFingerprint };
+      const loadedSnapshot = await adapter.snapshotAsync(context);
+      const createdDevice = this.deviceRow(loadedSnapshot, result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
+      if (typeof transaction.payload.chainRef === "string" && createdDevice.ownerRef !== transaction.payload.chainRef) throw new Error("browser-loaded device is not in the requested chain");
+      let fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device));
+      if (fingerprint !== result.createdFingerprint) {
+        // A Max for Live device builds itself after the load returns: the same device (its identity is
+        // checked each time) once it holds still, two reads alike, is the one undo will look for.
+        let previous = fingerprint; let settled = false;
+        for (let attempt = 0; attempt < 12 && !settled; attempt++) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+          const again = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef);
+          if (again.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
+          fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(again.device));
+          settled = fingerprint === previous; previous = fingerprint;
+        }
+        if (!settled) throw new Error("browser-loaded device creation fingerprint was not confirmed");
+        // The Remote Script keeps its own record of the device as made: the settled state too, or undo would be refused.
+        if ((status.operations ?? []).includes("ownership.settle")) {
+          const recorded = await adapter.invokeAsync({ operation: "ownership.settle", args: { ref: result.deviceRef, expectedObjectIdentity: result.deviceObjectIdentity, expectedFingerprint: fingerprint } }, context) as { settled?: unknown; fingerprint?: unknown };
+          if (recorded.settled !== true || recorded.fingerprint !== fingerprint) throw new Error("browser-loaded device settled state was not recorded");
+        }
+      }
+      transaction.created = { deviceRef: result.deviceRef, objectIdentity: result.deviceObjectIdentity, fingerprint };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", deviceRef: transaction.created.deviceRef, idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", deviceRef: transaction.created.deviceRef, placement: this.devicePlacement(loadedSnapshot, createdDevice), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Browser load is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -5564,7 +5652,7 @@ export class McpHost {
       const fence = JSON.stringify({ ref: params.chainRef, objectIdentity: found.chain.objectIdentity, mixerIdentity: mixer.mixerIdentity, sends: mixer.sends ?? [] });
       const transaction: ClipLifecycleTransaction = { id: `chainmix_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "chain-mixer", fence, clipRef: params.chainRef as LiveRef, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "chain mixer");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, chainRef: params.chainRef, prior, proposed, impact: "edits-chain-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, chainRef: params.chainRef, chainName: typeof found.chain.name === "string" ? found.chain.name : null, rackName: typeof found.device.name === "string" ? found.device.name : null, prior, proposed, impact: "edits-chain-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Chain-mixer preview requires fresh authoritative state."); }
   }
 
@@ -5724,7 +5812,6 @@ export class McpHost {
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
         const found = this.chainRow(snapshot, params.chainRef as LiveRef);
         const siblings = ((found.chain.devices as unknown[]) ?? []).filter(isObject).map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity }));
-        if (siblings.length > 0) return this.transactionError(id, "chain insertion requires an empty chain so cleanup cannot affect siblings");
         payload = { action: params.action, trackRef: params.trackRef, chainRef: params.chainRef, deviceName: params.deviceName, ...(params.index !== undefined ? { index: params.index } : {}), expectedTrackIdentity: track.objectIdentity, expectedSiblings: siblings };
         prior = { siblings };
         impact = "creates-chain-device-cleanup-guarded";
@@ -6077,12 +6164,13 @@ export class McpHost {
         if (!(status.operations ?? []).includes("rack.action")) throw new Error("rack actions are unavailable");
         if (["remove-macro", "recall-variation", "delete-variation"].includes(params.action as string) && params.index !== undefined) return error(id, -32602, "remove-macro, recall-variation, and delete-variation take no index in the public LOM");
         if (params.action === "copy-pad" && (!Number.isInteger(params.sourceIndex) || !Number.isInteger(params.targetIndex) || (params.sourceIndex as number) < 0 || (params.targetIndex as number) < 0)) return error(id, -32602, "sourceIndex and targetIndex are required");
+        if (params.action === "add-macro" || params.action === "remove-macro") prior = { visibleMacroCount: row.device.visibleMacroCount ?? null };
         payload = { action: params.action, ref: params.rackRef, ...(params.index !== undefined ? { index: params.index } : {}), ...(params.sourceIndex !== undefined ? { sourceIndex: params.sourceIndex } : {}), ...(params.targetIndex !== undefined ? { targetIndex: params.targetIndex } : {}), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: stateRevision };
       }
       const fence = JSON.stringify({ action: params.action, ref: params.rackRef, objectIdentity: row.device.objectIdentity, stateRevision });
       const transaction: ClipLifecycleTransaction = { id: `rack_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rack", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "rack");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, rackRef: params.rackRef, prior, impact: params.action === "set" ? "edits-rack" : "momentary-rack-action-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, rackRef: params.rackRef, rackName: typeof row.device.name === "string" ? row.device.name : null, prior, impact: params.action === "set" || params.action === "add-macro" || params.action === "remove-macro" ? "edits-rack" : "momentary-rack-action-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Rack preview requires fresh authoritative state."); }
   }
 
@@ -6105,19 +6193,28 @@ export class McpHost {
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = action === "set" ? Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action")) : Object.fromEntries(Object.entries(transaction.payload));
-      let result: { changed?: unknown; done?: unknown; revision?: unknown };
+      let result: { changed?: unknown; done?: unknown; revision?: unknown; chainRef?: unknown };
       if (action === "set") {
         result = await adapter.invokeAsync({ operation: "rack.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("rack change was not confirmed");
         const verified = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device;
         if (transaction.payload.selectedVariationIndex !== undefined && verified.selectedVariationIndex !== transaction.payload.selectedVariationIndex) throw new Error("rack postcondition was not confirmed");
       } else {
-        result = await adapter.invokeAsync({ operation: "rack.action", args }, context) as { done?: unknown; revision?: unknown };
+        result = await adapter.invokeAsync({ operation: "rack.action", args }, context) as { done?: unknown; revision?: unknown; chainRef?: unknown };
         if (result.done !== true) throw new Error("rack action was not confirmed");
+        // What undo checks is still so: the macro count this left.
+        if (action === "add-macro" || action === "remove-macro") transaction.created = { visibleMacroCount: this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device.visibleMacroCount ?? null };
+        if (action === "insert-chain" && isNonEmptyString(result.chainRef, 256)) {
+          transaction.created = { chainRef: result.chainRef };
+          try {
+            const rack = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device; const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
+            transaction.created.placement = { owner: "rack", rack: String(rack.name ?? "").slice(0, 64), chain: chains.findIndex((chain) => chain.ref === result.chainRef), chains: chains.slice(0, 8).map((chain) => ({ name: String(chain.name ?? "").slice(0, 64), devices: (Array.isArray(chain.devices) ? chain.devices : []).filter(isObject).slice(0, 16).map((device) => String(device.name ?? "").slice(0, 64)) })) };
+          } catch { /* the chain is there either way; only the picture is missing */ }
+        }
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(isNonEmptyString((result as { chainRef?: unknown }).chainRef, 256) ? { chainRef: (result as { chainRef: string }).chainRef } : {}), ...(transaction.created && isObject(transaction.created.placement) ? { placement: transaction.created.placement } : {}), ...(transaction.created && "visibleMacroCount" in transaction.created ? { visibleMacroCount: transaction.created.visibleMacroCount } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Rack state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -7159,7 +7256,7 @@ export class McpHost {
       if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
       const quantization = target.parameter.quantization ?? 0;
       if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error("parameter value does not match authoritative quantization");
+      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -7187,7 +7284,7 @@ export class McpHost {
         if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
         const quantization = target.parameter.quantization ?? 0;
         if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
-        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value does not match authoritative quantization`);
+        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
         // One device: the same owner, track and sibling parameters for every one.
         if (parameters.length && JSON.stringify({ ...authority, ref: null, parameterIdentity: null }) !== JSON.stringify({ ...parameters[0]!.authority, ref: null, parameterIdentity: null })) throw new Error("parameter changes must all be on one device");
         device ??= target;
@@ -7232,6 +7329,8 @@ export class McpHost {
       const verifiedSnapshot = await adapter.snapshotAsync(context);
       for (const parameter of transaction.parameters) {
         const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, parameter.ref).parameter;
+        const kept = sameLiveValue(verified.value, parameter.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, parameter.proposedValue, verified);
+        if (kept !== undefined) parameter.proposedValue = kept;
         if (!sameLiveValue(verified.value, parameter.proposedValue) || this.parameterRevision(verified) <= parameter.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the parameter changes"); }
         parameter.appliedRevision = this.parameterRevision(verified);
         if (typeof verified.displayValue === "string") parameter.appliedDisplay = verified.displayValue;
@@ -7268,6 +7367,8 @@ export class McpHost {
       await adapter.invokeAsync({ operation: "device.parameter.set", args: this.parameterMutationArgs(transaction, transaction.proposedValue, currentRevision) }, context);
       const verifiedSnapshot = await adapter.snapshotAsync(context);
       const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
+      const kept = sameLiveValue(verified.value, transaction.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, transaction.proposedValue, verified);
+      if (kept !== undefined) transaction.proposedValue = kept;
       if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= currentRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
       if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
@@ -7929,8 +8030,18 @@ export class McpHost {
       const devadv = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!devadv || devadv.kind !== "device-advanced") return this.transactionError(id, "Unknown or expired device-advanced transaction");
       if (["re-enable-automation", "save-comparison", "set-bank"].includes(devadv.payload.action as string)) return this.transactionError(id, "Momentary device actions and control-surface bank selection are not undoable");
-      if (devadv.payload.action === "insert-chain") return this.transactionError(id, "Chain device deletion is not exposed by the public LOM; undo is unavailable for this transaction");
       if (devadv.state === "undone" && devadv.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: true });
+      if (devadv.payload.action === "insert-chain") {
+        // A device inserted into a chain goes as a Browser-loaded one does: that device, as it was made, and nothing else.
+        const reconciling = devadv.state === "uncertain" && devadv.undoKey === params.idempotencyKey; const made = devadv.created as Record<string, unknown> | undefined;
+        if ((devadv.state !== "applied" && !reconciling) || !made || !isNonEmptyString(made.ref as string, 256) || !isNonEmptyString(made.objectIdentity as string, 256)) return this.transactionError(id, "Chain insertion lacks exact created device identity");
+        try {
+          this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
+          await this.deleteOwnedDeviceAsync(adapter, made.ref as LiveRef, made.objectIdentity as string, context, typeof made.createdFingerprint === "string" ? made.createdFingerprint : undefined, devadv, reconciling);
+          devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
+        } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Chain-insertion undo is uncertain; inspect the exact created device."); }
+      }
       const reconciliation = devadv.state === "uncertain" && devadv.undoKey === params.idempotencyKey;
       if ((devadv.state !== "applied" && !reconciliation) || !devadv.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-advanced transaction can be undone");
       try {
@@ -8045,7 +8156,8 @@ export class McpHost {
     if (!transaction && String(params.transactionId).startsWith("rack_")) {
       const rack = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!rack || rack.kind !== "rack") return this.transactionError(id, "Unknown or expired rack transaction");
-      if (rack.payload.action !== "set") return this.transactionError(id, "Rack actions are momentary or structural and not undoable");
+      const macroAction = rack.payload.action === "add-macro" || rack.payload.action === "remove-macro";
+      if (rack.payload.action !== "set" && !macroAction) return this.transactionError(id, "Rack actions are momentary or structural and not undoable");
       if (rack.state === "undone" && rack.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: rack.id, state: "undone", idempotent: true });
       const reconciliation = rack.state === "uncertain" && rack.undoKey === params.idempotencyKey;
       if ((rack.state !== "applied" && !reconciliation) || !rack.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack transaction can be undone");
@@ -8054,6 +8166,15 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
         if (!reconciliation) { if (rack.payload.selectedVariationIndex !== undefined && row.device.selectedVariationIndex !== rack.payload.selectedVariationIndex) return this.transactionError(id, "rack changed after apply; undo refused"); }
+        if (macroAction) {
+          const left = (rack.created as { visibleMacroCount?: unknown } | undefined)?.visibleMacroCount; const prior = (rack.prior as { visibleMacroCount?: unknown }).visibleMacroCount;
+          if (typeof left !== "number" || typeof prior !== "number" || row.device.visibleMacroCount !== left) return this.transactionError(id, "rack macros changed after apply; undo refused");
+          rack.state = "undoing";
+          const opposite = rack.payload.action === "add-macro" ? "remove-macro" : "add-macro";
+          const done = await this.invokeUndoRecovery(rack, adapter, "rack.action", { ref: rack.payload.ref, action: opposite, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: this.rackStateRevision(row.device) }, context) as { done?: unknown };
+          if (done.done !== true || this.deviceRow(await adapter.snapshotAsync(context), rack.payload.ref as LiveRef).device.visibleMacroCount !== prior) throw new Error("rack macro restoration was not confirmed");
+          rack.state = "undone"; return this.successText(id, { transactionId: rack.id, state: "undone", idempotent: false });
+        }
         rack.state = "undoing";
         const result = await this.invokeUndoRecovery(rack, adapter, "rack.set", { ref: rack.payload.ref, ...(rack.prior as Record<string, unknown>), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: this.rackStateRevision(row.device) }, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("rack restoration was not confirmed");
@@ -8700,7 +8821,7 @@ export class McpHost {
       const revision = this.parameterRevision(target.parameter); const quantization = target.parameter.quantization ?? 0;
       if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
       if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error("parameter value does not match authoritative quantization");
+      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });

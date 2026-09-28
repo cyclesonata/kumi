@@ -42,7 +42,8 @@ type Pending = {
 type Hello = LoopbackResponse & { id: "hello"; result: { protocol: string; registryHash: string; maxDeadlineMs: number } };
 
 function canonical(value: unknown, depth = 0): string {
-  if (depth > 16) throw new Error("wire payload is too deeply nested");
+  // As deep as the Remote Script allows (racks nested in racks' chains): both ends sign the same text.
+  if (depth > 64) throw new Error("wire payload is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "string") { if (value.length > 16_384) throw new Error("wire string is too large"); return JSON.stringify(value); }
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("wire number is not finite"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
@@ -196,8 +197,10 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (baseIdempotencyKey.length < 8 || baseIdempotencyKey.length > 128 || transactionScope.length < 8 || transactionScope.length > 128) throw new Error("remote mutation idempotency authority is invalid");
     const ownedCount = [...this.cleanupOwnership.values()].reduce((count, rows) => count + rows.size, 0); const reserve = invocation.operation === "session.capture-midi" ? 256 : 1;
     if (TRANSACTION_CREATIONS.has(invocation.operation) && ownedCount + reserve > 4096) throw new Error("remote cleanup ownership ledger is full");
-    const reference = typeof invocation.args.ref === "string" ? invocation.args.ref : undefined; let ownershipToken = TRANSACTION_DELETIONS.has(invocation.operation) && reference ? this.cleanupOwnership.get(transactionScope)?.get(reference) : undefined; let consumedMoveOwnership: { transactionId: string; reference: string } | undefined;
-    if (TRANSACTION_DELETIONS.has(invocation.operation) && !ownershipToken) throw new Error("remote destructive cleanup lacks transaction-owned authority");
+    // A deletion, or settling a device just made, carries the creating transaction's ownership token.
+    const owned = TRANSACTION_DELETIONS.has(invocation.operation) || invocation.operation === "ownership.settle";
+    const reference = typeof invocation.args.ref === "string" ? invocation.args.ref : undefined; let ownershipToken = owned && reference ? this.cleanupOwnership.get(transactionScope)?.get(reference) : undefined; let consumedMoveOwnership: { transactionId: string; reference: string } | undefined;
+    if (owned && !ownershipToken) throw new Error("remote destructive cleanup lacks transaction-owned authority");
     if ((invocation.operation === "clip.move" || invocation.operation === "arrangement.clip.move") && reference) {
       const matches = [...this.cleanupOwnership.entries()].filter(([, rows]) => rows.has(reference));
       if (matches.length > 1) throw new Error("remote transaction-owned move authority is ambiguous");

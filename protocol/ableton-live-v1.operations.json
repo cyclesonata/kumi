@@ -2160,6 +2160,16 @@
       "minLength": 1,
       "maxLength": 256
      },
+     "chainRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedChainIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
      "expectedName": {
       "type": "string",
       "maxLength": 256
@@ -2404,6 +2414,7 @@
        "instruments",
        "audio_effects",
        "midi_effects",
+       "modulators",
        "drums",
        "plugins",
        "packs",
@@ -7345,6 +7356,57 @@
    }
   },
   {
+   "id": "ownership.settle",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedFingerprint": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "expectedObjectIdentity",
+     "expectedFingerprint"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "settled": {
+      "type": "boolean",
+      "const": true
+     },
+     "fingerprint": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "settled",
+     "fingerprint"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "parameter.re-enable-automation",
    "method": "invoke",
    "request": {
@@ -8090,6 +8152,16 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+     },
+     "chainRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "chainObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
      }
     },
     "required": [
