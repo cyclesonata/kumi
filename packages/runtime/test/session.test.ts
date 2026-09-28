@@ -182,6 +182,23 @@ test("disconnect invalidates current observation and cancels; next turn is expli
   await h.session.close();
 });
 
+test("Live going away while idle keeps the conversation; when it's back Kumi says so and reads the Set again", async () => {
+  const h = harness();
+  await h.session.start();
+  await h.session.submit("first");
+  h.connection("disconnected");
+  assert(h.events.some((e) => e.type === "notice" && /reconnects when Live is back/.test(e.message)));
+  const observed = h.observations;
+  h.connection("connected");
+  assert(h.events.some((e) => e.type === "notice" && e.message === "Live is back."));
+  await delay(20);
+  assert.equal(h.observations, observed + 1, "the Set is read again right away");
+  await h.session.submit("second");
+  assert.equal(h.kernels.length, 1, "the same conversation continues");
+  assert(!h.events.some((e) => e.type === "notice" && /fresh conversation/.test(e.message)));
+  await h.session.close();
+});
+
 test("new conversation closes old resources, reconnects, and resets submitted-turn limit", async () => {
   const h = harness({ maxTurns: 1 }); await h.session.start(); await h.session.submit("one");
   await assert.rejects(h.session.submit("two"), /\/new/);

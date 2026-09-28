@@ -34,6 +34,8 @@ export function createSession(options: Options): SessionController {
   let integrationGeneration = 0;
   let kernel: { value: Kernel; key: string; revision: string; lifetime: AbortController } | undefined;
   let mustReset = false;
+  /** Live went away while connected; cleared when it's back. */
+  let away = false;
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -64,11 +66,18 @@ export function createSession(options: Options): SessionController {
   function connectionChanged(generation: number, next: ConnectionState) {
     if (generation !== integrationGeneration || state === "closed") return;
     const lost = connection === "connected" && (next === "disconnected" || next === "error");
+    const back = away && next === "connected";
     connection = next; emit({ type: "connection", state: next });
     if (lost) {
-      observationLabel = undefined; mustReset = true;
-      emit({ type: "notice", message: "Connection lost; observations discarded. No Live access. Use /new to reconnect." });
+      // Work in progress stops (it would act on a Live that's gone); a settled conversation stays.
+      observationLabel = undefined; away = true;
+      emit({ type: "notice", message: "Live disconnected. Kumi keeps the conversation and reconnects when Live is back; if it doesn't, use /new." });
       active?.controller.abort();
+    } else if (back) {
+      away = false;
+      emit({ type: "notice", message: "Live is back." });
+      // Read the Set again right away when nothing else is running.
+      if (!active && started) void perform(false, "refresh", async (op) => { await observe(op); return undefined; }).catch(() => {});
     }
   }
   async function ensureKernel(op: Operation, observation: Observation) {

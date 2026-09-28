@@ -236,11 +236,13 @@ test("a failed turn says so, and losing Live is explained", async () => {
   h.emit({ type: "state", state: "running" });
   h.emit({ type: "error", message: "anthropic rejected the credentials (HTTP 401). Check the configured model." });
   h.emit({ type: "state", state: "idle" });
+  // As the session reports it: the state, then what Kumi does about it.
   h.emit({ type: "connection", state: "disconnected" });
+  h.emit({ type: "notice", message: "Live disconnected. Kumi keeps the conversation and reconnects when Live is back; if it doesn't, use /new." });
   const lines = h.screen();
   assert.ok(has(lines, "Kumi couldn't answer that; see the note below."));
   assert.ok(has(lines, "anthropic rejected the credentials (HTTP 401)"));
-  assert.ok(has(lines, "Live disconnected."));
+  assert.ok(has(lines, "Live disconnected. Kumi keeps the conversation"));
   assert.match(lines[0]!, /● Live not connected {2}$/);
   await h.app.close();
 });

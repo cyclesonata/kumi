@@ -184,9 +184,14 @@ terminal is restored on exit, on crashes and on signals.
   Set-identity changes reset the conversation; a changed tool catalog (new tools
   after a first clip, say) keeps it. Same-name/unsaved Set switches the bridge
   cannot distinguish are a limitation; use `/new` explicitly.
-- Undo lasts as long as Kumi's bridge connection: after `/new`, a reconnect or a
-  restart, earlier changes can be undone only in Live (Cmd-Z). One answer makes at
-  most 40 changes.
+- **Live closing or crashing:** Kumi notices within a second, keeps the
+  conversation and reconnects on its own when Live is back (starting a fresh
+  bridge, which the bridge requires after a Live restart). Work in progress when
+  Live went away is stopped. If the same saved Set comes back, the conversation
+  carries on, and a note says what differs from what Kumi last saw.
+- Undo lasts as long as Live and Kumi's bridge connection: after Live restarts,
+  `/new` or a Kumi restart, earlier changes show **no undo** and can be undone
+  only in Live (Cmd-Z). One answer makes at most 40 changes.
 - Catching up needs a saved Set; a Set is recognized by its file path (Save As
   starts afresh). Very large Sets (a comparison over about 1.5 MB) get "changed,
   too big to compare yet". Look-alike items the bridge can't match (empty tracks,

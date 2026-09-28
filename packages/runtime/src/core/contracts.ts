@@ -107,9 +107,11 @@ export interface ChangeRecord {
   to?: number;
   /**
    * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
-   * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live.
+   * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live. "expired":
+   * Live restarted since, so Kumi can't undo it; whether it's still in the Set depends on
+   * whether the Set was saved.
    */
-  state: "applied" | "undone" | "kept" | "unsure";
+  state: "applied" | "undone" | "kept" | "unsure" | "expired";
   /** Why an undo didn't happen, in plain words. */
   note?: string;
   at: number;
@@ -123,6 +125,8 @@ export interface CatchUp {
   lines: string[];
   /** Changes not listed. */
   more: number;
+  /** Live went away and came back while Kumi was running. */
+  afterReconnect?: boolean;
 }
 
 export type SessionEvent = KernelEvent

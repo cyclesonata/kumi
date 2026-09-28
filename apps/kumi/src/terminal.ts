@@ -197,6 +197,7 @@ export function createTerminal(options: Options): Terminal {
         if (state === "applied") notice(`[change] ${title} (/undo takes it back)`);
         else if (state === "unsure") notice(`[change] Check Live: ${title}. ${note ?? "Live didn't confirm it."}`);
         else if (state === "kept") notice(`[change] Kept: ${title}. ${note ?? ""}`.trim());
+        else if (state === "expired") notice(`[change] No undo anymore: ${title}. ${note ?? ""}`.trim());
         break;
       }
       case "notice": notice(event.message); break;

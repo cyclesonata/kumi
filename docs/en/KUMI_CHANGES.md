@@ -63,10 +63,12 @@ The producer undoes a change by clicking **undo** beside it in HISTORY, with
 `/undo` for the latest one, or by asking Kumi. Undo waits until Kumi's current
 answer is finished.
 
-Undo lasts as long as Kumi's connection to the bridge, because the bridge keeps
-the transactions. After `/new`, a reconnect or restarting Kumi, earlier changes
-can only be undone in Live itself (Cmd-Z). Making undo outlive the connection is
-on the list, through a small write-ahead record of transactions.
+Undo lasts as long as Live and Kumi's connection to the bridge, because the
+bridge keeps the transactions for the running Live. After Live restarts (Kumi
+reconnects by itself), `/new` or restarting Kumi, earlier changes read **no
+undo** and can only be undone in Live itself (Cmd-Z); whether a change survived a
+Live restart depends on whether the Set was saved. Making undo outlive the
+connection is on the list, through a small write-ahead record of transactions.
 
 ## Safety layers
 

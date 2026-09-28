@@ -46,13 +46,17 @@ function fixture() {
     onDisconnect(listener) { disconnects.add(listener); return () => { disconnects.delete(listener); }; },
     async close() { closes++; },
   };
-  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), now: () => new Date("2026-01-01T00:00:00.000Z"), generation: "fixture-connection" });
+  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), now: () => new Date("2026-01-01T00:00:00.000Z"), generation: "fixture-connection", reconnectIntervalMs: 10 });
   return { integration, endpoint, requests, states, get closes() { return closes; },
     renameSet: (name: string) => { setName = name; }, renameTrack: (name: string) => { trackName = name; },
     bumpEpoch: () => { epoch++; }, setIdentity: (value: string) => { identity = value; },
     partial: () => { truncated = true; next = true; }, huge: () => { oversized = true; }, missing: () => { missing = true; },
     repeatCursor: () => { looping = true; }, stale: () => { stale = true; },
     fail: () => { fail = true; }, disconnect: () => { connected = false; for (const listener of disconnects) listener(); },
+    /** Live quits or crashes; the bridge process stays. */
+    liveAway: () => { connected = false; },
+    /** Live is back, restarted (a new epoch) unless told otherwise. */
+    liveBack: (restarted = true) => { connected = true; if (restarted) epoch++; },
     afterRead: (hook: () => void) => { afterRead = hook; },
     holdNext: (kind: string) => {
       let release!: () => void; let started!: () => void;
@@ -213,6 +217,28 @@ test("MCP disconnect removes access without hidden reconnection; subsequent cont
     assert.equal((await tool(before.tools).execute({ kind: "track" }, signal())).isError, true);
     assert.equal(f.states.at(-1), "disconnected");
   } finally { await f.integration.close(); await f.integration.close(); assert.equal(f.closes, 1); }
+});
+
+test("when Live goes away Kumi waits for it, and the same Set coming back continues the conversation", async () => {
+  const f = await started();
+  try {
+    const before = await f.integration.observe(signal());
+    f.liveAway();
+    assert.equal((await tool(before.tools).execute({ kind: "track" }, signal())).isError, true);
+    assert.equal(f.states.at(-1), "disconnected");
+    assert.match((await f.integration.observe(signal())).context, /No Live access/);
+    f.liveBack();
+    const deadline = Date.now() + 2_000;
+    while (f.states.at(-1) !== "connected" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(f.states.at(-1), "connected", "Kumi found Live again without /new");
+    const after = await f.integration.observe(signal());
+    assert.equal(after.key, before.key, "the same Set after a restart keeps the conversation");
+    assert.equal(JSON.parse(after.context).epoch, 2, "with Live's new epoch");
+    assert.equal((await f.integration.observe(signal())).key, before.key, "and keeps it on later turns");
+    f.renameSet("Another Set"); f.bumpEpoch();
+    const other = await f.integration.observe(signal());
+    assert.notEqual(other.key, before.key, "a different Set starts a new conversation");
+  } finally { await f.integration.close(); }
 });
 
 test("asking for a few fields keeps what Kumi's checks need: the Set's identity and the parent", async () => {

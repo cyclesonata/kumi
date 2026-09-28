@@ -42,6 +42,8 @@ export interface FocusFeed {
 export function startFocusFeed(options: {
   read: (signal: AbortSignal) => Promise<CallToolResult>;
   onFocus: (focus: LiveFocus | null) => void;
+  /** Two reads in a row failed (Live may have gone away); called once until a read works again. */
+  onFailure?: () => void;
   intervalMs?: number;
   timeoutMs?: number;
 }): FocusFeed {
@@ -49,6 +51,7 @@ export function startFocusFeed(options: {
   let last = "null";
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inflight: AbortController | undefined;
+  let failures = 0;
   const report = (focus: LiveFocus | null) => {
     const key = JSON.stringify(focus);
     if (key === last) return;
@@ -62,7 +65,10 @@ export function startFocusFeed(options: {
       const page = payload(await options.read(AbortSignal.any([inflight.signal, AbortSignal.timeout(options.timeoutMs ?? 2_000)])));
       const items = Array.isArray(page.items) ? page.items : [];
       if (!stopped) report(items.length ? parseFocus(object(items[0])) : null);
-    } catch { /* skipped */ }
+      failures = 0;
+    } catch {
+      if (!stopped && ++failures === 2) { try { options.onFailure?.(); } catch { /* the feed keeps going */ } }
+    }
     finally {
       inflight = undefined;
       if (!stopped) timer = setTimeout(() => { void tick(); }, options.intervalMs ?? 500);

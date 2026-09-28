@@ -12,6 +12,7 @@ function bridge() {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = 120;
+  let live = true; let epoch = 7;
   let tracks = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 }];
   let undoRefusal: string | undefined;
   let applyFailure: "throw" | "uncertain" | undefined;
@@ -32,7 +33,7 @@ function bridge() {
     async list() { return { tools: catalog }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
-      if (name === "live_status") return wrap({ connected: true, adapter: "remote-script", provenance: "fake-live", epoch: 7 });
+      if (name === "live_status") return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null });
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
@@ -75,9 +76,12 @@ function bridge() {
     onDisconnect() { return () => {}; },
     async close() {},
   };
-  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: () => {}, onChange: (change) => records.push(change), changeTimeoutMs: 2_000 });
+  const states: string[] = [];
+  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), onChange: (change) => records.push(change), changeTimeoutMs: 2_000, reconnectIntervalMs: 10 });
   return {
-    integration, requests, records, get tempo() { return tempo; },
+    integration, requests, records, states, get tempo() { return tempo; },
+    liveAway: () => { live = false; },
+    liveBack: () => { live = true; epoch++; },
     refuseUndo: (text: string) => { undoRefusal = text; },
     /** The bridge re-negotiates its tools after content changes and says so. */
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
@@ -186,6 +190,22 @@ test("the bridge offering new tools after a change keeps the Set, its references
     b.catalogChanged();
     const undone = await tool(b.tools, UNDO_TOOL).execute({ change: "last" }, signal());
     assert.equal(undone.isError, false, undone.text);
+  } finally { await b.integration.close(); }
+});
+
+test("after Live restarts, earlier changes stay in HISTORY without their undo", async () => {
+  const b = await opened();
+  try {
+    await tool(b.tools, "set_tempo").execute({ tempo: 131 }, signal());
+    b.liveAway();
+    assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 132 }, signal())).isError, true);
+    b.liveBack();
+    const deadline = Date.now() + 2_000;
+    while (b.states.at(-1) !== "connected" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    const expired = b.records.at(-1)!;
+    assert.equal(expired.state, "expired"); assert.match(expired.note ?? "", /Live restarted since, so Kumi can't undo this/);
+    const again = await b.integration.undo!(expired.id, signal());
+    assert.equal(again.state, "expired", "undo isn't attempted with a restarted Live");
   } finally { await b.integration.close(); }
 });
 

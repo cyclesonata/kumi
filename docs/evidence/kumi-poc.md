@@ -326,7 +326,25 @@ The bridge reports look-alike empty tracks as one ambiguous group (1 before, 2
 after) rather than a rename and an addition; Kumi resolves such groups by name
 and position. Screens: `.pi/kumi-evidence/tui/13-*.txt`, `14-*.txt`.
 
-This verifies small-Set inspection, basic focus, catching up and eight of the
-nine kinds of change with their undo (device parameters were not offered for this Set) on one
+## Live quitting and coming back
+
+With Kumi full screen (UTC `2026-09-28T05:52Z`–`05:56Z`), Kumi set the tempo, then
+Live was quit (Don't Save) and reopened:
+
+- Kumi noticed in the same second (the focus reads failed, a status check
+  confirmed): header "Live not connected" and "Live disconnected. Kumi keeps the
+  conversation and reconnects when Live is back".
+- The running bridge refuses to continue across a Live restart by design (its
+  reconciliation channel is "poisoned" by the new epoch), so Kumi started a fresh
+  bridge once Live answered: "Live is back." about 30 s after reopening, which is
+  Live's own start-up time.
+- HISTORY marked the earlier tempo change "no undo"; the catch-up note said
+  "While Live was away, Kumi Focus Demo changed: Tempo 117 → 120 BPM", that is, the
+  unsaved change was gone.
+- Asked "What tempo did I ask you for earlier, and what is it now?", Kumi answered
+  "You asked for 119 BPM. It's now 120 BPM": the conversation carried on.
+
+This verifies small-Set inspection, basic focus, catching up, reconnecting and
+eight of the nine kinds of change with their undo (device parameters were not offered for this Set) on one
 macOS/Live/model setup, not musical usefulness, listening,
 large Sets, Windows, or adversarial robustness.

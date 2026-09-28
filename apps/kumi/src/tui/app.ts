@@ -223,7 +223,7 @@ export class TuiApp {
         this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling");
         break;
       case "connection":
-        if (this.connection === "connected" && event.state !== "connected") this.notice("Live disconnected. Kumi can still talk, but can't see your Set until Live is back.", "warn");
+        // The session says what happened and what Kumi does about it (a notice).
         this.connection = event.state;
         break;
       case "observation":
@@ -235,7 +235,7 @@ export class TuiApp {
       case "catch-up":
         this.catchUp = event.catchUp;
         // The welcome screen shows it; once the conversation has started, it becomes a note.
-        if (!this.transcript.isEmpty) this.notice(catchUpText(event.catchUp), "info");
+        if (!this.transcript.isEmpty && !(event.catchUp.afterReconnect && !event.catchUp.lines.length)) this.notice(catchUpText(event.catchUp), "info");
         break;
       case "change": {
         const index = this.changes.findIndex((change) => change.id === event.change.id);
@@ -668,14 +668,14 @@ export class TuiApp {
     const room = newest.length > area.height ? area.height - 1 : area.height;
     newest.slice(0, room).forEach((change, index) => {
       const y = area.y + index;
-      const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : "check Live";
-      const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" ? st.faint : st.warn;
+      const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : change.state === "expired" ? "no undo" : "check Live";
+      const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" || change.state === "expired" ? st.faint : st.warn;
       const actionX = area.x + area.width - textWidth(action);
-      const marker = change.state === "undone" ? { text: "○", style: st.faint }
+      const marker = change.state === "undone" || change.state === "expired" ? { text: "○", style: st.faint }
         : change.state === "unsure" ? { text: "●", style: st.warn }
         : change.track ? { text: "■", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓", style: st.accent };
       screen.put(area.x, y, marker.text, marker.style);
-      screen.put(area.x + 2, y, truncate(change.title, Math.max(1, actionX - area.x - 3)), change.state === "undone" ? st.faint : st.text);
+      screen.put(area.x + 2, y, truncate(change.title, Math.max(1, actionX - area.x - 3)), change.state === "undone" || change.state === "expired" ? st.faint : st.text);
       screen.put(actionX, y, action, actionStyle);
       if (change.state === "applied") this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.undo(change.id); } });
     });
@@ -742,6 +742,7 @@ export class TuiApp {
 /** A catch-up as one line for the conversation. */
 export function catchUpText(catchUp: CatchUp, now = Date.now()): string {
   const when = since(catchUp.lastSeenAt, now);
+  if (catchUp.afterReconnect) return `While Live was away, ${catchUp.set} changed: ${catchUp.lines.join("; ")}${catchUp.more ? `; and ${catchUp.more} more` : ""}.`;
   if (!catchUp.lines.length) return `Nothing changed in ${catchUp.set} since you were last here, ${when}.`;
   return `Since you were last here (${when}): ${catchUp.lines.join("; ")}${catchUp.more ? `; and ${catchUp.more} more` : ""}.`;
 }
