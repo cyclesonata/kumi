@@ -57,6 +57,8 @@ const MAX_TOOLS = 128;
 const MAX_INSTRUCTIONS = 64 * 1024;
 const MAX_STEER = 16 * 1024;
 const MAX_TOOL_ERROR = 4 * 1024;
+/** A tool's own answer to the producer, when it finished the request. */
+const MAX_REPLY = 8 * 1024;
 /** Ends a stopped turn's kept steps, for the model and in the transcript. */
 export const STOPPED_NOTE = "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
 
@@ -94,6 +96,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       try { emit(event); } catch { failed.abort(); }
     };
     const messages: LanguageModelV4Message[] = [user(input)];
+    let spoke = false;
     const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     let reported = false;
     const settled = (stopReason: TurnResult["stopReason"]): TurnResult => ({ stopReason, ...(reported ? { usage } : {}) });
@@ -117,11 +120,20 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         earlier = fitted.history;
         if (fitted.turn !== messages) messages.splice(0, messages.length, ...fitted.turn);
         const request = binding.prepare({ instructions, messages: [...earlier, ...messages], tools: specs, sessionId });
-        const result = await stream(request, abort, (text) => deliver({ type: "text", text }));
+        const result = await stream(request, abort, (text) => { spoke = true; deliver({ type: "text", text }); });
         add(usage, result.usage); reported = true;
         if (result.content.length) messages.push({ role: "assistant", content: result.content });
-        if (result.calls.length) messages.push({ role: "tool", content: await execute(result.calls, abort, deliver) });
-        else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed"); }
+        if (result.calls.length) {
+          const { results, reply } = await execute(result.calls, abort, deliver);
+          messages.push({ role: "tool", content: results });
+          // The tools finished the request and said so: their reply is the answer, with no model call to write one.
+          if (reply !== undefined && !steering.length) {
+            const text = spoke ? `\n\n${reply}` : reply;
+            deliver({ type: "text", text });
+            messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
+            abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed");
+          }
+        } else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed"); }
         for (const text of steering.splice(0)) { messages.push(user(text)); deliver({ type: "steer", text }); }
       }
     } catch (error) {
@@ -147,8 +159,10 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     }
   }
 
-  async function execute(calls: StepResult["calls"], abort: AbortSignal, deliver: (event: KernelEvent) => void): Promise<LanguageModelV4ToolResultPart[]> {
+  /** Runs a step's calls in order; `reply` is set when all succeeded and some finished the request. */
+  async function execute(calls: StepResult["calls"], abort: AbortSignal, deliver: (event: KernelEvent) => void): Promise<{ results: LanguageModelV4ToolResultPart[]; reply?: string }> {
     const results: LanguageModelV4ToolResultPart[] = [];
+    const replies: string[] = []; let failed = false;
     for (const { call, input } of calls) {
       abort.throwIfAborted();
       const started = performance.now();
@@ -161,17 +175,19 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         try {
           const result = await untilAborted(tool.execute(input, abort), abort);
           outcome = { text: result.text, isError: Boolean(result.isError) };
+          if (!outcome.isError && typeof result.reply === "string" && result.reply.trim()) replies.push(result.reply.trim().slice(0, MAX_REPLY));
         } catch (error) {
           abort.throwIfAborted();
           outcome = { text: (error instanceof Error ? error.message : "Tool failed").slice(0, MAX_TOOL_ERROR), isError: true };
         }
       }
       abort.throwIfAborted();
+      failed ||= outcome.isError;
       deliver({ type: "tool-end", id: call.toolCallId, name: call.toolName, isError: outcome.isError, elapsedMs: Math.round(performance.now() - started) });
       results.push({ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName,
         output: outcome.isError ? { type: "error-text", value: outcome.text } : { type: "text", value: outcome.text } });
     }
-    return results;
+    return { results, ...(!failed && replies.length ? { reply: replies.join("\n\n") } : {}) };
   }
 
   return {

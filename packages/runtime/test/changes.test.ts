@@ -11,7 +11,7 @@ import { createAbletonIntegration } from "../src/integrations/ableton/index.js";
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
-function bridge() {
+function bridge(options: { padBatches?: boolean } = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = 120;
@@ -29,6 +29,7 @@ function bridge() {
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
     ? { type: "object", properties: { tracks: { type: "array", items: { type: "object", properties: { name: { type: "string" }, kind: { type: "string" }, index: { type: "integer", description: "request order" } } } }, scenes: { type: "array" } } }
+    : name === "live_drum_pad_preview" && options.padBatches ? { type: "object", properties: { action: { type: "string", enum: ["set", "delete-all-chains", "load-sample", "load-samples"] } }, additionalProperties: true }
     : { type: "object", properties: {}, additionalProperties: true } }));
   const wrap = (value: JsonObject): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });
   const refusal = (text: string, extra: JsonObject = {}): CallToolResult => ({ isError: true, content: [{ type: "text", text }], structuredContent: { message: text, ...extra } });
@@ -56,6 +57,7 @@ function bridge() {
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
         if (name === "live_track_properties_preview") return wrap({ ...base, ref: args.ref, prior: { colorIndex: 4 }, proposed: { colorIndex: args.colorIndex } });
         if (name === "live_device_preview") return wrap({ ...base, action: args.action, payload: { trackRef: args.trackRef, deviceName: args.deviceName }, sample: { path: args.filePath, size: 18 } });
+        if (name === "live_drum_pad_preview" && args.action === "load-samples") return wrap({ ...base, action: args.action, deviceRef: args.deviceRef, pads: (args.pads as JsonObject[]).map((pad) => ({ padRef: `7:drum_pad:0:0:${String(pad.note)}`, note: pad.note, sample: { path: pad.filePath } })) });
         if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: `7:drum_pad:0:0:${String(args.note)}`, note: args.note, sample: { path: args.filePath } });
         if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef, item: { name: String(args.itemId).split("/").at(-1) } });
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
@@ -75,6 +77,7 @@ function bridge() {
           return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
         }
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
+        if (transaction.name === "live_drum_pad_preview" && transaction.args.action === "load-samples") return wrap({ transactionId: args.transactionId, state: "applied", result: { pads: (transaction.args.pads as JsonObject[]).map((pad) => ({ ref: `7:drum_pad:0:0:${String(pad.note)}`, route: "hotswap" })) } });
         if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: `7:drum_pad:0:0:${String(transaction.args.note)}`, route: "chain", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_browser_load_preview") {
           // Like the bridge, a Drum Rack in the Set brings the pad tools.
@@ -123,8 +126,8 @@ function bridge() {
 }
 const signal = () => new AbortController().signal;
 function tool(tools: readonly KernelTool[], name: string) { const found = tools.find((item) => item.name === name); assert(found, `${name} is offered`); return found; }
-async function opened() {
-  const b = bridge();
+async function opened(options: { padBatches?: boolean } = {}) {
+  const b = bridge(options);
   await b.integration.start(signal());
   const observation = await b.integration.observe(signal());
   // Keep the fixture's getters live (a spread would copy their current values).
@@ -315,6 +318,50 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     assert.deepEqual(b.records.slice(-3).map((record) => record.title.replace(/“.*”/, "“…”")), ["Loaded “…” onto Drum Rack pad C1", "Loaded “…” onto Drum Rack pad C#1", "Loaded “…” onto Drum Rack pad D1"]);
     const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("make_changes with final answers for the model when every step is done, and not when one fails", async () => {
+  const b = await opened();
+  try {
+    const plan = tool(b.tools, "make_changes");
+    const one = await plan.execute({ steps: [{ tool: "set_tempo", input: { tempo: 124 } }], final: true }, signal());
+    assert.equal(one.isError, false); assert.equal(one.reply, "Done: Tempo 120 → 124 BPM.");
+    const two = await plan.execute({ steps: [{ tool: "set_tempo", input: { tempo: 126 } }, { tool: "set_mixer", input: { trackRef: "7:track:0", volume: 0.6 } }], final: true }, signal());
+    assert.equal(two.reply, "Done:\n- Tempo 124 → 126 BPM\n- Fixture Bass volume down");
+    assert.equal((await plan.execute({ steps: [{ tool: "set_tempo", input: { tempo: 127 } }] }, signal())).reply, undefined, "without final the model answers");
+    const failed = await plan.execute({ steps: [{ tool: "rename", input: { kind: "track", ref: "7:track:99", name: "Nope" } }], final: true }, signal());
+    assert.equal(failed.isError, true); assert.equal(failed.reply, undefined, "a failure goes back to the model");
+  } finally { await b.integration.close(); }
+});
+
+test("pads of one rack in a row load as one change when the bridge can: one Live request, one undo, a line each in the answer", async () => {
+  const b = await opened({ padBatches: true });
+  const folder = mkdtempSync(join(tmpdir(), "kumi-batch-"));
+  try {
+    for (const name of ["Kick.wav", "Snare.wav", "Hat.wav", "Clap.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const checks = () => b.requests.filter((request) => request.name === "live_status").length;
+    const before = checks();
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kit", kind: "midi" }], scenes: [] }, as: "track" },
+      { tool: "load_device", input: { trackRef: "@track", itemId: "instruments/Drum Rack" }, as: "rack" },
+      { tool: "load_sample_to_pad", input: { deviceRef: "@rack", sample: { random: true, folders: [folder] } }, each: { note: [36, 37, 38] } },
+      { tool: "set_tempo", input: { tempo: 126 } },
+    ], final: true }, signal());
+    assert.equal(result.isError, false, result.text);
+    const previews = b.requests.filter((request) => request.name === "live_drum_pad_preview");
+    assert.equal(previews.length, 1, "one preview for the three pads");
+    const pads = previews[0]!.args.pads as JsonObject[];
+    assert.deepEqual(pads.map((pad) => pad.note), [36, 37, 38]); assert.equal(previews[0]!.args.deviceRef, "7:device:2:0");
+    assert.equal(new Set(pads.map((pad) => pad.filePath)).size, 3, "three different samples");
+    const kit = b.records.find((record) => record.title.startsWith("Loaded 3 samples"));
+    assert.equal(kit?.title, "Loaded 3 samples onto Drum Rack pads C1–D1", "one HISTORY entry for the pads");
+    assert.match(result.reply ?? "", /^Done:\n- Added MIDI track “Kit”\n- Loaded Drum Rack on Kit\n- Loaded “\w+” onto Drum Rack pad C1\n- Loaded “\w+” onto Drum Rack pad C#1\n- Loaded “\w+” onto Drum Rack pad D1\n- Tempo 120 → 126 BPM$/);
+    assert.equal(checks() - before, 1, "only the plan's first change checks Live is the same");
+    assert.equal((await b.integration.undo!(kit!.id, signal())).state, "undone");
+    const one = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "load_sample_to_pad", input: { deviceRef: "7:device:2:0", note: 39, sample: { random: true, folders: [folder] } } }] }, signal());
+    assert.equal(one.isError, false, one.text);
+    assert.equal(b.requests.filter((request) => request.name === "live_drum_pad_preview").at(-1)!.args.action, "load-sample", "a single pad stays a single change");
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 

@@ -4,7 +4,11 @@ export interface KernelTool {
   name: string;
   description: string;
   inputSchema: JsonObject;
-  execute(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError?: boolean }>;
+  /**
+   * `reply`, from a tool that finished what the producer asked, is the answer: when every call in
+   * the step succeeded and no guidance is waiting, the turn ends there without another model call.
+   */
+  execute(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError?: boolean; reply?: string }>;
 }
 
 export type KernelEvent =

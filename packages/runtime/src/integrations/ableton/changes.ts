@@ -47,6 +47,8 @@ export interface ChangeSummary {
   range?: [number, number];
   clip?: ChangeRecord["clip"];
   colors?: ChangeRecord["colors"];
+  /** What each part of a change did, for the answer; HISTORY shows the title. */
+  lines?: string[];
 }
 
 export interface ChangeKind {
@@ -72,6 +74,8 @@ export interface ChangeKind {
    */
   always?: boolean;
   unavailable?: string;
+  /** Never offered to the model: make_changes uses it for several of its steps at once. */
+  internal?: boolean;
   /** `applied` is the bridge's apply result, when there is one: it can carry Live's own text for the new values. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary;
 }
@@ -83,6 +87,8 @@ const quoted = (value: unknown, fallback: string) => { const text = label(value)
 export const formatNumber = (value: number, digits = 2) => String(Number(value.toFixed(digits)));
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 /** A MIDI note as Live names it: 36 is C1, 60 is C3. */
+/** A sample's name as Live shows it: the file's name without its extension. */
+const fileName = (path: unknown) => (typeof path === "string" ? path.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined);
 export const noteName = (note: number) => `${["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][note % 12]}${Math.floor(note / 12) - 2}`;
 /** Live's 0xRRGGBB colours as "#rrggbb". */
 export const hexColor = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF ? `#${value.toString(16).padStart(6, "0")}` : undefined);
@@ -207,7 +213,7 @@ export const CHANGES: readonly ChangeKind[] = [
       return typeof created.ref === "string" ? { ref: created.ref, kind: "device" } : undefined;
     },
     summarize(_preview, input, track) {
-      const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
+      const file = fileName(input.filePath);
       const known = track(input.trackRef);
       return { title: `Loaded ${quoted(file, "a sample")} into a new Simpler${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };
     },
@@ -225,9 +231,31 @@ export const CHANGES: readonly ChangeKind[] = [
       return { action: "load-sample", deviceRef: input.deviceRef ?? null, note: input.note ?? null, filePath: found.path, allowedRoot: found.folder };
     },
     summarize(preview, input) {
-      const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
+      const file = fileName(input.filePath);
       const note = number(preview.note ?? input.note);
       return { title: `Loaded ${quoted(file, "a sample")} onto Drum Rack pad ${note !== undefined ? noteName(note) : ""}`.trimEnd() };
+    },
+  },
+  {
+    // make_changes turns a run of load_sample_to_pad steps on one rack into this: one Live request for all the pads.
+    tool: "load_samples_to_pads", preview: "live_drum_pad_preview", apply: "live_drum_pad_apply", family: "device", internal: true,
+    description: "Load samples onto empty pads of one Drum Rack as one change; undo clears them all.",
+    async prepare(input, context) {
+      const pads: JsonObject[] = [];
+      for (const pad of Array.isArray(input.pads) ? input.pads.map(record) : []) {
+        const found = await sampleFor(pad.sample, context);
+        if (typeof found === "string") return `Pad ${number(pad.note) !== undefined ? noteName(pad.note as number) : "?"}: ${found}`;
+        pads.push({ note: pad.note ?? null, filePath: found.path, allowedRoot: found.folder });
+      }
+      return { action: "load-samples", deviceRef: input.deviceRef ?? null, pads };
+    },
+    summarize(_preview, input) {
+      const pads = Array.isArray(input.pads) ? input.pads.map(record) : [];
+      const notes = pads.map((pad) => number(pad.note)).filter((note): note is number => note !== undefined);
+      const run = notes.length === pads.length && notes.length > 1 && notes.every((note, index) => index === 0 || note === notes[index - 1]! + 1);
+      const where = run ? `${noteName(notes[0]!)}–${noteName(notes.at(-1)!)}` : notes.map(noteName).join(", ");
+      return { title: `Loaded ${pads.length} samples onto Drum Rack pads ${where}`.trimEnd(),
+        lines: pads.map((pad) => `Loaded ${quoted(fileName(pad.filePath), "a sample")} onto Drum Rack pad ${number(pad.note) !== undefined ? noteName(pad.note as number) : ""}`.trimEnd()) };
     },
   },
   {

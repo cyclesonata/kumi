@@ -15,7 +15,7 @@ import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type Proj
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
 const MAKE_CHANGES = "make_changes";
-const MAKE_CHANGES_DESCRIPTION = "Make several changes in one call, in order: each step is one of your change tools with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). It stops at the first step that fails and says what was done. Use it whenever a request needs more than one change; it's much faster than one call per change.";
+const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const FIND_SAMPLES = "find_samples";
 const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
 const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
@@ -458,7 +458,7 @@ export function createAbletonIntegration(options: Options): Integration {
    * input stands for what an earlier step marked `as: "name"` made. One call instead of a model
    * round trip per change, which is most of the time a multi-step request takes.
    */
-  async function makeChanges(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+  async function makeChanges(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError: boolean; reply?: string }> {
     // A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it.
     const steps: unknown[] = [];
     for (const raw of Array.isArray(input.steps) ? input.steps : []) {
@@ -473,6 +473,17 @@ export function createAbletonIntegration(options: Options): Integration {
     if (!steps.length || steps.length > MAX_CHANGES_PER_TURN) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
     const made = new Map<string, string>();
     const done: JsonObject[] = [];
+    // Pads of one rack in a row load in one Live request, when the bridge can.
+    const padBatch = CHANGES.find((kind) => kind.tool === "load_samples_to_pads")!;
+    const batchesPads = () => {
+      const action = object(object(tools?.tool(padBatch.preview)?.inputSchema ?? {}).properties ?? {}).action;
+      return Array.isArray(object(action ?? {}).enum) && (object(action).enum as unknown[]).includes("load-samples");
+    };
+    const padStep = (value: unknown, rack?: unknown) => {
+      const item = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
+      const stepInput = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
+      return item.tool === "load_sample_to_pad" && item.as === undefined && typeof stepInput.deviceRef === "string" && (rack === undefined || stepInput.deviceRef === rack);
+    };
     const resolve = (value: unknown, step: number): unknown => {
       if (typeof value === "string" && /^@[a-z][a-z0-9_]{0,31}$/i.test(value)) {
         const found = made.get(value.slice(1));
@@ -483,26 +494,54 @@ export function createAbletonIntegration(options: Options): Integration {
       if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item, step)]));
       return value;
     };
-    for (const [index, raw] of steps.entries()) {
+    for (let index = 0; index < steps.length;) {
       const step = index + 1;
+      const raw = steps[index];
       const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
-      const kind = CHANGES.find((candidate) => candidate.tool === item.tool);
       const stop = (error: string) => ({ text: JSON.stringify({ done, stopped: { step, tool: item.tool ?? null, error: error.slice(0, 600) }, ...(steps.length > step ? { skipped: steps.length - step } : {}) }), isError: true });
+      // Earlier steps of this plan just confirmed Live is the same, so later ones skip that check.
+      const settled = done.length > 0;
+      let run = 1;
+      if (padStep(raw) && padStep(steps[index + 1], (item.input as JsonObject).deviceRef)) {
+        // A rack loaded just now changed the bridge's tools; read them again before asking.
+        try { await ensureCatalog(signal); } catch { signal.throwIfAborted(); }
+        if (batchesPads()) while (run < 16 && index + run < steps.length && padStep(steps[index + run], (item.input as JsonObject).deviceRef)) run++;
+      }
+      if (run > 1) {
+        let pads: JsonObject[];
+        try { pads = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
+        catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
+        const outcome = await change(padBatch, { deviceRef: pads[0]!.deviceRef ?? null, pads: pads.map((pad) => ({ note: pad.note ?? null, sample: pad.sample ?? null })) }, signal, settled);
+        let reply: JsonObject = {};
+        try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
+        if (outcome.isError) return stop(`pads ${step}–${step + run - 1}, as one change: ${outcome.text}`);
+        const lines = Array.isArray(reply.lines) ? reply.lines : [];
+        for (let offset = 0; offset < run; offset++) done.push({ step: step + offset, changed: typeof lines[offset] === "string" ? lines[offset] : reply.changed ?? null, change: reply.change ?? null });
+        index += run;
+        continue;
+      }
+      const kind = CHANGES.find((candidate) => candidate.tool === item.tool && !candidate.internal);
       if (!kind) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
       let stepInput: JsonObject;
       try { stepInput = resolve(item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {}, step) as JsonObject; }
       catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
-      const outcome = await change(kind, stepInput, signal);
+      const outcome = await change(kind, stepInput, signal, settled);
       let reply: JsonObject = {};
       try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
       if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
       if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
       done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}) });
+      index++;
     }
-    return { text: JSON.stringify({ done }), isError: false };
+    const text = JSON.stringify({ done });
+    if (input.final !== true) return { text, isError: false };
+    // The plan finished the request: Kumi says what changed, sparing the producer a model reply.
+    const lines = done.map((item) => item.changed).filter((line): line is string => typeof line === "string" && line.length > 0);
+    return { text, isError: false, reply: lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}` };
   }
 
-  async function change(kind: ChangeKind, input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+  /** `settled`: an earlier change in the same plan just confirmed Live's epoch, so it isn't read again. */
+  async function change(kind: ChangeKind, input: JsonObject, originalSignal: AbortSignal, settled = false): Promise<{ text: string; isError: boolean }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
     const lease = observationGeneration;
     try {
@@ -516,7 +555,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (typeof prepared === "string") return { text: prepared, isError: true };
       assertLease(lease, signal);
       const epoch = currentEpoch;
-      await guardEpoch(signal, epoch, lease);
+      if (!settled) await guardEpoch(signal, epoch, lease);
       const args = await appendAtEnd(kind, prepared, signal); assertLease(lease, signal);
       const previewed = await tools.call(kind.preview, args, signal, { host: true }); assertLease(lease, signal);
       if (previewed.isError) return { text: JSON.stringify(previewed), isError: true };
@@ -549,7 +588,8 @@ export function createAbletonIntegration(options: Options): Integration {
         remember(newRecord(kind, summary, "unsure", now().getTime()), transactionId);
         return { text: "Kumi couldn't read Live's answer to this change, so it can't confirm whether it happened. Tell the producer to check Live; discover again before more changes.", isError: true };
       }
-      const record = newRecord(kind, kind.summarize(preview, args, knownTrack, result), result.state === "applied" ? "applied" : "unsure", now().getTime());
+      const settledSummary = kind.summarize(preview, args, knownTrack, result);
+      const record = newRecord(kind, settledSummary, result.state === "applied" ? "applied" : "unsure", now().getTime());
       const field = kind.family === "rename" ? "name" : kind.family === "color" ? "color" : undefined;
       const replaced = field && typeof args.ref === "string" ? known.get(args.ref) : undefined;
       remember(record, transactionId, field && replaced ? { ref: args.ref as string, field, ...(replaced[field] !== undefined ? { value: replaced[field] } : {}) } : undefined);
@@ -570,7 +610,8 @@ export function createAbletonIntegration(options: Options): Integration {
       // What the change made (a new track, a loaded device) is usable at once, without discovering it.
       const produced = kind.produces?.(result);
       if (produced && produced.ref.length <= 256) refs.set(produced.ref, produced.kind);
-      const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: produced.ref } : {}),
+      const { lines } = settledSummary;
+      const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: produced.ref } : {}), ...(lines?.length ? { lines } : {}),
         ...(kind.restructures ? { note: "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
       const full = JSON.stringify({ ...reply, live: result });
       return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" };
@@ -621,7 +662,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
       execute: (input, signal) => invoke(tool.name, input, signal) }));
     // A change whose target an earlier step can create is offered by any bridge that makes changes (has undo).
-    const edits: KernelTool[] = CHANGES.filter((kind) => (kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply))).map((kind) => ({
+    const edits: KernelTool[] = CHANGES.filter((kind) => !kind.internal && ((kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply)))).map((kind) => ({
       name: kind.tool, description: kind.description,
       inputSchema: kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
       execute: (input, signal) => change(kind, input, signal) }));
@@ -647,7 +688,8 @@ export function createAbletonIntegration(options: Options): Integration {
         type: "object", additionalProperties: false, required: ["tool", "input"], properties: {
           tool: { type: "string", enum: edits.map((item) => item.name) }, input: { type: "object", description: "What that tool takes; \"@name\" for what an earlier step made" },
           as: { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,31}$", description: "Name what this step makes (a new track, a loaded device) for later steps" },
-          each: { type: "object", description: "Repeat this step once per value of one input field, e.g. {\"note\": [36, 37, 38, 39]}", additionalProperties: { type: "array", maxItems: 40 } } } } } } },
+          each: { type: "object", description: "Repeat this step once per value of one input field, e.g. {\"note\": [36, 37, 38, 39]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
+        final: { type: "boolean", description: "These changes complete the request: Kumi says what changed and you aren't called again. Leave it out to see the results and carry on." } } },
       execute: (input, signal) => makeChanges(input, signal) }] : [];
     return [...reads, sampleSearch, ...edits, ...batch, ...undo];
   }

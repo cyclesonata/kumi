@@ -222,6 +222,37 @@ test("tool failures are reported to the model as errors and the turn continues",
   await h.kernel.close();
 });
 
+test("a tool that finished the request answers for the model: the turn ends with its reply and no further model call", async () => {
+  const h = harness(() => [...text("On it."), call("plan", "{}"), finish("tool-calls")], {
+    tools: [tool("plan", async () => ({ text: '{"done":[1]}', reply: "Done: Tempo 120 → 124 BPM." }))],
+  });
+  const { events, emit } = collect();
+  assert.equal((await h.kernel.run("faster", new AbortController().signal, emit)).stopReason, "completed");
+  assert.equal(h.requests.length, 1, "no model call to write the answer");
+  assert.deepEqual(events.filter((event) => event.type === "text").map((event) => event.type === "text" && event.text), ["On it.", "\n\nDone: Tempo 120 → 124 BPM."]);
+  assert.deepEqual(h.kernel.checkpoint().messages.at(-1), { role: "assistant", content: [{ type: "text", text: "Done: Tempo 120 → 124 BPM." }] }, "the reply is the answer the next turn sees");
+  await h.kernel.close();
+});
+
+test("a reply doesn't end the turn when another call in the step failed, or guidance is waiting", async () => {
+  const failing = harness((_options, n) => n === 1 ? [call("plan", "{}", "c1"), call("read", "{}", "c2"), finish("tool-calls")] : [...text("fixed"), finish()], {
+    tools: [tool("plan", async () => ({ text: "ok", reply: "Done." })), tool("read", async () => ({ text: "gone", isError: true }))],
+  });
+  await failing.kernel.run("q", new AbortController().signal, () => {});
+  assert.equal(failing.requests.length, 2, "the model sees the failure");
+  await failing.kernel.close();
+  let kernelRef: ReturnType<typeof harness>["kernel"] | undefined;
+  const steered = harness((_options, n) => n === 1 ? [call("plan", "{}"), finish("tool-calls")] : [...text("darker too"), finish()], {
+    tools: [tool("plan", async () => { kernelRef!.steer("make it darker"); return { text: "ok", reply: "Done." }; })],
+  });
+  kernelRef = steered.kernel;
+  const { events, emit } = collect();
+  await steered.kernel.run("q", new AbortController().signal, emit);
+  assert.equal(steered.requests.length, 2, "the model hears the guidance");
+  assert.ok(!events.some((event) => event.type === "text" && event.text.includes("Done.")));
+  await steered.kernel.close();
+});
+
 test("stops at the step bound when the model keeps calling tools", async () => {
   const h = harness(() => [call("again", "{}"), finish("tool-calls")], { maxSteps: 3, tools: [tool("again", async () => ({ text: "ok" }))] });
   const result = await h.kernel.run("loop", new AbortController().signal, () => {});
