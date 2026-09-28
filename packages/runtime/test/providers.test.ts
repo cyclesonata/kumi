@@ -60,7 +60,9 @@ function kernelFor(binding: Awaited<ReturnType<typeof resolveModel>>) {
 }
 
 test("codex: stateless Responses requests identify Kumi, carry account/session headers, and replay encrypted reasoning", async () => {
-  await withStore(codexCredential(), async (store) => {
+  // One credential: a second one would carry a later expiry once the clock ticks over a second.
+  const credential = codexCredential();
+  await withStore(credential, async (store) => {
     const { fetch, requests } = recorder((_request, n) => sse(n === 1 ? reasoningThenCall : answer));
     const kernel = kernelFor(await resolveModel({ model: "openai-codex/gpt-6-astra", store, fetch, env: { OPENAI_API_KEY: "sk-not-for-codex" } }));
     let text = "";
@@ -70,7 +72,7 @@ test("codex: stateless Responses requests identify Kumi, carry account/session h
     assert.equal(result.usage?.cacheReadTokens, 10);
     const [first, second] = requests;
     assert.equal(first?.url, "https://chatgpt.com/backend-api/codex/responses");
-    assert.equal(first?.headers.get("authorization"), `Bearer ${codexCredential().access}`);
+    assert.equal(first?.headers.get("authorization"), `Bearer ${credential.access}`);
     assert.equal(first?.headers.get("chatgpt-account-id"), "acct-1");
     assert.equal(first?.headers.get("originator"), "kumi");
     assert.equal(first?.headers.get("openai-beta"), "responses=experimental");

@@ -289,7 +289,7 @@ Kumi's undo:
 All eight undos returned `undone` (587–1,516 ms each), and the Set read back as it
 started: 120 BPM, the original four tracks, no locators. The track chips carried
 Live's colours (3-Audio `#cc9927`). `set_device_parameter` is offered once a
-track holds a device such as Drift; after loading one (UTC `2026-09-28T07:05Z`) it
+track holds a device such as Drift; after loading one (UTC `2026-09-28T06:57Z`) it
 changed "Drift · LP Freq 1 → 0.3" in 2.3 s and undid it, with the load and the new
 track. That run found that the bridge compared device parameter values exactly,
 while Live keeps them as 32-bit floats (0.3 reads back as 0.29999998), so such a
