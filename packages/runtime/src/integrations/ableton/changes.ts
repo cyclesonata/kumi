@@ -9,6 +9,9 @@ import type { ChangeFamily, ChangeRecord, JsonObject } from "../../core/contract
 /** A track as Kumi last saw it in discovery, for HISTORY's colour chip. */
 export interface KnownTrack { name: string; color?: string }
 
+/** What a change can look up while preparing: a sample find_samples returned, with the folder searched. */
+export interface ChangeContext { sample(path: string): { path: string; folder: string } | undefined }
+
 export interface ChangeSummary {
   title: string;
   track?: KnownTrack;
@@ -30,6 +33,10 @@ export interface ChangeKind {
   restructures?: boolean;
   /** Adjust the preview's input schema where Kumi's behaviour differs from the bridge's wording. */
   schema?(schema: JsonObject): JsonObject;
+  /** The model's input, when Kumi's tool asks for something other than the bridge's preview does. */
+  inputSchema?: JsonObject;
+  /** Turn the model's input into the preview's; a string refuses, in words for the model. */
+  prepare?(input: JsonObject, context: ChangeContext): JsonObject | string;
   /** `applied` is the bridge's apply result, when there is one: it can carry Live's own text for the new values. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary;
 }
@@ -142,6 +149,22 @@ export const CHANGES: readonly ChangeKind[] = [
       });
       return { title: `New MIDI clip ${quoted(proposed.name ?? input.name, "")} · ${plural(source.length, "note")}`.replace("  ", " "), ...(known ? { track: known } : {}),
         ...(length !== undefined && length > 0 && notes.length ? { clip: { length, notes } } : {}) };
+    },
+  },
+  {
+    tool: "load_sample", preview: "live_device_preview", apply: "live_device_apply", family: "device",
+    description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is a path find_samples returned; trackRef comes from discovery in this turn or the track just added.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["trackRef", "sample"], properties: {
+      trackRef: { type: "string", minLength: 1, maxLength: 256 }, sample: { type: "string", minLength: 1, maxLength: 1024, description: "A path find_samples returned" } } },
+    prepare(input, context) {
+      const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
+      if (!found) return "Load a sample find_samples returned in this conversation; search for it first.";
+      return { action: "insert", trackRef: input.trackRef ?? null, deviceName: "Simpler", filePath: found.path, allowedRoot: found.folder };
+    },
+    summarize(_preview, input, track) {
+      const file = typeof input.filePath === "string" ? input.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined;
+      const known = track(input.trackRef);
+      return { title: `Loaded ${quoted(file, "a sample")} into a new Simpler${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };
     },
   },
   {

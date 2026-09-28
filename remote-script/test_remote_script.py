@@ -1917,6 +1917,29 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact requested"): mapper.invoke("device.insert", {"trackRef": row["ref"], "deviceName": "Wrong index", "index": 0, "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in row["devices"]]})
         self.assertEqual(len(track.devices), 0)
 
+    def test_a_new_simpler_can_arrive_with_its_sample_and_goes_again_if_the_sample_fails(self):
+        def simpler(name, loads=True):
+            device = type("InsertedDevice", (), {"name": name, "class_name": "OriginalSimpler", "enabled": True, "parameters": [FakeParameter()], "sample": None})()
+            def replace(path):
+                if not loads: raise RuntimeError("Live could not read the file")
+                device.sample = type("Sample", (), {"file_path": path})()
+            device.replace_sample = replace
+            return device
+        for loads in (True, False):
+            song = FakeSong(); track = song.tracks[0]; track.devices = []
+            track.insert_device = lambda name, index, loads=loads: track.devices.append(simpler(name, loads)); track.delete_device = lambda index: track.devices.pop(index)
+            mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+            args = {"trackRef": row["ref"], "deviceName": "Simpler", "samplePath": "/Samples/Kick 01.wav", "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": []}
+            if loads:
+                created = mapper.invoke("device.insert", args)
+                self.assertEqual(created["samplePath"], "/Samples/Kick 01.wav"); self.assertEqual(track.devices[0].sample.file_path, "/Samples/Kick 01.wav")
+                self.assertEqual(created["createdFingerprint"], mapper._mapped_fingerprint(created["ref"]), "the fingerprint includes the sample, so undo takes both")
+            else:
+                with self.assertRaisesRegex(RuntimeError, "could not read"): mapper.invoke("device.insert", args)
+                self.assertEqual(track.devices, [], "a sample that doesn't load takes the new device away again")
+        song = FakeSong(); track = song.tracks[0]; track.devices = []; track.insert_device = lambda name, index: None; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        with self.assertRaisesRegex(ValueError, "absolute path"): mapper.invoke("device.insert", {"trackRef": row["ref"], "deviceName": "Simpler", "samplePath": "Samples/Kick.wav", "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": []})
+
     def test_cleanup_token_attachment_failure_removes_physical_creation_and_registry_mapping(self):
         song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live"); track_ref = mapper.snapshot()["tracks"][0]["ref"]; checkpoint = mapper.refs.checkpoint(); mapper._attach_cleanup_ownership = lambda *_args: (_ for _ in ()).throw(RuntimeError("injected token attachment failure"))
         with self.assertRaisesRegex(RuntimeError, "token attachment failure"): mapper.invoke("clip.create", self.clip_creation_args(mapper, track_ref, 0, kind="midi", name="Unattached", length=4), "attachment-failure-transaction")

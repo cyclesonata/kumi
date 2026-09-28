@@ -444,9 +444,11 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError("That change isn't available for the open Set right now");
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
       requireFreshReferences(input);
+      const prepared = kind.prepare ? kind.prepare(input, { sample: (path) => samples.get(path) }) : input;
+      if (typeof prepared === "string") return { text: prepared, isError: true };
       const epoch = currentEpoch;
       await guardEpoch(signal, epoch, lease);
-      const args = await appendAtEnd(kind, input, signal); assertLease(lease, signal);
+      const args = await appendAtEnd(kind, prepared, signal); assertLease(lease, signal);
       const previewed = await tools.call(kind.preview, args, signal, { host: true }); assertLease(lease, signal);
       if (previewed.isError) return { text: JSON.stringify(previewed), isError: true };
       const preview = payload(previewed);
@@ -547,7 +549,8 @@ export function createAbletonIntegration(options: Options): Integration {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
       execute: (input, signal) => invoke(tool.name, input, signal) }));
     const edits: KernelTool[] = CHANGES.filter((kind) => tools!.has(kind.preview) && tools!.has(kind.apply)).map((kind) => ({
-      name: kind.tool, description: kind.description, inputSchema: kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject,
+      name: kind.tool, description: kind.description,
+      inputSchema: kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
       execute: (input, signal) => change(kind, input, signal) }));
     const undo: KernelTool[] = tools!.has("live_undo") ? [{ name: UNDO_TOOL, description: UNDO_DESCRIPTION,
       inputSchema: { type: "object", properties: { change: { type: "string", minLength: 1, maxLength: 32, description: "A change id such as c3, or \"last\"" } }, required: ["change"], additionalProperties: false },

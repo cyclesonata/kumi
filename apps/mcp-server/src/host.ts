@@ -1,7 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 import { createHash, randomBytes } from "node:crypto";
-import { realpathSync, statSync, createReadStream, constants as fsConstants, chmodSync, closeSync, fsyncSync, linkSync, openSync, renameSync, unlinkSync, lstatSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, extname, isAbsolute, join as joinPath, resolve } from "node:path";
+import { realpathSync, statSync, createReadStream, constants as fsConstants, chmodSync, closeSync, fsyncSync, linkSync, openSync, renameSync, rmdirSync, unlinkSync, lstatSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join as joinPath, resolve } from "node:path";
 import { sep } from "node:path";
 import { homedir } from "node:os";
 import { AnalysisRunner, type EncodedAnalysisSource } from "./analysis-runner.js";
@@ -413,6 +413,7 @@ export class McpHost {
   private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
   private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
+    if (value.kind === "device" && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
   private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
@@ -3181,7 +3182,9 @@ export class McpHost {
   private async liveDevicePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (isObject(params) && params.action === "delete") return this.transactionError(id, "Arbitrary device deletion is unavailable; use live_undo only for an exact transaction-created device");
     const actions = ["insert", "enable", "move"] as const;
-    if (!isObject(params) || !hasOnly(params, ["action", "trackRef", "deviceName", "deviceRef", "index", "enabled"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action insert/enable/move is required; arbitrary device deletion is unavailable");
+    if (!isObject(params) || !hasOnly(params, ["action", "trackRef", "deviceName", "deviceRef", "index", "enabled", "filePath", "allowedRoot"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action insert/enable/move is required; arbitrary device deletion is unavailable");
+    if ((params.filePath !== undefined || params.allowedRoot !== undefined) && (params.action !== "insert" || params.deviceName !== "Simpler")) return error(id, -32602, "a sample file goes only with inserting a Simpler");
+    let stagingPath: string | undefined;
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -3198,6 +3201,12 @@ export class McpHost {
         payload.trackRef = params.trackRef; payload.deviceName = params.deviceName; Object.assign(payload, authority);
         if (params.index !== undefined) payload.index = params.index;
         fence = JSON.stringify({ track: params.trackRef, ...authority });
+        // The same file authority and verified copy as an audio import or a Simpler's sample swap.
+        if (params.filePath !== undefined || params.allowedRoot !== undefined) {
+          const file = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
+          stagingPath = await this.stageVerifiedImportFile(file.canonicalPath, file);
+          payload.samplePath = stagingPath; prior = { file };
+        }
       } else {
         if (!isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "deviceRef is required");
         const operation = params.action === "enable" ? "device.enable" : "device.move";
@@ -3213,8 +3222,10 @@ export class McpHost {
       }
       const transaction: ClipLifecycleTransaction = { id: `device_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "device", fence, clipRef: (params.deviceRef ?? params.trackRef) as LiveRef, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "device");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, payload, impact: `device-${params.action}`, confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Device preview requires fresh authoritative state."); }
+      stagingPath = undefined;
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, payload, impact: `device-${params.action}`, confirmation: "apply", expiresAt: transaction.expiresAt,
+        ...(prior?.file ? { sample: { path: (prior.file as { canonicalPath: string }).canonicalPath, size: (prior.file as { size: number }).size } } : {}) });
+    } catch (cause) { this.releaseStagedImportFile(stagingPath); return this.adapterToolError(id, cause, "Device preview requires fresh authoritative state."); }
   }
 
   private async liveDeviceApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -3234,7 +3245,12 @@ export class McpHost {
       const action = transaction.payload.action as string;
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context);
         if (action === "insert") { const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
-          if (!track || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again");
+          if (!track || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
+          if (typeof transaction.payload.samplePath === "string") {
+            const file = (transaction.prior as { file?: { size: number; sha256: string } } | undefined)?.file;
+            if (!file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
+            await this.verifyStagedImportFile(transaction.payload.samplePath, file);
+          }
         } else { const located = this.deviceRow(snapshot, transaction.payload.ref as LiveRef); if (this.deviceFence(located) !== transaction.fence) return this.transactionError(id, "device state changed since preview; preview again"); }
       }
       const operation = action === "insert" ? "device.insert" : action === "enable" ? "device.enable" : "device.move";
@@ -3645,8 +3661,12 @@ export class McpHost {
       const after = await source.stat();
       if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) throw new Error("audio file changed since preview");
       if (hash.digest("hex") !== expected.sha256) throw new Error("audio file changed since preview");
-      const stagingPath = joinPath(this.importStagingRoot(), `${randomBytes(12).toString("base64url")}${extname(canonicalPath).toLowerCase()}`);
-      const staging = await open(stagingPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o444);
+      // Each staged copy keeps the original file's name, in a folder of its own: Live shows a
+      // sample by its file name ("Kick 01"), and collecting a Set keeps that name too.
+      const folder = joinPath(this.importStagingRoot(), randomBytes(12).toString("base64url"));
+      mkdirSync(folder, { mode: 0o700 });
+      const stagingPath = joinPath(folder, basename(canonicalPath));
+      const staging = await open(stagingPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o444).catch((cause: unknown) => { try { rmdirSync(folder); } catch { /* best effort */ } throw cause; });
       try {
         const copyHash = createHash("sha256");
         for await (const chunk of source.createReadStream({ autoClose: false, start: 0 })) {
@@ -3678,11 +3698,18 @@ export class McpHost {
 
   private releaseStagedImportFile(stagingPath: unknown): void {
     if (typeof stagingPath !== "string" || this.importStagingDir === undefined) return;
-    try { if (stagingPath.startsWith(this.importStagingDir + sep)) { chmodSync(stagingPath, 0o600); unlinkSync(stagingPath); } } catch { /* best-effort staging cleanup */ }
+    try {
+      if (stagingPath.startsWith(this.importStagingDir + sep)) {
+        chmodSync(stagingPath, 0o600); unlinkSync(stagingPath);
+        const folder = dirname(stagingPath);
+        if (folder !== this.importStagingDir && folder.startsWith(this.importStagingDir + sep)) rmdirSync(folder);
+      }
+    } catch { /* best-effort staging cleanup */ }
   }
 
   private releaseStagedImportFor(transaction: ClipLifecycleTransaction | undefined): void {
     if (transaction && (transaction.kind === "session-audio-create" || transaction.kind === "simpler")) this.releaseStagedImportFile(transaction.payload?.filePath);
+    if (transaction?.kind === "device") this.releaseStagedImportFile(transaction.payload?.samplePath);
   }
 
   private clipAuthorityDigest(snapshot: LiveSnapshot, clipRef: LiveRef): string {
@@ -7905,7 +7932,8 @@ export class McpHost {
         device.state = "undoing";
         if (action === "insert") {
           if (!isNonEmptyString(device.created?.ref, 256) || !isNonEmptyString(device.created?.objectIdentity, 256)) throw new Error("inserted device identity is unavailable");
-          await this.deleteOwnedDeviceAsync(adapter, device.created.ref as LiveRef, device.created.objectIdentity as string, context, device.created.fingerprint as string, device, reconciliation);
+          await this.deleteOwnedDeviceAsync(adapter, device.created.ref as LiveRef, device.created.objectIdentity as string, context, device.created.createdFingerprint as string, device, reconciliation);
+          this.releaseStagedImportFor(device);
         } else {
           const reference = (action === "move" ? device.created?.ref : device.payload.ref) as LiveRef; const located = this.deviceRow(await adapter.snapshotAsync(context), reference);
           if (reconciliation) { if (action === "enable" && located.device.enabled !== device.prior?.enabled) throw new Error("device-enable undo replay did not restore prior state"); if (action === "move" && located.siblings.findIndex((sibling) => sibling.ref === reference) !== device.prior?.index) throw new Error("device-move undo replay did not restore prior location"); }

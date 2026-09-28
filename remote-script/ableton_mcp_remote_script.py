@@ -6731,6 +6731,11 @@ class LiveObjectMapper:
         name = args.get("deviceName")
         if not isinstance(name, str) or not 1 <= len(name) <= 256:
             raise ValueError("device name is invalid")
+        # A new Simpler can arrive with its sample: loaded before the fingerprint below, so the
+        # insert's undo takes both away, and a failed load takes the new device away again.
+        sample_path = args.get("samplePath")
+        if sample_path is not None and (not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha()))):
+            raise ValueError("samplePath must be an absolute path")
         index = args.get("index")
         if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= 256):
             raise ValueError("device index is invalid")
@@ -6746,8 +6751,14 @@ class LiveObjectMapper:
             if len(devices) != len(before_devices) + 1 or len(created) != 1: raise ValueError("device insertion did not produce one identity-distinct device")
             position, device = created[0]; final_identity_order = [self._capture_object_identity(candidate) for candidate in devices]; expected_identity_order = list(before_identity_order); device_identity = self._capture_object_identity(device); expected_identity_order.insert(expected_position, device_identity)
             if position != expected_position or final_identity_order != expected_identity_order or str(self._read_attr(device, "name") or "") != name: raise ValueError("device insertion did not confirm the exact requested name, index, and siblings")
+            if sample_path is not None:
+                replacer = getattr(device, "replace_sample", None)
+                if not callable(replacer): raise ValueError("this device can't take a sample")
+                replacer(sample_path)
+                loaded = self._read_attr(self._read_attr(device, "sample"), "file_path")
+                if not isinstance(loaded, str) or not loaded: raise ValueError("the sample did not load")
             created_ref = self.refs.put("device", device, f"{owner_path}:{position}"); fingerprint = self._mapped_fingerprint(created_ref)
-            return {"ref": created_ref, "objectIdentity": device_identity, "name": name, "index": position, "createdFingerprint": fingerprint}
+            return {"ref": created_ref, "objectIdentity": device_identity, "name": name, "index": position, "createdFingerprint": fingerprint, **({"samplePath": loaded} if sample_path is not None else {})}
         except BaseException as error:
             rollback_failed = False; deleter = getattr(owner, "delete_device", None); current = self._items(self._read_attr(owner, "devices") or []); owned = [(position, device) for position, device in enumerate(current) if self._capture_object_identity(device) not in before_identities]
             if owned and not callable(deleter): rollback_failed = True

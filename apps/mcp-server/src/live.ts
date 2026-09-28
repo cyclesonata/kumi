@@ -576,9 +576,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (device.canHaveDrumPads) device.drumPads = Array.from({ length: 16 }, (_, padIndex) => ({ ref: ref("drum_pad", `${device.ref}:${padIndex}`), parentRef: device.ref, index: padIndex, name: `Pad ${padIndex + 1}`, mute: false, chains: [] }));
         const position = (index as number) < 0 || (index as number) > track.devices.length ? track.devices.length : index as number;
         device.ref = ref("device", `${track.ref}:${position}`);
+        // Like Live, a new Simpler can take its sample in the same step.
+        if (typeof args.samplePath === "string") (device as Device & { samplePath?: string }).samplePath = args.samplePath;
         track.devices.splice(position, 0, device);
         this.emit({ type: "object", ref: track.ref, payload: { operation, device } });
-        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)) };
+        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)), ...(typeof args.samplePath === "string" ? { samplePath: args.samplePath } : {}) };
       }
       case "device.delete": {
         const deviceRef = objectRef("ref"); const expectedIdentity = stringArg("expectedObjectIdentity"); const expectedOwnerRef = objectRef("expectedOwnerRef"); const expectedOwnerIdentity = stringArg("expectedOwnerIdentity");

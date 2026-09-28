@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -1723,6 +1723,46 @@ test("device insert, enable, move, and transaction-owned cleanup use exact fenci
   const enableUndone = JSON.parse(((await call(82, "live_undo", { transactionId: enable.transactionId, confirmation: "undo", idempotencyKey: "dev-enable-undo" })) as any).result.content[0].text); assert.equal(enableUndone.state, "undone");
   const insertUndone = JSON.parse(((await call(83, "live_undo", { transactionId: insert.transactionId, confirmation: "undo", idempotencyKey: "dev-insert-undo" })) as any).result.content[0].text); assert.equal(insertUndone.state, "undone");
   assert.equal((simulator as any).state.tracks[0].devices.some((d: any) => d.name === "Echo"), false);
+});
+
+test("a new Simpler can arrive with its sample in one change, named as the file is, and undo takes both", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const dir = mkdtempSync(join(tmpdir(), "simpler-samples-"));
+  const samplePath = join(dir, "Kick 01.wav");
+  writeFileSync(samplePath, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from("fake-audio-bytes")]));
+  const refused = await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Echo", filePath: samplePath, allowedRoot: dir });
+  assert.equal((refused as any).error.code, -32602, "a sample goes only with a new Simpler");
+  const preview = JSON.parse(((await call(2, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Simpler", filePath: samplePath, allowedRoot: dir })) as any).result.content[0].text);
+  assert.equal(preview.sample.path, realpathSync(samplePath));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.samplePath as string;
+  assert.equal(basename(staged), "Kick 01.wav", "Live shows the sample by its own name");
+  assert.ok(staged.startsWith(realpathSync(managed)));
+  const applied = JSON.parse(((await call(3, "live_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "simpler-with-sample" })) as any).result.content[0].text);
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.samplePath, staged);
+  const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === applied.result.ref);
+  assert.equal(device.name, "Simpler"); assert.equal(device.samplePath, staged);
+  const undone = JSON.parse(((await call(4, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "simpler-with-sample-undo" })) as any).result.content[0].text);
+  assert.equal(undone.state, "undone");
+  assert.equal((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === applied.result.ref), false, "the Simpler goes, with its sample");
+  assert.equal(existsSync(staged), false); assert.equal(readdirSync((host as any).importStagingDir).length, 0, "and so does the staged copy, folder included");
+});
+
+test("an inserted device someone changed afterwards isn't removed by undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const insert = JSON.parse(((await call(2, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Echo" })) as any).result.content[0].text);
+  const inserted = JSON.parse(((await call(3, "live_device_apply", { transactionId: insert.transactionId, confirmation: "apply", idempotencyKey: "echo-insert" })) as any).result.content[0].text);
+  const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === inserted.result.ref);
+  device.name = "Echo (tweaked)";
+  const undo = await call(4, "live_undo", { transactionId: insert.transactionId, confirmation: "undo", idempotencyKey: "echo-undo" });
+  assert.equal((undo as any).result.isError, true);
+  assert.ok((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === inserted.result.ref), "the changed device stays");
 });
 
 test("chain rows retain the true owning rack through track siblings and drum pads", () => {
