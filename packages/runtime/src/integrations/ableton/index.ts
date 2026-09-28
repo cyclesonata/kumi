@@ -7,12 +7,21 @@ import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
+import { defaultSampleFolders, findSamples, folderPath, type Sample } from "./samples.js";
 import { CHANGES, hexColor, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
+const FIND_SAMPLES = "find_samples";
+const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
+const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
+  folders: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 }, description: "Folders to search, such as ~/Samples; Live's User Library when empty" },
+  words: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 64 }, description: "Every word must appear in the file's name or its folders" },
+  random: { type: "boolean", description: "Pick at random among the matches instead of the best ones" },
+  limit: { type: "integer", minimum: 1, maximum: 50, description: "How many to return (20 when unset)" },
+} };
 
 const MAX_CHANGES_PER_TURN = 40;
 const MAX_CHANGE_RECORDS = 500;
@@ -79,6 +88,8 @@ export function createAbletonIntegration(options: Options): Integration {
   const known = new Map<string, KnownTrack>();
   /** Kumi's changes while this bridge connection lives; its transactions are what undo uses. */
   const changes = new Map<string, Applied>();
+  /** Samples find_samples returned, by path, with the folder searched: what load_sample may load. */
+  const samples = new Map<string, Sample>();
   let changesThisTurn = 0;
   const changeTimeoutMs = options.changeTimeoutMs ?? 30_000;
   /** The saved Set Kumi is keeping track of (unsaved Sets have no file, so nothing to remember). */
@@ -541,7 +552,21 @@ export function createAbletonIntegration(options: Options): Integration {
     const undo: KernelTool[] = tools!.has("live_undo") ? [{ name: UNDO_TOOL, description: UNDO_DESCRIPTION,
       inputSchema: { type: "object", properties: { change: { type: "string", minLength: 1, maxLength: 32, description: "A change id such as c3, or \"last\"" } }, required: ["change"], additionalProperties: false },
       execute: async (input, signal) => { const outcome = await undoChange(typeof input.change === "string" ? input.change : "last", signal); return { text: outcome.text, isError: outcome.isError }; } }] : [];
-    return [...reads, ...edits, ...undo];
+    const sampleSearch: KernelTool = { name: FIND_SAMPLES, description: FIND_SAMPLES_DESCRIPTION, inputSchema: FIND_SAMPLES_SCHEMA,
+      execute: async (input, signal) => {
+        const named = Array.isArray(input.folders) ? input.folders.filter((folder): folder is string => typeof folder === "string") : [];
+        const folders = named.map((folder) => folderPath(folder));
+        if (folders.some((folder) => !folder)) return { text: "Name folders by their full path, such as ~/Samples or /Users/me/Music/Drums.", isError: true };
+        const words = Array.isArray(input.words) ? input.words.filter((word): word is string => typeof word === "string") : [];
+        const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(50, Math.max(1, input.limit)) : 20;
+        const found = await findSamples({ folders: folders.length ? folders as string[] : defaultSampleFolders(), words, limit, random: input.random === true, signal });
+        for (const sample of found.samples) { samples.delete(sample.path); samples.set(sample.path, sample); }
+        while (samples.size > 5_000) samples.delete(samples.keys().next().value!);
+        return { text: JSON.stringify({ samples: found.samples.map((sample) => ({ name: sample.name, path: sample.path, ...(sample.seconds !== undefined ? { seconds: sample.seconds } : {}), kb: Math.round(sample.bytes / 1024) })),
+          matched: found.matched, looked: found.scanned, ...(found.partial ? { partial: true } : {}), ...(found.missing.length ? { missing: found.missing } : {}),
+          ...(folders.length ? {} : { searched: "the User Library, Live's Core Library and Factory Packs" }) }), isError: false };
+      } };
+    return [...reads, sampleSearch, ...edits, ...undo];
   }
   return {
     async start(signal) {

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ChangeRecord, JsonObject, KernelTool } from "../src/core/contracts.js";
@@ -180,6 +183,22 @@ test("a colour change shows the old and new colours; later changes, and its undo
     await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5 }, signal());
     assert.deepEqual(b.records.at(-1)!.track, { name: "Sub", color: "#f7f47c" }, "the old colour once it's undone, and the later name stays");
   } finally { await b.integration.close(); }
+});
+
+test("find_samples is offered alongside Live's reads and finds samples in the folders named", async () => {
+  const b = await opened();
+  const folder = mkdtempSync(join(tmpdir(), "kumi-find-"));
+  try {
+    mkdirSync(join(folder, "Kicks")); writeFileSync(join(folder, "Kicks", "Kick Deep.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    writeFileSync(join(folder, "Snare Tight.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const result = await tool(b.tools, "find_samples").execute({ folders: [folder], words: ["kick"] }, signal());
+    assert.equal(result.isError, false, result.text);
+    const body = JSON.parse(result.text) as { samples: { name: string; path: string }[]; matched: number };
+    assert.deepEqual(body.samples.map((sample) => sample.name), ["Kick Deep"]); assert.equal(body.matched, 1);
+    assert.equal(body.samples[0]!.path, join(folder, "Kicks", "Kick Deep.wav"));
+    const relative = await tool(b.tools, "find_samples").execute({ folders: ["Samples"] }, signal());
+    assert.equal(relative.isError, true); assert.match(relative.text, /full path/);
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 
 test("each turn's observation lists Kumi's latest changes and where they stand, so an undo in HISTORY isn't news to the model", async () => {
