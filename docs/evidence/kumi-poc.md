@@ -422,6 +422,20 @@ Live was quit (Don't Save) and reopened:
 - Asked "What tempo did I ask you for earlier, and what is it now?", Kumi answered
   "You asked for 119 BPM. It's now 120 BPM": the conversation carried on.
 
+### A new clip in NOW
+
+On real Live (UTC `2026-09-28T07:46Z`), a one-bar beat written through
+`write_midi_clip` (kick on 1 and 3, snare on 2 and 4, hats on the eighths) was
+recorded with its 12 notes over 4 beats, taken from the bridge's preview, and
+NOW's picture of it read as a drum grid:
+
+```text
+⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀⠉⠉⠀⠀
+⣀⣀⠀⠀⠀⠀⠀⠀⠉⠉⠀⠀⠀⠀⠀⠀⣀⣀⠀⠀⠀⠀⠀⠀⠉⠉⠀⠀⠀⠀⠀⠀
+```
+
+The clip and its track were then undone.
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change
