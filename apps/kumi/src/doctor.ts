@@ -98,19 +98,21 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
       checks.push({ status: "fix", text: `The installed bridge (${server.version}) is older than this Kumi's (${io.bundledBridgeVersion})`, next: "Upgrade it: docs/en/DELIVERY.md, Upgrade" });
     }
     // Kumi starts this repository's bridge with its own Node; the configuration's command is how
-    // other MCP apps start it, so problems there are notes.
-    if (!server.command) checks.push({ status: "note", text: "The bridge configuration names no Node for other MCP apps", next: "Run the bridge activation again: docs/en/KUMI_POC.md, Connect to Live" });
+    // other MCP apps start it, so problems there are notes. Only an install or an upgrade to a
+    // newer bridge rewrites it (repair and activation keep it), hence "the next upgrade".
+    const later = "Kumi isn't affected. Run the next bridge upgrade with Node 24 LTS: docs/en/DELIVERY.md, Upgrade";
+    if (!server.command) checks.push({ status: "note", text: "The bridge configuration names no Node for other MCP apps", next: later });
     else {
       let runnable = true;
       try { statSync(server.command); accessSync(server.command, constants.X_OK); } catch { runnable = false; }
-      if (!runnable) checks.push({ status: "note", text: `Other MCP apps would start the bridge with a Node that's missing (${tilde(server.command)})`, next: "Run the bridge upgrade again with Node 24: docs/en/DELIVERY.md, Upgrade" });
+      if (!runnable) checks.push({ status: "note", text: `Other MCP apps would start the bridge with a Node that's missing (${tilde(server.command)})`, next: later });
       else {
         const bridgeNode = await (io.nodeVersionOf ?? nodeVersion)(server.command);
         if (bridgeNode && !SUPPORTED_NODE_MAJORS.includes(major(bridgeNode))) {
-          checks.push({ status: "note", text: `Other MCP apps would start the bridge with Node.js ${bridgeNode.replace(/^v/, "")}, which it doesn't support`, next: "Install Node 24 LTS, then run the bridge upgrade again: docs/en/DELIVERY.md, Upgrade" });
+          checks.push({ status: "note", text: `Other MCP apps would start the bridge with Node.js ${bridgeNode.replace(/^v/, "")}, which it doesn't support`, next: later });
         }
         if (/[\\/](_npx|\.npm[\\/]_npx|tmp|Temp)[\\/]/i.test(server.command)) {
-          checks.push({ status: "note", text: "Other MCP apps would start the bridge with a Node from a temporary folder, which can disappear", next: "After installing Node 24 LTS, run the bridge upgrade again with it: docs/en/DELIVERY.md, Upgrade" });
+          checks.push({ status: "note", text: "Other MCP apps would start the bridge with a Node from a temporary folder, which can disappear", next: later });
         }
       }
     }
