@@ -41,6 +41,12 @@ interface Options {
   /** Starting the child and the MCP handshake; defaults to the request timeout. */
   connectTimeoutMs?: number;
   onDispatch?: (name: string) => void;
+  /**
+   * Ask the bridge to expose exactly these tools; it refuses every other one, so playback,
+   * recording, audio capture and file tools stay off even if Kumi's own checks were bypassed.
+   * Without it the bridge runs read-only.
+   */
+  allowTools?: readonly string[];
 }
 
 export async function connectMcp(options: Options): Promise<McpEndpoint> {
@@ -52,8 +58,9 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
   const environment: Record<string, string> = {
     // Override the SDK's automatic defaults; no model keys, auth paths, NODE_OPTIONS or loader hooks.
     HOME: process.env.HOME ?? "", LOGNAME: "", USER: "", SHELL: "", TERM: "dumb", PATH: dirname(process.execPath),
-    // Only Live reads are wired up so far; ask the bridge to expose no more than that.
-    ABLETON_MCP_TOOL_POLICY: "read-only",
+    ...(options.allowTools?.length
+      ? { ABLETON_MCP_TOOL_POLICY: "full", ABLETON_MCP_TOOL_ALLOW: [...new Set(options.allowTools)].sort().join(",") }
+      : { ABLETON_MCP_TOOL_POLICY: "read-only" }),
   };
   // Windows runtime variables are not inference credentials. No complete process.env inheritance.
   for (const key of ["SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP"]) if (process.env[key]) environment[key] = process.env[key]!;

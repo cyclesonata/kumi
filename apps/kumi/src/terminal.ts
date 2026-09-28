@@ -23,7 +23,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /refresh · /new · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. No history is persisted.";
+const HELP = "/help · /status · /undo · /refresh · /new · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. No history is persisted.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -167,7 +167,10 @@ export function createTerminal(options: Options): Terminal {
     }
     if (busy()) { notice("[busy] Busy; cancel first. No second turn was submitted."); return; }
     try {
-      if (command === "/refresh") await controller.refresh();
+      if (command === "/undo") {
+        const change = await controller.undo();
+        if (change) notice(change.state === "undone" ? `[undo] Undid: ${change.title}` : `[undo] Kept: ${change.title}. ${change.note ?? ""}`.trim());
+      } else if (command === "/refresh") await controller.refresh();
       else if (command === "/new") await controller.newConversation();
       else if (command.startsWith("/")) notice("Unknown command. Use /help.");
       else await controller.submit(inputLine);
@@ -183,6 +186,13 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
+      case "change": {
+        const { state, title, note } = event.change;
+        if (state === "applied") notice(`[change] ${title} (/undo takes it back)`);
+        else if (state === "unsure") notice(`[change] Check Live: ${title}. ${note ?? "Live didn't confirm it."}`);
+        else if (state === "kept") notice(`[change] Kept: ${title}. ${note ?? ""}`.trim());
+        break;
+      }
       case "notice": notice(event.message); break;
       case "error": reportError(new Error(event.message)); text.discard(); break;
       case "text": {

@@ -41,6 +41,18 @@ const STEP_LABELS: Record<string, string> = {
   live_status: "checked Live",
   live_discover: "looked at your Set",
   live_snapshot: "read your whole Set",
+  live_browser_search: "searched the Browser",
+  live_note_read: "read notes",
+  set_tempo: "changed the tempo",
+  set_mixer: "changed the mixer",
+  rename: "renamed",
+  add_tracks_and_scenes: "added tracks or scenes",
+  write_midi_clip: "wrote a MIDI clip",
+  load_device: "loaded a device",
+  set_device_parameter: "moved a device control",
+  set_locators: "set locators",
+  set_track_color: "changed a track colour",
+  undo_change: "undid a change",
 };
 
 export function stepLabel(tool: string): string {

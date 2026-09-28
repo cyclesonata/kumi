@@ -1,5 +1,5 @@
 import type {
-  ConnectionState, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation,
+  ChangeRecord, ConnectionState, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
@@ -18,7 +18,7 @@ interface Operation {
   controller: AbortController;
   done: Promise<void>;
   isTurn: boolean;
-  phase: "start" | "refresh" | "inference";
+  phase: "start" | "refresh" | "inference" | "undo";
 }
 
 export function createSession(options: Options): SessionController {
@@ -154,7 +154,8 @@ export function createSession(options: Options): SessionController {
           if (timedOut) emit({ type: "error", message: "Turn timed out; work cancelled and late output discarded." });
           if (isTurn) emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
         } else {
-          const message = op.phase !== "inference" ? "Context refresh failed; no answer was generated from old observations."
+          const message = op.phase === "undo" ? (error instanceof KumiError ? error.message : "The undo didn't finish; check Live.")
+            : op.phase !== "inference" ? "Context refresh failed; no answer was generated from old observations."
             : error instanceof KumiError ? error.message : "Inference failed; check the configured model, sign-in and connection.";
           emit({ type: "error", message });
           if (!isTurn && phase === "start") {
@@ -194,6 +195,16 @@ export function createSession(options: Options): SessionController {
       return perform(false, "refresh", async (op) => { await observe(op); return undefined; });
     },
     newConversation() { return perform(false, "start", async (op) => { await reset(op); emit({ type: "notice", message: "New ephemeral conversation; previous history discarded." }); return undefined; }); },
+    async undo(id) {
+      if (!started) throw new Error("Session is not started");
+      let outcome: ChangeRecord | undefined;
+      await perform(false, "undo", async (op) => {
+        if (!integration?.undo) throw new KumiError("request", "There's nothing Kumi can undo here.");
+        outcome = await integration.undo(id, op.controller.signal);
+        return undefined;
+      });
+      return outcome;
+    },
     async cancel() { const op = active; if (!op) return; op.controller.abort(); await op.done; },
     close() {
       if (closing) return closing;

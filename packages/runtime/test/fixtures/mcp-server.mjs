@@ -32,7 +32,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   if (args.action === "error") return { isError: true, content: [{ type: "text", text: "fixture failure" }], structuredContent: { fixture: true, reason: "expected-error" } };
   if (args.action === "oversized") return { content: [{ type: "text", text: "x".repeat(70 * 1024) }] };
   if (args.action === "frame") return { content: [{ type: "text", text: "x".repeat(3 * 1024 * 1024) }] };
-  const value = { fixture: true, calls: [...calls], cancelled, provenance: "synthetic-fixture", secretPresent: ["AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "KUMI_AUTH_FILE", "NODE_OPTIONS"].some((key) => Boolean(process.env[key])) };
+  const value = { fixture: true, calls: [...calls], cancelled, provenance: "synthetic-fixture", toolPolicy: process.env.ABLETON_MCP_TOOL_POLICY ?? null, toolAllow: process.env.ABLETON_MCP_TOOL_ALLOW ?? null, secretPresent: ["AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "KUMI_AUTH_FILE", "NODE_OPTIONS"].some((key) => Boolean(process.env[key])) };
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
 });
 if (mode === "stderr") process.stderr.write("must-not-be-retained-secret".repeat(20_000));

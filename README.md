@@ -3,9 +3,11 @@
 English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
 A personal producer assistant for Ableton Live. This proof of concept is a
-streaming terminal conversation that inspects the open Live Set and answers
-contextual follow-ups. Editing, playback control, recording, listening and
-memory are not implemented yet.
+full-screen terminal conversation about the open Live Set: it answers questions
+about it and makes the changes you ask for (tempo, mixer, names, new tracks and
+scenes, MIDI clips, loading devices, device parameters, locators, track
+colours), each shown in HISTORY with its own undo. Playback control, recording,
+listening and memory are not implemented yet.
 
 ## Quick start
 
@@ -58,8 +60,8 @@ integration.
 [![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 The existing `@ableton-mcp/mcp-server` component remains independently usable
-with other MCP clients. Kumi uses its Live-reading tools so far; its editing and
-analysis tools are next. It retains its own lockfile, Node support policy,
+with other MCP clients. Kumi uses its Live reads and editing tools, with their
+verified undo; its analysis tools are next. It retains its own lockfile, Node support policy,
 safety contracts and CI.
 
 - [Standalone bridge entry](apps/mcp-server/README.md)

@@ -23,8 +23,9 @@ More:
 
 Providers: openai-codex (ChatGPT sign-in), openai (OPENAI_API_KEY), anthropic (ANTHROPIC_API_KEY),
 opencode and opencode-go (OPENCODE_API_KEY). KUMI_MODEL overrides the chosen model.
-This build inspects the open Live Set; editing, playback control, listening and memory are not implemented yet.
-In a session: /help /status /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
+Kumi reads the open Live Set and makes changes you ask for; each change can be undone. Playback control,
+recording, listening and memory are not implemented yet.
+In a session: /help /status /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, see docs/en/KUMI_POC.md (Connect to Live).";
@@ -64,6 +65,7 @@ try {
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
         : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
+          onChange: (change) => terminal?.handleEvent({ type: "change", change }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
       onEvent: (event) => terminal?.handleEvent(event),

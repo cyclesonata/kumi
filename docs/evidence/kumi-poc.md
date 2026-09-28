@@ -248,6 +248,63 @@ In a real PTY (120×36, UTC `2026-09-28T02:53Z`), plain `npm run kumi` showed
 0 with the terminal restored and the goodbye printed on the normal screen.
 Screens and the driver are in `.pi/kumi-evidence/tui/` (gitignored).
 
-This verifies small-Set inspection and the bridge's editing families on one
-macOS/Live/model setup, not musical usefulness, listening, large Sets, Windows, or
-adversarial robustness.
+### Basic focus on real Live
+
+Bridge 1.0.9 adds plain-name focus fields to the `selection` row; Kumi reads it
+twice a second and redraws FOCUS only when it changes. On real Live 12 beta
+(UTC `2026-09-28T04:45Z`, "Kumi Focus Demo"), with Kumi full screen in a PTY:
+
+| In Live | FOCUS |
+| --- | --- |
+| Click the Kumi Keys clip | `■ Kumi Keys › Untitled clip` · Session · Clip view |
+| Select the A-Kumi Air return | `■ A-Kumi Air` · Session · Clip view |
+| Shift-Tab to Device view | `■ A-Kumi Air` · Session · Device view |
+| Click the Reverb title, then its Decay knob | `■ A-Kumi Air › Reverb › Decay Time` · 2.50 s · Session · Device view |
+| Tab to Arrangement | `■ A-Kumi Air › Reverb` · Arrangement · Device view |
+
+Live reports a selected device only after its title bar is clicked (clicking a
+knob first selects neither device nor parameter), and switching views clears the
+last clicked parameter; FOCUS shows what Live reports. The knob's value stayed
+2.50 s. Ctrl-C exited 0.
+
+## Changes and undo
+
+Kumi's change tools ([design](../en/KUMI_CHANGES.md)) were exercised on real Live
+(UTC `2026-09-28T05:10Z`, same Set) by
+`.pi/kumi-evidence/kernel/exercise-changes.mjs`, which calls Kumi's own tools
+through the runtime, no model, then undoes every change newest first through
+Kumi's undo:
+
+| Kumi tool | HISTORY title | ms |
+| --- | --- | ---: |
+| `set_tempo` | Tempo 120 → 124 BPM | 812 |
+| `set_mixer` | 3-Audio volume down, pan left | 902 |
+| `rename` | Renamed track “3-Audio” → “Kumi Bass” | 889 |
+| `set_track_color` | 3-Audio colour changed | 905 |
+| `set_locators` | Locators “Kumi Intro” and “Kumi Drop” (beats 0–16) | 1,725 |
+| `add_tracks_and_scenes` | Added MIDI track “Kumi Pad” (placed after the last track) | 1,091 |
+| `write_midi_clip` | New MIDI clip “Kumi Chord” · 3 notes | 1,426 |
+| `load_device` | Loaded Drift on Kumi Pad | 990 |
+
+All eight undos returned `undone` (587–1,516 ms each), and the Set read back as it
+started: 120 BPM, the original four tracks, no locators. The track chips carried
+Live's colours (3-Audio `#cc9927`). `set_device_parameter` was not offered: the
+bridge negotiates it only for devices whose parameters it publishes, which this
+Set lacked.
+
+The runs found two things now fixed: the bridge process ran with a read-only
+tool policy (Kumi now asks for exactly its own tools), and the bridge's
+tool-list notifications after each change had been dropping Kumi's access for
+the rest of the answer (the list is now read again when needed, and Live's
+answers stand).
+
+End to end, with the model (`openai-codex`, 120×36 PTY, UTC `2026-09-28T05:11Z`): “Set the tempo to 124
+and rename the track 3-Audio to Kumi Bass.” took 3 steps and 12.0 s. HISTORY
+showed `■ Renamed track “3-Audio” → “K… undo` above `✓ Tempo 120 → 124 BPM undo`.
+Two `/undo`s printed “Undid: …” for each and marked both **undone**; Live read
+back at 120 BPM with 3-Audio restored. Screens: `.pi/kumi-evidence/tui/7-9*.txt`.
+
+This verifies small-Set inspection, basic focus and eight of the nine kinds of
+change with their undo (device parameters were not offered for this Set) on one
+macOS/Live/model setup, not musical usefulness, listening,
+large Sets, Windows, or adversarial robustness.

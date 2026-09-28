@@ -35,7 +35,10 @@ function fixture() {
       const row = kind === "set" ? set : kind === "track" ? { ref: `fixture-track-${epoch}`, parentRef: set.ref, name: trackName, kind: "regular" }
         : kind === "device" ? { ref: `fixture-device-${epoch}`, parentRef: `fixture-track-${epoch}`, name: "Fixture Filter", kind: "audio-effect" }
         : { ref: `fixture-param-${epoch}`, parentRef: `fixture-device-${epoch}`, name: "Cutoff", value: 1000 };
-      const result = wrap({ epoch, kind, items: [row], revision: `fixture-revision-${epoch}`, truncated: truncated && (!args.cursor || looping), ...(next && (!args.cursor || looping) ? { nextCursor: `fixture-cursor-${epoch}` } : {}) });
+      // Like the bridge, rows carry only the requested fields.
+      const fields = Array.isArray(args.fields) ? args.fields as string[] : undefined;
+      const picked = fields ? Object.fromEntries(Object.entries(row).filter(([key]) => fields.includes(key))) : row;
+      const result = wrap({ epoch, kind, items: [picked], revision: `fixture-revision-${epoch}`, truncated: truncated && (!args.cursor || looping), ...(next && (!args.cursor || looping) ? { nextCursor: `fixture-cursor-${epoch}` } : {}) });
       if (held?.kind === kind) { const pending = held; held = undefined; pending.started(); await pending.waiting; }
       afterRead?.(); return result;
     },
@@ -77,7 +80,7 @@ test("fresh bounded status/Set observations carry provenance, timestamp and iden
     const discovery = f.requests.find((request) => request.name === "live_discover")!;
     assert.equal(discovery.args.kind, "set"); assert.equal(discovery.args.limit, 25); assert.equal(discovery.args.budget, 1000);
     assert(Array.isArray(discovery.args.fields)); assert(!f.requests.some((request) => request.name === "live_snapshot"));
-    assert(first.tools.length <= 4); assert.match(first.instructions, /untrusted/i); assert.match(first.instructions, /only read Live state/i);
+    assert(first.tools.length <= 4); assert.match(first.instructions, /untrusted/i); assert.match(first.instructions, /change tools/i); assert.match(first.instructions, /undo/i);
     const count = f.requests.length; await f.integration.observe(signal()); assert(f.requests.length > count);
   } finally { await f.integration.close(); }
 });
@@ -212,6 +215,22 @@ test("MCP disconnect removes access without hidden reconnection; subsequent cont
   } finally { await f.integration.close(); await f.integration.close(); assert.equal(f.closes, 1); }
 });
 
+test("asking for a few fields keeps what Kumi's checks need: the Set's identity and the parent", async () => {
+  const f = await started();
+  try {
+    const observation = await f.integration.observe(signal());
+    const set = await tool(observation.tools).execute({ kind: "set", fields: ["tempo"] }, signal());
+    assert.equal(set.isError, false, set.text);
+    const tracks = JSON.parse((await tool(observation.tools).execute({ kind: "track", fields: ["mediaKind"] }, signal())).text) as { mcp: { structuredContent: { items: JsonObject[] } } };
+    const track = tracks.mcp.structuredContent.items[0]!;
+    assert.equal(track.name, "Fixture Bass", "a track's name always comes along, for HISTORY");
+    const devices = await tool(observation.tools).execute({ kind: "device", parent: track.ref, fields: ["name"] }, signal());
+    assert.equal(devices.isError, false, devices.text);
+    const request = f.requests.filter((item) => item.name === "live_discover").at(-1)!;
+    assert.deepEqual(request.args.fields, ["ref", "parentRef", "name"]);
+  } finally { await f.integration.close(); }
+});
+
 test("names that look like instructions stay data and never expand tool authority", async () => {
   const f = await started();
   try {
@@ -220,7 +239,10 @@ test("names that look like instructions stay data and never expand tool authorit
     assert(!observation.instructions.includes("print credentials")); assert(observation.context.includes("print credentials"));
     assert.deepEqual(observation.tools.map((item) => item.name).sort(), ["live_discover", "live_snapshot", "live_status", "server_status"]);
     f.changeCatalog();
-    assert.equal((await tool(observation.tools).execute({ kind: "track" }, signal())).isError, true);
+    assert.equal((await tool(observation.tools).execute({ kind: "set" }, signal())).isError, false, "a changed catalog is read again; the Set stays current");
+    f.missing(); f.changeCatalog();
+    const gone = await tool(observation.tools).execute({ kind: "set" }, signal());
+    assert.equal(gone.isError, true, "a tool the bridge stopped offering is refused"); assert.match(gone.text, /isn't available/);
   } finally { await f.integration.close(); }
 });
 

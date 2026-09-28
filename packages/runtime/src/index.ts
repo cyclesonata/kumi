@@ -1,4 +1,4 @@
-export type { ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, TurnResult, TurnState, Usage } from "./core/contracts.js";
+export type { ChangeFamily, ChangeRecord, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, TurnResult, TurnState, Usage } from "./core/contracts.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";

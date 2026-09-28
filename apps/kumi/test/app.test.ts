@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
-import type { SessionController, SessionEvent, TurnState } from "@kumi/runtime";
+import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
 import { chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
@@ -25,13 +25,21 @@ function harness(columns = 120, rows = 36) {
     async cancel() { calls.push("cancel"); state = "idle"; },
     async close() { calls.push("close"); state = "closed"; },
     status() { return { state, connection: "connected", turns: 0, maxTurns: 30 }; },
+    async undo(id) {
+      calls.push(`undo:${id ?? "last"}`);
+      const change = undoResult?.(id);
+      if (change) app.handleEvent({ type: "change", change });
+      return change;
+    },
   };
+  let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
   const app = new TuiApp({ controller, input, output, model: "openai-codex/fixture", mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
   return {
     input, output, app, calls,
+    onUndo(result: (id: string | undefined) => ChangeRecord | undefined) { undoResult = result; },
     get written() { return written; },
     screen(): string[] {
       app.flush();
@@ -148,7 +156,7 @@ test("the / menu lists a few commands, moves with the arrows and runs the choice
   let lines = h.screen();
   assert.ok(lines.some((line) => line.includes("/new") && line.includes("Start a fresh conversation")));
   assert.ok(has(lines, "/refresh") && !has(lines, "Read your Live Set again"), "only the highlighted command explains itself");
-  await h.type("\u001b[B");
+  await h.type("\u001b[B\u001b[B");
   assert.ok(has(h.screen(), "Read your Live Set again"));
   await h.type("\r");
   assert.ok(h.calls.includes("refresh"));
@@ -256,6 +264,70 @@ test("FOCUS shows where you are in Live, in the wide pane and the narrow strip",
     assert.ok(!has(h.screen(), "■ Bass"), "no stale focus once Live is gone");
     await h.app.close();
   }
+});
+
+const click = (lines: string[], row: number, text: string) => {
+  const column = lines[row]!.indexOf(text);
+  assert.ok(column >= 0, `${text} is on row ${row}`);
+  return `\u001b[<0;${column + 1};${row + 1}M\u001b[<0;${column + 1};${row + 1}m`;
+};
+
+test("HISTORY lists Kumi's changes newest first with their own undo, and NOW shows the one just made", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const tempo: ChangeRecord = { id: "c1", family: "tempo", title: "Tempo 120 → 124 BPM", state: "applied", from: 120, to: 124, at: 1 };
+  const mixer: ChangeRecord = { id: "c2", family: "mixer", title: "Bass volume down", track: { name: "Bass", color: "#f59a3c" }, state: "applied", from: 0.85, to: 0.6, at: 2 };
+  h.emit({ type: "change", change: tempo });
+  h.emit({ type: "change", change: mixer });
+  let lines = h.screen();
+  assert.ok(has(lines, "✓ Bass volume down"), "NOW shows the change just made");
+  assert.ok(!has(lines, "Nothing changed yet"));
+  const history = lines.findIndex((line) => line.includes("HISTORY"));
+  assert.match(lines[history + 1]!, /■ Bass volume down +undo/);
+  assert.match(lines[history + 2]!, /✓ Tempo 120 → 124 BPM +undo/);
+  h.onUndo(() => ({ ...tempo, state: "undone" }));
+  await h.type(click(lines, history + 2, "undo"));
+  assert.ok(h.calls.includes("undo:c1"), "clicking undo takes back that change");
+  lines = h.screen();
+  assert.match(lines[history + 2]!, /○ Tempo 120 → 124 BPM +undone/);
+  assert.ok(has(lines, "Undid: Tempo 120 → 124 BPM"));
+  await h.app.close();
+});
+
+test("/undo takes back the latest change; a refused undo is kept and explained", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/undo\r");
+  assert.ok(has(h.screen(), "There's nothing of Kumi's to undo."));
+  assert.ok(!h.calls.some((call) => call.startsWith("undo:")), "nothing to undo asks nothing of Live");
+  const change: ChangeRecord = { id: "c7", family: "rename", title: "Renamed track “Bass” → “Sub”", state: "applied", at: 1 };
+  h.emit({ type: "change", change });
+  h.onUndo(() => ({ ...change, state: "kept", note: "It changed in Live since, so Kumi left it as it is." }));
+  await h.type("/undo\r");
+  assert.ok(h.calls.includes("undo:last"));
+  const lines = h.screen();
+  assert.ok(has(lines, "Kept: Renamed track “Bass” → “Sub”.") && has(lines, "It changed in Live since"), "the notice says why");
+  assert.ok(lines.some((line) => /Renamed track “Bass” → “Sub” +kept/.test(line)));
+  await h.app.close();
+});
+
+test("the narrow strip offers undo for the latest change", async () => {
+  const h = harness(80, 24);
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "change", change: { id: "c3", family: "tempo", title: "Tempo 120 → 96 BPM", state: "applied", at: 1 } });
+  const lines = h.screen();
+  const row = lines.findIndex((line) => line.includes("✓ Tempo 120 → 96 BPM") && line.includes("undo"));
+  assert.ok(row >= 0, "the strip shows the change with undo");
+  h.onUndo(() => ({ id: "c3", family: "tempo", title: "Tempo 120 → 96 BPM", state: "undone", at: 1 }));
+  await h.type(click(lines, row, "undo"));
+  assert.ok(h.calls.includes("undo:c3"));
+  await h.app.close();
 });
 
 test("focus paths follow Live's detail view, shorten from the middle, and keep dark colours visible", () => {

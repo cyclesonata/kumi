@@ -2,7 +2,8 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonObject } from "../core/contracts.js";
 import type { McpEndpoint } from "./client.js";
 
-const ALLOWED = new Set(["server_status", "live_status", "live_snapshot", "live_discover"]);
+/** Tools the model may call directly: reads. */
+export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read"]);
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_CATALOG_BYTES = 1024 * 1024;
 
@@ -17,14 +18,19 @@ export class AllowedTools {
   private unlisten: (() => void)[];
   private closing: Promise<void> | undefined;
 
-  constructor(private readonly endpoint: McpEndpoint) {
+  /** `hostTools` are called only by Kumi itself (behind its change tools), never listed for the model. */
+  constructor(private readonly endpoint: McpEndpoint, private readonly hostTools: ReadonlySet<string> = new Set()) {
     const invalidate = () => { this.valid = false; this.catalog.clear(); this.invalidation++; };
     this.unlisten = [endpoint.onCatalogChanged(invalidate), endpoint.onDisconnect(invalidate)];
   }
   get generation() { return this.revision; }
   get isValid() { return this.valid && !this.closed; }
-  list(): Tool[] { return this.isValid ? structuredClone([...this.catalog.values()]) : []; }
-  has(name: string): boolean { return this.isValid && ALLOWED.has(name) && this.catalog.has(name); }
+  /** The model's tools (reads) currently advertised. */
+  list(): Tool[] { return this.isValid ? structuredClone([...this.catalog.values()].filter((tool) => MODEL_TOOLS.has(tool.name))) : []; }
+  has(name: string): boolean { return this.isValid && this.allowed(name) && this.catalog.has(name); }
+  /** One advertised tool, model or host, for its schema. */
+  tool(name: string): Tool | undefined { const found = this.isValid ? this.catalog.get(name) : undefined; return found ? structuredClone(found) : undefined; }
+  private allowed(name: string): boolean { return MODEL_TOOLS.has(name) || this.hostTools.has(name); }
 
   async refresh(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
@@ -48,7 +54,7 @@ export class AllowedTools {
       for (const tool of page.tools) {
         if (names.has(tool.name)) throw new Error("MCP catalog contains a duplicate tool name");
         names.add(tool.name);
-        if (ALLOWED.has(tool.name)) next.set(tool.name, structuredClone(tool));
+        if (this.allowed(tool.name)) next.set(tool.name, structuredClone(tool));
       }
       cursor = page.nextCursor;
       if (cursor === undefined) break;
@@ -61,16 +67,22 @@ export class AllowedTools {
     this.valid = true;
   }
 
-  async call(name: string, args: JsonObject, signal: AbortSignal): Promise<CallToolResult> {
+  /**
+   * `host`: a call Kumi itself checked against a fresh catalog (see `has`). It is still limited to
+   * allowed tools, but its result stands even if the catalog changes meanwhile: Live's answer
+   * doesn't depend on the tool list, and a change's outcome must never be dropped.
+   */
+  async call(name: string, args: JsonObject, signal: AbortSignal, options: { host?: boolean } = {}): Promise<CallToolResult> {
     signal.throwIfAborted();
-    if (!ALLOWED.has(name)) throw new Error("Tool is not in Kumi's allowed tool list");
-    if (!this.isValid) throw new Error("MCP catalog is invalid; refresh before calling tools");
-    if (!this.catalog.has(name)) throw new Error("Tool is not currently available or permitted");
+    if (!this.allowed(name)) throw new Error("Tool is not in Kumi's allowed tool list");
+    if (this.closed) throw new Error("MCP catalog is closed");
+    if (!options.host && !this.isValid) throw new Error("MCP catalog is invalid; refresh before calling tools");
+    if (!options.host && !this.catalog.has(name)) throw new Error("Tool is not currently available or permitted");
     if (Buffer.byteLength(JSON.stringify(args)) > 16 * 1024) throw new Error("Tool arguments are too large; narrow the request");
     const invalidation = this.invalidation;
     const result = await this.endpoint.call(name, args, signal);
     signal.throwIfAborted();
-    if (!this.isValid || invalidation !== this.invalidation) throw new Error("MCP catalog changed during the call; result discarded");
+    if (!options.host && (!this.isValid || invalidation !== this.invalidation)) throw new Error("MCP catalog changed during the call; result discarded");
     if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) {
       return { isError: true, content: [{ type: "text", text: "Result too large; narrow fields/parent/page instead of requesting a whole Set dump." }] };
     }

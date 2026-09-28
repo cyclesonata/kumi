@@ -2,9 +2,10 @@
 
 [English](README.md) · 简体中文 · [日本語](README.ja.md)
 
-以一只猫命名的个人音乐制作助手。此概念验证提供流式终端对话，可以检查当前
-打开的 Ableton Live 工程并回答上下文追问。编辑、播放控制、录音、聆听音频和
-记忆功能尚未实现。
+以一只猫命名的个人音乐制作助手。此概念验证提供全屏终端对话：回答关于当前
+打开的 Ableton Live 工程的问题，并执行你要求的修改（速度、调音台、名称、新轨道
+和场景、MIDI 片段、加载设备、设备参数、定位点、轨道颜色）。每项修改都显示在
+HISTORY 中，并可单独撤销。播放控制、录音、聆听音频和记忆功能尚未实现。
 
 ## 开始使用
 
@@ -39,7 +40,7 @@ Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示
 [![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 `@ableton-mcp/mcp-server` 仍可由其他 MCP 客户端独立使用，保留自己的锁文件、
-Node 支持策略、安全契约和 CI。Kumi 目前使用桥接的 Live 读取工具，编辑与分析工具是下一步。
+Node 支持策略、安全契约和 CI。Kumi 目前使用桥接的 Live 读取与编辑工具（带经过验证的撤销），分析工具是下一步。
 
 [桥接入口（英文）](apps/mcp-server/README.md) ·
 [能力列表](docs/zh-CN/CAPABILITY_MATRIX.md) · [支持矩阵](docs/zh-CN/SUPPORT_MATRIX.md) ·

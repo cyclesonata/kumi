@@ -2,7 +2,7 @@
  * Kumi's full-screen terminal app: a header, the conversation, the Live pane (FOCUS, NOW,
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
-import type { ConnectionState, LiveFocus, SessionController, SessionEvent } from "@kumi/runtime";
+import type { ChangeRecord, ConnectionState, LiveFocus, SessionController, SessionEvent } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -33,13 +33,16 @@ type Assistant = Extract<Entry, { kind: "assistant" }>;
 
 const COMMANDS = [
   { name: "/new", about: "Start a fresh conversation" },
+  { name: "/undo", about: "Undo Kumi's last change" },
   { name: "/refresh", about: "Read your Live Set again" },
   { name: "/status", about: "What Kumi is connected to" },
   { name: "/help", about: "Keys and commands" },
   { name: "/quit", about: "Close Kumi" },
 ] as const;
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · ctrl+c clears the box, then quits · type / for commands";
+/** How long NOW shows a change Kumi just made. */
+const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const FAREWELL = "Kumi closed. This conversation wasn't saved.";
@@ -128,6 +131,12 @@ export class TuiApp {
   private connection: ConnectionState;
   private setName: string | undefined;
   private focus: LiveFocus | null = null;
+  /** Kumi's changes in the order they happened; each keeps its latest state. */
+  private changes: ChangeRecord[] = [];
+  private lastChange: { id: string; at: number } | undefined;
+  private undoing = false;
+  /** Clickable areas from the last frame. */
+  private hits: { x: number; y: number; width: number; action: () => void }[] = [];
   private scroll = 0;
   private lastTotal = 0;
   private page = 10;
@@ -221,6 +230,18 @@ export class TuiApp {
       case "focus":
         this.focus = event.focus;
         break;
+      case "change": {
+        const index = this.changes.findIndex((change) => change.id === event.change.id);
+        if (index >= 0) this.changes[index] = event.change;
+        else {
+          this.changes.push(event.change);
+          if (this.changes.length > 500) this.changes.shift();
+          this.lastChange = { id: event.change.id, at: performance.now() };
+          // NOW shows the change for a moment, then one more frame puts it back.
+          setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
+        }
+        break;
+      }
       case "notice":
         this.notice(event.message, "info");
         break;
@@ -326,6 +347,8 @@ export class TuiApp {
       this.key(event);
     } else if (event.type === "mouse" && event.action === "wheel") {
       this.scrollBy(event.direction === "up" ? 3 : -3);
+    } else if (event.type === "mouse" && event.action === "press" && event.button === "left") {
+      this.hits.find((hit) => event.y === hit.y && event.x >= hit.x && event.x < hit.x + hit.width)?.action();
     }
     this.scheduler.request();
   }
@@ -401,6 +424,7 @@ export class TuiApp {
       return;
     }
     if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+    if (command === "/undo") { this.editor.clear(); await this.undo(); return; }
     this.editor.clear();
     this.scroll = 0;
     try {
@@ -428,6 +452,26 @@ export class TuiApp {
     this.scheduler.request();
   }
 
+  /** Undo one change (the latest undoable one without an id) and say how it went. */
+  private async undo(id?: string): Promise<void> {
+    if (this.closing || this.undoing) return;
+    if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first, then undo.", "info"); return; }
+    if (!id && !this.changes.some((change) => change.state === "applied")) { this.notice("There's nothing of Kumi's to undo.", "info"); return; }
+    this.undoing = true;
+    this.activity = "undoing";
+    this.scheduler.request();
+    try {
+      const change = await this.options.controller.undo(id);
+      if (change?.state === "undone") this.notice(`Undid: ${change.title}`, "info");
+      else if (change) this.notice(`Kept: ${change.title}. ${change.note ?? ""}`.trim(), "warn");
+    } catch (error) {
+      if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
+    } finally {
+      this.undoing = false;
+      this.scheduler.request();
+    }
+  }
+
   private scrollBy(lines: number): void {
     this.scroll = Math.max(0, this.scroll + lines);
   }
@@ -448,6 +492,7 @@ export class TuiApp {
     const { columns, rows } = this.tty.size;
     const screen = new Screen(columns, rows, this.table);
     screen.fill(screen.bounds, st.ground);
+    this.hits = [];
     if (columns < 24 || rows < 8) {
       screen.put(1, 0, truncate("Make this window bigger for Kumi", columns - 2), st.dim);
       this.tty.write(this.renderer.frame(screen));
@@ -523,7 +568,7 @@ export class TuiApp {
       line(0, `Kumi can see ${this.setName}.`, st.dim);
       line(2, "Try", st.faint);
       line(3, "  “What's on this track?”", st.text);
-      line(4, "  “How is my Set laid out?”", st.text);
+      line(4, "  “Set the tempo to 124”", st.text);
       line(5, "  “Why might my low end sound muddy?”", st.text);
     } else {
       line(0, "Ask anything about production.", st.dim);
@@ -536,11 +581,14 @@ export class TuiApp {
     if (this.closing) return { label: "", detail: "Closing…", detailStyle: st.dim };
     const state = this.options.controller.status().state;
     if (state === "cancelling" || this.cancelling) return { dot: st.faint, label: "stopping", detail: "Stopping…", detailStyle: st.dim };
+    const flash = this.lastChange && performance.now() - this.lastChange.at < CHANGE_FLASH_MS ? this.changes.find((change) => change.id === this.lastChange!.id) : undefined;
     if (state === "running") {
       const blink = Math.floor(performance.now() / 500) % 2 === 0;
       const step = this.current?.steps.at(-1);
+      if (flash && step?.state !== "running") return { dot: blink ? st.accent : st.pulse, label: "working", detail: `✓ ${flash.title}`, detailStyle: st.bright };
       return { dot: blink ? st.accent : st.pulse, label: "working", detail: step?.state === "running" ? step.label : this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }
+    if (flash) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
     return { label: "", detail: "Ready", detailStyle: st.faint };
   }
 
@@ -587,7 +635,29 @@ export class TuiApp {
     }
     put(7, now.detail, now.detailStyle);
     put(10, "HISTORY", st.label);
-    put(11, "Nothing changed yet", st.faint);
+    this.drawHistory(screen, { x, y: area.y + 11, width, height: Math.max(0, area.height - 12) });
+  }
+
+  /** Kumi's changes, newest first, each with its own undo. */
+  private drawHistory(screen: Screen, area: Rect): void {
+    if (area.height <= 0) return;
+    if (!this.changes.length) { screen.put(area.x, area.y, truncate("Nothing changed yet", area.width), st.faint); return; }
+    const newest = [...this.changes].reverse();
+    const room = newest.length > area.height ? area.height - 1 : area.height;
+    newest.slice(0, room).forEach((change, index) => {
+      const y = area.y + index;
+      const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : "check Live";
+      const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" ? st.faint : st.warn;
+      const actionX = area.x + area.width - textWidth(action);
+      const marker = change.state === "undone" ? { text: "○", style: st.faint }
+        : change.state === "unsure" ? { text: "●", style: st.warn }
+        : change.track ? { text: "■", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓", style: st.accent };
+      screen.put(area.x, y, marker.text, marker.style);
+      screen.put(area.x + 2, y, truncate(change.title, Math.max(1, actionX - area.x - 3)), change.state === "undone" ? st.faint : st.text);
+      screen.put(actionX, y, action, actionStyle);
+      if (change.state === "applied") this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.undo(change.id); } });
+    });
+    if (newest.length > room) screen.put(area.x, area.y + room, truncate(`${newest.length - room} earlier`, area.width), st.faint);
   }
 
   private drawDock(screen: Screen, area: Rect): void {
@@ -602,7 +672,16 @@ export class TuiApp {
       screen.put(at, area.y, "●", now.dot);
       screen.put(at + 1, area.y, right, st.dim);
     }
-    if (area.height > 1) screen.put(2, area.y + 1, truncate(now.detail, area.width - 4), now.detailStyle);
+    const last = this.changes.at(-1);
+    if (area.height > 1) {
+      if (!this.busy && last?.state === "applied") {
+        const hint = "undo";
+        const at = area.width - 2 - textWidth(hint);
+        screen.put(2, area.y + 1, truncate(`✓ ${last.title}`, Math.max(1, at - 4)), st.text);
+        screen.put(at, area.y + 1, hint, st.accent);
+        this.hits.push({ x: at, y: area.y + 1, width: textWidth(hint), action: () => { void this.undo(last.id); } });
+      } else screen.put(2, area.y + 1, truncate(now.detail, area.width - 4), now.detailStyle);
+    }
   }
 
   private drawComposer(screen: Screen, box: Rect, layout: EditorLayout, visibleRows: number): Cursor {

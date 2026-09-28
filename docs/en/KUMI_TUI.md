@@ -1,9 +1,10 @@
 # Kumi terminal UI
 
-Status: direction agreed on 2026-09-27. The foundations and a first full-screen app
-are built (`apps/kumi/src/tui/`) and run against real Live; FOCUS and HISTORY still
-show placeholders until the focus feed and editing tools are connected. The
-owner's "Kumi TUI Mockups" canvas shows every state below.
+Status: direction agreed on 2026-09-27. The foundations and the full-screen app
+are built (`apps/kumi/src/tui/`) and run against real Live. FOCUS follows Live's
+selection (basic tier) and HISTORY lists Kumi's changes, each with its own undo
+([how changes work](KUMI_CHANGES.md)). The owner's "Kumi TUI Mockups" canvas shows
+every state below.
 
 ## Decisions
 
@@ -67,12 +68,13 @@ old line-by-line interface (`terminal.ts`).
 
 ## Next
 
-1. **Focus feed**: a runtime stream of the selection (baseline tier), shown in
-   FOCUS and the narrow strip; then the opt-in Accessibility tier.
-2. **Kumi's edits**: connect the bridge's editing tools, with HISTORY entries
-   backed by their transactions and one-key undo.
-3. **NOW building blocks**: knob, device chain and piano roll drawn live from
-   what Kumi is changing.
+1. ~~**Focus feed**~~: done for the basic tier (Live's scripting API, read twice a
+   second, shown when it changes). Next, the opt-in Accessibility tier.
+2. ~~**Kumi's edits**~~: done. Nine kinds of change, each a HISTORY entry backed by
+   its bridge transaction, undone by a click, `/undo` or asking Kumi. NOW shows
+   each change for a moment as it lands.
+3. **NOW building blocks**: knob, fader, device chain and piano roll drawn from
+   each change's before and after values, and producer units (dB, pan, bars).
 4. **Saved sessions**, since the full-screen view is gone once Kumi closes.
 
 ## Edge cases to design for

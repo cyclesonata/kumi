@@ -69,6 +69,8 @@ export interface Integration {
   start(signal: AbortSignal): Promise<void>;
   observe(signal: AbortSignal): Promise<Observation>;
   close(): Promise<void>;
+  /** Undo one of Kumi's changes (the latest undoable one when `id` is omitted). */
+  undo?(id: string | undefined, signal: AbortSignal): Promise<ChangeRecord>;
 }
 export type IntegrationFactory = (connection: (state: ConnectionState) => void) => Integration;
 
@@ -88,8 +90,34 @@ export interface LiveFocus {
   selectedNotes?: number;
 }
 
+/** Which picture HISTORY and NOW draw for a change. */
+export type ChangeFamily = "tempo" | "mixer" | "rename" | "structure" | "clip" | "device" | "parameter" | "locators" | "color";
+
+/** One change Kumi made in Live, as the producer sees it in HISTORY. Names inside are data. */
+export interface ChangeRecord {
+  /** Unique for this Kumi process: "c1", "c2", … */
+  id: string;
+  family: ChangeFamily;
+  /** Plain words, such as "Tempo 120 → 124 BPM". */
+  title: string;
+  /** The track it happened on, for the colour chip. */
+  track?: { name: string; color?: string };
+  /** Before and after, for the picture (a fader position, a value). */
+  from?: number;
+  to?: number;
+  /**
+   * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
+   * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live.
+   */
+  state: "applied" | "undone" | "kept" | "unsure";
+  /** Why an undo didn't happen, in plain words. */
+  note?: string;
+  at: number;
+}
+
 export type SessionEvent = KernelEvent
   | { type: "focus"; focus: LiveFocus | null }
+  | { type: "change"; change: ChangeRecord }
   | { type: "state"; state: TurnState }
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }
@@ -113,4 +141,10 @@ export interface SessionController {
   cancel(): Promise<void>;
   close(): Promise<void>;
   status(): SessionStatus;
+  /**
+   * Undo one of Kumi's changes (the latest undoable one when `id` is omitted); not during a turn.
+   * Resolves with the change as it now stands, or undefined when there was nothing to undo (an
+   * error event says why).
+   */
+  undo(id?: string): Promise<ChangeRecord | undefined>;
 }

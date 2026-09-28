@@ -115,6 +115,23 @@ test("child environment excludes inference credentials and stderr is drained wit
   }
 });
 
+test("the bridge is asked to expose exactly Kumi's tools, or only reads when none are named", async () => {
+  const readOnly = await open();
+  try {
+    await readOnly.tools.refresh(freshSignal());
+    const status = data(await readOnly.tools.call("server_status", {}, freshSignal()));
+    assert.equal(status.toolPolicy, "read-only"); assert.equal(status.toolAllow, null);
+  } finally { await readOnly.tools.close(); }
+  const client = await connectMcp({ entry: fixture, args: ["normal"], timeoutMs: 2_000, connectTimeoutMs: 10_000, signal: freshSignal(), allowTools: ["live_tempo_apply", "live_status", "live_tempo_preview", "live_status"] });
+  const tools = new AllowedTools(client);
+  try {
+    await tools.refresh(freshSignal());
+    const status = data(await tools.call("server_status", {}, freshSignal()));
+    assert.equal(status.toolPolicy, "full");
+    assert.equal(status.toolAllow, "live_status,live_tempo_apply,live_tempo_preview", "an exact, sorted list without duplicates");
+  } finally { await tools.close(); }
+});
+
 test("bounded SDK shutdown terminates only the owned stubborn child", { timeout: 8_000 }, async () => {
   const sibling = await open();
   try {

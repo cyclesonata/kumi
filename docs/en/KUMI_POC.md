@@ -1,8 +1,9 @@
 # Kumi terminal POC
 
-Kumi is a streaming producer-assistant conversation that **inspects the current
-open Ableton Live Set**. Editing, playback control, listening and memory are not
-implemented yet. It runs its own agent core and the
+Kumi is a streaming producer-assistant conversation about the **current open
+Ableton Live Set**: it reads the Set and makes the changes you ask for, each with
+its own undo ([how changes work](KUMI_CHANGES.md)). Playback control, recording,
+listening and memory are not implemented yet. It runs its own agent core and the
 independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
@@ -101,17 +102,17 @@ npm run kumi -- --bridge-config /absolute/path/bridge-config.json
 ```
 
 Keep the secret in the bridge's separate private file, never in the command.
-Kumi starts only its fixed local Node MCP child. So far it uses these Live reads,
-checked against its own exact list and the bridge's tool policy:
-
-- `server_status`
-- `live_status`
-- `live_discover`
-- `live_snapshot`
-
-Only currently advertised tools from that list are registered; every call is
-checked again. The bridge's editing, audio, resource and prompt surfaces are not
-wired into Kumi yet. A running Live process or an installed script is not
+Kumi starts only its fixed local Node MCP child and asks it to expose exactly
+Kumi's tools; the bridge refuses everything else (playback, recording, audio
+capture, files). The model gets reads (`server_status`, `live_status`,
+`live_discover`, `live_snapshot`, `live_browser_search`, `live_note_read`) and
+Kumi's change tools (`set_tempo`, `set_mixer`, `rename`, `add_tracks_and_scenes`,
+`write_midi_clip`, `load_device`, `set_device_parameter`, `set_locators`,
+`set_track_color`, `undo_change`). Each change runs the bridge's preview and
+apply as one step and lands in HISTORY with its undo; see
+[how Kumi changes your Set](KUMI_CHANGES.md). Only currently advertised tools are
+offered. The bridge's audio, resource and prompt surfaces are not wired into Kumi
+yet. A running Live process or an installed script is not
 connectivity proof: check the displayed Remote Script / `real-live` observation.
 An unavailable or disconnected bridge is shown as **No Live access**. See the
 bridge [user guide](USER_GUIDE.md), [safety guide](LIVE_SAFETY.md),
@@ -132,7 +133,9 @@ or `KUMI_UI=plain` (for screen readers, say), keeps the plain line-by-line mode.
 See [the terminal UI design](KUMI_TUI.md).
 
 Try “Describe the open Set: tracks, tempo, and transport state,” then ask which
-devices are on a specific track. Rename a track manually in Live and ask again.
+devices are on a specific track. Ask for a change, such as “Set the tempo to 124
+and rename 3-Audio to Bass”: each change appears in HISTORY with **undo** beside
+it. Rename a track manually in Live and ask again.
 Kumi refreshes bounded status and Set observations before each turn, and discovers
 fresh detail references rather than treating names or history as authority.
 
@@ -142,6 +145,7 @@ fresh detail references rather than treating names or history as authority.
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
 | `/help`, `/status` | Keys and commands; what Kumi is connected to |
+| `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/refresh` | Read fresh bounded observations without a model answer |
 | `/new` | Discard the conversation and reconnect with fresh observations |
 | `/quit`, or Ctrl-C with an empty box | Close Kumi |
@@ -166,9 +170,13 @@ terminal is restored on exit, on crashes and on signals.
 - Discovery defaults to 25 rows and a 1,000-unit traversal budget. Parent and
   cursor references must come from the current observation. Partial pages remain
   partial; model-facing results over 64 KiB require a narrower query.
-- A failed refresh produces no answer based on old observations. Known epoch,
-  Set-identity or catalog changes reset the conversation. Same-name/unsaved Set
-  switches the bridge cannot distinguish are a limitation; use `/new` explicitly.
+- A failed refresh produces no answer based on old observations. Known epoch or
+  Set-identity changes reset the conversation; a changed tool catalog (new tools
+  after a first clip, say) keeps it. Same-name/unsaved Set switches the bridge
+  cannot distinguish are a limitation; use `/new` explicitly.
+- Undo lasts as long as Kumi's bridge connection: after `/new`, a reconnect or a
+  restart, earlier changes can be undone only in Live (Cmd-Z). One answer makes at
+  most 40 changes.
 - After a disconnect, observations are discarded and inference-only conversation
   remains available with no Live tools. `/new` or restart reconnects; Kumi runs no
   hidden reconnect loop. The standalone bridge retains its own status-refresh
@@ -204,5 +212,5 @@ KUMI_TEST_BRIDGE=1 npm test           # also require real no-config MCP interope
 npm run probe:inference --workspace @kumi/app   # opt-in authenticated requests
 ```
 
-Next: wire the bridge's editing tools into Kumi, keeping its verification and
-undo automatic rather than extra steps for the producer.
+Next: changes in producer units (dB, pan, bars), a picture in NOW for each kind
+of change, undo that outlives the connection, and saved sessions.

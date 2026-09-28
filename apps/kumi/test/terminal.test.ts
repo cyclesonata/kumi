@@ -26,6 +26,7 @@ function fixture(tty = false, hold = false, startupNotice?: string) {
     async cancel() { calls.push("cancel"); state = "idle"; for (const release of releases) release(); releases = []; },
     async close() { calls.push("close"); state = "closed"; for (const release of releases) release(); releases = []; },
     status() { return { state, connection: "disconnected", turns: 0, maxTurns: 30 }; },
+    async undo() { calls.push("undo"); return { id: "c1", family: "tempo", title: "Tempo 120 → 124 BPM", state: "undone", at: 1 }; },
   };
   const terminal = createTerminal({ controller, input, output: sink, model: "openai-codex/fixture", mode: "inference-only", secrets: ["private-token"], closeTimeoutMs: 25,
     ...(startupNotice ? { startupNotice } : {}) });
@@ -46,6 +47,16 @@ test("header, transcript, tool timing, usage and command dispatch are concise an
   assert.match(f.output, /No Live access/); assert.match(f.output, /hello world/); assert.equal(f.output.split("hello world").length, 2);
   assert.match(f.output, /live_status.*7 ms/); assert.match(f.output, /3.*2/); assert(!f.output.includes("private-token"));
   assert.deepEqual(f.calls, ["start", "refresh", "new", "submit:question", "close"]);
+});
+
+test("plain mode prints each change, and /undo takes back the latest", async () => {
+  const f = fixture(); await delay(0);
+  f.emit({ type: "change", change: { id: "c1", family: "tempo", title: "Tempo 120 → 124 BPM", state: "applied", at: 1 } });
+  f.input.write("/undo\n"); await delay(5);
+  f.input.write("/quit\n"); assert.equal(await f.done, 0);
+  assert.match(f.output, /\[change\] Tempo 120 → 124 BPM \(\/undo takes it back\)/);
+  assert.match(f.output, /\[undo\] Undid: Tempo 120 → 124 BPM/);
+  assert(f.calls.includes("undo"));
 });
 
 test("an optional startup notice follows the header once", async () => {
