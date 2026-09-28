@@ -14,12 +14,16 @@ concurrency:
 
 jobs:
   kumi:
-    name: Kumi / Node ${{ matrix.node }}
-    runs-on: ubuntu-24.04
+    name: Kumi / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node: [22, 24]
+        include:
+          - { os: ubuntu-24.04, node: 22, label: "Node 22" }
+          - { os: ubuntu-24.04, node: 24, label: "Node 24" }
+          - { os: macos-15, node: 24, label: "macOS / Node 24" }
+          - { os: windows-2025, node: 24, label: "Windows / Node 24" }
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
