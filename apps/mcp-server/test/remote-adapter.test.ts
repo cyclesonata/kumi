@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
+import { expandPadChains, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
 import { LIVE_REGISTRY_HASH } from "../src/live.js";
 
 const secret = "0123456789abcdef0123456789abcdef";
@@ -44,6 +44,26 @@ async function listen(server: ReturnType<typeof createServer>): Promise<number> 
 }
 async function close(server: ReturnType<typeof createServer>): Promise<void> { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 
+
+test("a Drum Rack's pads point at the chains the rack lists in full, nested racks too", () => {
+  const simpler = { ref: "1:device:0:0:0:0", name: "Simpler", parameters: [{ ref: "1:parameter:x", name: "Volume" }] };
+  const kick = { ref: "1:chain:0:0:0", objectIdentity: "live:kick", name: "Kick", devices: [simpler] };
+  const inner = { ref: "1:device:0:0:0:1", name: "Drum Rack", chains: [{ ref: "1:chain:inner", objectIdentity: "live:inner", devices: [] }], drumPads: [{ ref: "1:drum_pad:inner", chains: [{ ref: "1:chain:inner", objectIdentity: "live:inner", listedOnRack: true }] }] };
+  const nested = { ref: "1:chain:0:0:1", objectIdentity: "live:nested", name: "Nested", devices: [inner] };
+  const snapshot = { tracks: [{ devices: [{ ref: "1:device:0:0", name: "Drum Rack", chains: [kick, nested], drumPads: [
+    { ref: "1:drum_pad:0:0:0", note: 36, chains: [{ ref: kick.ref, objectIdentity: "live:kick", name: "Kick", listedOnRack: true }] },
+    { ref: "1:drum_pad:0:0:1", note: 37, chains: [] },
+    { ref: "1:drum_pad:0:0:2", note: 38, chains: [{ ref: "1:chain:gone", objectIdentity: "live:gone", listedOnRack: true }] },
+    { ref: "1:drum_pad:0:0:3", note: 39, chains: [{ ref: "1:chain:own", objectIdentity: "live:own", devices: [simpler] }] },
+  ] }] }] };
+  expandPadChains(snapshot);
+  const pads = snapshot.tracks[0]!.devices[0]!.drumPads as Array<{ chains: Array<Record<string, unknown>> }>;
+  assert.equal(pads[0]!.chains[0], kick, "the rack's own row, not a copy");
+  assert.deepEqual(pads[1]!.chains, []);
+  assert.deepEqual(pads[2]!.chains[0]!.devices, [], "a chain the rack doesn't list has no devices to show");
+  assert.equal(pads[3]!.chains[0]!.devices && (pads[3]!.chains[0]!.devices as unknown[])[0], simpler, "full rows stay as they are");
+  assert.equal((inner.drumPads[0]!.chains[0] as unknown), inner.chains[0], "a rack inside a chain too");
+});
 
 test("remote adapter fails closed before opening non-loopback or weakly authenticated endpoints", async () => {
   await assert.rejects(RemoteScriptLiveAdapter.connect({ host: "192.168.1.10", port: 9000, secret }), /loopback/);

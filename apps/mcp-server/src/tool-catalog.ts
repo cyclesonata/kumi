@@ -119,7 +119,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { prefix: "live_device_advanced_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "device.insert", "device.move"] } },
   { name: "live_chain_preview", prereq: { capabilitiesAll: ["chains"], operationsAll: ["snapshot", "chain.set"] } },
   { name: "live_chain_apply", prereq: { capabilitiesAll: ["chains"], operationsAll: ["snapshot", "chain.set"] } },
-  { prefix: "live_drum_pad_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample"] } },
+  { prefix: "live_drum_pad_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples"] } },
   { name: "live_rack_preview", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot"], operationsAny: ["rack.set", "rack.action"] } },
   { name: "live_rack_apply", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot"], operationsAny: ["rack.set", "rack.action"] } },
   { prefix: "live_rack_view_", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot", "rack.view.set"] } },
@@ -1135,8 +1135,9 @@ const toolDescriptors = [
   },
   {
     name: "live_drum_pad_preview",
-    description: "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad).",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set", "delete-all-chains", "load-sample"] }, padRef: { type: "string", minLength: 1, maxLength: 256 }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127 }, solo: { type: "boolean" }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["action"], additionalProperties: false },
+    description: "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad). load-samples does that for up to 16 pads of one rack as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set", "delete-all-chains", "load-sample", "load-samples"] }, padRef: { type: "string", minLength: 1, maxLength: 256 }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127 }, solo: { type: "boolean" }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 },
+      pads: { type: "array", minItems: 1, maxItems: 16, items: { type: "object", properties: { note: { type: "integer", minimum: 0, maximum: 127 }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["note", "filePath", "allowedRoot"], additionalProperties: false } } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: true, openWorldHint: true },
   },
   {

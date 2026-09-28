@@ -362,7 +362,7 @@ def validate_operation_payload(operation_id: str, side: str, value: Any) -> None
     validate_registry_value(operation[side], value, f"{operation_id}.{side}")
 
 MAX_NONCE_LENGTH = 256
-MAX_WIRE_BYTES = 1_048_576
+MAX_WIRE_BYTES = 4 * 1_048_576
 MAX_WIRE_DEPTH = 16
 MAX_WIRE_STRING_LENGTH = 16_384
 MAX_WIRE_ARRAY_LENGTH = 512
@@ -914,7 +914,7 @@ class LiveObjectMapper:
             return any(self._read_attr(pad, "note") is not None or self._read_attr(pad, "solo") is not None for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
         if operation == "drum-pad.delete-all-chains":
             return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
-        if operation == "drum-pad.load-sample":
+        if operation in {"drum-pad.load-sample", "drum-pad.load-samples"}:
             return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
         if operation == "rack.set":
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
@@ -1411,7 +1411,11 @@ class LiveObjectMapper:
 
     def _pad_chain_rows(self, pad: Any, pad_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int, known: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         identities = [self._capture_object_identity(chain) for chain in self._items(self._read_attr(pad, "chains") or [])]
-        if identities and all(identity in known for identity in identities): return [known[identity] for identity in identities]
+        # A chain the rack lists in full is named here, not repeated: repeating its devices doubled a
+        # loaded Drum Rack on the wire (a Simpler's parameters are most of it). The bridge points the
+        # pad back at the rack's row.
+        if identities and all(identity in known for identity in identities):
+            return [{"ref": known[identity]["ref"], "parentRef": known[identity]["parentRef"], "index": known[identity]["index"], "objectIdentity": identity, "name": known[identity]["name"], "inNote": known[identity].get("inNote"), "listedOnRack": True} for identity in identities]
         return self._chain_rows(pad, pad_ref, track_index, path, traversal, depth)
 
     @staticmethod
@@ -2482,6 +2486,8 @@ class LiveObjectMapper:
             return self._drum_pad_delete_all_chains(args)
         if operation == "drum-pad.load-sample":
             return self._drum_pad_load_sample(args)
+        if operation == "drum-pad.load-samples":
+            return self._drum_pad_load_samples(args)
         if operation == "rack.set":
             return self._rack_set(args)
         if operation == "rack.action":
@@ -5665,6 +5671,27 @@ class LiveObjectMapper:
             clear_pad(); raise
         self.refs.touch(reference)
         return {"ref": reference, "objectIdentity": self._capture_object_identity(pad), "chainIdentity": self._capture_object_identity(chain), "deviceIdentity": self._capture_object_identity(simpler), "samplePath": loaded, "route": route, "tried": tried}
+
+    def _drum_pad_load_samples(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Samples onto several empty pads in one request, in order: all of them load, or none stays.
+
+        Each pad loads as `_drum_pad_load_sample` does; when one fails, the pads this request
+        already loaded are cleared again, so the rack is as it was."""
+        pads = args.get("pads")
+        if set(args) - {"pads"} or not isinstance(pads, list) or not 1 <= len(pads) <= 16 or not all(isinstance(item, dict) for item in pads): raise ValueError("drum pad authority is invalid")
+        references = [item.get("ref") for item in pads]
+        if len(set(map(str, references))) != len(references): raise ValueError("drum pad loads name the same pad twice")
+        loaded: list[dict[str, Any]] = []
+        for index, item in enumerate(pads):
+            try: loaded.append(self._drum_pad_load_sample(item))
+            except BaseException as error:
+                for done in reversed(loaded):
+                    try:
+                        pad = self.refs.get(done["ref"]); deleter = getattr(pad, "delete_all_chains", None)
+                        if callable(deleter): deleter()
+                    except BaseException: pass
+                raise ValueError(f"drum pad {index + 1} of {len(pads)}: {str(error)[:200]}") from error
+        return {"pads": loaded}
 
     def _rack_state(self, device: Any) -> dict[str, Any]:
         visible = self._read_attr(device, "visible_macro_count"); selected = self._read_attr(device, "selected_variation_index")

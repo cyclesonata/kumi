@@ -1784,6 +1784,53 @@ test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clear
   assert.equal(other.chains.length, 0, "no other pad changed");
 });
 
+test("samples go onto several empty pads as one change: one transaction, all or none, one undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const dir = mkdtempSync(join(tmpdir(), "kit-samples-"));
+  const files = ["Kick 01.wav", "Snare 808.wav", "Hat Closed.wav"].map((name) => {
+    const path = join(dir, name);
+    writeFileSync(path, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from(`fake-audio-${name}`)]));
+    return path;
+  });
+  const rackPreview = text(await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" }));
+  const rack = text(await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "kit-rack" })).result;
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  const kit = files.map((filePath, index) => ({ note: 36 + index, filePath, allowedRoot: dir }));
+  assert.equal(((await call(13, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: [kit[0], { ...kit[1], note: 36 }] })) as any).error.code, -32602, "one sample per pad");
+  assert.equal(((await call(14, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, note: 36, pads: kit })) as any).error.code, -32602, "a batch names its pads, nothing else");
+  assert.equal(((await call(15, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 36, filePath: files[0], allowedRoot: dir, pads: kit })) as any).error.code, -32602);
+  const invokes: string[] = [];
+  const invoke = simulator.invoke.bind(simulator);
+  (simulator as any).invoke = (invocation: any) => { invokes.push(invocation.operation); return invoke(invocation); };
+  const preview = text(await call(16, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: kit }));
+  assert.deepEqual(preview.pads.map((pad: any) => [pad.note, pad.sample.path]), files.map((path, index) => [36 + index, realpathSync(path)]));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.pads.map((pad: any) => pad.samplePath) as string[];
+  assert.deepEqual(staged.map((path) => basename(path)), ["Kick 01.wav", "Snare 808.wav", "Hat Closed.wav"]);
+  const applied = text(await call(17, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "kit-pads" }));
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.pads.length, 3);
+  assert.deepEqual(invokes.filter((operation) => operation.startsWith("drum-pad.")), ["drum-pad.load-samples"], "one Live request for the three pads");
+  assert.deepEqual([36, 37, 38].map((note) => pads().find((item: any) => item.note === note).chains[0]?.name), ["Kick 01", "Snare 808", "Hat Closed"]);
+  const again = text(await call(18, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: [{ ...kit[2], note: 39 }, kit[0]] }));
+  assert.match(again.reason, /drum pad C1 already has a sound/);
+  assert.equal(readdirSync(managed).length, 3, "a refused batch leaves no staged copies behind");
+  const undone = text(await call(19, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "kit-pads-undo" }));
+  assert.equal(undone.state, "undone");
+  assert.deepEqual([36, 37, 38].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0, 0], "one undo clears every pad");
+  for (const path of staged) assert.equal(existsSync(path), false);
+  // When Live fails on a pad part-way, none stays loaded.
+  const partial = text(await call(20, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: kit.slice(0, 2) }));
+  const load = (simulator as any).loadDrumPadSample.bind(simulator); let loads = 0;
+  (simulator as any).loadDrumPadSample = (args: unknown, operation: string) => { if (++loads === 2) throw new Error("the sample did not load"); return load(args, operation); };
+  const failed = text(await call(21, "live_drum_pad_apply", { transactionId: partial.transactionId, confirmation: "apply", idempotencyKey: "kit-partial" }));
+  assert.match(failed.reason, /^drum pad 2 of 2: the sample did not load/);
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0], "the first pad was cleared again");
+});
+
 test("an inserted device someone changed afterwards isn't removed by undo", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);

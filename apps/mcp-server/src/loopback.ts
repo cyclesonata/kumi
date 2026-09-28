@@ -4,7 +4,7 @@ import { validateLiveOperationRequest, validateLiveOperationResult } from "./reg
 
 export const LOOPBACK_PROTOCOL_VERSION = "ableton-loopback/v1";
 const MAX_NONCE_LENGTH = 256;
-const MAX_WIRE_BYTES = 1_048_576;
+const MAX_WIRE_BYTES = 4 * 1_048_576;
 const MAX_WIRE_DEPTH = 16;
 const MAX_WIRE_STRING_LENGTH = 16_384;
 const MAX_WIRE_ARRAY_LENGTH = 512;

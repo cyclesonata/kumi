@@ -616,7 +616,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "303695907f72f6676a47d3cf19934a61276830a656a7f32e879ceadd64308628")
+        self.assertEqual(digest, "fa13c41c7138b0e79746e91cd9acae733c8606f4321412c8a050a4da5435d0ab")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -4306,7 +4306,9 @@ class RackMacroDrumPadTests(unittest.TestCase):
         rack = FakeDevice(); rack.name = "Drum Rack"; rack.can_have_chains = True; rack.can_have_drum_pads = True; rack.chains = [chain]; rack.drum_pads = [pad, empty]
         song.tracks[0].devices = [rack]; mapper = LiveObjectMapper(song)
         row = mapper.snapshot()["tracks"][0]["devices"][0]
-        self.assertIs(row["drumPads"][0]["chains"][0], row["chains"][0], "the pad shares the rack's row for its chain")
+        self.assertEqual(row["drumPads"][0]["chains"], [{"ref": row["chains"][0]["ref"], "parentRef": row["chains"][0]["parentRef"], "index": 0, "objectIdentity": row["chains"][0]["objectIdentity"], "name": "Kick", "inNote": 36, "listedOnRack": True}], "the pad names the chain the rack lists in full, so its devices go over the wire once")
+        device_identity = row["chains"][0]["devices"][0]["objectIdentity"]
+        self.assertEqual(AuthenticatedRemoteScript._canonical(row).count(f'"objectIdentity":"{device_identity}"'), 1, "the device isn't repeated")
         self.assertEqual([item["name"] for item in mapper._flatten_device_rows(mapper.snapshot()["tracks"][0]["devices"])], ["Drum Rack", "Kick"], "each device once")
         track_ref = mapper.discover("track")["items"][0]["ref"]; kick_row = row["chains"][0]["devices"][0]
         base = {"ref": kick_row["ref"], "expectedObjectIdentity": kick_row["objectIdentity"], "expectedOwnerRef": kick_row["parentRef"], "expectedOwnerIdentity": row["chains"][0]["objectIdentity"], "expectedSiblings": [{"ref": kick_row["ref"], "objectIdentity": kick_row["objectIdentity"]}], "expectedTrackRef": track_ref, "expectedTrackIdentity": mapper.snapshot()["tracks"][0]["objectIdentity"]}
@@ -4362,6 +4364,26 @@ class RackMacroDrumPadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"drum pad load failed: browser: the pad can't be a hot-swap target; chain: AttributeError"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
             mapper.invoke("drum-pad.load-sample", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": "/Samples/Snare.wav"})
         self.assertEqual(rack.chains, [], "the stray chain on the first pad is gone")
+        # Several pads in one request: they all load, in order, or none stays loaded.
+        song, rack, pads, browser = kit("hotswap"); mapper = LiveObjectMapper(song)
+        rows = mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"]
+        batch = [{"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": f"/Samples/{name}.wav", "name": name} for row, name in zip(rows, ("Kick", "Snare", "Hat"))]
+        with patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+            self.assertTrue(mapper._operation_supported("drum-pad.load-samples"))
+            result = mapper.invoke("drum-pad.load-samples", {"pads": batch})
+        validate_operation_payload("drum-pad.load-samples", "result", result)
+        self.assertEqual([pad.chains[0].name for pad in pads], ["Kick", "Snare", "Hat"])
+        self.assertEqual([item["route"] for item in result["pads"]], ["hotswap"] * 3)
+        song, rack, pads, browser = kit("hotswap"); mapper = LiveObjectMapper(song)
+        rows = mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"]
+        batch = [{"ref": rows[0]["ref"], "expectedObjectIdentity": rows[0]["objectIdentity"], "samplePath": "/Samples/Kick.wav"}, {"ref": rows[1]["ref"], "expectedObjectIdentity": "someone-else", "samplePath": "/Samples/Snare.wav"}]
+        with self.assertRaisesRegex(ValueError, r"^drum pad 2 of 2: drum pad identity changed since preview"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+            mapper.invoke("drum-pad.load-samples", {"pads": batch})
+        self.assertEqual([len(pad.chains) for pad in pads], [0, 0, 0], "the first pad is cleared again")
+        for bad in ({"pads": [batch[0], batch[0]]}, {"pads": []}, {"pads": batch, "ref": rows[0]["ref"]}):
+            with self.assertRaises(ValueError):
+                mapper.invoke("drum-pad.load-samples", bad)
+        self.assertEqual([len(pad.chains) for pad in pads], [0, 0, 0])
 
     def test_rack_rows_actions_and_view(self):
         song = FakeSong()

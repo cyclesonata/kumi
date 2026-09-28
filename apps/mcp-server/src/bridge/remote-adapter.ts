@@ -8,7 +8,7 @@ import {
 import { LOOPBACK_PROTOCOL_VERSION, type RemoteBridgeRequest, type LoopbackResponse } from "../loopback.js";
 import { validateLiveOperationRequest, validateLiveOperationResult } from "../registry.js";
 
-const MAX_FRAME_BYTES = 1_048_576;
+const MAX_FRAME_BYTES = 4 * 1_048_576;
 const MAX_PENDING = 64;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
@@ -51,6 +51,27 @@ function canonical(value: unknown, depth = 0): string {
   throw new Error("unsupported wire value");
 }
 function mac(secret: string, value: unknown): string { const encoded = canonical(value); if (Buffer.byteLength(encoded) > MAX_FRAME_BYTES) throw new Error("wire payload is too large"); return createHmac("sha256", secret).update(encoded).digest("base64url"); }
+/**
+ * The Remote Script sends a loaded Drum Rack's chains in full once, on the rack, and each pad names
+ * its chains (`listedOnRack`). Pads point at the rack's rows again, the very same objects, so every
+ * reader sees a pad's devices as before while the wire carries them once.
+ */
+export function expandPadChains(value: unknown, depth = 0): void {
+  if (depth > 48 || !value || typeof value !== "object") return;
+  if (Array.isArray(value)) { for (const item of value) expandPadChains(item, depth + 1); return; }
+  const row = value as Record<string, unknown>;
+  for (const child of Object.values(row)) expandPadChains(child, depth + 1);
+  if (!Array.isArray(row.drumPads)) return;
+  const chains = new Map<unknown, unknown>((Array.isArray(row.chains) ? row.chains : []).filter((chain): chain is Record<string, unknown> => !!chain && typeof chain === "object").map((chain) => [chain.objectIdentity, chain]));
+  for (const pad of row.drumPads) {
+    if (!pad || typeof pad !== "object" || !Array.isArray((pad as { chains?: unknown }).chains)) continue;
+    const named = pad as { chains: unknown[] };
+    named.chains = named.chains.map((chain) => {
+      if (!chain || typeof chain !== "object" || (chain as { listedOnRack?: unknown }).listedOnRack !== true) return chain;
+      return chains.get((chain as { objectIdentity?: unknown }).objectIdentity) ?? { ...(chain as object), devices: [] };
+    });
+  }
+}
 function validEndpoint(endpoint: Endpoint): void {
   if ((endpoint.host !== "127.0.0.1" && endpoint.host !== "::1") || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65_535 || endpoint.secret.length < 32) throw new Error("remote script endpoint must use exact loopback address 127.0.0.1 or ::1 with a strong secret");
 }
@@ -125,7 +146,7 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   invoke(): never { throw new Error("remote adapter is asynchronous; use invokeAsync"); }
   subscribe(listener: (event: LiveEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   reconnect(): LiveStatus { throw new Error("remote adapter is asynchronous; use reconnectAsync"); }
-  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)) as Promise<LiveSnapshot>; }
+  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return snapshot; }) as Promise<LiveSnapshot>; }
   async discoverAsync(request: LiveDiscoveryRequest, context?: LiveOperationContext): Promise<LiveDiscoveryResult> {
     await this.ensureConnectedAsync(context);
     const wireKind = KIND_TO_WIRE[request.kind];
@@ -139,12 +160,13 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (request.cursor !== undefined) args.cursor = request.cursor;
     const operationId = request.kind === "session-playback" ? "session.playback" : "discover";
     const result = await this.requestAsync({ method: "discover", args }, operationId, context) as Record<string, unknown>;
+    expandPadChains(result);
     if (request.kind === "session-playback") return { epoch: result.epoch as number, items: [result], truncated: false, revision: result.revision as string, kind: request.kind };
     const translated = WIRE_TO_KIND.get(String(result.kind));
     if (!translated || translated !== request.kind) throw new Error("remote discovery returned an unexpected kind");
     return { ...(result as unknown as LiveDiscoveryResult), kind: translated };
   }
-  getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "get", ref }, "get", context)); }
+  getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "get", ref }, "get", context)).then((row) => { expandPadChains(row); return row; }); }
   /** Live applies playhead moves on its next tick; operations that need the playhead somewhere answer
    * "retry shortly" after moving it. Retry those (full authority chain each time) a few ticks later. */
   async invokeAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown> {
