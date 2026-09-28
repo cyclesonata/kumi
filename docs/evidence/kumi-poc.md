@@ -443,7 +443,7 @@ colour, and the change was undone.
 
 ## Finding and loading samples
 
-On real Live with bridge 1.0.17 (UTC `2026-09-28T16:52Z`), asked "Make me a small
+On real Live with bridge 1.0.17 (UTC `2026-09-28T16:53Z`), asked "Make me a small
 drum kit — kick, snare and closed hat — with random samples from Live's
 library, one MIDI track per sound", the model searched three times at random,
 added three MIDI tracks in one change and loaded one sample into a new Simpler
