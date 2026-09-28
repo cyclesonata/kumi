@@ -391,11 +391,13 @@ export function createAbletonIntegration(options: Options): Integration {
       return { text: error instanceof ObservationError ? error.message : "Live read failed; refresh current observations and narrow the request before retrying.", isError: true };
     }
   }
-  function requireFreshReferences(args: JsonObject) {
+  function requireFreshReferences(args: JsonObject, depth = 0) {
     for (const field of REFERENCE_FIELDS) {
       const value = args[field];
       if (value !== undefined && (typeof value !== "string" || !refs.has(value))) throw new ObservationError(`${field} must come from discovery in this turn; discover it again`);
     }
+    // And the ones in a list, such as each parameter of several changed at once.
+    if (depth < 2) for (const value of Object.values(args)) if (Array.isArray(value)) for (const item of value) if (item && typeof item === "object" && !Array.isArray(item)) requireFreshReferences(item as JsonObject, depth + 1);
   }
   function emitChange(record: ChangeRecord) {
     try { options.onChange?.(structuredClone(record)); } catch { /* a listener failure must not affect Live */ }
@@ -535,16 +537,21 @@ export function createAbletonIntegration(options: Options): Integration {
     if (!steps.length || steps.length > MAX_CHANGES_PER_TURN) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
     const made = new Map<string, string>();
     const done: JsonObject[] = [];
-    // Pads of one rack in a row load in one Live request, when the bridge can.
-    const padBatch = CHANGES.find((kind) => kind.tool === "load_samples_to_pads")!;
-    const batchesPads = () => {
-      const action = object(object(tools?.tool(padBatch.preview)?.inputSchema ?? {}).properties ?? {}).action;
-      return Array.isArray(object(action ?? {}).enum) && (object(action).enum as unknown[]).includes("load-samples");
-    };
-    const padStep = (value: unknown, rack?: unknown) => {
+    // Steps in a row on one device become one change, in one Live request, when the bridge can:
+    // samples onto a rack's pads, and parameters of a device.
+    const schemaOf = (kind: ChangeKind) => object(object(tools?.tool(kind.preview)?.inputSchema ?? {}).properties ?? {});
+    const batches = [
+      { tool: "load_sample_to_pad", kind: CHANGES.find((kind) => kind.tool === "load_samples_to_pads")!, most: 16, what: "pads",
+        offered: (kind: ChangeKind) => { const action = object(schemaOf(kind).action ?? {}); return Array.isArray(action.enum) && action.enum.includes("load-samples"); },
+        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, pads: steps.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null })) }) },
+      { tool: "set_device_parameter", kind: CHANGES.find((kind) => kind.tool === "set_device_parameters")!, most: 64, what: "parameters",
+        offered: (kind: ChangeKind) => "values" in schemaOf(kind),
+        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, values: steps.map((step) => ({ parameterRef: step.parameterRef ?? null, value: step.value ?? null })) }) },
+    ];
+    const batchStep = (value: unknown, tool: string, device?: unknown) => {
       const item = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
       const stepInput = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
-      return item.tool === "load_sample_to_pad" && item.as === undefined && typeof stepInput.deviceRef === "string" && (rack === undefined || stepInput.deviceRef === rack);
+      return item.tool === tool && item.as === undefined && typeof stepInput.deviceRef === "string" && (device === undefined || stepInput.deviceRef === device);
     };
     const resolve = (value: unknown, step: number): unknown => {
       if (typeof value === "string" && /^@[a-z][a-z0-9_]{0,31}$/i.test(value)) {
@@ -564,19 +571,20 @@ export function createAbletonIntegration(options: Options): Integration {
       // Earlier steps of this plan just confirmed Live is the same, so later ones skip that check.
       const settled = done.length > 0;
       let run = 1;
-      if (padStep(raw) && padStep(steps[index + 1], (item.input as JsonObject).deviceRef)) {
+      const batch = batches.find((candidate) => batchStep(raw, candidate.tool) && batchStep(steps[index + 1], candidate.tool, (item.input as JsonObject).deviceRef));
+      if (batch) {
         // A rack loaded just now changed the bridge's tools; read them again before asking.
         try { await ensureCatalog(signal); } catch { signal.throwIfAborted(); }
-        if (batchesPads()) while (run < 16 && index + run < steps.length && padStep(steps[index + run], (item.input as JsonObject).deviceRef)) run++;
+        if (batch.offered(batch.kind)) while (run < batch.most && index + run < steps.length && batchStep(steps[index + run], batch.tool, (item.input as JsonObject).deviceRef)) run++;
       }
-      if (run > 1) {
-        let pads: JsonObject[];
-        try { pads = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
+      if (batch && run > 1) {
+        let inputs: JsonObject[];
+        try { inputs = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
         catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
-        const outcome = await change(padBatch, { deviceRef: pads[0]!.deviceRef ?? null, pads: pads.map((pad) => ({ note: pad.note ?? null, sample: pad.sample ?? null })) }, signal, settled);
+        const outcome = await change(batch.kind, batch.input(inputs), signal, settled);
         let reply: JsonObject = {};
         try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
-        if (outcome.isError) return stop(`pads ${step}–${step + run - 1}, as one change: ${outcome.text}`);
+        if (outcome.isError) return stop(`${batch.what} ${step}–${step + run - 1}, as one change: ${outcome.text}`);
         const lines = Array.isArray(reply.lines) ? reply.lines : [];
         for (let offset = 0; offset < run; offset++) done.push({ step: step + offset, changed: typeof lines[offset] === "string" ? lines[offset] : reply.changed ?? null, change: reply.change ?? null });
         index += run;
@@ -592,13 +600,14 @@ export function createAbletonIntegration(options: Options): Integration {
       try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
       if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
       if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
-      done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}) });
+      done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}), ...(Array.isArray(reply.lines) ? { lines: reply.lines } : {}) });
       index++;
     }
     const text = JSON.stringify({ done });
     if (input.final !== true) return { text, isError: false };
     // The plan finished the request: Kumi says what changed, sparing the producer a model reply.
-    const lines = done.map((item) => item.changed).filter((line): line is string => typeof line === "string" && line.length > 0);
+    // A line for each thing changed: a change of several parameters gives one for each.
+    const lines = done.flatMap((item) => Array.isArray(item.lines) ? item.lines : [item.changed]).filter((line): line is string => typeof line === "string" && line.length > 0);
     return { text, isError: false, reply: lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}` };
   }
 

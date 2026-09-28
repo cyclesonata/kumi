@@ -11,7 +11,7 @@ import { createAbletonIntegration } from "../src/integrations/ableton/index.js";
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
-function bridge(options: { padBatches?: boolean } = {}) {
+function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = 120;
@@ -24,12 +24,13 @@ function bridge(options: { padBatches?: boolean } = {}) {
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
-    "live_browser_load_preview", "live_browser_load_apply"];
+    "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : [])];
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
     ? { type: "object", properties: { tracks: { type: "array", items: { type: "object", properties: { name: { type: "string" }, kind: { type: "string" }, index: { type: "integer", description: "request order" } } } }, scenes: { type: "array" } } }
     : name === "live_drum_pad_preview" && options.padBatches ? { type: "object", properties: { action: { type: "string", enum: ["set", "delete-all-chains", "load-sample", "load-samples"] } }, additionalProperties: true }
+    : name === "live_device_parameter_preview" ? { type: "object", properties: { deviceRef: { type: "string" }, parameterRef: { type: "string" }, value: { type: "number" }, values: { type: "array" } }, additionalProperties: true }
     : { type: "object", properties: {}, additionalProperties: true } }));
   const wrap = (value: JsonObject): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });
   const refusal = (text: string, extra: JsonObject = {}): CallToolResult => ({ isError: true, content: [{ type: "text", text }], structuredContent: { message: text, ...extra } });
@@ -45,7 +46,9 @@ function bridge(options: { padBatches?: boolean } = {}) {
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
-          ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color })) : [];
+          ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color }))
+          : args.kind === "device" && options.parameters ? [{ ref: "7:device:0:0", parentRef: "7:track:0", name: "Operator", className: "Operator" }]
+          : args.kind === "parameter" && options.parameters ? ["Osc-A Level", "Filter Freq", "Ae Release"].map((name, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name, value: 0, min: 0, max: 1 })) : [];
         return wrap({ epoch: 7, kind: args.kind, items, revision: "r1", truncated: false });
       }
       if (name.endsWith("_preview")) {
@@ -60,6 +63,11 @@ function bridge(options: { padBatches?: boolean } = {}) {
         if (name === "live_drum_pad_preview" && args.action === "load-samples") return wrap({ ...base, action: args.action, deviceRef: args.deviceRef, pads: (args.pads as JsonObject[]).map((pad) => ({ padRef: `7:drum_pad:0:0:${String(pad.note)}`, note: pad.note, sample: { path: pad.filePath } })) });
         if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: `7:drum_pad:0:0:${String(args.note)}`, note: args.note, sample: { path: args.filePath } });
         if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef, item: { name: String(args.itemId).split("/").at(-1) } });
+        if (name === "live_device_parameter_preview") {
+          const device = { ref: args.deviceRef, name: "Operator", trackRef: "7:track:0" };
+          const row = (parameterRef: unknown, value: unknown) => ({ ref: parameterRef, name: ["Osc-A Level", "Filter Freq", "Ae Release"][Number(String(parameterRef).split(":").at(-1))], currentValue: 0, proposedValue: value, min: 0, max: 1 });
+          return wrap(Array.isArray(args.values) ? { ...base, device, parameters: (args.values as JsonObject[]).map((item) => row(item.parameterRef, item.value)) } : { ...base, device, parameter: row(args.parameterRef, args.value) });
+        }
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
         return wrap({ ...base, prior: { tracks: tracks.map((track, index) => ({ ref: `7:track:${index}`, name: track.name, index })), scenes: [] }, proposed });
       }
@@ -79,6 +87,7 @@ function bridge(options: { padBatches?: boolean } = {}) {
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
         if (transaction.name === "live_drum_pad_preview" && transaction.args.action === "load-samples") return wrap({ transactionId: args.transactionId, state: "applied", result: { pads: (transaction.args.pads as JsonObject[]).map((pad) => ({ ref: `7:drum_pad:0:0:${String(pad.note)}`, route: "hotswap" })) } });
         if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: `7:drum_pad:0:0:${String(transaction.args.note)}`, route: "chain", samplePath: "/staged/Kick Deep.wav" } });
+        if (transaction.name === "live_device_parameter_preview") return wrap({ transactionId: args.transactionId, state: "applied", ...(Array.isArray(transaction.args.values) ? { parameters: (transaction.args.values as JsonObject[]).map((item) => ({ ref: item.parameterRef, value: item.value, revision: 2 })) } : { value: transaction.args.value }) });
         if (transaction.name === "live_browser_load_preview") {
           // Like the bridge, a Drum Rack in the Set brings the pad tools.
           if (String(transaction.args.itemId).endsWith("Drum Rack")) { drumRack = true; for (const listener of catalogListeners) listener(); }
@@ -126,7 +135,7 @@ function bridge(options: { padBatches?: boolean } = {}) {
 }
 const signal = () => new AbortController().signal;
 function tool(tools: readonly KernelTool[], name: string) { const found = tools.find((item) => item.name === name); assert(found, `${name} is offered`); return found; }
-async function opened(options: { padBatches?: boolean } = {}) {
+async function opened(options: { padBatches?: boolean; parameters?: boolean } = {}) {
   const b = bridge(options);
   await b.integration.start(signal());
   const observation = await b.integration.observe(signal());
@@ -391,6 +400,30 @@ test("pads of one rack in a row load as one change when the bridge can: one Live
     assert.equal(one.isError, false, one.text);
     assert.equal(b.requests.filter((request) => request.name === "live_drum_pad_preview").at(-1)!.args.action, "load-sample", "a single pad stays a single change");
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("parameters of one device in a row change as one change: one Live request, one undo, a line each in the answer", async () => {
+  const b = await opened({ parameters: true });
+  try {
+    const device = (JSON.parse(b.observation.context) as { tracks: Array<{ devices?: JsonObject[] }> }).tracks[0]!.devices![0]!;
+    assert.deepEqual(device, { ref: "device:1", name: "Operator" }, "the observation lists the track's device");
+    const read = JSON.parse((await tool(b.tools, "live_discover").execute({ kind: "parameter", parent: "device:1" }, signal())).text) as { live: { items: JsonObject[] } };
+    assert.deepEqual(read.live.items.map((item) => item.ref), ["parameter:1", "parameter:2", "parameter:3"]);
+    const result = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_device_parameter", input: { deviceRef: "device:1" }, each: { parameterRef: ["parameter:1", "parameter:3"], value: [0.5, 0.25] } }], final: true }, signal());
+    assert.equal(result.isError, false, result.text);
+    const previews = b.requests.filter((request) => request.name === "live_device_parameter_preview");
+    assert.deepEqual(previews.map((request) => request.args), [{ deviceRef: "7:device:0:0", values: [{ parameterRef: "7:parameter:0", value: 0.5 }, { parameterRef: "7:parameter:2", value: 0.25 }] }], "one preview for both, with Live's references");
+    assert.equal(b.records.at(-1)!.title, "Operator · 2 parameters");
+    assert.equal(result.reply, "Done:\n- Operator · Osc-A Level 0 → 0.5\n- Operator · Ae Release 0 → 0.25");
+    assert.equal((await b.integration.undo!(b.records.at(-1)!.id, signal())).state, "undone");
+    const direct = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_device_parameter", input: { deviceRef: "device:1", values: [{ parameterRef: "parameter:2", value: 0.75 }, { parameterRef: "parameter:3", value: 0.5 }, { parameterRef: "parameter:1", value: 0 }] } }], final: true }, signal());
+    assert.equal(direct.isError, false, direct.text);
+    assert.equal(b.records.at(-1)!.title, "Operator · 2 parameters", "the model may give values itself; one set to what it was isn't counted");
+    assert.equal(direct.reply, "Done:\n- Operator · Filter Freq 0 → 0.75\n- Operator · Ae Release 0 → 0.5");
+    const stale = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_device_parameter", input: { deviceRef: "device:1" }, each: { parameterRef: ["parameter:1", "7:parameter:9"], value: [0.5, 0.5] } }] }, signal());
+    assert.equal(stale.isError, true); assert.match(stale.text, /parameterRef must come from discovery/, "every parameter's reference is checked");
+    assert.equal(b.requests.filter((request) => request.name === "live_device_parameter_preview").length, 2, "and nothing more reached Live");
+  } finally { await b.integration.close(); }
 });
 
 test("random picks within one answer don't repeat", async () => {

@@ -87,6 +87,25 @@ const quoted = (value: unknown, fallback: string) => { const text = label(value)
 export const formatNumber = (value: number, digits = 2) => String(Number(value.toFixed(digits)));
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 /** A MIDI note as Live names it: 36 is C1, 60 is C3. */
+/** Several parameters of one device changed as one: HISTORY's title, and a line for each in the answer. */
+function parametersSummary(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary {
+  const device = record(preview.device); const known = track(device.trackRef); const deviceName = label(device.name);
+  const all = Array.isArray(preview.parameters) ? preview.parameters.map(record) : [];
+  // A parameter set to the value it had isn't news.
+  const moved = all.filter((row) => number(row.currentValue) !== number(row.proposedValue));
+  const rows = moved.length ? moved : all;
+  const after = new Map((Array.isArray(applied?.parameters) ? applied.parameters.map(record) : []).map((row) => [row.ref, row]));
+  const lines = rows.map((parameter) => {
+    const from = number(parameter.currentValue); const to = number(parameter.proposedValue);
+    // Live's own text ("2.50 kHz", "-6.0 dB") when the bridge read it before and after; plain numbers otherwise.
+    const text = shown(label(parameter.displayValue), label(after.get(parameter.ref)?.displayValue));
+    const values = text ? ` ${text}` : from !== undefined && to !== undefined ? ` ${formatNumber(from)} → ${formatNumber(to)}` : "";
+    return `${deviceName ? `${deviceName} · ` : ""}${label(parameter.name) ?? "parameter"}${values}`;
+  });
+  const count = rows.length || (Array.isArray(input.values) ? input.values.length : 0);
+  return { title: `${deviceName ?? "Device"} · ${count} parameter${count === 1 ? "" : "s"}`, lines, ...(known ? { track: known } : {}) };
+}
+
 /** A sample's name as Live shows it: the file's name without its extension. */
 const fileName = (path: unknown) => (typeof path === "string" ? path.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined);
 export const noteName = (note: number) => `${["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][note % 12]}${Math.floor(note / 12) - 2}`;
@@ -272,8 +291,9 @@ export const CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "set_device_parameter", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter",
-    description: "Set one device parameter to a value between its min and max. deviceRef and parameterRef come from discovery in this turn.",
+    description: "Set one device parameter to a value between its min and max, or several of one device at once with values (one change, one undo) when offered. deviceRef and parameterRef come from discovery in this turn.",
     summarize(preview, input, track, applied) {
+      if (Array.isArray(preview.parameters)) return parametersSummary(preview, input, track, applied);
       const parameter = record(preview.parameter); const device = record(preview.device);
       const name = label(parameter.name) ?? "parameter";
       const from = number(parameter.currentValue); const to = number(parameter.proposedValue ?? input.value);
@@ -285,6 +305,12 @@ export const CHANGES: readonly ChangeKind[] = [
       return { title: `${label(device.name) ? `${label(device.name)} · ` : ""}${name}${values}`, ...(known ? { track: known } : {}),
         ...(from !== undefined && to !== undefined ? { from, to, ...(min !== undefined && max !== undefined && max > min ? { range: [min, max] as [number, number] } : {}) } : {}) };
     },
+  },
+  {
+    // make_changes turns a run of set_device_parameter steps on one device into this: one Live request for them all.
+    tool: "set_device_parameters", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter", internal: true,
+    description: "Set several parameters of one device as one change; undo restores them all.",
+    summarize: (preview, input, track, applied) => parametersSummary(preview, input, track, applied),
   },
   {
     tool: "set_locators", preview: "live_arrangement_section_preview", apply: "live_arrangement_section_apply", family: "locators",
