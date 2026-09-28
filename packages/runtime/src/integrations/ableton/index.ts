@@ -543,7 +543,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const batches = [
       { tool: "load_sample_to_pad", kind: CHANGES.find((kind) => kind.tool === "load_samples_to_pads")!, most: 16, what: "pads",
         offered: (kind: ChangeKind) => { const action = object(schemaOf(kind).action ?? {}); return Array.isArray(action.enum) && action.enum.includes("load-samples"); },
-        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, pads: steps.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null })) }) },
+        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, pads: steps.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null, ...(step.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) })) }) },
       { tool: "set_device_parameter", kind: CHANGES.find((kind) => kind.tool === "set_device_parameters")!, most: 64, what: "parameters",
         offered: (kind: ChangeKind) => "values" in schemaOf(kind),
         input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, values: steps.map((step) => ({ parameterRef: step.parameterRef ?? null, value: step.value ?? null })) }) },

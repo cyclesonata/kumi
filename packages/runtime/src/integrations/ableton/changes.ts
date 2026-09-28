@@ -106,6 +106,9 @@ function parametersSummary(preview: JsonObject, input: JsonObject, track: (ref: 
   return { title: `${deviceName ?? "Device"} · ${count} parameter${count === 1 ? "" : "s"}`, lines, ...(known ? { track: known } : {}) };
 }
 
+/** Which instrument a pad's sample goes into: Simpler, or Live 12's Drum Sampler when asked. */
+const PAD_INSTRUMENT: JsonObject = { type: "string", enum: ["Simpler", "Drum Sampler"], description: "Simpler unless the producer asks for Drum Sampler" };
+
 /** A sample's name as Live shows it: the file's name without its extension. */
 const fileName = (path: unknown) => (typeof path === "string" ? path.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : undefined);
 export const noteName = (note: number) => `${["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][note % 12]}${Math.floor(note / 12) - 2}`;
@@ -240,19 +243,19 @@ export const CHANGES: readonly ChangeKind[] = [
   {
     tool: "load_sample_to_pad", preview: "live_drum_pad_preview", apply: "live_drum_pad_apply", family: "device", always: true,
     unavailable: "There's no Drum Rack in the Set yet: load one with load_device first (search the Browser for \"Drum Rack\"), then its pads can take samples.",
-    description: "Load a sample onto an empty pad of a Drum Rack, as a new Simpler on that pad; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is a path find_samples returned.",
+    description: "Load a sample onto an empty pad of a Drum Rack, in a new Simpler on that pad, or in Live 12's Drum Sampler with instrument \"Drum Sampler\"; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is a path find_samples returned.",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "note", "sample"], properties: {
       deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127, description: "The pad: 36 is C1, the first pad" },
-      sample: SAMPLE_INPUT } },
+      sample: SAMPLE_INPUT, instrument: PAD_INSTRUMENT } },
     async prepare(input, context) {
       const found = await sampleFor(input.sample, context);
       if (typeof found === "string") return found;
-      return { action: "load-sample", deviceRef: input.deviceRef ?? null, note: input.note ?? null, filePath: found.path, allowedRoot: found.folder };
+      return { action: "load-sample", deviceRef: input.deviceRef ?? null, note: input.note ?? null, filePath: found.path, allowedRoot: found.folder, ...(input.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) };
     },
     summarize(preview, input) {
       const file = fileName(input.filePath);
       const note = number(preview.note ?? input.note);
-      return { title: `Loaded ${quoted(file, "a sample")} onto Drum Rack pad ${note !== undefined ? noteName(note) : ""}`.trimEnd() };
+      return { title: `Loaded ${quoted(file, "a sample")} onto Drum Rack pad ${note !== undefined ? noteName(note) : ""}`.trimEnd() + (input.instrument === "Drum Sampler" ? " in a Drum Sampler" : "") };
     },
   },
   {
@@ -264,7 +267,7 @@ export const CHANGES: readonly ChangeKind[] = [
       for (const pad of Array.isArray(input.pads) ? input.pads.map(record) : []) {
         const found = await sampleFor(pad.sample, context);
         if (typeof found === "string") return `Pad ${number(pad.note) !== undefined ? noteName(pad.note as number) : "?"}: ${found}`;
-        pads.push({ note: pad.note ?? null, filePath: found.path, allowedRoot: found.folder });
+        pads.push({ note: pad.note ?? null, filePath: found.path, allowedRoot: found.folder, ...(pad.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) });
       }
       return { action: "load-samples", deviceRef: input.deviceRef ?? null, pads };
     },
@@ -273,8 +276,10 @@ export const CHANGES: readonly ChangeKind[] = [
       const notes = pads.map((pad) => number(pad.note)).filter((note): note is number => note !== undefined);
       const run = notes.length === pads.length && notes.length > 1 && notes.every((note, index) => index === 0 || note === notes[index - 1]! + 1);
       const where = run ? `${noteName(notes[0]!)}–${noteName(notes.at(-1)!)}` : notes.map(noteName).join(", ");
-      return { title: `Loaded ${pads.length} samples onto Drum Rack pads ${where}`.trimEnd(),
-        lines: pads.map((pad) => `Loaded ${quoted(fileName(pad.filePath), "a sample")} onto Drum Rack pad ${number(pad.note) !== undefined ? noteName(pad.note as number) : ""}`.trimEnd()) };
+      const into = (pad: JsonObject) => (pad.instrument === "Drum Sampler" ? " in a Drum Sampler" : "");
+      const every = pads.length > 0 && pads.every((pad) => pad.instrument === "Drum Sampler");
+      return { title: `Loaded ${pads.length} samples onto Drum Rack pads ${where}`.trimEnd() + (every ? " in Drum Samplers" : ""),
+        lines: pads.map((pad) => `Loaded ${quoted(fileName(pad.filePath), "a sample")} onto Drum Rack pad ${number(pad.note) !== undefined ? noteName(pad.note as number) : ""}`.trimEnd() + into(pad)) };
     },
   },
   {

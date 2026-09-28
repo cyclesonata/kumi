@@ -426,6 +426,32 @@ test("parameters of one device in a row change as one change: one Live request, 
   } finally { await b.integration.close(); }
 });
 
+test("a pad's sample can go into Live 12's Drum Sampler instead of Simpler, in a batch or on its own", async () => {
+  const b = await opened({ padBatches: true });
+  const folder = mkdtempSync(join(tmpdir(), "kumi-drum-sampler-"));
+  try {
+    for (const name of ["Kick.wav", "Snare.wav", "Hat.wav", "Clap.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "DS Kit", kind: "midi" }], scenes: [] }, as: "track" },
+      { tool: "load_device", input: { trackRef: "@track", itemId: "instruments/Drum Rack" }, as: "rack" },
+      { tool: "load_sample_to_pad", input: { deviceRef: "@rack", sample: { random: true, folders: [folder] }, instrument: "Drum Sampler" }, each: { note: [36, 37] } },
+    ], final: true }, signal());
+    assert.equal(result.isError, false, result.text);
+    const batch = b.requests.filter((request) => request.name === "live_drum_pad_preview").at(-1)!;
+    assert.deepEqual((batch.args.pads as JsonObject[]).map((pad) => pad.instrument), ["Drum Sampler", "Drum Sampler"], "the bridge is asked for Drum Samplers");
+    assert.match(b.records.at(-1)!.title, /^Loaded 2 samples onto Drum Rack pads C1–C#1 in Drum Samplers$/);
+    assert.match(result.reply ?? "", /onto Drum Rack pad C1 in a Drum Sampler\n- Loaded “\w+” onto Drum Rack pad C#1 in a Drum Sampler$/);
+    const single = await tool(b.tools, "load_sample_to_pad").execute({ deviceRef: "device:1", note: 38, sample: { random: true, folders: [folder] }, instrument: "Drum Sampler" }, signal());
+    assert.equal(single.isError, false, single.text);
+    assert.equal(b.requests.filter((request) => request.name === "live_drum_pad_preview").at(-1)!.args.instrument, "Drum Sampler");
+    assert.match(b.records.at(-1)!.title, /pad D1 in a Drum Sampler$/);
+    const simpler = await tool(b.tools, "load_sample_to_pad").execute({ deviceRef: "device:1", note: 39, sample: { random: true, folders: [folder] } }, signal());
+    assert.equal(simpler.isError, false, simpler.text);
+    assert.equal("instrument" in b.requests.filter((request) => request.name === "live_drum_pad_preview").at(-1)!.args, false, "Simpler is the default, unsaid");
+    assert.doesNotMatch(b.records.at(-1)!.title, /Drum Sampler/);
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
 test("random picks within one answer don't repeat", async () => {
   const b = await opened();
   const folder = mkdtempSync(join(tmpdir(), "kumi-picks-"));
