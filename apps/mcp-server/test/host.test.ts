@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { McpHost, PROTOCOL_VERSION, serve } from "../src/host.js";
-import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
+import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, ownedDeviceFingerprintRow, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
 const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
@@ -56,7 +56,7 @@ test("requires initialization and exposes only executable, policy-allowed tools"
   assert.deepEqual(structure.inputSchema.properties.tracks.items.required, ["name", "kind"]);
   assert.deepEqual(structure.inputSchema.properties.scenes.items.required, ["name"]);
   const midi = simulatorTools.find((tool: { name: string }) => tool.name === "live_midi_clip_preview");
-  assert.deepEqual(midi.inputSchema.properties.notes.items.required, ["pitch", "start", "duration", "velocity", "channel"]);
+  assert.deepEqual(midi.inputSchema.properties.notes.items.required, ["pitch", "start", "duration", "velocity"], "channel defaults to 1");
   const semanticExport = simulatorTools.find((tool: { name: string }) => tool.name === "live_project_snapshot_export");
   assert.deepEqual(Object.keys(semanticExport.inputSchema.properties), ["profile", "limit", "cursor"]);
   const semanticDiff = simulatorTools.find((tool: { name: string }) => tool.name === "live_project_snapshot_diff");
@@ -309,6 +309,44 @@ test("previews, applies, verifies, and undoes a purpose-specific rename", async 
   assert.equal(applied.name, "Renamed Track"); assert.equal((simulator.get("track:track-1") as any).name, "Renamed Track");
   const undone = JSON.parse(((await call(4, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "rename-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone"); assert.equal((simulator.get("track:track-1") as any).name, "Drums");
+});
+
+test("undo of a created track ignores selection, auto-arm, meters and view changes Live makes on its own", () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = (id: number, name: string, args: unknown) => JSON.parse((host.handle({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result.content[0].text);
+  const preview = call(90, "live_session_structure_preview", { tracks: [{ name: "Kumi Test", kind: "midi" }], scenes: [] });
+  const applied = call(91, "live_session_structure_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "volatile-apply" });
+  const track = (simulator as any).state.tracks.find((item: { ref: string }) => item.ref === applied.created[0].ref);
+  Object.assign(track, { armed: true, isSelected: true, implicitArm: true, outputMeterLevel: 0.42, view: { selectedDeviceRef: null, isCollapsed: true } });
+  const undone = call(92, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "volatile-undo" });
+  assert.equal(undone.state, "undone");
+  assert.deepEqual(simulator.snapshot().tracks.map((item) => item.name), ["Drums"]);
+});
+
+test("return-track rename expects Live's letter prefix whether or not the caller includes it", async () => {
+  const simulator = new DeterministicLiveSimulator(); const state = (simulator as any).state;
+  state.tracks.push({ ...structuredClone(state.tracks[0]), ref: "track:return-a", objectIdentity: "simulator:track:return-a", name: "A-Reverb", kind: "return", clips: [], devices: [] });
+  // Like Live: a return track shows its letter and prepends it to whatever name it is given.
+  const original = simulator.invokeAsync.bind(simulator);
+  simulator.invokeAsync = async (invocation) => {
+    const result = await original(invocation);
+    if (invocation.operation !== "track.rename" || invocation.args.ref !== "track:return-a") return result;
+    const track = state.tracks.find((item: { ref: string }) => item.ref === "track:return-a"); track.name = `A-${String(invocation.args.name).replace(/^A-/, "")}`;
+    return { renamed: "track:return-a", name: track.name };
+  };
+  const host = new McpHost(simulator); ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  for (const [id, requested] of [[20, "Hall"], [30, "A-Plate"]] as const) {
+    const preview = JSON.parse(((await call(id, "live_object_rename_preview", { kind: "track", ref: "track:return-a", name: requested })) as any).result.content[0].text);
+    const expected = requested.startsWith("A-") ? requested : `A-${requested}`;
+    assert.equal(preview.proposedName, expected);
+    const applied = JSON.parse(((await call(id + 1, "live_object_rename_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `return-rename-${id}` })) as any).result.content[0].text);
+    assert.equal(applied.state, "applied"); assert.equal(applied.name, expected);
+    const undone = JSON.parse(((await call(id + 2, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: `return-undo-${id}` })) as any).result.content[0].text);
+    assert.equal(undone.state, "undone"); assert.equal((simulator.get("track:return-a") as any).name, "A-Reverb");
+  }
+  const unchanged = await call(40, "live_object_rename_preview", { kind: "track", ref: "track:return-a", name: "Reverb" });
+  assert.equal((unchanged as any).result.isError, true, "renaming to the current displayed name is a no-op");
 });
 
 test("rename apply reconciles a lost acknowledgement only with the exact key", async () => {
@@ -1300,6 +1338,42 @@ test("browser search returns stable identities and browser load verifies onto th
   assert.equal(replay.idempotent, true);
   const undone = JSON.parse(((await call(8, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "load-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone"); assert.equal((simulator as any).state.tracks[0].devices.filter((item: any) => item.name === "Drum Rack").length, 0);
+});
+
+test("Browser-load undo still removes a device whose parameter was tweaked and reverted or whose rack view changed", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const racks = () => ((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Drum Rack");
+  // Like a real Live device, the loaded rack has a parameter from the moment it exists.
+  const invoke = simulator.invoke.bind(simulator);
+  simulator.invoke = (invocation) => {
+    const result = invoke(invocation) as any;
+    if (invocation.operation === "device.insert") {
+      const rack = racks().find((device) => device.ref === result.ref);
+      rack.parameters.push({ ref: "parameter:rack-macro", objectIdentity: "simulator:parameter:rack-macro", parentRef: rack.ref, name: "Macro 1", value: 0.5, min: 0, max: 1, automatable: true, quantization: 0, enabled: true, displayValue: "0.5", revision: 1 });
+      result.createdFingerprint = (host as any).captureObjectFingerprint(ownedDeviceFingerprintRow(structuredClone(rack)));
+    }
+    return result;
+  };
+  const load = async (id: number) => {
+    const preview = body(await call(id, "live_browser_load_preview", { itemId: "instruments/Drum Rack", trackRef: "track:track-1" }));
+    assert.equal(body(await call(id + 1, "live_browser_load_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `load-${id}` })).state, "applied");
+    return preview.transactionId as string;
+  };
+  const loaded = await load(9100); const rack = racks()[0];
+  const tweak = body(await call(9102, "live_device_parameter_preview", { deviceRef: rack.ref, parameterRef: "parameter:rack-macro", value: 0.25 }));
+  assert.equal((await call(9103, "live_device_parameter_apply", { transactionId: tweak.transactionId, confirmation: tweak.confirmation, idempotencyKey: "tweak-apply-key" })).isError, false);
+  assert.equal(body(await call(9104, "live_undo", { transactionId: tweak.transactionId, confirmation: "undo", idempotencyKey: "tweak-undo-key" })).state, "undone");
+  assert.equal(rack.parameters[0].value, 0.5); assert.notEqual(rack.parameters[0].revision, 1, "the edit counter moved");
+  rack.view = { selectedChainRef: null, selectedPadIndex: 3, padScrollPosition: 0, showChainDevices: true };
+  assert.equal(body(await call(9105, "live_undo", { transactionId: loaded, confirmation: "undo", idempotencyKey: "load-undo-key" })).state, "undone");
+  assert.equal(racks().length, 0);
+
+  const edited = await load(9110); racks()[0].name = "Renamed by hand";
+  const refused = await call(9112, "live_undo", { transactionId: edited, confirmation: "undo", idempotencyKey: "edited-undo-key" });
+  assert.equal(refused.isError, true); assert.match(refused.content[0].text, /modified after creation/);
+  assert.equal(((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Renamed by hand").length, 1, "the edited device is kept");
 });
 
 test("a lost Browser-load acknowledgement reconciles with the exact key and retains safe undo", async () => {

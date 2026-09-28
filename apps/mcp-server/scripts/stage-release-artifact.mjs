@@ -49,6 +49,8 @@ for (const module of runtimeModules) for (const extension of ["js", "d.ts"]) {
 const remoteFiles = ["README.md", "AbletonMcpBridge/__init__.py", "AbletonMcpBridge/ableton_mcp_remote_script.py", "AbletonMcpBridge/ableton-live-v1.operations.json", "AbletonMcpBridge/manifest.json"];
 for (const name of remoteFiles) include(join(packageRoot, "remote-script", ...name.split("/")), "ableton-remote-script");
 for (const [, name] of documentation) include(join(docsRoot, name), "documentation");
+// npm includes a package-root README even when it is outside `files`.
+include(join(packageRoot, "README.md"), "documentation");
 include(licenseDestination, "license");
 include(join(packageRoot, "package.json"), "package-metadata");
 

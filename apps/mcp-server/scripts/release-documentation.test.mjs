@@ -45,6 +45,14 @@ test("docs-relative evidence and mapped sibling links are transformed structural
   assert.match(transformed, /\(DELIVERY\.md\)/);
 });
 
+test("standalone bridge documentation does not package the Kumi landing page", () => {
+  assert.deepEqual(releaseDocumentation[0], ["apps/mcp-server/README.md", "README.md"]);
+  const markdown = readFileSync(resolve(packageRoot, "README.md"), "utf8");
+  assert.match(markdown, /^# Ableton MCP Beyond\n/);
+  // npm always includes a package-root README; its links must also work installed.
+  validatePackagedDocumentation(packageRoot, ["README.md"]);
+});
+
 test("all real release documents stage with no broken packaged relative targets", (context) => {
   const root = mkdtempSync(resolve(tmpdir(), "ableton-release-docs-"));
   context.after(() => rmSync(root, { recursive: true, force: true }));

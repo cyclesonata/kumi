@@ -22,7 +22,7 @@ import {
   secureWindowsFile,
   writeConfig,
   writeSecretFile,
-  type BridgeConfig,
+  type BridgeConfig, stableNodeCommand,
 } from "./delivery.js";
 
 export const LIFECYCLE_RECEIPT_VERSION = 1 as const;
@@ -308,7 +308,7 @@ function releaseRole(name: string, legacy: boolean): string | null {
   if (name === "LICENSE.md") return legacy ? "private-license" : "license";
   if (name === "package.json") return "package-metadata";
   if (name.startsWith("dist/src/") && (name.endsWith(".js") || name.endsWith(".d.ts"))) return "compiled-runtime";
-  if (name.startsWith("release-docs/") && name.endsWith(".md")) return "documentation";
+  if (name === "README.md" || (name.startsWith("release-docs/") && name.endsWith(".md"))) return "documentation";
   if (name.startsWith("remote-script/")) return "ableton-remote-script";
   return null;
 }
@@ -619,7 +619,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
     if (!("bridge" in currentConfig)) throw new Error("managed bridge config is invalid");
     let backup: string | null = null;
     try {
-      const nextConfig = configForBridge(join(options.packageRoot, "dist", "src", "cli.js"), currentConfig.bridge, process.execPath, paths.configPath);
+      const nextConfig = configForBridge(join(options.packageRoot, "dist", "src", "cli.js"), currentConfig.bridge, stableNodeCommand(), paths.configPath);
       writeConfig(paths.configPath, nextConfig, true);
       fault(options, "before-remote");
       const installed = installRemoteScript(join(options.packageRoot, "remote-script", REMOTE_PACKAGE, REMOTE_MODULE), paths.remoteScriptDirectory, { force: true, configPath: paths.configPath });

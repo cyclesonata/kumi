@@ -155,6 +155,33 @@ test("lifecycle plan is non-mutating and consequential actions require explicit 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("admits only the package-root README as additional documentation", async () => {
+  for (const [name, role, accepted] of [
+    ["README.md", "documentation", true],
+    ["NOTES.md", "documentation", false],
+    ["README.md", "compiled-runtime", false],
+  ] as const) {
+    const root = mkdtempSync(join(tmpdir(), "ableton-lifecycle-readme-"));
+    try {
+      const packageRoot = fixturePackage(root, "1.0.1", "readme");
+      const content = "# Standalone bridge\n";
+      writeFileSync(join(packageRoot, name), content);
+      const path = join(packageRoot, "release-manifest.json");
+      const manifest = JSON.parse(readFileSync(path, "utf8"));
+      manifest.files[name] = sha(content); manifest.roles[name] = role;
+      const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+      writeFileSync(path, bytes);
+      const artifact = artifacts.get(packageRoot)!;
+      createArtifact(artifact.path, bytes, packageRoot);
+      artifact.sha256 = sha(readFileSync(artifact.path));
+      const options = await withPorts(lifecycleOptions(root, packageRoot, "install", { apply: false }));
+      if (accepted) assert.equal((await runLifecycle(options)).state, "planned");
+      else await assert.rejects(runLifecycle(options), /release manifest policy is invalid/);
+      assert.equal(existsSync(options.stateDirectory), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test("installs into paths with spaces and Unicode, records exact artifact identity, and keeps activation truthful", async () => {
   const root = mkdtempSync(join(tmpdir(), "ableton-lifecycle-install-"));
   try {

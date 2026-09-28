@@ -145,7 +145,21 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     return { ...(result as unknown as LiveDiscoveryResult), kind: translated };
   }
   getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "get", ref }, "get", context)); }
+  /** Live applies playhead moves on its next tick; operations that need the playhead somewhere answer
+   * "retry shortly" after moving it. Retry those (full authority chain each time) a few ticks later. */
   async invokeAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.invokeOnceAsync(invocation, context); }
+      catch (error) {
+        const retry = error instanceof Error && error.message.endsWith("retry shortly") && attempt < 10 && !context?.signal?.aborted
+          && (context?.deadlineMs === undefined || context.deadlineMs - Date.now() > 250);
+        if (!retry) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    }
+  }
+
+  private async invokeOnceAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown> {
     await this.ensureConnectedAsync(context);
     if (!this.cached.operations?.includes(invocation.operation)) throw new Error(`remote operation is not negotiated: ${invocation.operation}`);
     if (invocation.operation === "subscribe") {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, isAbsolute, posix, relative, resolve } from "node:path";
 
 export const releaseDocumentation = [
-  ["README.md", "README.md"],
+  ["apps/mcp-server/README.md", "README.md"],
   ["docs/en/USER_GUIDE.md", "USER_GUIDE.md"],
   ["docs/en/USER_JOURNEYS.md", "USER_JOURNEYS.md"],
   ["docs/en/OPERATIONS.md", "OPERATIONS.md"],

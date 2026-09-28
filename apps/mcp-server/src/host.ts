@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, UnavailableLiveAdapter, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane } from "./live.js";
+import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, UnavailableLiveAdapter, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectPage } from "./project-semantic.js";
@@ -345,6 +345,14 @@ class BoundedTransactionMap<T extends { expiresAt: number; state: string }> exte
     }
     return super.set(key, value);
   }
+}
+
+/** Live keeps mixer and device values as 32-bit floats (a written 0.6 reads back as 0.6000000238),
+ * so numeric postconditions compare within float32 precision; everything else must match exactly. */
+function sameLiveValue(observed: unknown, expected: unknown): boolean {
+  if (typeof observed === "number" && typeof expected === "number") return Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
+  if (Array.isArray(observed) && Array.isArray(expected)) return observed.length === expected.length && observed.every((value, index) => sameLiveValue(value, expected[index]));
+  return JSON.stringify(observed) === JSON.stringify(expected);
 }
 
 export class McpHost {
@@ -1119,7 +1127,7 @@ export class McpHost {
   }
 
   private sessionStructureCreatedFingerprint(snapshot: LiveSnapshot, kind: "track" | "scene", reference: LiveRef): string {
-    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = { ...track, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null) }; const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return this.captureObjectFingerprint({ track: ownedTrack, arrangementClips }); }
+    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = ownedTrackFingerprintRow(track); const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return this.captureObjectFingerprint({ track: ownedTrack, arrangementClips }); }
     const scene = snapshot.scenes.find((row) => row.ref === reference); if (!scene) throw new Error("created scene fingerprint is unavailable"); const sceneRow = scene as unknown as JsonObject; const sceneIdentity = { ref: scene.ref, parentRef: sceneRow.parentRef ?? null, objectIdentity: scene.objectIdentity ?? null, name: scene.name, triggerable: sceneRow.triggerable ?? null };
     const contents = snapshot.tracks.map((track) => { const slot = track.clipSlots?.find((row) => row.sceneIndex === scene.index); const clip = slot?.clipRef ? track.clips.find((row) => row.ref === slot.clipRef) : undefined; const slotRow = slot as unknown as JsonObject | undefined; const ownedSlot = slot ? { ref: slot.ref, parentRef: slot.parentRef ?? null, trackRef: slotRow?.trackRef ?? null, objectIdentity: slot.objectIdentity ?? null, clipRef: slot.clipRef ?? null, empty: slot.empty } : null; return { trackRef: track.ref, trackIdentity: track.objectIdentity ?? null, slot: ownedSlot, clip: clip ?? null }; });
     return this.captureObjectFingerprint({ scene: sceneIdentity, contents });
@@ -1224,13 +1232,17 @@ export class McpHost {
       const status = this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
       if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
       const adapter = this.asyncAdapter(); const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
-      if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to regular Set tracks");
+      if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
       const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       if (!current || current.ref !== params.ref || !isNonEmptyString(current.objectIdentity, 256) || typeof current.name !== "string") throw new Error("rename target lacks exact authoritative object identity");
-      if (current.name === params.name) throw new Error("rename would not change the target");
-      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name: params.name, expectedAuthorityRevision: this.renameAuthorityRevision(snapshot, params.kind as string, params.ref as LiveRef) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      // Live shows return tracks with their letter ("A-Reverb") and prepends it to any name it is given,
+      // so the name to expect afterwards carries that prefix whether or not the caller included it.
+      const prefix = params.kind === "track" && snapshot.tracks.find((track) => track.ref === params.ref)?.kind === "return" ? /^[A-Z]-/.exec(current.name)?.[0] ?? "" : "";
+      const name = prefix && !(params.name as string).startsWith(prefix) ? `${prefix}${params.name as string}` : params.name as string;
+      if (current.name === name) throw new Error("rename would not change the target");
+      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name, expectedAuthorityRevision: this.renameAuthorityRevision(snapshot, params.kind as string, params.ref as LiveRef) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "rename");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { kind: params.kind, ref: params.ref, objectIdentity: current.objectIdentity, currentName: current.name }, proposedName: params.name, impact: "renames-one-live-object", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { kind: params.kind, ref: params.ref, objectIdentity: current.objectIdentity, currentName: current.name }, proposedName: name, impact: "renames-one-live-object", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Rename preview failed without mutation; rediscover the exact target."); }
   }
 
@@ -2389,7 +2401,7 @@ export class McpHost {
     const snapshot = await adapter.snapshotAsync(context); let located: ReturnType<McpHost["deviceRow"]>;
     try { located = this.deviceRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
     if (located.device.objectIdentity !== objectIdentity) throw new Error("owned device identity changed before cleanup");
-    if (expectedFingerprint && this.captureObjectFingerprint(located.device) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
+    if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
     try { this.deviceRow(await adapter.snapshotAsync(context), reference); } catch { return; }
@@ -2648,7 +2660,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "browser.load", args: transaction.payload }, context) as { loaded?: unknown; deviceRef?: unknown; deviceObjectIdentity?: unknown; createdFingerprint?: unknown };
       if (result.loaded !== true || !isNonEmptyString(result.deviceRef, 256) || !isNonEmptyString(result.deviceObjectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("browser load did not return exact created device identity");
       const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
-      if (this.captureObjectFingerprint(createdDevice.device) !== result.createdFingerprint) throw new Error("browser-loaded device creation fingerprint was not confirmed");
+      if (this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("browser-loaded device creation fingerprint was not confirmed");
       transaction.created = { deviceRef: result.deviceRef, objectIdentity: result.deviceObjectIdentity, fingerprint: result.createdFingerprint };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -2723,7 +2735,7 @@ export class McpHost {
       if ((action === "insert" || action === "move") && (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || (action === "insert" && !isNonEmptyString(result.createdFingerprint, 64)))) throw new Error(`device ${action} did not return exact identity`);
       if (action === "move" && result.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("device move returned a different object identity");
       transaction.created = result;
-      if (action === "insert") { const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(createdDevice.device) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
+      if (action === "insert") { const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
@@ -2797,7 +2809,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("mixer change was not confirmed");
-      const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && JSON.stringify(verified.mixer[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
+      const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -4593,7 +4605,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "mixer.extended.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("extended mixer change was not confirmed");
       const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef)?.mixer as JsonObject | undefined;
-      for (const field of ["trackActivator", "crossfader", "crossfadeAssign", "panningMode", "panningLeft", "panningRight"]) if (transaction.payload[field] !== undefined && verified?.[field] !== transaction.payload[field]) throw new Error("extended mixer postcondition was not confirmed");
+      for (const field of ["trackActivator", "crossfader", "crossfadeAssign", "panningMode", "panningLeft", "panningRight"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("extended mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -4654,7 +4666,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "chain-mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("chain mixer change was not confirmed");
       const verified = this.chainRow(await adapter.snapshotAsync(context), transaction.clipRef!).chain.mixer as JsonObject | undefined;
-      for (const field of ["volume", "pan", "sends", "chainActivator"]) if (transaction.payload[field] !== undefined && JSON.stringify(verified?.[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("chain mixer postcondition was not confirmed");
+      for (const field of ["volume", "pan", "sends", "chainActivator"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("chain mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -6672,7 +6684,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
         if (!track || !mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("extended mixer authority is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (mixer[field] !== value) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
         const state = { crossfadeAssign: mixer.crossfadeAssign ?? null, panningMode: mixer.panningMode ?? null };
         mixerext.state = "undoing";
         const priorFields = Object.fromEntries(Object.entries(mixerext.prior as Record<string, unknown>).filter(([, value]) => value !== null));
@@ -6692,7 +6704,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
         if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer authority is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (JSON.stringify(mixer[field]) !== JSON.stringify(value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
         chainmix.state = "undoing";
         const chainPriorFields = Object.fromEntries(Object.entries(chainmix.prior as Record<string, unknown>).filter(([, value]) => value !== null));
         const result = await this.invokeUndoRecovery(chainmix, adapter, "chain-mixer.set", { ref: chainmix.clipRef, ...chainPriorFields, expectedObjectIdentity: found.chain.objectIdentity, expectedMixerIdentity: mixer.mixerIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity({ sends: mixer.sends ?? [] })).digest("hex") }, context) as { changed?: unknown };
@@ -7081,7 +7093,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
         let currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
-        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
+        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
         if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
         currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
@@ -7679,12 +7691,13 @@ export class McpHost {
     const now = Date.now();
     for (const [id, transaction] of this.transactions) if ((transaction.state === "previewed" && transaction.expiresAt <= now) || (transaction.state === "previewed" && this.transactions.size > MAX_TRANSACTIONS)) this.transactions.delete(id);
   }
-  private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Request a fresh tempo preview and confirm the exact transaction." }) }], isError: true }); }
+  private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Preview the change again, then apply the new transaction." }) }], isError: true }); }
   private recoveryFinalizeError(id: RequestId, reason: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence." }) }], isError: true }); }
   private successText(id: RequestId, value: unknown): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify(value) }], isError: false }); }
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const raw = cause instanceof Error ? cause.message : "adapter request failed";
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |probe |warp |notes |adapter request)/i.test(raw) && raw.length <= 160 ? raw : "adapter request failed";
+    // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
+    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |probe |warp |notes |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

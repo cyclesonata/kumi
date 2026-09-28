@@ -48,7 +48,8 @@ function validateRequest(value: unknown): asserts value is SessionMidiRequest {
   const request = value as Partial<SessionMidiRequest>;
   const sceneIndex = request.sceneIndex;
   if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 1023 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
-  request.notes.forEach((note) => validateNote(note, request.length as number));
+  // Most producers never think about MIDI channels; default to channel 1.
+  for (const note of request.notes) { note.channel ??= 1; validateNote(note, request.length as number); }
 }
 
 export class SessionMidiTransactionManager {
@@ -144,7 +145,7 @@ export class SessionMidiTransactionManager {
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (/uncertain|disconnect|timeout|cancellation/i.test(message)) { record.state = "uncertain"; record.recoveryMode = "apply"; throw cause; }
-      if (clipRef) { try { record.clipRef = clipRef; record.recoveryMode = "compensate"; await this.compensateApplyAsync(record, adapter, context); record.state = "undone"; } catch { record.state = "uncertain"; record.recoveryMode = "compensate"; throw new Error("MIDI apply failed and compensation failed; retry the exact key to reconcile cleanup"); } }
+      if (clipRef) { try { record.clipRef = clipRef; record.recoveryMode = "compensate"; await this.compensateApplyAsync(record, adapter, context); record.state = "undone"; } catch (compensation) { record.state = "uncertain"; record.recoveryMode = "compensate"; throw new Error(`MIDI apply failed (${message.slice(0, 120)}) and compensation failed (${(compensation instanceof Error ? compensation.message : String(compensation)).slice(0, 80)}); retry the exact key to reconcile cleanup`); } }
       else record.state = "undone";
       throw cause;
     }

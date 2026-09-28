@@ -212,6 +212,24 @@ function createSimulatorState(): LiveSnapshot {
   };
 }
 
+// Selection, arm, meters, playback status and view change without anyone editing a track; fingerprints
+// of created tracks ignore them so undo and cleanup are not refused for nothing. Mirrors the Remote Script.
+const VOLATILE_TRACK_FIELDS = new Set(["armed", "implicitArm", "isSelected", "isVisible", "foldState", "view", "playingSlotIndex", "firedSlotIndex", "backToArranger", "mutedViaSolo", "performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel"]);
+const VOLATILE_SLOT_FIELDS = new Set(["playingStatus", "willRecordOnStart", "fireButtonState"]);
+export function ownedTrackFingerprintRow(track: Track): Record<string, unknown> {
+  const keep = (row: object, volatile: Set<string>) => Object.fromEntries(Object.entries(row).filter(([key]) => !volatile.has(key)));
+  return { ...keep(track, VOLATILE_TRACK_FIELDS), clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) };
+}
+
+/** A device row for ownership checks: parameter edit counters and a rack's view (UI selection) are not content. */
+export function ownedDeviceFingerprintRow(row: unknown): unknown {
+  if (Array.isArray(row)) return row.map(ownedDeviceFingerprintRow);
+  if (row === null || typeof row !== "object") return row;
+  return Object.fromEntries(Object.entries(row)
+    .filter(([key]) => key !== "revision" && !(key === "view" && "canHaveChains" in row))
+    .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
+}
+
 export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
 
 export class DeterministicLiveSimulator implements LiveAdapter {
@@ -222,7 +240,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
 
   private structureCreatedFingerprint(kind: "track" | "scene", reference: LiveRef): string {
     const snapshot = this.snapshot();
-    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = { ...track, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null) }; const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return simulatorRevision({ track: ownedTrack, arrangementClips }); }
+    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = ownedTrackFingerprintRow(track); const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return simulatorRevision({ track: ownedTrack, arrangementClips }); }
     const scene = snapshot.scenes.find((row) => row.ref === reference); if (!scene) throw new Error("created scene fingerprint is unavailable"); const sceneRow = scene as unknown as Record<string, unknown>; const sceneIdentity = { ref: scene.ref, parentRef: sceneRow.parentRef ?? null, objectIdentity: scene.objectIdentity ?? null, name: scene.name, triggerable: sceneRow.triggerable ?? null };
     const contents = snapshot.tracks.map((track) => { const slot = track.clipSlots?.find((row) => row.sceneIndex === scene.index); const clip = slot?.clipRef ? track.clips.find((row) => row.ref === slot.clipRef) : undefined; const slotRow = slot as unknown as Record<string, unknown> | undefined; const ownedSlot = slot ? { ref: slot.ref, parentRef: slot.parentRef ?? null, trackRef: slotRow?.trackRef ?? null, objectIdentity: slot.objectIdentity ?? null, clipRef: slot.clipRef ?? null, empty: slot.empty } : null; return { trackRef: track.ref, trackIdentity: track.objectIdentity ?? null, slot: ownedSlot, clip: clip ?? null }; });
     return simulatorRevision({ scene: sceneIdentity, contents });
@@ -541,7 +559,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           const device: Device = { ref: ref("device", `${found.chain.ref}:${found.chain.devices.length}`), parentRef: found.chain.ref, name, kind: name.toLowerCase().includes("rack") ? "rack" : "device", className: name, parameters: [], objectIdentity: `simulator:device:${this.sequence + 1}:${found.chain.ref}:${found.chain.devices.length}`, enabled: true };
           found.chain.devices.push(device);
           this.emit({ type: "object", ref: found.chain.ref, payload: { operation, device } });
-          return { ref: device.ref, objectIdentity: device.objectIdentity, name, index: found.chain.devices.length - 1, createdFingerprint: simulatorRevision(device) };
+          return { ref: device.ref, objectIdentity: device.objectIdentity, name, index: found.chain.devices.length - 1, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)) };
         }
         const track = this.findTrack(objectRef("trackRef"));
         if (!track || args.expectedTrackIdentity !== track.objectIdentity || simulatorCanonical(args.expectedSiblings) !== simulatorCanonical(track.devices.map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity })))) throw new Error("device insertion target changed since preview");
@@ -554,7 +572,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         device.ref = ref("device", `${track.ref}:${position}`);
         track.devices.splice(position, 0, device);
         this.emit({ type: "object", ref: track.ref, payload: { operation, device } });
-        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(device) };
+        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)) };
       }
       case "device.delete": {
         const deviceRef = objectRef("ref"); const expectedIdentity = stringArg("expectedObjectIdentity"); const expectedOwnerRef = objectRef("expectedOwnerRef"); const expectedOwnerIdentity = stringArg("expectedOwnerIdentity");

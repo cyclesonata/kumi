@@ -15,7 +15,7 @@ import ableton_mcp_remote_script as remote_module
 from ableton_mcp_remote_script import (
     AbletonMcpBridge,
     AuthenticatedRemoteScript,
-    LiveObjectMapper, _DiagnosticsSink, _DispatchToken, _MainThreadQueue, _Subscription, _authority_state_digest, _clear_diagnostics_sink, _debug_trace, _set_diagnostics_sink, operation_registry, validate_operation_payload,
+    LiveObjectMapper, _DiagnosticsSink, _DispatchToken, _MainThreadQueue, _Subscription, _authority_state_digest, _clear_diagnostics_sink, _debug_trace, _owned_device_row, _set_diagnostics_sink, operation_registry, validate_operation_payload,
     PROTOCOL,
     create_instance,
 )
@@ -292,7 +292,10 @@ class RemoteScriptTests(unittest.TestCase):
         unsigned = remote.bound({"version": PROTOCOL, "id": "one", "method": "snapshot", "nonce": "0000000000000001", "sequence": 1})
         result = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "request failed")
+        self.assertEqual(result["error"], "request failed: RuntimeError", "foreign exception text is not echoed")
+        validation = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: (_ for _ in ()).throw(ValueError("structure changed since preview\x1b[2J")))
+        unsigned = validation.bound({"version": PROTOCOL, "id": "two", "method": "snapshot", "nonce": "0000000000000002", "sequence": 1})
+        self.assertEqual(validation.dispatch({**unsigned, "mac": validation.sign(unsigned)})["error"], "request failed: structure changed since preview [2J")
 
     def test_result_schema_violation_invalidates_authenticated_channel(self):
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: {"connected": "yes"})
@@ -592,7 +595,9 @@ class FakeArrangementSong(FakeSong):
         super().__init__()
         self.cue_points = [FakeLocator(0, "Intro")]
 
-    def set_or_delete_cue(self, position):
+    def set_or_delete_cue(self):
+        # Like Live: no arguments; toggles a locator at the playhead.
+        position = self.current_song_time
         for index, locator in enumerate(self.cue_points):
             if locator.time == position:
                 self.cue_points.pop(index)
@@ -1667,7 +1672,10 @@ class ControlSurfaceTests(unittest.TestCase):
         mapper = LiveObjectMapper(song)
         self.assertIn("arrangement.write", mapper.status()["capabilities"])
         self.assertEqual(mapper.discover("locator")["items"][0]["name"], "Intro")
-        created = mapper.invoke("arrangement.locator.create", {"name": "Verse", "position": 8, "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]})
+        create_args = {"name": "Verse", "position": 8, "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]}
+        with self.assertRaisesRegex(ValueError, "playhead is moving; retry shortly"):
+            mapper.invoke("arrangement.locator.create", create_args)
+        created = mapper.invoke("arrangement.locator.create", create_args)
         self.assertEqual(created["name"], "Verse")
         self.assertEqual(mapper.discover("locator")["items"][-1]["position"], 8)
         delete_args = {"ref": created["ref"], "expectedObjectIdentity": created["objectIdentity"], "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]}
@@ -4074,3 +4082,244 @@ class BrowserSurfaceTests(unittest.TestCase):
         mapper = LiveObjectMapper(FakeSong())
         self.assertFalse(mapper._operation_supported("browser.preview.start"))
         self.assertFalse(mapper._operation_supported("browser.preview.stop"))
+
+
+class LetteredReturnTrack(FakeTrack):
+    """Behaves like Live: a return track shows its letter and prepends it to any name it is given."""
+
+    def __init__(self, song, stored):
+        super().__init__()
+        self._song, self._stored, self.reject = song, stored, set()
+
+    @property
+    def name(self):
+        return f"{chr(ord('A') + self._song.return_tracks.index(self))}-{self._stored}"
+
+    @name.setter
+    def name(self, value):
+        if value in getattr(self, "reject", ()): raise RuntimeError("Live refused the name")
+        self._stored = value
+
+
+class ReturnTrackNamingTests(unittest.TestCase):
+    def test_rename_accepts_bare_or_displayed_names_without_doubling_the_letter(self):
+        song = FakeSong(); verb = LetteredReturnTrack(song, "Reverb"); song.return_tracks = [verb]
+        mapper = LiveObjectMapper(song)
+
+        def rename(name):
+            row = next(row for row in mapper.snapshot()["tracks"] if row["kind"] == "return")
+            return mapper.invoke("track.rename", {"ref": row["ref"], "name": name, "expectedName": row["name"], "expectedObjectIdentity": row["objectIdentity"],
+                                                  "expectedAuthorityRevision": mapper._rename_authority_revision("track", row["ref"])})
+
+        self.assertEqual(verb.name, "A-Reverb")
+        self.assertEqual(rename("Kumi Space")["name"], "A-Kumi Space")
+        self.assertEqual(rename("A-Hall")["name"], "A-Hall")
+        self.assertEqual(verb._stored, "Hall")
+        verb.reject = {"Broken"}
+        with self.assertRaisesRegex(ValueError, "postcondition was not confirmed"): rename("Broken")
+        self.assertEqual(verb.name, "A-Hall", "rollback restores the exact displayed name, not A-A-Hall")
+        with self.assertRaisesRegex(ValueError, "name is invalid"): rename("A-")
+
+    def test_regular_track_rename_is_unchanged(self):
+        song = FakeSong(); mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        result = mapper.invoke("track.rename", {"ref": row["ref"], "name": "A-Bass", "expectedName": row["name"], "expectedObjectIdentity": row["objectIdentity"],
+                                                "expectedAuthorityRevision": mapper._rename_authority_revision("track", row["ref"])})
+        self.assertEqual((result["name"], song.tracks[0].name), ("A-Bass", "A-Bass"))
+
+    def test_return_creation_names_with_the_letter_and_removes_a_return_it_cannot_name(self):
+        song = FakeSong(); song.return_tracks = [LetteredReturnTrack(song, "Reverb")]
+
+        def create(reject=()):
+            def create_return_track():
+                track = LetteredReturnTrack(song, "Return"); track.reject = set(reject); song.return_tracks.append(track); return track
+            return create_return_track
+
+        song.delete_return_track = lambda index: song.return_tracks.pop(index)
+        mapper = LiveObjectMapper(song)
+        song.create_return_track = create()
+        result = mapper.invoke("track.create-return", {"name": "Verb", "expectedStructureRevision": mapper._structure_revision()})
+        self.assertEqual((result["name"], result["index"]), ("B-Verb", 1)); validate_operation_payload("track.create-return", "result", result)
+        self.assertEqual(mapper.invoke("track.create-return", {"name": "C-Plate", "expectedStructureRevision": mapper._structure_revision()})["name"], "C-Plate")
+        song.create_return_track = create(reject={"Delay"})
+        with self.assertRaisesRegex(ValueError, "was removed"):
+            mapper.invoke("track.create-return", {"name": "Delay", "expectedStructureRevision": mapper._structure_revision()})
+        self.assertEqual([track.name for track in song.return_tracks], ["A-Reverb", "B-Verb", "C-Plate"])
+
+
+class ReturnTrackOwnershipTests(unittest.TestCase):
+    def test_created_return_is_discoverable_and_removable_by_its_creator_under_real_live_rules(self):
+        song = FakeSong(); song.return_tracks = [LetteredReturnTrack(song, "Reverb")]
+
+        def create_return_track():
+            track = LetteredReturnTrack(song, "Return"); song.return_tracks.append(track); return track
+
+        song.create_return_track = create_return_track
+        song.delete_return_track = lambda index: song.return_tracks.pop(index)
+        mapper = LiveObjectMapper(song, provenance="real-live")
+        created = mapper.invoke("track.create-return", {"name": "Kumi Verb", "expectedStructureRevision": mapper._structure_revision()}, "transaction-0001")
+        self.assertEqual({row["ref"]: row["name"] for row in mapper.snapshot()["tracks"]}.get(created["ref"]), "B-Kumi Verb")
+        self.assertEqual(mapper.get(created["ref"])["name"], "B-Kumi Verb")
+        deleted = mapper.invoke("track.delete-return", {"ref": created["ref"], "expectedObjectIdentity": created["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-0001", created["ownershipToken"])
+        self.assertEqual(deleted, {"deleted": created["ref"]})
+        self.assertEqual([track.name for track in song.return_tracks], ["A-Reverb"])
+
+
+class Float32Parameter(FakeParameter):
+    """Like Live: a parameter stores its value as a 32-bit float."""
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, new):
+        import struct
+        self._value = struct.unpack("f", struct.pack("f", float(new)))[0]
+
+
+class Float32ConfirmationTests(unittest.TestCase):
+    def test_mixer_confirms_values_that_live_rounds_to_32_bit_floats(self):
+        song = FakeSong(); track = song.tracks[0]; track.mute = False; track.solo = False
+        volume, pan, cue, send = Float32Parameter(), Float32Parameter(), Float32Parameter(), Float32Parameter(); volume.value = 0.5; pan.value = 0.0; cue.value = 0.7; send.value = 0.1
+        track.mixer_device = type("Mixer", (), {"volume": volume, "panning": pan, "cue_volume": cue, "sends": [send]})()
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]; mixer = row["mixer"]
+        state = {field: mixer.get(field) for field in ("volume", "pan", "mute", "solo", "cueVolume", "sends")}
+        args = {"ref": row["ref"], "volume": 0.6, "pan": -0.25, "sends": [0.3], "expectedObjectIdentity": row["objectIdentity"], "expectedVolumeIdentity": mixer["volumeIdentity"], "expectedPanIdentity": mixer["panIdentity"],
+                "expectedCueIdentity": mixer["cueIdentity"], "expectedSendIdentities": mixer["sendIdentities"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+        mapper.invoke("mixer.set", args)
+        self.assertNotEqual(volume.value, 0.6, "the fake really rounds like Live")
+        self.assertAlmostEqual(volume.value, 0.6, places=6); self.assertAlmostEqual(send.value, 0.3, places=6)
+
+
+class DeviceOwnershipFingerprintTests(unittest.TestCase):
+    def test_a_reverted_parameter_tweak_keeps_a_created_device_fingerprint(self):
+        song = FakeSong(); song.tracks[0].devices = [FakeDevice()]; mapper = LiveObjectMapper(song)
+        device = mapper.snapshot()["tracks"][0]["devices"][0]; parameter = device["parameters"][0]
+        created = mapper._ownership_fingerprint(device["ref"])
+        mapper._set_parameter_value(parameter["ref"], 0.75); mapper._set_parameter_value(parameter["ref"], 0.5)
+        self.assertNotEqual(mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]["revision"], parameter["revision"], "the edit counter moved")
+        self.assertEqual(mapper._ownership_fingerprint(device["ref"]), created)
+        mapper._set_parameter_value(parameter["ref"], 0.75)
+        self.assertNotEqual(mapper._ownership_fingerprint(device["ref"]), created, "a real change still counts")
+
+    def test_rack_view_is_not_device_content(self):
+        rack = {"ref": "1:device:0:0", "canHaveChains": True, "view": {"selectedPadIndex": 1}, "parameters": [{"ref": "p", "value": 0.5, "revision": 4}],
+                "chains": [{"devices": [{"canHaveChains": False, "parameters": [{"value": 1.0, "revision": 9}]}]}]}
+        self.assertEqual(_owned_device_row(rack), {"ref": "1:device:0:0", "canHaveChains": True, "parameters": [{"ref": "p", "value": 0.5}],
+                                                   "chains": [{"devices": [{"canHaveChains": False, "parameters": [{"value": 1.0}]}]}]})
+
+
+class LazyPlayheadTests(unittest.TestCase):
+    """Live applies playhead moves on its next tick; nothing may treat that as a failure."""
+
+    def lazy_song(self):
+        song = FakeArrangementSong()
+        state = {"time": float(song.current_song_time), "pending": None}
+        cls = type("LazyArrangementSong", (type(song),), {
+            "current_song_time": property(lambda self: state["time"], lambda self, value: state.__setitem__("pending", float(value))),
+        })
+        song.__class__ = cls
+        song.tick = lambda: state.update(time=state["pending"] if state["pending"] is not None else state["time"], pending=None)
+        return song
+
+    def test_transport_position_is_accepted_before_live_applies_it(self):
+        song = self.lazy_song(); mapper = LiveObjectMapper(song)
+        snapshot = mapper.snapshot()
+        result = mapper.invoke("transport.set", {"setRef": snapshot["set"]["ref"], "expectedObjectIdentity": snapshot["set"]["objectIdentity"], "expectedRevision": snapshot["playback"]["revision"], "position": 12.0})
+        self.assertTrue(result["changed"])
+        song.tick(); self.assertEqual(song.current_song_time, 12.0)
+
+    def test_locator_creation_moves_the_playhead_then_succeeds_on_retry(self):
+        song = self.lazy_song(); mapper = LiveObjectMapper(song)
+        create_args = {"name": "Drop", "position": 16, "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]}
+        with self.assertRaisesRegex(ValueError, "playhead is moving; retry shortly"):
+            mapper.invoke("arrangement.locator.create", create_args)
+        self.assertEqual([item["name"] for item in mapper.discover("locator")["items"]], ["Intro"], "nothing created before the playhead lands")
+        song.tick()
+        created = mapper.invoke("arrangement.locator.create", create_args)
+        self.assertEqual((created["name"], created["position"]), ("Drop", 16.0))
+        # Deleting a locator away from the playhead follows the same move-then-retry protocol.
+        intro = mapper.discover("locator")["items"][0]
+        delete_args = {"ref": intro["ref"], "expectedObjectIdentity": intro["objectIdentity"], "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]}
+        with self.assertRaisesRegex(ValueError, "playhead is moving; retry shortly"):
+            mapper.invoke("arrangement.locator.delete", delete_args)
+        song.tick()
+        self.assertEqual(mapper.invoke("arrangement.locator.delete", delete_args), {"deleted": intro["ref"]})
+        self.assertEqual([item["name"] for item in mapper.discover("locator")["items"]], ["Drop"])
+
+
+class MainThreadTransportTests(unittest.TestCase):
+    SECRET = "0123456789abcdef0123456789abcdef"
+
+    def setUp(self):
+        import socket as _socket
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM); probe.bind(("127.0.0.1", 0)); self.port = probe.getsockname()[1]; probe.close()
+        self.threads_before = threading.active_count()
+        self.bridge = AbletonMcpBridge(FakeInstance(), {"host": "127.0.0.1", "port": self.port, "secret": self.SECRET})
+        self.clients = []
+
+    def tearDown(self):
+        for client in self.clients: client.close()
+        self.bridge.disconnect()
+
+    def connect(self):
+        import socket as _socket
+        client = _socket.create_connection(("127.0.0.1", self.port), timeout=2); self.clients.append(client)
+        return client, client.makefile("rb")
+
+    def pump_until_readable(self, client, limit=20):
+        """Tick the bridge like Live does; return how many ticks it took for data to arrive."""
+        import select
+        for tick in range(1, limit + 1):
+            self.bridge.update_display()
+            if select.select([client], [], [], 0.02)[0]: return tick
+        self.fail("no data after pumping")
+
+    def request(self, channel, sequence, method="status"):
+        unsigned = channel.bound({"version": PROTOCOL, "id": f"{method}-{sequence}", "method": method, "nonce": f"{sequence:016d}", "sequence": sequence})
+        return json.dumps({**unsigned, "mac": channel.sign(unsigned)}).encode("utf-8") + b"\n"
+
+    def test_requests_are_answered_within_a_tick_on_the_main_thread(self):
+        self.assertEqual(threading.active_count(), self.threads_before, "no accept or worker threads")
+        client, reader = self.connect()
+        self.assertLessEqual(self.pump_until_readable(client), 3)
+        hello = json.loads(reader.readline())
+        self.assertEqual(hello["id"], "hello")
+        channel = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, hello["bridgeEpoch"], hello["connectionChallenge"])
+        self.assertEqual(hello["mac"], channel.sign({key: value for key, value in hello.items() if key != "mac"}))
+        client.sendall(self.request(channel, 1) + self.request(channel, 2))
+        self.assertLessEqual(self.pump_until_readable(client), 3)
+        responses = [json.loads(reader.readline()), json.loads(reader.readline())]
+        self.assertEqual([(item["id"], item["ok"]) for item in responses], [("status-1", True), ("status-2", True)])
+        self.assertTrue(responses[0]["result"]["connected"])
+        self.assertEqual(threading.active_count(), self.threads_before)
+
+    def test_a_failed_authentication_closes_only_that_connection(self):
+        client, reader = self.connect(); self.pump_until_readable(client); hello = json.loads(reader.readline())
+        other, other_reader = self.connect(); self.pump_until_readable(other); other_hello = json.loads(other_reader.readline())
+        forged = AuthenticatedRemoteScript("f" * 32, lambda *_: None, hello["bridgeEpoch"], hello["connectionChallenge"])
+        client.sendall(self.request(forged, 1)); self.pump_until_readable(client)
+        self.assertFalse(json.loads(reader.readline())["ok"])
+        channel = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, other_hello["bridgeEpoch"], other_hello["connectionChallenge"])
+        other.sendall(self.request(channel, 1)); self.pump_until_readable(other)
+        self.assertTrue(json.loads(other_reader.readline())["ok"])
+
+    def test_submissions_from_the_pump_run_inline_and_other_threads_still_queue(self):
+        queue = _MainThreadQueue(); ran = []
+        queue.inline_thread = threading.get_ident()
+        self.assertEqual(queue.submit(lambda: ran.append("inline") or "done"), "done")
+        self.assertEqual(ran, ["inline"])
+        worker_result = []
+        worker = threading.Thread(target=lambda: worker_result.append(queue.submit(lambda: "queued")))
+        worker.start()
+        for _ in range(100):
+            if queue.drain(): break
+            time.sleep(0.01)
+        worker.join(1)
+        self.assertEqual(worker_result, ["queued"])
+
+    def test_disconnect_closes_every_connection(self):
+        client, _ = self.connect(); self.pump_until_readable(client)
+        self.bridge.disconnect()
+        self.assertEqual((len(self.bridge._clients), len(self.bridge._connections)), (0, 0))
+        self.bridge.update_display()

@@ -112,6 +112,26 @@ test("remote adapter delegates discovery with exhaustive kind translation and sc
   } finally { await close(server); }
 });
 
+test("remote adapter retries an operation that waits for Live's playhead, with a fresh authority chain", async () => {
+  const seen: string[] = []; let invokes = 0;
+  const server = framedServer((request, socket) => {
+    seen.push(String(request.method));
+    if (request.method === "status") { socket.write(`${JSON.stringify(response(request.id as string, status({ operations: [...requiredOperations, "locator.add"] })))}\n`); return; }
+    const argsDigest = createHash("sha256").update(canonical(request.args ?? {})).digest("hex");
+    if (request.method === "preflight") socket.write(`${JSON.stringify(response(request.id as string, { preflightToken: "p".repeat(32), confirmation: "c".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), impact: "mutates-live", expiresAt: Date.now() + 5000 }))}\n`);
+    else if (request.method === "prepare") socket.write(`${JSON.stringify(response(request.id as string, { authorityToken: "t".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), expiresAt: Date.now() + 5000 }))}\n`);
+    else if (++invokes === 1) socket.write(`${JSON.stringify(response(request.id as string, "request failed: playhead is moving; retry shortly", false))}\n`);
+    else socket.write(`${JSON.stringify(response(request.id as string, { ref: "1:locator:1", objectIdentity: "live:locator:1", name: "Drop", position: 16, createdFingerprint: "f".repeat(64), ownershipToken: "o".repeat(48) }))}\n`);
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    const result = await adapter.invokeAsync({ operation: "locator.add", args: { name: "Drop", position: 16, expectedCollectionRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 5000, idempotencyKey: "locator-drop-key", transactionId: "locator-transaction" }) as { name?: string };
+    assert.equal(result.name, "Drop");
+    assert.deepEqual(seen, ["status", "preflight", "prepare", "invoke", "preflight", "prepare", "invoke"]);
+  } finally { await adapter?.close(); await close(server); }
+});
+
 test("remote adapter obtains mutation preflight authority with stable transaction idempotency", async () => {
   const seen: Record<string, unknown>[] = []; const idempotencyKeys: unknown[] = [];
   const server = framedServer((request, socket) => {
