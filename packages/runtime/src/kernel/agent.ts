@@ -5,7 +5,7 @@ import type {
   LanguageModelV4Message, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolCall, LanguageModelV4ToolResultPart,
   LanguageModelV4Usage, SharedV4ProviderMetadata,
 } from "@ai-sdk/provider";
-import type { JsonObject, Kernel, KernelEvent, KernelOptions, KernelTool, TurnResult, Usage } from "../core/contracts.js";
+import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
 
@@ -27,13 +27,12 @@ export interface ModelBinding {
 }
 
 /** Plain JSON, owned by Kumi: settled messages only, including provider replay metadata. */
-export interface Checkpoint { version: 1; messages: LanguageModelV4Message[] }
+export interface Checkpoint extends KernelCheckpoint { version: 1; messages: LanguageModelV4Message[] }
 
 export interface AgentKernelOptions extends KernelOptions {
   binding: ModelBinding;
   /** Model calls per turn; each tool round trip is one more. */
   maxSteps?: number;
-  checkpoint?: Checkpoint;
 }
 
 export interface AgentKernel extends Kernel {
@@ -254,9 +253,9 @@ function user(text: string): LanguageModelV4Message {
   return { role: "user", content: [{ type: "text", text }] };
 }
 
-function restore(checkpoint: Checkpoint): LanguageModelV4Message[] {
+function restore(checkpoint: KernelCheckpoint): LanguageModelV4Message[] {
   if (checkpoint?.version !== 1 || !Array.isArray(checkpoint.messages)) throw new Error("Unsupported checkpoint version.");
-  return structuredClone(checkpoint.messages);
+  return structuredClone(checkpoint.messages) as LanguageModelV4Message[];
 }
 
 /** Resolve with the work, or reject as soon as the signal aborts; a late settlement is ignored. */

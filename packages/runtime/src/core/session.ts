@@ -1,5 +1,5 @@
 import type {
-  ConnectionState, Integration, IntegrationFactory, Kernel, KernelFactory, Observation,
+  ConnectionState, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
@@ -32,7 +32,7 @@ export function createSession(options: Options): SessionController {
   let observationLabel: string | undefined;
   let integration: Integration | undefined;
   let integrationGeneration = 0;
-  let kernel: { value: Kernel; key: string; lifetime: AbortController } | undefined;
+  let kernel: { value: Kernel; key: string; revision: string; lifetime: AbortController } | undefined;
   let mustReset = false;
   let turns = 0;
   let nextOperation = 0;
@@ -74,9 +74,17 @@ export function createSession(options: Options): SessionController {
   async function ensureKernel(op: Operation, observation: Observation) {
     assertCurrent(op);
     const identityChanged = kernel !== undefined && kernel.key !== observation.key;
-    if (kernel && (identityChanged || mustReset)) {
+    const revision = observation.revision ?? "";
+    let carried: KernelCheckpoint | undefined;
+    if (kernel && !identityChanged && !mustReset && kernel.revision !== revision) {
+      // Same Set, new tools (say, a first clip made clip tools appear): keep the conversation.
+      if (kernel.value.checkpoint) carried = kernel.value.checkpoint();
+      if (carried) { await dropKernel(); assertCurrent(op); }
+    }
+    if (kernel && (identityChanged || mustReset || kernel.revision !== revision)) {
       await dropKernel(); assertCurrent(op);
-      emit({ type: "notice", message: identityChanged ? "Context identity or tool catalog changed; starting a fresh conversation." : "Cancelled work was discarded; starting a fresh conversation." });
+      emit({ type: "notice", message: identityChanged ? "The open Set changed; starting a fresh conversation."
+        : mustReset ? "Cancelled work was discarded; starting a fresh conversation." : "Kumi's tools changed; starting a fresh conversation." });
       if (identityChanged) turns = op.isTurn ? 1 : 0;
     }
     if (!kernel) {
@@ -86,9 +94,9 @@ export function createSession(options: Options): SessionController {
       op.controller.signal.addEventListener("abort", abortCreation, { once: true });
       let value: Kernel | undefined;
       try {
-        value = await options.kernelFactory({ instructions: observation.instructions, tools: observation.tools, signal: lifetime.signal });
+        value = await options.kernelFactory({ instructions: observation.instructions, tools: observation.tools, signal: lifetime.signal, ...(carried ? { checkpoint: carried } : {}) });
         if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
-        kernel = { value, key: observation.key, lifetime };
+        kernel = { value, key: observation.key, revision, lifetime };
       } catch (error) { lifetime.abort(); throw error; }
       finally { op.controller.signal.removeEventListener("abort", abortCreation); }
     }

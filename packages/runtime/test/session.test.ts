@@ -145,6 +145,30 @@ test("identity change resets conversation; same-identity refresh updates observa
   await h.session.close();
 });
 
+test("a changed tool catalog for the same Set keeps the conversation in a rebuilt kernel", async () => {
+  const created: { checkpoint?: unknown; tools: number }[] = [];
+  const h = harness({ factory: async ({ tools, checkpoint }) => {
+    created.push({ tools: tools.length, ...(checkpoint ? { checkpoint } : {}) });
+    const history: string[] = checkpoint ? [...(checkpoint.messages as string[])] : [];
+    return {
+      async run(input: string) { history.push(input); return { stopReason: "completed" as const }; },
+      async close() {},
+      checkpoint() { return { version: 1 as const, messages: [...history] }; },
+    };
+  } });
+  await h.session.start(); await h.session.submit("one");
+  h.setObservation({ revision: "2", tools: [{ name: "live_clip", description: "clip tool", inputSchema: { type: "object" }, execute: async () => ({ text: "ok" }) }] });
+  await h.session.submit("two");
+  assert.equal(created.length, 2, "a kernel with the new tools");
+  const carried = created[1]?.checkpoint as { version: number; messages: string[] } | undefined;
+  assert.equal(carried?.version, 1);
+  assert.equal(carried?.messages.length, 1, "carrying the settled conversation");
+  assert.ok(carried?.messages[0]?.includes("one"));
+  assert.equal(created[1]?.tools, 1);
+  assert(!h.events.some((e) => e.type === "notice" && /fresh conversation/.test(e.message)), "no reset notice");
+  await h.session.close();
+});
+
 test("disconnect invalidates current observation and cancels; next turn is explicitly inference-only", async () => {
   let calls = 0;
   const h = harness({ run: async () => { if (++calls === 1) return new Promise(() => {}); return { stopReason: "completed" }; } });

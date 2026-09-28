@@ -186,7 +186,8 @@ export function createAbletonIntegration(options: Options): Integration {
         const provenance = typeof status.provenance === "string" ? status.provenance : "unknown";
         const source = provenance === "real-live" && status.adapter === "remote-script" ? "Remote Script · real-live" : `unverified/synthetic fixture · ${provenance}`;
         return {
-          key: JSON.stringify([generation, epoch, identity, tools!.generation]),
+          key: JSON.stringify([generation, epoch, identity]),
+          revision: String(tools!.generation),
           label: `Current open Set: ${name} — ${source}`,
           instructions: INSTRUCTIONS, tools: definitions(),
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,

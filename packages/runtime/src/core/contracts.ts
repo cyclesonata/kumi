@@ -28,15 +28,25 @@ export interface TurnResult {
   usage?: Usage;
 }
 
+/** A kernel's settled conversation as plain JSON; opaque outside the kernel that made it. */
+export interface KernelCheckpoint {
+  readonly version: 1;
+  readonly messages: readonly unknown[];
+}
+
 export interface Kernel {
   run(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void): Promise<TurnResult>;
   close(): Promise<void>;
+  /** The settled conversation, so a kernel with other tools can carry it on. */
+  checkpoint?(): KernelCheckpoint;
 }
 
 export interface KernelOptions {
   instructions: string;
   tools: readonly KernelTool[];
   signal: AbortSignal;
+  /** Continue this conversation instead of starting empty. */
+  checkpoint?: KernelCheckpoint;
 }
 
 export type KernelFactory = (options: KernelOptions) => Promise<Kernel>;
@@ -45,8 +55,10 @@ export type ConnectionState = "disconnected" | "connecting" | "connected" | "err
 export type TurnState = "idle" | "running" | "cancelling" | "closed";
 
 export interface Observation {
-  /** Integration-owned identity/catalog generation. Not a durable project ID. */
+  /** What the conversation is about (the open Set in this Live session). A new key starts a new conversation. Not a durable project ID. */
   key: string;
+  /** Changes that keep the conversation, such as the tool catalog: the kernel is rebuilt with the same history. */
+  revision?: string;
   label: string;
   context: string;
   instructions: string;
