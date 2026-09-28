@@ -3702,7 +3702,11 @@ export class McpHost {
       if (stagingPath.startsWith(this.importStagingDir + sep)) {
         chmodSync(stagingPath, 0o600); unlinkSync(stagingPath);
         const folder = dirname(stagingPath);
-        if (folder !== this.importStagingDir && folder.startsWith(this.importStagingDir + sep)) rmdirSync(folder);
+        if (folder !== this.importStagingDir && folder.startsWith(this.importStagingDir + sep)) {
+          // Live leaves its analysis file (.asd) beside a sample it loaded; the folder is the copy's own.
+          try { unlinkSync(`${stagingPath}.asd`); } catch { /* none written */ }
+          rmdirSync(folder);
+        }
       }
     } catch { /* best-effort staging cleanup */ }
   }

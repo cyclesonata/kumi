@@ -1745,10 +1745,11 @@ test("a new Simpler can arrive with its sample in one change, named as the file 
   assert.equal(applied.state, "applied"); assert.equal(applied.result.samplePath, staged);
   const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === applied.result.ref);
   assert.equal(device.name, "Simpler"); assert.equal(device.samplePath, staged);
+  writeFileSync(`${staged}.asd`, "Live's analysis of the sample");
   const undone = JSON.parse(((await call(4, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "simpler-with-sample-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone");
   assert.equal((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === applied.result.ref), false, "the Simpler goes, with its sample");
-  assert.equal(existsSync(staged), false); assert.equal(readdirSync((host as any).importStagingDir).length, 0, "and so does the staged copy, folder included");
+  assert.equal(existsSync(staged), false); assert.equal(readdirSync((host as any).importStagingDir).length, 0, "and so does the staged copy, with Live's analysis file and its folder");
 });
 
 test("an inserted device someone changed afterwards isn't removed by undo", async () => {
