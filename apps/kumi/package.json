@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "probe:inference": "npm run build && node scripts/probe-inference.mjs",
-    "eval:changes": "npm run build && node scripts/eval-changes.mjs"
+    "eval:changes": "npm run build && node scripts/eval-changes.mjs",
+    "accept:live": "npm run build && node scripts/accept-live.mjs"
   },
   "dependencies": {
     "@kumi/runtime": "0.0.1",

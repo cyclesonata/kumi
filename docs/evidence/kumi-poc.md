@@ -422,6 +422,18 @@ Live was quit (Don't Save) and reopened:
 - Asked "What tempo did I ask you for earlier, and what is it now?", Kumi answered
   "You asked for 119 BPM. It's now 120 BPM": the conversation carried on.
 
+## One command for all of it
+
+`npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change
+Kumi can make through its own tools, undoes each newest first, checks the Set is
+as it was, and times the reads a big Set depends on. It refuses any Set but the
+named one (checked: "The open Set is “Kumi Focus Demo”, not “My Real Album”;
+nothing was changed."). On real Live with bridge 1.0.14 (UTC `2026-09-28T07:40Z`),
+23 of 23 passed: connect 194 ms, first look 407 ms, 4 tracks in 303 ms, the Set
+snapshot for catching up (24 KB) 531 ms after the first look; changes 0.8–2.1 s
+each and undos 0.6–1.7 s; afterwards "Set as it was: tempo 120, 4 tracks, 8
+scenes, 0 locators".
+
 This verifies small-Set inspection, basic focus, catching up, reconnecting and
 all nine kinds of change with their undo on one macOS/Live/model setup, not musical usefulness, listening,
 large Sets, Windows, or adversarial robustness.

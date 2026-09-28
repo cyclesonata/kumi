@@ -245,7 +245,15 @@ npm test                            # no credentials or Live required
 KUMI_TEST_BRIDGE=1 npm test           # also require real no-config MCP interoperability
 npm run probe:inference --workspace @kumi/app   # opt-in authenticated requests
 npm run eval:changes --workspace @kumi/app      # opt-in: how the model uses the change tools (no Live)
+npm run accept:live --workspace @kumi/app -- --set "<Set name>"   # opt-in: every change and its undo on real Live
 ```
 
-Next: changes in producer units (dB, pan, bars), a picture in NOW for each kind
-of change, undo that outlives the connection, and saved sessions.
+`accept:live` changes the open Set and undoes every change, so run it on a
+disposable copy; it refuses any Set but the one named. It needs no sign-in, and
+also times the reads a big Set depends on (tracks, and the Set snapshot Kumi
+catches up from), without touching `~/.kumi`.
+
+Next: a picture in NOW for the kinds of change that have none yet (colour,
+clips, locators, new tracks), bars instead of beats for locators, undo that
+outlives the bridge connection, and the bridge's scale limits (see the evidence,
+"Scale on real Live").
