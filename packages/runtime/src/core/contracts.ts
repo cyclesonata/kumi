@@ -134,6 +134,8 @@ export interface ChangeRecord {
   colors?: { from?: string; to: string };
   /** A new clip's notes, for drawing it: positions in beats from the clip's start (the first 512 notes). */
   clip?: { length: number; notes: ClipNote[] };
+  /** Where a loaded device or a new chain sits, for drawing it. */
+  devices?: DevicePlacement;
   /**
    * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
    * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live. "expired":
@@ -144,6 +146,18 @@ export interface ChangeRecord {
   /** Why an undo didn't happen, in plain words. */
   note?: string;
   at: number;
+}
+
+/**
+ * A device chain by name, for NOW's picture: a track's or a chain's devices in order with the new
+ * one's place, and, inside a rack, the rack's chains side by side and which one it's in.
+ */
+export interface DevicePlacement {
+  devices?: string[];
+  index?: number;
+  rack?: string;
+  chains?: { name: string; devices: string[] }[];
+  chain?: number;
 }
 
 /** What changed in a saved Set while Kumi wasn't running, in plain words. Names are data. */

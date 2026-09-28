@@ -661,7 +661,9 @@ export function createAbletonIntegration(options: Options): Integration {
         return { text: "Kumi couldn't read Live's answer to this change, so it can't confirm whether it happened. Tell the producer to check Live; discover again before more changes.", isError: true };
       }
       const settledSummary = kind.summarize(preview, args, knownTrack, result);
-      const record = newRecord(kind, settledSummary, result.state === "applied" ? "applied" : "unsure", now().getTime());
+      // A change Live can't take back stays in HISTORY as kept, with why, instead of an undo that would fail.
+      const permanent = result.state === "applied" ? kind.permanent?.(args) : undefined;
+      const record = { ...newRecord(kind, settledSummary, result.state === "applied" ? permanent ? "kept" : "applied" : "unsure", now().getTime()), ...(permanent ? { note: permanent } : {}) };
       const field = kind.family === "rename" ? "name" : kind.family === "color" ? "color" : undefined;
       const replaced = field && typeof args.ref === "string" ? known.get(args.ref) : undefined;
       remember(record, transactionId, field && replaced ? { ref: args.ref as string, field, ...(replaced[field] !== undefined ? { value: replaced[field] } : {}) } : undefined);
@@ -686,7 +688,7 @@ export function createAbletonIntegration(options: Options): Integration {
       const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: shortRef(produced.ref) } : {}), ...(lines?.length ? { lines } : {}),
         ...(kind.restructures ? { note: "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
       const full = JSON.stringify({ ...reply, live: shorten(result) });
-      return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" };
+      return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" && !permanent };
     } catch (error) {
       return { text: error instanceof ObservationError ? error.message : "The change failed before anything happened in Live; discover again, then retry.", isError: true };
     }
@@ -819,18 +821,28 @@ export function createAbletonIntegration(options: Options): Integration {
             moreTracks = Boolean(trackPage.nextCursor) || trackPage.truncated === true;
             // And the devices on them, so a request about a track's sound goes straight to its parameters.
             try {
-              const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className"], limit: 100 });
+              const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: 100 });
               const devicesRead = await tools!.call("live_discover", deviceArgs, signal, { host: true }); assertLease(lease, signal);
               if (!devicesRead.isError) {
                 const devicePage = discoveryPayload(devicesRead, "device", epoch);
                 registerRows("device", devicePage.items, deviceArgs);
-                const onTrack = new Map<unknown, JsonObject[]>();
+                // Devices by what holds them: a track, or a rack's chain. A rack lists its chains, empty ones too,
+                // each with its devices, so a request about a layer or a parallel chain goes straight to it.
+                const onTrack = new Map<unknown, JsonObject[]>(); const chainRows: JsonObject[] = [];
                 for (const device of devicePage.items) {
                   if (typeof device.ref !== "string") continue;
                   const name = typeof device.name === "string" ? device.name.slice(0, 120) : null;
                   const type = typeof device.className === "string" && device.className !== name ? device.className.slice(0, 64) : undefined;
-                  onTrack.set(device.parentRef, [...(onTrack.get(device.parentRef) ?? []), { ref: shortRef(device.ref), name, ...(type ? { type } : {}) }]);
+                  const chains = Array.isArray(device.chainList) ? device.chainList.filter((chain): chain is JsonObject => Boolean(chain) && typeof chain === "object" && typeof (chain as JsonObject).ref === "string").slice(0, 32) : [];
+                  chainRows.push(...chains);
+                  const row: JsonObject = { ref: shortRef(device.ref), name, ...(type ? { type } : {}), ...(chains.length ? { chains: chains.map((chain) => ({ ref: shortRef(chain.ref as string), name: typeof chain.name === "string" ? chain.name.slice(0, 120) : null, devices: [] as JsonObject[] })) } : {}) };
+                  onTrack.set(device.parentRef, [...(onTrack.get(device.parentRef) ?? []), row]);
                 }
+                registerRows("chain", chainRows, {});
+                // Nest each chain's devices under it; what's left keyed by a track is the track's own.
+                const byChain = new Map<string, JsonObject[]>();
+                for (const rows of onTrack.values()) for (const row of rows) for (const chain of (row.chains as JsonObject[] | undefined) ?? []) byChain.set(chain.ref as string, chain.devices as JsonObject[]);
+                for (const [parent, rows] of onTrack) { const chain = typeof parent === "string" ? byChain.get(shortRef(parent)) : undefined; if (chain) { chain.push(...rows); onTrack.delete(parent); } }
                 trackList = trackList.map((entry, index) => { const devices = onTrack.get(trackPage.items[index]!.ref); return devices ? { ...entry, devices } : entry; });
                 moreDevices = Boolean(devicePage.nextCursor) || devicePage.truncated === true;
               }
@@ -878,7 +890,8 @@ export function createAbletonIntegration(options: Options): Integration {
       } catch (error) {
         if (lease !== observationGeneration) throw new ObservationError("Observation changed; late refresh discarded");
         refs.clear(); cursors.clear(); currentEpoch = undefined;
-        throw new ObservationError(error instanceof ObservationError ? error.message : "Live observation refresh failed; old observations are not current");
+        // The cause stays with it, for logs and tests; the message is what the producer and model see.
+        throw new ObservationError(error instanceof ObservationError ? error.message : "Live observation refresh failed; old observations are not current", { cause: error });
       }
     },
     async undo(id, signal) {

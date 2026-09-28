@@ -2,7 +2,7 @@
  * Kumi's full-screen terminal app: a header, the conversation, the Live pane (FOCUS, NOW,
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
-import { since, type CatchUp, type ChangeRecord, type ConnectionState, type LiveFocus, type SessionController, type SessionEvent } from "@kumi/runtime";
+import { since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type LiveFocus, type SessionController, type SessionEvent } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -823,6 +823,7 @@ export class TuiApp {
 /** NOW's picture of a change, a line or two: a value moving within its span, or a new clip's notes. */
 export function changePicture(change: ChangeRecord, width: number, depth: ColorDepth = "truecolor"): { text: string; style: Style }[][] | undefined {
   if (change.clip) return clipPicture(change.clip, width);
+  if (change.devices) return devicesPicture(change.devices, width);
   if (change.colors) {
     // Swatches need colours: 16 fold Live's 70 into a few (two different colours could look the same), and none show nothing.
     if (depth === "16" || depth === "none") return undefined;
@@ -839,6 +840,53 @@ export function changePicture(change: ChangeRecord, width: number, depth: ColorD
     return "█".repeat(filled) + "░".repeat(cells - filled);
   };
   return [[{ text: bar(change.from), style: st.faint }, { text: " → ", style: st.faint }, { text: bar(change.to), style: st.accent }]];
+}
+
+type Span = { text: string; style: Style };
+
+/**
+ * Devices in the order sound goes through them, "Operator → Reverb → Saturator", the one at
+ * `lit` bright. When they don't fit, the lit one stays and the far ends give way to "…".
+ */
+function deviceRow(devices: string[], lit: number | undefined, room: number): Span[] {
+  const names = devices.map((name) => truncate(name || "Device", 16));
+  if (!names.length) return [{ text: "empty", style: st.faint }];
+  const arrow = " → "; const cost = (from: number, to: number) => names.slice(from, to + 1).reduce((sum, name) => sum + textWidth(name), 0) + arrow.length * (to - from) + (from > 0 ? 4 : 0) + (to < names.length - 1 ? 4 : 0);
+  let first = lit !== undefined && lit >= 0 && lit < names.length ? lit : names.length - 1; let last = first;
+  for (let grew = true; grew;) {
+    grew = false;
+    if (last < names.length - 1 && cost(first, last + 1) <= room) { last++; grew = true; }
+    if (first > 0 && cost(first - 1, last) <= room) { first--; grew = true; }
+  }
+  const spans: Span[] = first > 0 ? [{ text: "…", style: st.faint }, { text: arrow, style: st.faint }] : [];
+  names.slice(first, last + 1).forEach((name, offset) => {
+    if (offset) spans.push({ text: arrow, style: st.faint });
+    spans.push({ text: name, style: first + offset === lit ? st.accent : st.dim });
+  });
+  if (last < names.length - 1) spans.push({ text: arrow, style: st.faint }, { text: "…", style: st.faint });
+  return spans;
+}
+
+/**
+ * Where a loaded device went, in two lines at most: a track's devices in a row, or a rack's
+ * chains stacked like the parallel branches they are, the chain it went into and a neighbour,
+ * with the new device (or a new, empty chain's name) lit.
+ */
+function devicesPicture(placement: DevicePlacement, width: number): Span[][] | undefined {
+  const chains = placement.chains ?? [];
+  if (!chains.length) return placement.devices?.length ? [deviceRow(placement.devices, placement.index, width)] : undefined;
+  const focus = Math.min(chains.length - 1, Math.max(0, placement.chain ?? 0));
+  const shown = chains.length === 1 ? [focus] : focus < chains.length - 1 ? [focus, focus + 1] : [focus - 1, focus];
+  const more = chains.length - shown.length;
+  const nameWidth = Math.min(10, Math.max(...shown.map((index) => textWidth(chains[index]!.name))));
+  const newChain = placement.index === undefined;
+  return shown.map((index, line) => {
+    const glyph = shown.length === 1 ? "╶ " : line === 0 ? "╭ " : "╰ ";
+    const name = truncate(chains[index]!.name, nameWidth); const tail = line === shown.length - 1 && more ? `  +${more}` : "";
+    const room = Math.max(8, width - 2 - nameWidth - 2 - tail.length);
+    return [{ text: glyph, style: st.faint }, { text: name + " ".repeat(Math.max(0, nameWidth - textWidth(name))) + "  ", style: index === focus ? newChain ? st.accent : st.text : st.faint },
+      ...deviceRow(chains[index]!.devices, index === focus && !newChain ? placement.index : undefined, room), ...(tail ? [{ text: tail, style: st.faint }] : [])];
+  });
 }
 
 /** Braille dots for a cell's 2×4 grid, by row then column. */

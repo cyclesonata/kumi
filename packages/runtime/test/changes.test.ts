@@ -11,7 +11,7 @@ import { createAbletonIntegration } from "../src/integrations/ableton/index.js";
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
-function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
+function bridge(options: { padBatches?: boolean; parameters?: boolean; racks?: boolean } = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = 120;
@@ -24,7 +24,8 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
-    "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : [])];
+    "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
+    ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : [])];
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
@@ -47,6 +48,10 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
           ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color }))
+          : args.kind === "device" && options.racks ? [
+            { ref: "7:device:0:0", parentRef: "7:track:0", name: "Instrument Rack", className: "InstrumentGroupDevice", chainList: [{ ref: "7:chain:0:0:0", name: "Keys" }, { ref: "7:chain:0:0:1", name: "Pad" }] },
+            { ref: "7:device:0:0:0:0", parentRef: "7:chain:0:0:0", name: "Operator", className: "Operator" },
+            { ref: "7:device:0:1", parentRef: "7:track:0", name: "Reverb", className: "Reverb" }]
           : args.kind === "device" && options.parameters ? [{ ref: "7:device:0:0", parentRef: "7:track:0", name: "Operator", className: "Operator" }]
           : args.kind === "parameter" && options.parameters ? ["Osc-A Level", "Filter Freq", "Ae Release"].map((name, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name, value: 0, min: 0, max: 1 })) : [];
         return wrap({ epoch: 7, kind: args.kind, items, revision: "r1", truncated: false });
@@ -62,7 +67,9 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
         if (name === "live_device_preview") return wrap({ ...base, action: args.action, payload: { trackRef: args.trackRef, deviceName: args.deviceName }, sample: { path: args.filePath, size: 18 } });
         if (name === "live_drum_pad_preview" && args.action === "load-samples") return wrap({ ...base, action: args.action, deviceRef: args.deviceRef, pads: (args.pads as JsonObject[]).map((pad) => ({ padRef: `7:drum_pad:0:0:${String(pad.note)}`, note: pad.note, sample: { path: pad.filePath } })) });
         if (name === "live_drum_pad_preview") return wrap({ ...base, action: args.action, padRef: `7:drum_pad:0:0:${String(args.note)}`, note: args.note, sample: { path: args.filePath } });
-        if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef, item: { name: String(args.itemId).split("/").at(-1) } });
+        if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef ?? "7:track:0", item: { name: String(args.itemId).split("/").at(-1) }, ...(args.chainRef ? { chainRef: args.chainRef, chainName: "Keys", rackName: "Instrument Rack" } : {}) });
+        if (name === "live_rack_preview") return wrap({ ...base, action: args.action, rackRef: args.rackRef, rackName: "Instrument Rack", prior: args.action === "add-macro" ? { visibleMacroCount: 8 } : {}, impact: args.action === "insert-chain" ? "momentary-rack-action-no-undo" : "edits-rack" });
+        if (name === "live_chain_mixer_preview") return wrap({ ...base, chainRef: args.chainRef, chainName: "Pad", rackName: "Instrument Rack", prior: { volume: 0.85, pan: 0 }, proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_device_parameter_preview") {
           const device = { ref: args.deviceRef, name: "Operator", trackRef: "7:track:0" };
           const row = (parameterRef: unknown, value: unknown) => ({ ref: parameterRef, name: ["Osc-A Level", "Filter Freq", "Ae Release"][Number(String(parameterRef).split(":").at(-1))], currentValue: 0, proposedValue: value, min: 0, max: 1 });
@@ -91,7 +98,14 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
         if (transaction.name === "live_browser_load_preview") {
           // Like the bridge, a Drum Rack in the Set brings the pad tools.
           if (String(transaction.args.itemId).endsWith("Drum Rack")) { drumRack = true; for (const listener of catalogListeners) listener(); }
+          if (transaction.args.chainRef) return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: "7:device:0:0:2:0",
+            placement: { owner: "chain", rack: "Instrument Rack", chain: 2, index: 0, chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Bells", devices: ["Collision"] }] } });
           return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: `7:device:${String(transaction.args.trackRef).split(":").at(-1)}:0` });
+        }
+        if (transaction.name === "live_rack_preview") {
+          if (transaction.args.action === "insert-chain") return wrap({ transactionId: args.transactionId, state: "applied", chainRef: "7:chain:0:0:2",
+            placement: { owner: "rack", rack: "Instrument Rack", chain: 2, chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Chain", devices: [] }] } });
+          return wrap({ transactionId: args.transactionId, state: "applied", visibleMacroCount: 9 });
         }
         if (transaction.name === "live_device_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:device:0:0", objectIdentity: "device-identity", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_track_properties_preview") {
@@ -135,7 +149,7 @@ function bridge(options: { padBatches?: boolean; parameters?: boolean } = {}) {
 }
 const signal = () => new AbortController().signal;
 function tool(tools: readonly KernelTool[], name: string) { const found = tools.find((item) => item.name === name); assert(found, `${name} is offered`); return found; }
-async function opened(options: { padBatches?: boolean; parameters?: boolean } = {}) {
+async function opened(options: { padBatches?: boolean; parameters?: boolean; racks?: boolean } = {}) {
   const b = bridge(options);
   await b.integration.start(signal());
   const observation = await b.integration.observe(signal());
@@ -343,6 +357,33 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
+
+test("racks: the observation shows chains with their devices; a plan adds a chain, loads into it and balances the chains", async () => {
+  const b = await opened({ racks: true });
+  try {
+    const context = JSON.parse(b.observation.context) as { tracks: { name: string; devices?: JsonObject[] }[] };
+    assert.deepEqual(context.tracks[0]!.devices, [
+      { ref: "device:1", name: "Instrument Rack", type: "InstrumentGroupDevice", chains: [
+        { ref: "chain:1", name: "Keys", devices: [{ ref: "device:2", name: "Operator" }] }, { ref: "chain:2", name: "Pad", devices: [] }] },
+      { ref: "device:3", name: "Reverb" }], "a rack's chains, empty ones too, each with its devices; the track's own devices after");
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "edit_rack", input: { rackRef: "device:1", action: "add-chain" }, as: "bells" },
+      { tool: "load_device", input: { chainRef: "@bells", itemId: "instruments/Collision" } },
+      { tool: "set_chain_mixer", input: { chainRef: "chain:2", volume: 0.6 } },
+      { tool: "edit_rack", input: { rackRef: "device:1", action: "add-macro" } },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.deepEqual(b.requests.filter((request) => request.name === "live_rack_preview").map((request) => request.args.action), ["insert-chain", "add-macro"]);
+    assert.equal(b.requests.find((request) => request.name === "live_browser_load_preview")!.args.chainRef, "7:chain:0:0:2", "the new chain, from the step that made it");
+    const [chain, load, mixer, macro] = b.records.slice(-4);
+    assert.equal(chain!.title, "Added a chain to Instrument Rack"); assert.equal(chain!.state, "kept", "Live can't take a chain away"); assert.match(chain!.note ?? "", /delete it in Live/);
+    assert.deepEqual(chain!.devices, { rack: "Instrument Rack", chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Chain", devices: [] }], chain: 2 });
+    assert.equal(load!.title, "Loaded Collision into Instrument Rack's chain “Keys” on Fixture Bass"); assert.equal(load!.state, "applied");
+    assert.equal(load!.devices?.index, 0); assert.equal(load!.devices?.chain, 2);
+    assert.equal(mixer!.title, "Instrument Rack · chain “Pad” volume down");
+    assert.equal(macro!.title, "Added a macro to Instrument Rack"); assert.deepEqual([macro!.from, macro!.to], [8, 9]);
+  } finally { await b.integration.close(); }
 });
 
 test("each takes several lists of one length together: the same change on several tracks in one step", async () => {

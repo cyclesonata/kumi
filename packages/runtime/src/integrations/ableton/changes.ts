@@ -4,7 +4,7 @@
  * HISTORY entry with its own undo (the bridge's guarded live_undo). Titles are plain words for
  * producers; names inside them are data.
  */
-import type { ChangeFamily, ChangeRecord, JsonObject } from "../../core/contracts.js";
+import type { ChangeFamily, ChangeRecord, DevicePlacement, JsonObject } from "../../core/contracts.js";
 
 /** A track as Kumi last saw it in discovery, for HISTORY's colour chip. */
 export interface KnownTrack { name: string; color?: string }
@@ -49,6 +49,7 @@ export interface ChangeSummary {
   colors?: ChangeRecord["colors"];
   /** What each part of a change did, for the answer; HISTORY shows the title. */
   lines?: string[];
+  devices?: DevicePlacement;
 }
 
 export interface ChangeKind {
@@ -67,7 +68,9 @@ export interface ChangeKind {
   /** Turn the model's input into the preview's; a string refuses, in words for the model. */
   prepare?(input: JsonObject, context: ChangeContext): JsonObject | string | Promise<JsonObject | string>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
-  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" } | undefined;
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" } | undefined;
+  /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
+  permanent?(input: JsonObject): string | undefined;
   /**
    * Offered even while the bridge doesn't advertise it, for changes whose target an earlier step
    * of the same answer creates (a Drum Rack's pads). `unavailable` says what to do first.
@@ -104,6 +107,18 @@ function parametersSummary(preview: JsonObject, input: JsonObject, track: (ref: 
   });
   const count = rows.length || (Array.isArray(input.values) ? input.values.length : 0);
   return { title: `${deviceName ?? "Device"} · ${count} parameter${count === 1 ? "" : "s"}`, lines, ...(known ? { track: known } : {}) };
+}
+
+/** Where a device landed, from the bridge's answer, for NOW's picture. */
+function placement(value: unknown): DevicePlacement | undefined {
+  const row = record(value);
+  const names = (list: unknown) => (Array.isArray(list) ? list.filter((item): item is string => typeof item === "string").slice(0, 16).map((item) => item.slice(0, 64)) : undefined);
+  const chains = Array.isArray(row.chains) ? row.chains.slice(0, 8).map(record).map((chain) => ({ name: label(chain.name) ?? "Chain", devices: names(chain.devices) ?? [] })) : undefined;
+  const devices = names(row.devices);
+  if (!chains?.length && !devices?.length) return undefined;
+  const index = number(row.index); const chain = number(row.chain);
+  return { ...(devices?.length ? { devices } : {}), ...(index !== undefined && index >= 0 ? { index } : {}), ...(label(row.rack) ? { rack: label(row.rack)! } : {}),
+    ...(chains?.length ? { chains } : {}), ...(chain !== undefined && chain >= 0 ? { chain } : {}) };
 }
 
 /** Which instrument a pad's sample goes into: Simpler, or Live 12's Drum Sampler when asked. */
@@ -288,10 +303,12 @@ export const CHANGES: readonly ChangeKind[] = [
       const reference = applied.deviceRef ?? record(applied.created).deviceRef;
       return typeof reference === "string" ? { ref: reference, kind: "device" } : undefined;
     },
-    description: "Load an instrument, effect or preset from Live's Browser onto an empty track. itemId is the Browser path, such as \"instruments/Drum Rack\", \"instruments/Operator\" or \"audio_effects/Reverb\"; live_browser_search finds others. trackRef comes from discovery in this turn or a track just made.",
-    summarize(preview, input, track) {
+    description: "Load an instrument, effect, Max for Live device or preset from Live's Browser onto a track (after its devices) or, with chainRef instead, into a rack's chain (after the chain's devices; a chain can hold a rack too). itemId is the Browser path, such as \"instruments/Drum Rack\", \"instruments/Operator\" or \"audio_effects/Reverb\"; live_browser_search finds others. A track or a chain takes one instrument: to layer instruments, load an Instrument Rack, add a chain for each with edit_rack, and load one into each. trackRef and chainRef come from discovery in this turn or an earlier step.",
+    summarize(preview, input, track, applied) {
       const known = track(preview.trackRef ?? input.trackRef);
-      return { title: `Loaded ${label(record(preview.item).name) ?? "a device"}${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };
+      const into = label(preview.chainName) ? ` into ${label(preview.rackName) ?? "the rack"}'s chain ${quoted(preview.chainName, "")}` : "";
+      const devices = placement(applied?.placement);
+      return { title: `Loaded ${label(record(preview.item).name) ?? "a device"}${into}${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}), ...(devices ? { devices } : {}) };
     },
   },
   {
@@ -316,6 +333,40 @@ export const CHANGES: readonly ChangeKind[] = [
     tool: "set_device_parameters", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter", internal: true,
     description: "Set several parameters of one device as one change; undo restores them all.",
     summarize: (preview, input, track, applied) => parametersSummary(preview, input, track, applied),
+  },
+  {
+    tool: "edit_rack", preview: "live_rack_preview", apply: "live_rack_apply", family: "device", always: true,
+    unavailable: "There's no rack in the Set yet: load an Instrument Rack, Audio Effect Rack or MIDI Effect Rack with load_device first.",
+    description: "Add a chain to a rack (instrument, audio effect or MIDI effect rack): chains play side by side, in parallel; mark it with as and load devices into it with load_device's chainRef. Or add or remove one of the rack's macro controls. rackRef is the rack from discovery in this turn or an earlier step. Macro values are the rack's \"Macro 1\", \"Macro 2\", … parameters: set them with set_device_parameter.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["rackRef", "action"], properties: {
+      rackRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["add-chain", "add-macro", "remove-macro"] },
+      index: { type: "integer", minimum: 0, maximum: 256, description: "For add-chain: where the chain goes, 0 is first; leave it out to add after the last" } } },
+    prepare(input) {
+      const action = input.action === "add-chain" ? "insert-chain" : input.action;
+      if (action !== "insert-chain" && action !== "add-macro" && action !== "remove-macro") return "action is add-chain, add-macro or remove-macro.";
+      return { action, rackRef: input.rackRef ?? null, ...(action === "insert-chain" && typeof input.index === "number" ? { index: input.index } : {}) };
+    },
+    produces(applied) { return typeof applied.chainRef === "string" ? { ref: applied.chainRef, kind: "chain" } : undefined; },
+    permanent: (input) => (input.action === "insert-chain" ? "Live gives Kumi no way to take a chain away again; delete it in Live if you don't want it." : undefined),
+    summarize(preview, input, _track, applied) {
+      const devices = placement(applied?.placement);
+      const rack = devices?.rack ?? label(preview.rackName) ?? "the rack";
+      if (input.action === "insert-chain") return { title: `Added a chain to ${rack}`, ...(devices ? { devices } : {}) };
+      const count = number(applied?.visibleMacroCount); const before = number(record(preview.prior).visibleMacroCount);
+      return { title: input.action === "add-macro" ? `Added a macro to ${rack}` : `Removed a macro from ${rack}`, ...(count !== undefined ? { from: before ?? count, to: count, range: [1, 16] as [number, number] } : {}) };
+    },
+  },
+  {
+    tool: "set_chain_mixer", preview: "live_chain_mixer_preview", apply: "live_chain_mixer_apply", family: "mixer",
+    description: "Balance a rack's chains: one chain's volume (0 to 1; 0.85 is 0 dB), pan (-1 left to 1 right), or chainActivator false to switch the chain off (true on). chainRef comes from discovery in this turn or an earlier step.",
+    summarize(preview) {
+      const prior = record(preview.prior); const proposed = record(preview.proposed);
+      const parts = mixerParts(prior, proposed, {}, {});
+      if (typeof proposed.chainActivator === "boolean") parts.push(proposed.chainActivator ? "on" : "off");
+      const from = number(prior.volume); const to = number(proposed.volume);
+      return { title: `${label(preview.rackName) ? `${label(preview.rackName)} · ` : ""}chain ${quoted(preview.chainName, "")} ${parts.join(", ") || "mixer"}`.replace("  ", " "),
+        ...(from !== undefined && to !== undefined ? { from, to, range: [0, 1] as [number, number] } : {}) };
+    },
   },
   {
     tool: "set_locators", preview: "live_arrangement_section_preview", apply: "live_arrangement_section_apply", family: "locators",
@@ -345,13 +396,14 @@ export const UNDO_DESCRIPTION = "Undo one of your changes from this session: pas
 export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), "live_undo"]);
 
 /** The fields of a change tool's input that name Live objects; they must come from discovery in this turn. */
-export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef"] as const;
+export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef", "chainRef", "rackRef"] as const;
 
 /** A bridge refusal, in plain words for HISTORY. The model also gets the bridge's own message. */
 export function undoNote(message: string): string {
   if (/epoch|connection/i.test(message)) return "Live restarted or reconnected since, so Kumi can't undo this.";
   if (/unknown|expired|not found/i.test(message)) return "Kumi can't undo this anymore.";
   if (/changed|postcondition|no longer|fingerprint|revision|identity|mismatch/i.test(message)) return "It changed in Live since, so Kumi left it as it is.";
+  if (/momentary|structural|not undoable/i.test(message)) return "Live gives Kumi no way to take this back; change it in Live if you need to.";
   return "Live didn't accept the undo, so Kumi left it as it is.";
 }
 
@@ -366,5 +418,6 @@ export function newRecord(kind: ChangeKind, summary: ChangeSummary, state: Chang
   return { id: nextChangeId(), family: kind.family, title: summary.title, state, at,
     ...(summary.track ? { track: summary.track } : {}),
     ...(summary.from !== undefined ? { from: summary.from } : {}), ...(summary.to !== undefined ? { to: summary.to } : {}),
-    ...(summary.range ? { range: summary.range } : {}), ...(summary.clip ? { clip: summary.clip } : {}), ...(summary.colors ? { colors: summary.colors } : {}) };
+    ...(summary.range ? { range: summary.range } : {}), ...(summary.clip ? { clip: summary.clip } : {}), ...(summary.colors ? { colors: summary.colors } : {}),
+    ...(summary.devices ? { devices: summary.devices } : {}) };
 }
