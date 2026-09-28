@@ -539,6 +539,94 @@ Two defects came up on the way:
   another 21 s to stream 127 tokens. Kumi can't help that; its own time
   stayed the same.
 
+## Every Browser device, and racks
+
+On real Live 12.4.15b4 on 2026-09-28, bridge 1.0.28 to 1.0.33, in the
+disposable Kumi Focus Demo Set (every run's leftovers discarded with Don't
+Save).
+
+Every device at the top of Live's Browser, through Kumi's own tools: load it
+onto a new track, read its parameters, change one, then undo the change and
+the load.
+
+| Browser category | Devices | Load, change, undo | Nothing to change |
+| --- | --- | --- | --- |
+| Instruments (Drift, Operator, Drum Sampler, the DS Max for Live drums…) | 23 | 23 | |
+| Audio effects (Reverb, Roar, LFO, Shaper, Envelope Follower…) | 47 | 45 | Spectrum, Tuner |
+| MIDI effects (Arpeggiator, Scale, CC Control, Expression Control…) | 15 | 14 | MIDI Monitor |
+| Max for Live (the blank Max Audio Effect, Instrument, MIDI Effect) | 3 | | all three |
+
+A load took 1.0 to 2.2 s (median 1.2 s), a whole round 2.4 to 6.4 s. Live's
+Modulators category is the Max for Live LFO, Shaper, Envelope Follower and
+the like; Live's scripting API lists them under audio and MIDI effects, where
+they passed. "Nothing to change" devices expose only Device On.
+
+The sweep found these in the bridge, all fixed:
+- **One parameter near zero broke every snapshot.** Both ends sign the same
+  JSON text, and Python wrote 0.0000022 as `2.2e-06` where JavaScript writes
+  `0.0000022`. A parameter restored to almost zero made the whole Set
+  unreadable until Live restarted. Checked against Node on 2,990 values.
+- **Stepped parameters** (Analog's Voices, a switch) reported no steps, so a
+  value between two was sent and refused after the fact; they now report
+  whole steps, and a refusal names them. **Whole-number parameters** Live
+  doesn't mark as stepped (Scale's Base, CC Control's 0–127) now take the
+  nearest whole number.
+- **Max for Live devices** build themselves after the load returns: they
+  loaded but couldn't be undone. The host now waits until the device holds
+  still and records that state with the Remote Script.
+- **Undo** only removed a device when it was alone on its track or chain.
+- A device the producer deletes by hand, or a device Live replaces, left a
+  record that refused every new track before it until Live restarted.
+- Parameter changes on a big Set were refused by a traversal bound counted
+  over every device's parameters, not the one being changed.
+
+The rack lab, through the bridge's tools, on one new MIDI track:
+- An Instrument Rack with two chains: Operator then Reverb in one (series),
+  Wavetable in the other (parallel).
+- Arpeggiator into the Wavetable chain (by name, before the instrument).
+- The Max for Live LFO into it (hot-swapped).
+- An Audio Effect Rack inside the first chain, with Saturator and Utility in
+  its own chain: a device two racks down.
+- The second chain's volume and pan, Macro 1, one more macro.
+- Arpeggiator, Chord and Reverb around the rack on the track.
+- A second instrument into a chain, and onto the track, refused.
+
+Every step took 0.8 to 1.6 s (the Max for Live LFO 2.9 s), and every change
+undid, newest first, except the rack chains and what holds them (below).
+
+What the lab found:
+- **Browser loads into a chain** replaced the whole rack. Live's Browser loads
+  next to what's selected, but an instrument replaces the track's instrument,
+  the rack, whatever is selected. Chains now take a native device by name and
+  a Max for Live device or preset by hot-swap onto a placeholder.
+- **Hot-swapping onto a MIDI effect crashed Live** (EXC_BAD_ACCESS on the main
+  thread, from the Remote Script's call). MIDI effects go into chains by name
+  only, and the rest onto the track.
+- **A device two racks down broke every snapshot**: the wire allowed 16 levels
+  of nesting and that is 17. It's 64 on both ends.
+- **Chain volume and pan never worked on Live**: the Remote Script didn't
+  report the mixer identity the change checks.
+
+Kumi, with `openai-codex/gpt-6-astra`: "On a new MIDI track, build me a
+layered pad: an Instrument Rack with Wavetable on one chain and Operator on
+another, put a Reverb after the Operator, and turn the Operator chain down a
+bit." It took 22.6 s: one reply of 12.5 s, and the 8 changes in 9.5 s. Filling
+an existing rack's empty chains took 13.4 s, and adding an effect to a chain
+took 9.9 to 12.2 s. NOW drew the chains stacked with the new device lit.
+
+What Live's scripting API doesn't expose (as of Live 12.4):
+- Mapping a macro to a parameter, a macro's range, and a macro's name. A rack
+  preset carries them: Live keeps a mapping on the target parameter as a
+  `KeyMidi` on channel 16 whose `NoteOrController` is the macro's index, with
+  the range in its `MidiControllerRange`.
+- Mapping a modulator (LFO, Shaper, Envelope Follower, Expression Control) to a
+  target: the Map button and its target live inside the Max device. Their own
+  controls (rate, depth, shape…) are ordinary parameters.
+- Taking a chain away from a rack. A new chain can't be undone by Kumi, so a
+  rack that gained chains stays.
+- Putting a sample into Drum Sampler (worked around with a preset), and
+  hot-swapping onto a MIDI effect safely (a Live 12.4 beta crash).
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change

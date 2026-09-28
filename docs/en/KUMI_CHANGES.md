@@ -15,7 +15,9 @@ to be dependable.
 | `rename` | A track, scene, clip, device or locator | `live_object_rename_*` |
 | `add_tracks_and_scenes` | New MIDI or audio tracks and named scenes, after the last ones by default | `live_session_structure_*` |
 | `write_midi_clip` | A new MIDI clip with notes in an empty Session slot | `live_midi_clip_*` |
-| `load_device` | An instrument, effect or preset from the Browser onto a track | `live_browser_load_*` |
+| `load_device` | An instrument, effect, Max for Live device or preset from the Browser onto a track, or into a rack's chain (`chainRef`) | `live_browser_load_*` |
+| `edit_rack` | A new chain in a rack (instrument, audio or MIDI effect rack), or a macro added or removed | `live_rack_*` (insert-chain, add-macro, remove-macro) |
+| `set_chain_mixer` | A rack chain's volume, pan, or on/off, to balance chains | `live_chain_mixer_*` |
 | `set_device_parameter` | One device parameter, or several of one device at once (`values`) | `live_device_parameter_*` |
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
@@ -48,6 +50,56 @@ earlier step of the same answer usually loads one.
 
 Not yet: playback and recording, deleting things, saving, files, audio capture
 and listening. The model is told so and says so plainly.
+
+## Racks
+
+The observation lists each rack's chains, empty ones too, with the devices in
+each, so a request about a layer or a parallel chain goes straight to it. A
+layered sound is one plan: a MIDI track, an Instrument Rack on it, a chain per
+layer with `edit_rack` (each named with `as` for the steps after it), and a
+`load_device` into each chain with `chainRef`. Devices loaded into one chain play
+in series; a chain can hold another rack. `set_chain_mixer` balances the chains,
+and a rack's macros are its "Macro 1", "Macro 2"… parameters, set with
+`set_device_parameter`.
+
+Live's Browser loads next to what's selected, and an instrument replaces the
+track's instrument whatever is selected, so the bridge never relies on
+selection for a chain. A native device goes in by name with the chain's own
+`insert_device`, where it belongs: an audio effect at the end, an instrument or a
+MIDI effect after the chain's MIDI effects. A Max for Live device or a preset is
+hot-swapped onto a native placeholder of its kind (Simpler, Utility) put there
+for it. Hot-swapping onto a MIDI effect crashed Live 12.4 beta, so a Max for
+Live MIDI effect or a MIDI effect preset goes onto a track, not into a chain.
+Either way the bridge checks that exactly one new device is in that chain and
+nothing new anywhere else on the track, and takes away anything Live put
+elsewhere.
+
+A track or a chain takes one instrument: loading a second one is refused (Live
+would replace the first), and Kumi layers instruments in a rack's chains
+instead.
+
+In NOW, a load draws where the device went: a track's devices in a row,
+`Operator → Reverb → Utility`, or a rack's chains stacked like the branches they
+are, the new device lit:
+
+```text
+╭ Wavetable  Wavetable → Echo
+╰ Operator   … → Chorus-Ensemble
+```
+
+Live's scripting API has no way to take a chain away again, so a new chain is
+recorded as **kept**, with that reason, instead of offering an undo that would
+fail. What goes into the chain undoes as usual; the rack itself undoes once it's
+as it was made, so a rack that gained chains stays (delete it in Live).
+
+What Live doesn't let Kumi do: map a macro to a parameter or set a macro's
+range, map a modulator (LFO, Shaper, Envelope Follower, Expression Control) to
+a target, or name a macro. Kumi says so, and the producer does it in Live
+(Map, then click the parameter). A rack preset written with its mappings is a
+way around the first two for racks Kumi builds, as the Drum Sampler presets are
+for pads: Live keeps a macro mapping on the target parameter, as a `KeyMidi` on
+channel 16 whose `NoteOrController` is the macro's index, with the range in its
+`MidiControllerRange`.
 
 ## One change, start to finish
 
@@ -127,6 +179,11 @@ changed the same thing afterwards, the undo is refused and the entry reads
 **kept**, with the reason in plain words. Each change keeps a single undo key, so
 retrying an undo that Live didn't confirm reconciles it rather than undoing
 twice.
+
+A loaded device undoes from among others, not only when it's alone, and a Max
+for Live device undoes too: it builds itself after the load returns, so the
+host waits for it to hold still and has the Remote Script record that state
+(`ownership.settle`) as the one undo looks for.
 
 The producer undoes a change by clicking **undo** beside it in HISTORY, with
 `/undo` for the latest one, or by asking Kumi. Undo waits until Kumi's current

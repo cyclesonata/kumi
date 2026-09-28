@@ -152,6 +152,15 @@ remembered.
 Kumi refreshes bounded status and Set observations before each turn, and discovers
 fresh detail references rather than treating names or history as authority.
 
+**Devices and racks.** Kumi loads any device in Live's Browser (every native
+instrument, audio and MIDI effect, Max for Live devices, presets) onto a track
+or into a rack's chain, and changes its parameters. Ask for "a layered pad:
+Wavetable and Operator in an Instrument Rack, a Reverb after the Operator": the
+chains play in parallel, the devices in a chain in series, a chain can hold
+another rack, and NOW draws the chains with the new device lit. Kumi sets
+macros and adds them, but Live doesn't let it map a macro or a modulator to a
+parameter: you do that in Live ([racks](KUMI_CHANGES.md#racks)).
+
 **Speed.** Kumi plans a request in one reply where it can: a whole plan of
 changes goes in one call, and when the plan completes the request Kumi itself
 lists what changed, so the model isn't asked again. Each turn's observation
