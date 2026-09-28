@@ -1,0 +1,424 @@
+[
+ {
+  "name": "server_status",
+  "description": "Return host and Live-adapter availability without changing Live state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_status",
+  "description": "Return truthful Live-adapter status and negotiated capabilities without changing Live state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_snapshot",
+  "description": "Read a bounded snapshot of the current Live Set through the configured adapter.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_discover",
+  "description": "Read bounded, deterministic parent-scoped Live objects without changing Live state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "kind": {
+     "type": "string",
+     "enum": [
+      "set",
+      "track",
+      "return-track",
+      "main-track",
+      "scene",
+      "clip-slot",
+      "session-clip",
+      "arrangement-clip",
+      "note",
+      "locator",
+      "device",
+      "parameter",
+      "selection",
+      "routing-choice",
+      "session-playback"
+     ]
+    },
+    "parent": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
+    },
+    "filter": {
+     "type": "object",
+     "additionalProperties": {
+      "type": [
+       "string",
+       "number",
+       "boolean",
+       "null"
+      ],
+      "maxLength": 256,
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "maxProperties": 8
+    },
+    "fields": {
+     "type": "array",
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+     },
+     "maxItems": 32
+    },
+    "budget": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 10000
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 100
+    },
+    "cursor": {
+     "type": "string",
+     "maxLength": 1024
+    }
+   },
+   "required": [
+    "kind"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_mixer_preview",
+  "description": "Read-only preflight for bounded mixer edits (volume, pan, mute, solo, cue, sends) with prior-value capture.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "trackRef": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
+    },
+    "volume": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1
+    },
+    "pan": {
+     "type": "number",
+     "minimum": -1,
+     "maximum": 1
+    },
+    "mute": {
+     "type": "boolean"
+    },
+    "solo": {
+     "type": "boolean"
+    },
+    "cueVolume": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1
+    },
+    "sends": {
+     "type": "array",
+     "maxItems": 64,
+     "items": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+     }
+    }
+   },
+   "required": [
+    "trackRef"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_mixer_apply",
+  "description": "Apply an exact, unexpired mixer preview with confirmation and idempotency.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 128
+    },
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "apply"
+     ]
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_session_structure_preview",
+  "description": "Preview bounded MIDI/audio track and named scene creation without mutation. Track indexes address only mutable regular tracks, never return or main tracks.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "tracks": {
+     "type": "array",
+     "maxItems": 16,
+     "items": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+       },
+       "kind": {
+        "type": "string",
+        "enum": [
+         "audio",
+         "midi"
+        ]
+       },
+       "index": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1024,
+        "description": "Insertion index in the regular-track collection; omitted entries default to request order."
+       }
+      },
+      "required": [
+       "name",
+       "kind"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "scenes": {
+     "type": "array",
+     "maxItems": 32,
+     "items": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+       },
+       "index": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1024,
+        "description": "Insertion index in the scene collection; omitted entries default to request order."
+       }
+      },
+      "required": [
+       "name"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "required": [
+    "tracks",
+    "scenes"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_session_structure_apply",
+  "description": "Apply a confirmed Session-structure preview once, verify authoritative ordering, and support guarded undo.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string"
+    },
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "apply"
+     ]
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_object_rename_preview",
+  "description": "Preview a purpose-specific track, scene, clip, device, or locator rename against its exact current name.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "kind": {
+     "type": "string",
+     "enum": [
+      "track",
+      "scene",
+      "clip",
+      "device",
+      "locator",
+      "takeLane"
+     ]
+    },
+    "ref": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
+    },
+    "name": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
+    }
+   },
+   "required": [
+    "kind",
+    "ref",
+    "name"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_object_rename_apply",
+  "description": "Apply one exact revision-fenced rename and support guarded undo.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 128
+    },
+    "confirmation": {
+     "type": "string",
+     "const": "apply"
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_tempo_preview",
+  "description": "Preview a reversible tempo change without mutating Live.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "tempo": {
+     "type": "number",
+     "minimum": 20,
+     "maximum": 999
+    }
+   },
+   "required": [
+    "tempo"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_tempo_apply",
+  "description": "Apply an unexpired tempo preview after explicit confirmation and verify the authoritative result.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string"
+    },
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "apply"
+     ]
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_undo",
+  "description": "Undo a verified guarded transaction only when fresh authoritative state still matches its exact postcondition.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string"
+    },
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "undo"
+     ]
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ }
+]

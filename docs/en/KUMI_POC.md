@@ -236,6 +236,7 @@ npm run typecheck
 npm test                            # no credentials or Live required
 KUMI_TEST_BRIDGE=1 npm test           # also require real no-config MCP interoperability
 npm run probe:inference --workspace @kumi/app   # opt-in authenticated requests
+npm run eval:changes --workspace @kumi/app      # opt-in: how the model uses the change tools (no Live)
 ```
 
 Next: changes in producer units (dB, pan, bars), a picture in NOW for each kind

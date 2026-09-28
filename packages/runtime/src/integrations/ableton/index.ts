@@ -227,6 +227,19 @@ export function createAbletonIntegration(options: Options): Integration {
       throw new ObservationError("Cursor is stale or belongs to another query; rediscover without it");
     }
   }
+  /** A track row's mixer, as a producer reads it: values and Live's text, without the bridge's internal references. */
+  function slimMixers(result: CallToolResult): CallToolResult {
+    const content = result.structuredContent as JsonObject | undefined;
+    if (!content || !Array.isArray(content.items) || !content.items.some((item) => item && typeof item === "object" && "mixer" in (item as JsonObject))) return result;
+    const keep = ["volume", "pan", "mute", "solo", "cueVolume", "sends", "volumeDisplay", "panDisplay", "cueVolumeDisplay", "sendDisplays"];
+    const items = content.items.map((item) => {
+      const row = item as JsonObject;
+      if (!row.mixer || typeof row.mixer !== "object") return row;
+      return { ...row, mixer: Object.fromEntries(Object.entries(row.mixer as JsonObject).filter(([key]) => keep.includes(key))) };
+    });
+    const slim = { ...content, items };
+    return { ...result, structuredContent: slim, content: [{ type: "text", text: JSON.stringify(slim) }] };
+  }
   function encode(result: CallToolResult, epoch: number): { text: string; isError: boolean } {
     if (result.isError) return { text: JSON.stringify(result), isError: true };
     const text = JSON.stringify({ mcp: result, observation: { observedAt: now().toISOString(), connectionGeneration: generation, epoch,
@@ -268,7 +281,7 @@ export function createAbletonIntegration(options: Options): Integration {
           assertEpoch(data.epoch, epoch);
         }
       }
-      const encoded = encode(result, epoch);
+      const encoded = encode(name === "live_discover" ? slimMixers(result) : result, epoch);
       if (encoded.isError) { refs.clear(); cursors.clear(); }
       return encoded;
     } catch (error) {

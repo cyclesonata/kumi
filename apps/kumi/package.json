@@ -4,11 +4,17 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22 <23 || >=24 <25" },
+  "engines": {
+    "node": ">=22 <23 || >=24 <25"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "probe:inference": "npm run build && node scripts/probe-inference.mjs"
+    "probe:inference": "npm run build && node scripts/probe-inference.mjs",
+    "eval:changes": "npm run build && node scripts/eval-changes.mjs"
   },
-  "dependencies": { "@kumi/runtime": "0.0.1", "string-width": "8.1.0" }
+  "dependencies": {
+    "@kumi/runtime": "0.0.1",
+    "string-width": "8.1.0"
+  }
 }

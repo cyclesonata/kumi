@@ -14,6 +14,7 @@ function fixture() {
   let identity = "fixture-song-1"; let truncated = false; let next = false;
   let oversized = false; let missing = false; let closes = 0; let fail = false; let looping = false; let stale = false;
   let afterRead: (() => void) | undefined;
+  let mixer: JsonObject | undefined;
   let held: { kind: string; waiting: Promise<void>; started: () => void } | undefined;
   const catalog: Tool[] = ["server_status", "live_status", "live_snapshot", "live_discover"].map((name) => ({
     name, description: "Synthetic fixture tool", inputSchema: { type: "object", properties: {}, additionalProperties: true },
@@ -32,7 +33,7 @@ function fixture() {
       const kind = String(args.kind);
       const set = { ref: `fixture-set-${epoch}`, objectIdentity: identity, name: setName, tempo: 121, playing: false };
       if (name === "live_snapshot") return wrap({ epoch, snapshot: { set, tracks: [] } });
-      const row = kind === "set" ? set : kind === "track" ? { ref: `fixture-track-${epoch}`, parentRef: set.ref, name: trackName, kind: "regular" }
+      const row = kind === "set" ? set : kind === "track" ? { ref: `fixture-track-${epoch}`, parentRef: set.ref, name: trackName, kind: "regular", ...(mixer ? { mixer } : {}) }
         : kind === "device" ? { ref: `fixture-device-${epoch}`, parentRef: `fixture-track-${epoch}`, name: "Fixture Filter", kind: "audio-effect" }
         : { ref: `fixture-param-${epoch}`, parentRef: `fixture-device-${epoch}`, name: "Cutoff", value: 1000 };
       // Like the bridge, rows carry only the requested fields.
@@ -58,6 +59,7 @@ function fixture() {
     /** Live is back, restarted (a new epoch) unless told otherwise. */
     liveBack: (restarted = true) => { connected = true; if (restarted) epoch++; },
     afterRead: (hook: () => void) => { afterRead = hook; },
+    withMixer: (value: JsonObject) => { mixer = value; },
     holdNext: (kind: string) => {
       let release!: () => void; let started!: () => void;
       const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -254,6 +256,18 @@ test("asking for a few fields keeps what Kumi's checks need: the Set's identity 
     assert.equal(devices.isError, false, devices.text);
     const request = f.requests.filter((item) => item.name === "live_discover").at(-1)!;
     assert.deepEqual(request.args.fields, ["ref", "parentRef", "name"]);
+  } finally { await f.integration.close(); }
+});
+
+test("a track's mixer reaches the model as values and Live's text, without internal references", async () => {
+  const f = await started();
+  try {
+    const observation = await f.integration.observe(signal());
+    f.withMixer({ volume: 0.85, pan: 0, volumeDisplay: "0.0 dB", panDisplay: "C", sends: [0], volumeRef: "fixture:parameter:volume", volumeIdentity: "live:1", sendRefs: ["x"] });
+    const result = await tool(observation.tools).execute({ kind: "track", fields: ["mixer"] }, signal());
+    assert.equal(result.isError, false, result.text);
+    const text = result.text;
+    assert.match(text, /"volumeDisplay":"0\.0 dB"/); assert.doesNotMatch(text, /volumeRef|volumeIdentity|sendRefs/);
   } finally { await f.integration.close(); }
 });
 
