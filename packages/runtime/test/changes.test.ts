@@ -19,7 +19,8 @@ function bridge() {
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo",
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
-    "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply"];
+    "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
+    "live_track_properties_preview", "live_track_properties_apply"];
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
     ? { type: "object", properties: { tracks: { type: "array", items: { type: "object", properties: { name: { type: "string" }, kind: { type: "string" }, index: { type: "integer", description: "request order" } } } }, scenes: { type: "array" } } }
     : { type: "object", properties: {}, additionalProperties: true } }));
@@ -47,6 +48,7 @@ function bridge() {
         if (name === "live_tempo_preview") return wrap({ ...base, priorTempo: tempo, proposedTempo: args.tempo });
         if (name === "live_mixer_preview") return wrap({ ...base, trackRef: args.trackRef, prior: { volume: 0.85, pan: 0 }, ...(args.volume === 0.4 ? { priorDisplay: { volume: "0.0 dB", pan: "C" } } : {}), proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
+        if (name === "live_track_properties_preview") return wrap({ ...base, ref: args.ref, prior: { colorIndex: 4 }, proposed: { colorIndex: args.colorIndex } });
         const proposed = [...(Array.isArray(args.tracks) ? args.tracks as JsonObject[] : []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 }))];
         return wrap({ ...base, prior: { tracks: tracks.map((track, index) => ({ ref: `7:track:${index}`, name: track.name, index })), scenes: [] }, proposed });
       }
@@ -64,6 +66,11 @@ function bridge() {
           return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
         }
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
+        if (transaction.name === "live_track_properties_preview") {
+          const track = tracks[Number(String(transaction.args.ref).split(":").at(-1))]!;
+          track.color = 0xe553a0;
+          return wrap({ transactionId: args.transactionId, state: "applied", color: track.color });
+        }
         return wrap({ transactionId: args.transactionId, state: "applied" });
       }
       if (name === "live_undo") {
@@ -153,6 +160,24 @@ test("changes need references from this turn's discovery; HISTORY gets the track
     const next = await b.integration.observe(signal());
     const again = await tool(next.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5 }, signal());
     assert.equal(again.isError, true, "a new turn needs fresh discovery again");
+  } finally { await b.integration.close(); }
+});
+
+test("a colour change shows the old and new colours; later changes, and its undo, keep Kumi's picture of the track right", async () => {
+  const b = await opened();
+  try {
+    await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
+    const result = await tool(b.tools, "set_track_color").execute({ ref: "7:track:0", colorIndex: 12 }, signal());
+    assert.equal(result.isError, false, result.text);
+    const colour = b.records.at(-1)!;
+    assert.equal(colour.title, "Fixture Bass colour changed");
+    assert.deepEqual(colour.colors, { from: "#f7f47c", to: "#e553a0" }, "before from discovery, after from Live's answer");
+    assert.deepEqual(colour.track, { name: "Fixture Bass", color: "#e553a0" }, "the chip shows the track as it looks now");
+    await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6 }, signal());
+    assert.equal(b.records.at(-1)!.track?.color, "#e553a0", "later changes use the new colour");
+    await b.integration.undo!(colour.id, signal());
+    await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5 }, signal());
+    assert.equal(b.records.at(-1)!.track?.color, "#f7f47c", "and the old one again once it's undone");
   } finally { await b.integration.close(); }
 });
 

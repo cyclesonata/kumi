@@ -126,6 +126,8 @@ export interface ChangeRecord {
   to?: number;
   /** The span `from` and `to` move in, for drawing them as positions. */
   range?: [number, number];
+  /** A colour change's before and after, as "#rrggbb", for swatches. */
+  colors?: { from?: string; to: string };
   /** A new clip's notes, for drawing it: positions in beats from the clip's start (the first 512 notes). */
   clip?: { length: number; notes: ClipNote[] };
   /**

@@ -353,6 +353,15 @@ test("NOW draws a change's before and after as positions while it shows the chan
   await h.app.close();
 });
 
+test("NOW draws a colour change as the old and new swatches", () => {
+  const change: ChangeRecord = { id: "c11", family: "color", title: "Bass colour changed", state: "applied", at: 1, colors: { from: "#f7f47c", to: "#e553a0" } };
+  const [line] = changePicture(change, 40)!;
+  assert.deepEqual(line!.map((part) => part.text), ["████", " → ", "████"]);
+  assert.deepEqual([line![0]!.style.fg, line![2]!.style.fg], [[0xf7, 0xf4, 0x7c], [0xe5, 0x53, 0xa0]]);
+  const { colors: _colors, ...plain } = change;
+  assert.deepEqual(changePicture({ ...plain, colors: { to: "#e553a0" } }, 40)![0]!.map((part) => part.text), ["████"], "just the new colour when the old one wasn't known");
+});
+
 test("NOW draws a new clip's notes as a tiny piano roll", async () => {
   const chord: ChangeRecord = { id: "c10", family: "clip", title: "New MIDI clip “Chord” · 3 notes", state: "applied", at: 1,
     clip: { length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) } };

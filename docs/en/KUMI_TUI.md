@@ -78,9 +78,9 @@ old line-by-line interface (`terminal.ts`).
    own units in the title ("-2.0 dB", "159 Hz"). A new MIDI clip shows its notes
    as a two-row braille piano roll: time runs across, higher notes sit higher,
    quieter notes are dimmer, and up to eight pitches get a lane each, so a drum
-   pattern reads as a grid. Still to do: colour swatches (the bridge would need
-   to report the new colour), a device chain, locators on a timeline, and bars
-   instead of beats.
+   pattern reads as a grid. A colour change shows the old and new colours as
+   swatches (`████ → ████`), and the track's chip takes the new colour. Still to
+   do: a device chain, locators on a timeline, and bars instead of beats.
 4. ~~**Saved sessions**~~: done for saved Sets. Opening Kumi on a Set picks up
    its conversation and shows the recent exchanges ("Continuing your conversation
    from 2 hours ago"); `/new` starts afresh.

@@ -7,7 +7,7 @@ import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
-import { CHANGES, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { CHANGES, hexColor, HOST_TOOLS, newRecord, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
@@ -51,9 +51,9 @@ interface Options {
   reconnectIntervalMs?: number;
 }
 
-interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string }
+/** `track` is how a renamed or recoloured track looked before, to put back in Kumi's names when the change is undone. */
+interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string; track?: { ref: string; before: KnownTrack } }
 
-const hexColor = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF ? `#${value.toString(16).padStart(6, "0")}` : undefined);
 const resultText = (result: CallToolResult) => result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 const uncertain = (result: CallToolResult) => (result.structuredContent as JsonObject | undefined)?.state === "uncertain" || /uncertain/i.test(resultText(result));
 
@@ -325,8 +325,8 @@ export function createAbletonIntegration(options: Options): Integration {
   function emitChange(record: ChangeRecord) {
     try { options.onChange?.(structuredClone(record)); } catch { /* a listener failure must not affect Live */ }
   }
-  function remember(record: ChangeRecord, transactionId: string) {
-    changes.set(record.id, { record, transactionId });
+  function remember(record: ChangeRecord, transactionId: string, track?: Applied["track"]) {
+    changes.set(record.id, { record, transactionId, ...(track ? { track } : {}) });
     if (changes.size > MAX_CHANGE_RECORDS) changes.delete(changes.keys().next().value!);
     emitChange(record);
     scheduleSave(20_000);
@@ -468,9 +468,12 @@ export function createAbletonIntegration(options: Options): Integration {
         return { text: "Kumi couldn't read Live's answer to this change, so it can't confirm whether it happened. Tell the producer to check Live; discover again before more changes.", isError: true };
       }
       const record = newRecord(kind, kind.summarize(preview, args, knownTrack, result), result.state === "applied" ? "applied" : "unsure", now().getTime());
-      remember(record, transactionId);
+      const before = (kind.family === "rename" || kind.family === "color") && typeof args.ref === "string" ? known.get(args.ref) : undefined;
+      remember(record, transactionId, before ? { ref: args.ref as string, before } : undefined);
       // A renamed track keeps its new name in later HISTORY entries.
       if (kind.family === "rename" && summary.track && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, name: summary.track.name });
+      // Likewise its new colour.
+      if (kind.family === "color" && record.colors && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, color: record.colors.to });
       if (kind.restructures) {
         refs.clear(); cursors.clear(); known.clear();
         for (const item of Array.isArray(result.created) ? result.created : []) {
@@ -520,6 +523,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const body = payload(result);
     if (body.state !== "undone") return { record: update({ state: "unsure", note: "Live didn't confirm the undo; try again." }), text: JSON.stringify(body), isError: true };
     scheduleSave(20_000);
+    if (entry.track && known.has(entry.track.ref)) known.set(entry.track.ref, entry.track.before);
     return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
   }
   function definitions(): KernelTool[] {

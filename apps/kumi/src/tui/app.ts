@@ -819,6 +819,10 @@ export class TuiApp {
 /** NOW's picture of a change, a line or two: a value moving within its span, or a new clip's notes. */
 export function changePicture(change: ChangeRecord, width: number): { text: string; style: Style }[][] | undefined {
   if (change.clip) return clipPicture(change.clip, width);
+  if (change.colors) {
+    const swatch = (color: string): { text: string; style: Style } => ({ text: "████", style: { fg: hex(color) } });
+    return [[...(change.colors.from ? [swatch(change.colors.from), { text: " → ", style: st.faint }] : []), swatch(change.colors.to)]];
+  }
   if (change.from === undefined || change.to === undefined || !change.range) return undefined;
   const [min, max] = change.range;
   if (!(max > min)) return undefined;

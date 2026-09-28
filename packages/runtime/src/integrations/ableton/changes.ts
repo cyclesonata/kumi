@@ -16,6 +16,7 @@ export interface ChangeSummary {
   to?: number;
   range?: [number, number];
   clip?: ChangeRecord["clip"];
+  colors?: ChangeRecord["colors"];
 }
 
 export interface ChangeKind {
@@ -39,6 +40,8 @@ const label = (value: unknown): string | undefined => (typeof value === "string"
 const quoted = (value: unknown, fallback: string) => { const text = label(value); return text ? `“${text}”` : fallback; };
 export const formatNumber = (value: number, digits = 2) => String(Number(value.toFixed(digits)));
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+/** Live's 0xRRGGBB colours as "#rrggbb". */
+export const hexColor = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF ? `#${value.toString(16).padStart(6, "0")}` : undefined);
 
 /** A value stays whole when a line wraps: its number and unit are joined by a no-break space. */
 const whole = (text: string) => text.trim().replace(/ /g, "\u00a0");
@@ -176,9 +179,12 @@ export const CHANGES: readonly ChangeKind[] = [
   {
     tool: "set_track_color", preview: "live_track_properties_preview", apply: "live_track_properties_apply", family: "color",
     description: "Change a track's colour to one of Live's 70 palette colours (colorIndex 0–69). ref comes from discovery in this turn.",
-    summarize(preview, input, track) {
+    summarize(preview, input, track, applied) {
       const known = track(preview.ref ?? input.ref);
-      return { title: `${known?.name ?? "Track"} colour changed`, ...(known ? { track: known } : {}) };
+      // The track as it looks now: the new colour, when the bridge reported it, for its chip and swatches.
+      const to = hexColor(applied?.color);
+      return { title: `${known?.name ?? "Track"} colour changed`, ...(known ? { track: { ...known, ...(to ? { color: to } : {}) } } : {}),
+        ...(to ? { colors: { ...(known?.color ? { from: known.color } : {}), to } } : {}) };
     },
   },
 ];
@@ -211,5 +217,5 @@ export function newRecord(kind: ChangeKind, summary: ChangeSummary, state: Chang
   return { id: nextChangeId(), family: kind.family, title: summary.title, state, at,
     ...(summary.track ? { track: summary.track } : {}),
     ...(summary.from !== undefined ? { from: summary.from } : {}), ...(summary.to !== undefined ? { to: summary.to } : {}),
-    ...(summary.range ? { range: summary.range } : {}), ...(summary.clip ? { clip: summary.clip } : {}) };
+    ...(summary.range ? { range: summary.range } : {}), ...(summary.clip ? { clip: summary.clip } : {}), ...(summary.colors ? { colors: summary.colors } : {}) };
 }

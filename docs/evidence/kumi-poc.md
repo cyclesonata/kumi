@@ -436,6 +436,11 @@ NOW's picture of it read as a drum grid:
 
 The clip and its track were then undone.
 
+A colour change (UTC `2026-09-28T07:50Z`, bridge 1.0.15 from this repository,
+which Kumi runs): Kumi Keys went from #f7f47c to palette colour 12, which Live
+reported as #e553a0. NOW showed the two swatches, the HISTORY chip took the new
+colour, and the change was undone.
+
 ## One command for all of it
 
 `npm run accept:live --workspace @kumi/app -- --set "<Set name>"` runs every change

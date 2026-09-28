@@ -253,7 +253,7 @@ disposable copy; it refuses any Set but the one named. It needs no sign-in, and
 also times the reads a big Set depends on (tracks, and the Set snapshot Kumi
 catches up from), without touching `~/.kumi`.
 
-Next: a picture in NOW for the kinds of change that have none yet (colour,
-locators, new tracks, devices), bars instead of beats for locators, undo that
+Next: a picture in NOW for the kinds of change that have none yet (locators,
+new tracks, devices), bars instead of beats for locators, undo that
 outlives the bridge connection, and the bridge's scale limits (see the evidence,
 "Scale on real Live").

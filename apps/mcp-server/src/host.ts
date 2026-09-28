@@ -4997,7 +4997,9 @@ export class McpHost {
       if ((verified as unknown as JsonObject).colorIndex !== transaction.payload.colorIndex) throw new Error("track properties postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      // The colour Live shows now, for a picture of the change; the palette index alone doesn't say.
+      const color = (verified as unknown as JsonObject).color;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(typeof color === "number" ? { color } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Track properties state is uncertain; perform fresh discovery before retrying."); }
   }
 
