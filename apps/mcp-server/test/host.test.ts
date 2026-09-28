@@ -7,7 +7,9 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { McpHost, PROTOCOL_VERSION, serve } from "../src/host.js";
+import { liveResources } from "./helpers/drum-sampler.js";
 import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, ownedDeviceFingerprintRow, ownedTrackFingerprintRow, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
@@ -1814,6 +1816,43 @@ test("several parameters of one device change as one transaction: one Live reque
   const refused = text(await call(17, "live_device_parameter_apply", { transactionId: again.transactionId, confirmation: again.confirmation, idempotencyKey: "changed-meanwhile" }));
   assert.match(refused.reason ?? refused.message ?? JSON.stringify(refused), /changed after preview/);
   assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.5, 3, 0], "nothing changes when one moved since the preview");
+});
+
+test("samples go into Drum Samplers on pads through presets Live's Browser loads, which go once loaded", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const library = mkdtempSync(join(tmpdir(), "user-library-"));
+  const host = new McpHost(simulator, { importStagingDir: managed, userLibraryDir: library, liveResourcesDir: liveResources() });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const dir = mkdtempSync(join(tmpdir(), "drum-sampler-samples-"));
+  const files = ["Kick 01.wav", "Snare 808.wav"].map((name) => { const path = join(dir, name); writeFileSync(path, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from(`fake-audio-${name}`)])); return path; });
+  const rackPreview = text(await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" }));
+  const rack = text(await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "ds-drum-rack" })).result;
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  assert.equal(((await call(13, "live_drum_pad_preview", { action: "set", padRef: "drum_pad:x", solo: true, instrument: "Drum Sampler" })) as any).error.code, -32602, "an instrument goes only with loading samples");
+  const preview = text(await call(14, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, instrument: "Drum Sampler", pads: files.map((filePath, index) => ({ note: 36 + index, filePath, allowedRoot: dir })) }));
+  const payload = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.pads as any[];
+  assert.deepEqual(payload.map((pad) => pad.presetItemId.replace(/ [0-9a-f]{8}\.adv$/, " ….adv")), ["user_library/Kumi/Kick 01 ….adv", "user_library/Kumi/Snare 808 ….adv"]);
+  for (const pad of payload) {
+    assert.ok(existsSync(pad.presetPath), "the preset waits in the User Library's Kumi folder");
+    assert.ok(gunzipSync(readFileSync(pad.presetPath)).toString("utf8").includes(`<Path Value="${pad.samplePath}" />`), "holding the staged copy");
+  }
+  const applied = text(await call(15, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "ds-pads-apply" }));
+  assert.equal(applied.state, "applied", JSON.stringify(applied));
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains[0].devices[0].className), ["DrumCell", "DrumCell"]);
+  for (const pad of payload) assert.equal(existsSync(pad.presetPath), false, "loaded, the preset goes");
+  assert.deepEqual(readdirSync(join(library, "Kumi")), [], "the Kumi folder stays, empty, for Live's Browser to keep watching");
+  for (const pad of payload) assert.ok(existsSync(pad.samplePath), "the staged sample stays: the Drum Sampler plays it");
+  const undone = text(await call(16, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "ds-pads-undo" }));
+  assert.equal(undone.state, "undone");
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0]);
+  const single = text(await call(17, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: files[0], allowedRoot: dir, instrument: "Drum Sampler" }));
+  const singlePayload = (host as any).clipLifecycleTransactions.get(single.transactionId).payload;
+  assert.equal(singlePayload.instrument, "Drum Sampler"); assert.ok(existsSync(singlePayload.presetPath));
+  (host as any).clipLifecycleTransactions.delete(single.transactionId);
+  assert.equal(existsSync(singlePayload.presetPath), false, "a preview that's never applied lets its preset go when it expires");
 });
 
 test("devices can be listed Set-wide in pages, for an overview; parameters still need their device", async () => {

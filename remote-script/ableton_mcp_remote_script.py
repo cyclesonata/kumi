@@ -5655,6 +5655,9 @@ class LiveObjectMapper:
         the rack and pointed at the pad's note. A pad that doesn't end up with exactly the new
         chain is cleared again; what each route did is in the error.
         """
+        if args.get("instrument") == "Drum Sampler": return self._drum_pad_load_drum_sampler(args)
+        if args.get("instrument", "Simpler") != "Simpler": raise ValueError("drum pad instrument must be Simpler or Drum Sampler")
+        args = {key: value for key, value in args.items() if key != "instrument"}
         reference = args.get("ref"); sample_path = args.get("samplePath"); name = args.get("name")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:drum_pad:") or set(args) - {"ref", "expectedObjectIdentity", "samplePath", "name"}: raise ValueError("drum pad authority is invalid")
         if not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha())): raise ValueError("samplePath must be an absolute path")
@@ -5739,6 +5742,66 @@ class LiveObjectMapper:
             clear_pad(); raise
         self.refs.touch(reference)
         return {"ref": reference, "objectIdentity": self._capture_object_identity(pad), "chainIdentity": self._capture_object_identity(chain), "deviceIdentity": self._capture_object_identity(simpler), "samplePath": loaded, "route": route, "tried": tried}
+
+    def _browser_item_at(self, item_id: Any) -> Any:
+        """An item in Live's Browser by its path ("user_library/Kumi/…/Kick.adv"), one exact name per
+        level: a sample or preset folder can hold hundreds of files, more than a general walk takes."""
+        parts = item_id.split("/") if isinstance(item_id, str) and 1 <= len(item_id) <= 1024 else []
+        if len(parts) < 2 or len(parts) > 16 or parts[0] not in {"user_library", "user_folders", "packs", "samples", "current_project"} or any(not part for part in parts): raise ValueError("the Browser path is invalid")
+        node = self._read_attr(self._browser(), parts[0])
+        for part in parts[1:]:
+            children = self._items(self._read_attr(node, "children") or [])
+            if len(children) > 8192: raise ValueError("the Browser folder is too big to search")
+            matches = [child for child in children if str(self._read_attr(child, "name") or "") == part]
+            if len(matches) != 1: raise ValueError(f"the preset isn't in Live's Browser at {item_id[:160]}")
+            node = matches[0]
+        if self._read_attr(node, "is_loadable") is False: raise ValueError("the preset in Live's Browser can't be loaded")
+        return node
+
+    def _drum_pad_load_drum_sampler(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A Drum Sampler with a sample on one empty pad, as one change: undo clears the pad.
+
+        Drum Sampler has no call that takes a sample, and Live makes a Simpler of any sample loaded
+        through the Browser. So the bridge writes a Drum Sampler preset holding the sample, and here
+        the Browser loads that preset onto the pad as its hot-swap target, as a drop does. The pad
+        must end up with one chain holding one Drum Sampler, or it's cleared again."""
+        reference = args.get("ref"); item_id = args.get("presetItemId"); name = args.get("name")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:drum_pad:") or set(args) - {"ref", "expectedObjectIdentity", "presetItemId", "name", "instrument"}: raise ValueError("drum pad authority is invalid")
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("drum pad chain name is invalid")
+        pad = self.refs.get(reference)
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(pad), args["expectedObjectIdentity"]): raise ValueError("drum pad identity changed since preview")
+        if self._items(self._read_attr(pad, "chains") or []): raise ValueError("drum pad already has a sound; choose an empty pad")
+        preset = self._browser_item_at(item_id); browser = self._browser()
+        def pad_chains() -> list[Any]: return self._items(self._read_attr(pad, "chains") or [])
+        def clear_pad() -> None:
+            deleter = getattr(pad, "delete_all_chains", None)
+            if callable(deleter) and pad_chains(): deleter()
+        chain = device = None; made = "nothing"
+        try:
+            browser.hotswap_target = pad; target = self._read_attr(browser, "hotswap_target")
+            # Only with the pad confirmed as the target: otherwise Live would load onto the selected track.
+            if target is None or self._capture_object_identity(target) != self._capture_object_identity(pad): raise ValueError("the pad can't be a hot-swap target")
+            browser.load_item(preset)
+            chains = pad_chains(); devices = self._items(self._read_attr(chains[0], "devices") or []) if len(chains) == 1 else []
+            classes = [str(self._read_attr(item, "class_name") or type(item).__name__) for item in devices]
+            if len(chains) == 1 and len(devices) == 1 and classes[0] == "DrumCell": chain, device = chains[0], devices[0]
+            else: made = f"{len(chains)} chains with {', '.join(classes) or 'no device'}"
+        except BaseException as error:
+            made = f"{type(error).__name__}: {str(error)[:80]}"
+        finally:
+            try: browser.hotswap_target = None
+            except BaseException: pass
+        if chain is None:
+            try: clear_pad()
+            except BaseException: pass
+            raise ValueError(f"drum pad load failed: Live made {made} of the Drum Sampler preset")
+        if name is not None:
+            # The chain and the Drum Sampler go by the sample's name, not the preset file's.
+            for target in (chain, device):
+                try: target.name = name
+                except BaseException: pass
+        self.refs.touch(reference)
+        return {"ref": reference, "objectIdentity": self._capture_object_identity(pad), "chainIdentity": self._capture_object_identity(chain), "deviceIdentity": self._capture_object_identity(device), "samplePath": item_id, "route": "preset", "tried": []}
 
     def _drum_pad_load_samples(self, args: dict[str, Any]) -> dict[str, Any]:
         """Samples onto several empty pads in one request, in order: all of them load, or none stays.

@@ -616,7 +616,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "fd6dd68336ff8447d47c0f200bd38bd16c747f2061ca0a7e353d2c502def3c88")
+        self.assertEqual(digest, "67ad0dc75713e87606e17e9650527d206b0335d43a793332c37fd45cbcb4bd36")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -4426,6 +4426,32 @@ class RackMacroDrumPadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"^drum pad 2 of 2: drum pad identity changed since preview"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
             mapper.invoke("drum-pad.load-samples", {"pads": batch})
         self.assertEqual([len(pad.chains) for pad in pads], [0, 0, 0], "the first pad is cleared again")
+        # Drum Sampler: the Browser loads a preset holding the sample onto the pad, as a drop does.
+        ds_song, ds_rack, ds_pads, ds_browser = kit("hotswap"); ds_mapper = LiveObjectMapper(ds_song)
+        class DrumCell(FakeDevice): pass
+        def drum_cell():
+            device = DrumCell(); device.name = "Kick 606"; device.class_name = "DrumCell"; return device
+        preset = type("Item", (), {"name": "Kick 606.adv", "is_loadable": True, "children": []})()
+        folder = type("Item", (), {"name": "abc123", "children": [preset]})()
+        ds_browser.user_library = type("Root", (), {"children": [type("Item", (), {"name": "Kumi", "children": [folder]})()]})()
+        makes = {"device": drum_cell}
+        def load_item(item):
+            chain = type("DrumChain", (), {"name": "Chain", "in_note": ds_browser.hotswap_target.note, "devices": []})()
+            ds_rack.chains.append(chain); chain.devices.append(makes["device"]())
+        ds_browser.load_item = load_item
+        ds_rows = ds_mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"]
+        item_id = "user_library/Kumi/abc123/Kick 606.adv"
+        with patch.object(LiveObjectMapper, "_browser", lambda self: ds_browser):
+            loaded = ds_mapper.invoke("drum-pad.load-sample", {"ref": ds_rows[0]["ref"], "expectedObjectIdentity": ds_rows[0]["objectIdentity"], "instrument": "Drum Sampler", "presetItemId": item_id, "name": "Kick 606"})
+        validate_operation_payload("drum-pad.load-sample", "result", loaded)
+        self.assertEqual(loaded["route"], "preset"); self.assertEqual(ds_pads[0].chains[0].name, "Kick 606"); self.assertEqual(ds_pads[0].chains[0].devices[0].class_name, "DrumCell")
+        self.assertIsNone(ds_browser.hotswap_target, "the target is let go")
+        makes["device"] = simpler
+        with self.assertRaisesRegex(ValueError, r"Live made 1 chains with .* of the Drum Sampler preset"), patch.object(LiveObjectMapper, "_browser", lambda self: ds_browser):
+            ds_mapper.invoke("drum-pad.load-sample", {"ref": ds_rows[1]["ref"], "expectedObjectIdentity": ds_rows[1]["objectIdentity"], "instrument": "Drum Sampler", "presetItemId": item_id})
+        self.assertEqual(len(ds_pads[1].chains), 0, "a pad that didn't get a Drum Sampler is cleared again")
+        with self.assertRaisesRegex(ValueError, "isn't in Live's Browser"), patch.object(LiveObjectMapper, "_browser", lambda self: ds_browser):
+            ds_mapper.invoke("drum-pad.load-sample", {"ref": ds_rows[1]["ref"], "expectedObjectIdentity": ds_rows[1]["objectIdentity"], "instrument": "Drum Sampler", "presetItemId": "user_library/Kumi/abc123/Missing.adv"})
         for bad in ({"pads": [batch[0], batch[0]]}, {"pads": []}, {"pads": batch, "ref": rows[0]["ref"]}):
             with self.assertRaises(ValueError):
                 mapper.invoke("drum-pad.load-samples", bad)

@@ -4854,12 +4854,23 @@
       ],
       "minLength": 1,
       "maxLength": 256
+     },
+     "instrument": {
+      "type": "string",
+      "enum": [
+       "Simpler",
+       "Drum Sampler"
+      ]
+     },
+     "presetItemId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
      }
     },
     "required": [
      "ref",
-     "expectedObjectIdentity",
-     "samplePath"
+     "expectedObjectIdentity"
     ],
     "additionalProperties": false
    },
@@ -4895,7 +4906,8 @@
       "type": "string",
       "enum": [
        "hotswap",
-       "chain"
+       "chain",
+       "preset"
       ]
      },
      "tried": {
@@ -4954,12 +4966,23 @@
          ],
          "minLength": 1,
          "maxLength": 256
+        },
+        "instrument": {
+         "type": "string",
+         "enum": [
+          "Simpler",
+          "Drum Sampler"
+         ]
+        },
+        "presetItemId": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 1024
         }
        },
        "required": [
         "ref",
-        "expectedObjectIdentity",
-        "samplePath"
+        "expectedObjectIdentity"
        ],
        "additionalProperties": false
       }
@@ -5009,7 +5032,8 @@
          "type": "string",
          "enum": [
           "hotswap",
-          "chain"
+          "chain",
+          "preset"
          ]
         },
         "tried": {

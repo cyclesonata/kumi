@@ -659,6 +659,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
       case "browser.inspect": {
         const itemId = stringArg("itemId"); const item = this.browserCatalog().find((candidate) => candidate.id === itemId);
+        // Like Live's Browser once it has indexed the User Library: files there are items.
+        if (!item && itemId.startsWith("user_library/")) return { id: itemId, objectIdentity: `simulator:browser:${itemId}`, name: itemId.split("/").at(-1)!, category: "user_library", path: itemId, isDevice: false };
         if (!item) throw new Error("browser item is not present"); return structuredClone(item);
       }
       case "browser.load": {
@@ -2091,9 +2093,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
 
   /** Like Live: a chain with a Simpler holding the sample, on an empty pad. */
   private loadDrumPadSample(args: Record<string, unknown>, operation: string) {
-    const reference = args.ref; const samplePath = args.samplePath;
+    const reference = args.ref; const drumSampler = args.instrument === "Drum Sampler";
+    // A Drum Sampler comes from the preset the host wrote; a Simpler takes the staged sample itself.
+    const samplePath = drumSampler ? args.presetItemId : args.samplePath;
     if (typeof reference !== "string" || !reference || reference.length > 256) throw new TypeError("ref must be a non-empty string");
-    if (typeof samplePath !== "string" || !samplePath || samplePath.length > 1024) throw new TypeError("samplePath must be a non-empty string");
+    if (typeof samplePath !== "string" || !samplePath || samplePath.length > 1024) throw new TypeError(drumSampler ? "presetItemId must be a non-empty string" : "samplePath must be a non-empty string");
     const found = this.findDrumPad(reference as LiveRef);
     if (!found) throw new Error("drum pad reference is stale or invalid");
     const pad = found.pad;
@@ -2101,11 +2105,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     if (pad.chains.length) throw new Error("drum pad already has a sound; choose an empty pad");
     const chainRef = ref("chain", `${pad.ref}:0`);
     const chain = { ref: chainRef, parentRef: pad.ref, name: typeof args.name === "string" ? args.name : "Simpler", objectIdentity: `simulator:chain:${++this.sequence}`, devices: [] } as unknown as DeviceChain;
-    const device = { ref: ref("device", `${chainRef}:0`), parentRef: chainRef, name: "Simpler", kind: "instrument", className: "OriginalSimpler", parameters: [], objectIdentity: `simulator:device:${++this.sequence}`, enabled: true, samplePath } as unknown as Device;
+    const device = { ref: ref("device", `${chainRef}:0`), parentRef: chainRef, name: drumSampler ? (typeof args.name === "string" ? args.name : "Drum Sampler") : "Simpler", kind: "instrument", className: drumSampler ? "DrumCell" : "OriginalSimpler", parameters: [], objectIdentity: `simulator:device:${++this.sequence}`, enabled: true, samplePath } as unknown as Device;
     (chain as unknown as { devices: Device[] }).devices.push(device);
     pad.chains.push(chain);
     this.emit({ type: "object", ref: pad.ref, payload: { operation } });
-    return { ref: pad.ref, objectIdentity: pad.objectIdentity, chainIdentity: (chain as unknown as { objectIdentity: string }).objectIdentity, deviceIdentity: device.objectIdentity!, samplePath, route: "chain", tried: [] };
+    return { ref: pad.ref, objectIdentity: pad.objectIdentity, chainIdentity: (chain as unknown as { objectIdentity: string }).objectIdentity, deviceIdentity: device.objectIdentity!, samplePath, route: drumSampler ? "preset" : "chain", tried: [] };
   }
 
   private findDrumPad(reference: LiveRef): { device: Device; pad: DrumPad } | undefined {

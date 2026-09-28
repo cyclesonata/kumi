@@ -17,6 +17,7 @@ import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
 import { BatchTransactionManager, BATCH_OPERATION_POLICY_TOOLS, type BatchOperationKind } from "./transactions/batch.js";
+import { defaultUserLibrary, drumSamplerPreset, findDrumSamplerTemplate, liveResourceFolders, type DrumSamplerTemplate } from "./drum-sampler-preset.js";
 import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
 import { SqliteReader } from "./sqlite-reader.js";
 import { LIBRARY_KINDS, LIBRARY_SEARCH_SCHEMA, LibraryUnavailable, SUPPORTED_FILES_SCHEMA_VERSIONS, SUPPORTED_PLUGINS_SCHEMA_VERSIONS, assertSupportedFilesSchema, assertSupportedPluginsSchema, queryLibraryFiles, queryLibraryPlugins, queryLibraryTagVocabulary, type LibraryQuery } from "./library-search.js";
@@ -434,6 +435,7 @@ export class McpHost {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
     if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
     if (value.kind === "drum-pad" && Array.isArray(value.payload?.pads)) for (const pad of value.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
+    if (value.kind === "drum-pad") this.releaseDrumSamplerPresets(value);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
   private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
@@ -442,7 +444,7 @@ export class McpHost {
   private toolPolicy: ToolPolicySpec;
   private toolListFingerprint: string | undefined;
 
-  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string } = {}) {
+  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string; userLibraryDir?: string; liveResourcesDir?: string } = {}) {
     this.midiTransactions = new SessionMidiTransactionManager(adapter);
     this.batchTransactions = new BatchTransactionManager(adapter, (kinds) => {
       for (const kind of kinds) {
@@ -453,6 +455,8 @@ export class McpHost {
     this.deviceStateTransactions = new DeviceStateTransactionManager(adapter);
     this.toolPolicy = options.toolPolicy === undefined ? DEFAULT_TOOL_POLICY : parseToolPolicySpec(options.toolPolicy);
     this.importStagingDirOption = options.importStagingDir;
+    this.userLibraryDirOption = options.userLibraryDir;
+    this.liveResourcesDirOption = options.liveResourcesDir;
   }
 
   /** The effective deployment tool policy (profile plus explicit overrides). */
@@ -3653,6 +3657,57 @@ export class McpHost {
   }
   private importStagingDir: string | undefined;
   private readonly importStagingDirOption: string | undefined;
+  private readonly userLibraryDirOption: string | undefined;
+  private readonly liveResourcesDirOption: string | undefined;
+  private drumSamplerTemplate: DrumSamplerTemplate | undefined;
+
+  /** Where Drum Sampler presets wait for Live's Browser: a Kumi folder in the User Library. */
+  private drumSamplerPresetRoot(): string {
+    const library = this.userLibraryDirOption ?? process.env.ABLETON_MCP_USER_LIBRARY ?? defaultUserLibrary();
+    if (!isAbsolute(library) || !existsSync(library)) throw new Error("drum pad loading into Drum Sampler needs Live's User Library, which wasn't found; use Simpler");
+    return joinPath(realpathSync(library), "Kumi");
+  }
+
+  /** A Drum Sampler preset holding the staged sample, where Live's Browser sees it. */
+  private writeDrumSamplerPreset(stagingPath: string, name: string): { presetPath: string; presetItemId: string } {
+    this.drumSamplerTemplate ??= findDrumSamplerTemplate(this.liveResourcesDirOption ? [this.liveResourcesDirOption] : liveResourceFolders());
+    if (!this.drumSamplerTemplate) throw new Error("drum pad loading into Drum Sampler needs Live 12's Drum Sampler, which wasn't found; use Simpler");
+    // One folder that stays: Live's Browser notices new files in a folder it watches sooner than new folders.
+    const root = this.drumSamplerPresetRoot();
+    mkdirSync(root, { recursive: true, mode: 0o755 });
+    const file = `${name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").trim().slice(0, 100) || "Sample"} ${randomBytes(4).toString("hex")}.adv`;
+    const stats = statSync(stagingPath);
+    writeFileSync(joinPath(root, file), drumSamplerPreset(this.drumSamplerTemplate, { path: stagingPath, size: stats.size, modifiedSeconds: stats.mtimeMs / 1000 }), { flag: "wx", mode: 0o644 });
+    return { presetPath: joinPath(root, file), presetItemId: `user_library/Kumi/${file}` };
+  }
+
+  /** A preset has done its job once Live loaded it (or never will): it goes, with its folder. */
+  private releaseDrumSamplerPreset(presetPath: unknown): void {
+    if (typeof presetPath !== "string") return;
+    try {
+      const root = this.drumSamplerPresetRoot();
+      if (dirname(presetPath) !== root) return;
+      unlinkSync(presetPath);
+    } catch { /* best-effort cleanup */ }
+  }
+
+  /** Waits, briefly, until Live's Browser sees each new preset; Live indexes the User Library on its own time. */
+  private async awaitBrowserItems(itemIds: string[]): Promise<void> {
+    const adapter = this.asyncAdapter(); const deadline = Date.now() + 8_000;
+    for (const itemId of itemIds) {
+      for (;;) {
+        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); break; }
+        catch (cause) { if (Date.now() > deadline) throw new Error("drum pad loading into Drum Sampler timed out waiting for Live's Browser to see the preset; try again or use Simpler", { cause }); }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  }
+
+  /** What the Remote Script gets for one pad: the staged sample for Simpler, the preset for Drum Sampler. */
+  private drumPadLoadArgs(pad: Record<string, unknown>): Record<string, unknown> {
+    const { ref, expectedObjectIdentity, name } = pad;
+    return pad.instrument === "Drum Sampler" ? { ref, expectedObjectIdentity, instrument: "Drum Sampler", presetItemId: pad.presetItemId, name } : { ref, expectedObjectIdentity, samplePath: pad.samplePath, name };
+  }
 
   /** Re-verify the authorized source through one no-follow descriptor (identity
       and size checked before and after a byte-bounded read), then copy the
@@ -3736,6 +3791,12 @@ export class McpHost {
     if (transaction && (transaction.kind === "session-audio-create" || transaction.kind === "simpler")) this.releaseStagedImportFile(transaction.payload?.filePath);
     if (transaction?.kind === "device" || transaction?.kind === "drum-pad") this.releaseStagedImportFile(transaction.payload?.samplePath);
     if (transaction?.kind === "drum-pad" && Array.isArray(transaction.payload?.pads)) for (const pad of transaction.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
+    if (transaction?.kind === "drum-pad") this.releaseDrumSamplerPresets(transaction);
+  }
+
+  private releaseDrumSamplerPresets(transaction: ClipLifecycleTransaction): void {
+    this.releaseDrumSamplerPreset(transaction.payload?.presetPath);
+    if (Array.isArray(transaction.payload?.pads)) for (const pad of transaction.payload.pads as unknown[]) if (isObject(pad)) this.releaseDrumSamplerPreset(pad.presetPath);
   }
 
   private clipAuthorityDigest(snapshot: LiveSnapshot, clipRef: LiveRef): string {
@@ -5810,7 +5871,9 @@ export class McpHost {
   }
 
   private async liveDrumPadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo", "deviceRef", "filePath", "allowedRoot", "pads"])) return error(id, -32602, "action and padRef are required");
+    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo", "deviceRef", "filePath", "allowedRoot", "pads", "instrument"])) return error(id, -32602, "action and padRef are required");
+    if (params.instrument !== undefined && params.instrument !== "Simpler" && params.instrument !== "Drum Sampler") return error(id, -32602, "instrument must be Simpler or Drum Sampler");
+    if (params.instrument !== undefined && params.action !== "load-sample" && params.action !== "load-samples") return error(id, -32602, "an instrument goes only with loading samples");
     if (params.action === "load-samples") return this.liveDrumPadLoadSamplesPreviewAsync(id, params);
     if (params.action !== "set" && params.action !== "delete-all-chains" && params.action !== "load-sample") return error(id, -32602, "action must be set, delete-all-chains, load-sample or load-samples");
     if (params.pads !== undefined) return error(id, -32602, "pads go only with load-samples");
@@ -5842,7 +5905,13 @@ export class McpHost {
         const file = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
         stagingPath = await this.stageVerifiedImportFile(file.canonicalPath, file);
         prior = { file, chainCount: 0 };
-        payload = { action: params.action, ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath: stagingPath, name: basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256) };
+        const name = basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256);
+        payload = { action: params.action, ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath: stagingPath, name };
+        if (params.instrument === "Drum Sampler") {
+          const preset = this.writeDrumSamplerPreset(stagingPath, name);
+          payload = { ...payload, instrument: "Drum Sampler", ...preset };
+          try { await this.awaitBrowserItems([preset.presetItemId]); } catch (cause) { this.releaseDrumSamplerPreset(preset.presetPath); throw cause; }
+        }
       } else {
         if (!(status.operations ?? []).includes("drum-pad.delete-all-chains")) throw new Error("delete-all-chains is unavailable");
         const chains = ((pad.chains as unknown[]) ?? []).filter(isObject).map((chain) => chain.objectIdentity);
@@ -5864,10 +5933,10 @@ export class McpHost {
   private async liveDrumPadLoadSamplesPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
     const requested = params.pads;
     if (!isNonEmptyString(params.deviceRef, 256) || !Array.isArray(requested) || requested.length < 1 || requested.length > MAX_DRUM_PAD_LOADS || ["padRef", "note", "solo", "filePath", "allowedRoot"].some((key) => params[key] !== undefined)) return error(id, -32602, `load-samples takes the rack's deviceRef and 1 to ${MAX_DRUM_PAD_LOADS} pads`);
-    if (!requested.every((item) => isObject(item) && hasOnly(item, ["note", "filePath", "allowedRoot"]) && Number.isInteger(item.note) && (item.note as number) >= 0 && (item.note as number) <= 127)) return error(id, -32602, "each pad needs its note (0-127), a sample file and its allowedRoot");
+    if (!requested.every((item) => isObject(item) && hasOnly(item, ["note", "filePath", "allowedRoot", "instrument"]) && (item.instrument === undefined || item.instrument === "Simpler" || item.instrument === "Drum Sampler") && (params.instrument === undefined || item.instrument === undefined) && Number.isInteger(item.note) && (item.note as number) >= 0 && (item.note as number) <= 127)) return error(id, -32602, "each pad needs its note (0-127), a sample file and its allowedRoot");
     const notes = (requested as JsonObject[]).map((item) => item.note as number);
     if (new Set(notes).size !== notes.length) return error(id, -32602, "each pad takes one sample");
-    const staged: string[] = [];
+    const staged: string[] = []; const presets: string[] = [];
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -5880,16 +5949,26 @@ export class McpHost {
         // The same file authority and verified copy as an audio import, per sample.
         const file = await this.audioImportFileAuthority(item.filePath, item.allowedRoot);
         const samplePath = await this.stageVerifiedImportFile(file.canonicalPath, file); staged.push(samplePath);
-        pads.push({ ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath, name: basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256) });
+        const name = basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256);
+        // Drum Sampler takes its sample through a preset the Browser loads (see drum-sampler-preset.ts).
+        const preset = (item.instrument ?? params.instrument) === "Drum Sampler" ? this.writeDrumSamplerPreset(samplePath, name) : undefined;
+        if (preset) presets.push(preset.presetPath);
+        pads.push({ ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath, name, ...(preset ? { instrument: "Drum Sampler", ...preset } : {}) });
         files.push({ ...file, note: item.note });
       }
+      const waiting = pads.filter((pad) => typeof pad.presetItemId === "string").map((pad) => pad.presetItemId as string);
+      if (waiting.length) await this.awaitBrowserItems(waiting);
       const payload = { action: "load-samples", deviceRef: params.deviceRef, pads };
       const fence = JSON.stringify({ action: "load-samples", ref: params.deviceRef, payload });
       const transaction: ClipLifecycleTransaction = { id: `drumpad_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "drum-pad", fence, payload, prior: { files }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "drum pad");
-      staged.length = 0;
+      staged.length = 0; presets.length = 0;
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: "load-samples", deviceRef: params.deviceRef, pads: pads.map((pad, index) => ({ padRef: pad.ref, note: files[index]!.note, sample: { path: files[index]!.canonicalPath } })), impact: "loads-samples-onto-empty-drum-pads", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { for (const path of staged) this.releaseStagedImportFile(path); return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state."); }
+    } catch (cause) {
+      for (const path of staged) this.releaseStagedImportFile(path);
+      for (const path of presets) this.releaseDrumSamplerPreset(path);
+      return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state.");
+    }
   }
 
   /** The visible pad of a Drum Rack that plays `note` (C1–D#2, 36–51, on a new rack). */
@@ -5938,7 +6017,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
       if (action === "load-samples") {
-        const result = await adapter.invokeAsync({ operation: "drum-pad.load-samples", args: { pads: batch } }, context) as { pads?: unknown };
+        const result = await adapter.invokeAsync({ operation: "drum-pad.load-samples", args: { pads: batch.map((pad) => this.drumPadLoadArgs(pad)) } }, context) as { pads?: unknown };
         const loaded = Array.isArray(result.pads) ? result.pads.filter(isObject) : [];
         if (loaded.length !== batch.length || loaded.some((item, index) => item.ref !== batch[index]!.ref || !isNonEmptyString(item.chainIdentity, 256) || !isNonEmptyString(item.deviceIdentity, 256))) throw new Error("drum pad sample loads did not return exact identities");
         const verified = await adapter.snapshotAsync(context);
@@ -5947,13 +6026,16 @@ export class McpHost {
           if (chains.length !== 1 || chains[0]!.objectIdentity !== item.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
         }
         transaction.created = { pads: loaded };
+        // Loaded: the Drum Sampler presets have done their job.
+        this.releaseDrumSamplerPresets(transaction);
       } else if (action === "load-sample") {
-        const result = await adapter.invokeAsync({ operation: "drum-pad.load-sample", args }, context) as JsonObject;
+        const result = await adapter.invokeAsync({ operation: "drum-pad.load-sample", args: this.drumPadLoadArgs(transaction.payload) }, context) as JsonObject;
         if (!isNonEmptyString(result.chainIdentity, 256) || !isNonEmptyString(result.deviceIdentity, 256)) throw new Error("drum pad sample load did not return exact identities");
         const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
         const chains = (verified.chains as JsonObject[] | undefined) ?? [];
         if (chains.length !== 1 || chains[0]!.objectIdentity !== result.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
         transaction.created = result;
+        this.releaseDrumSamplerPresets(transaction);
       } else if (action === "set") {
         const result = await adapter.invokeAsync({ operation: "drum-pad.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("drum pad change was not confirmed");
