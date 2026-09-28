@@ -1240,11 +1240,13 @@ class LiveObjectMapper:
         return rows
 
     def _flatten_device_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        flattened: list[dict[str, Any]] = []; seen: set[str] = set()
+        flattened: list[dict[str, Any]] = []; seen: dict[str, int] = {}
         def visit(device: dict[str, Any], depth: int = 0) -> None:
             reference = str(device.get("ref", ""))
+            # A Drum Rack's chain rows are shared by the rack and its pads: the very same row again is no ambiguity.
+            if reference in seen and seen[reference] == id(device): return
             if depth > 32 or not reference or reference in seen or len(flattened) >= MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device row hierarchy is cyclic, ambiguous, or exceeds its bound")
-            seen.add(reference); flattened.append(device)
+            seen[reference] = id(device); flattened.append(device)
             for chain in device.get("chains", []):
                 for nested in chain.get("devices", []): visit(nested, depth + 1)
             for pad in device.get("drumPads", []):
@@ -1349,7 +1351,9 @@ class LiveObjectMapper:
                 "showChainDevices": show_devices if isinstance(show_devices, bool) else None,
             }
         if row["canHaveDrumPads"] is True:
-            row["drumPads"] = self._drum_pad_rows(device, device_ref, track_index, path, traversal, depth)
+            # Live lists a Drum Rack's chains both on the rack and on their pads: build each once.
+            known = {chain_row["objectIdentity"]: chain_row for chain_row in row.get("chains") or [] if isinstance(chain_row, dict)}
+            row["drumPads"] = self._drum_pad_rows(device, device_ref, track_index, path, traversal, depth, known)
         return row
 
     def _chain_rows(self, parent: Any, parent_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int) -> list[dict[str, Any]]:
@@ -1386,7 +1390,7 @@ class LiveObjectMapper:
             })
         return rows
 
-    def _drum_pad_rows(self, device: Any, device_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int) -> list[dict[str, Any]]:
+    def _drum_pad_rows(self, device: Any, device_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int, known: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         pads = self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or [])
         if len(pads) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("drum-pad collection exceeds its bound")
@@ -1399,11 +1403,16 @@ class LiveObjectMapper:
                 "name": str(self._read_attr(pad, "name") or f"Pad {pad_index + 1}"),
                 "mute": bool(mute) if isinstance(mute, bool) else None,
                 "objectIdentity": self._capture_object_identity(pad),
-                "chains": self._chain_rows(pad, pad_ref, track_index, f"{path}:{pad_index}", traversal, depth),
+                "chains": self._pad_chain_rows(pad, pad_ref, track_index, f"{path}:{pad_index}", traversal, depth, known or {}),
                 "note": int(note) if isinstance(note, int) and not isinstance(note, bool) else None,
                 "solo": bool(pad_solo) if isinstance(pad_solo, bool) else None,
             })
         return rows
+
+    def _pad_chain_rows(self, pad: Any, pad_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int, known: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        identities = [self._capture_object_identity(chain) for chain in self._items(self._read_attr(pad, "chains") or [])]
+        if identities and all(identity in known for identity in identities): return [known[identity] for identity in identities]
+        return self._chain_rows(pad, pad_ref, track_index, path, traversal, depth)
 
     @staticmethod
     def _items(value: Any) -> list[Any]:
@@ -6756,7 +6765,8 @@ class LiveObjectMapper:
                 if self._capture_object_identity(device) == target_identity: target_occurrences += 1
                 for chain in self._items(self._read_attr(device, "chains") or []): count(chain)
                 for pad in self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or []):
-                    for chain in self._items(self._read_attr(pad, "chains") or []): count(chain)
+                    for chain in self._items(self._read_attr(pad, "chains") or []):
+                        if self._capture_object_identity(chain) not in counted_owners: count(chain)
         for current_track in tracks: count(current_track)
         if target_occurrences != 1: raise ValueError("device target identity is stale or ambiguous")
         def locate(owner: Any, owner_ref: str, path: str, track_index: int, seen: set[str]) -> tuple[Any, Any, int, int, str] | None:

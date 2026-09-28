@@ -4288,6 +4288,31 @@ class RackMacroDrumPadTests(unittest.TestCase):
         result = mapper.invoke("drum-pad.delete-all-chains", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": chains_revision})
         self.assertEqual(result, {"deleted": 2}); self.assertEqual(pad.chains, [])
 
+    def test_a_drum_rack_with_sounds_on_its_pads_reads_and_edits_like_any_rack(self):
+        """Live lists a Drum Rack's chains both on the rack and on their pads; that isn't a cycle."""
+        class EnableableDevice(FakeDevice):
+            def __init__(self):
+                super().__init__()
+                on = FakeParameter(); on.value = 1.0; on.quantization = 1.0
+                self.parameters = [on, FakeParameter()]
+            @property
+            def enabled(self): return self.parameters[0].value == 1.0
+            @enabled.setter
+            def enabled(self, _value): pass
+        song = FakeSong(); kick = EnableableDevice(); kick.name = "Kick"
+        chain = type("DrumChain", (), {"name": "Kick", "devices": [kick], "mute": False, "solo": False, "in_note": 36})()
+        pad = type("DrumPad", (), {"name": "Kick", "mute": False, "note": 36, "solo": False, "chains": [chain]})()
+        empty = type("DrumPad", (), {"name": "Pad", "mute": False, "note": 37, "solo": False, "chains": []})()
+        rack = FakeDevice(); rack.name = "Drum Rack"; rack.can_have_chains = True; rack.can_have_drum_pads = True; rack.chains = [chain]; rack.drum_pads = [pad, empty]
+        song.tracks[0].devices = [rack]; mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertIs(row["drumPads"][0]["chains"][0], row["chains"][0], "the pad shares the rack's row for its chain")
+        self.assertEqual([item["name"] for item in mapper._flatten_device_rows(mapper.snapshot()["tracks"][0]["devices"])], ["Drum Rack", "Kick"], "each device once")
+        track_ref = mapper.discover("track")["items"][0]["ref"]; kick_row = row["chains"][0]["devices"][0]
+        base = {"ref": kick_row["ref"], "expectedObjectIdentity": kick_row["objectIdentity"], "expectedOwnerRef": kick_row["parentRef"], "expectedOwnerIdentity": row["chains"][0]["objectIdentity"], "expectedSiblings": [{"ref": kick_row["ref"], "objectIdentity": kick_row["objectIdentity"]}], "expectedTrackRef": track_ref, "expectedTrackIdentity": mapper.snapshot()["tracks"][0]["objectIdentity"]}
+        changed = mapper.invoke("device.enable", {**base, "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical({"enabled": True}).encode()).hexdigest(), "enabled": False})
+        self.assertTrue(changed["changed"], "a device on a pad is found once and edited")
+
     def test_a_sample_goes_onto_an_empty_drum_pad_by_either_route_and_nothing_half_made_stays(self):
         def simpler():
             device = type("InsertedDevice", (), {"name": "Simpler", "class_name": "OriginalSimpler", "enabled": True, "parameters": [], "sample": None})()
@@ -4323,6 +4348,7 @@ class RackMacroDrumPadTests(unittest.TestCase):
             self.assertEqual(result["route"], route); self.assertEqual(result["samplePath"], "/Samples/Snare.wav")
             self.assertEqual(len(pads[2].chains), 1); self.assertEqual(pads[2].chains[0].name, "Snare"); self.assertEqual(pads[2].chains[0].devices[0].sample.file_path, "/Samples/Snare.wav")
             self.assertEqual([len(pad.chains) for pad in pads[:2]], [0, 0], "no other pad changes")
+            self.assertEqual(len(mapper.snapshot()["tracks"][0]["devices"][0]["drumPads"][2]["chains"]), 1, "and the Set still reads, the pad's chain once")
             with self.assertRaisesRegex(ValueError, "already has a sound"), patch.object(LiveObjectMapper, "_browser", lambda self: browser):
                 mapper.invoke("drum-pad.load-sample", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "samplePath": "/Samples/Other.wav"})
         # Neither route: the chain lands on another pad and can't be moved. It's removed again and the error says what happened.
