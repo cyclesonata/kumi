@@ -36,12 +36,13 @@ const COMMANDS = [
   { name: "/new", about: "Start a fresh conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
   { name: "/refresh", about: "Read your Live Set again" },
+  { name: "/copy", about: "Copy Kumi's last answer" },
   { name: "/status", about: "What Kumi is connected to" },
   { name: "/help", about: "Keys and commands" },
   { name: "/quit", about: "Close Kumi" },
 ] as const;
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
@@ -433,6 +434,7 @@ export class TuiApp {
     }
     if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
     if (command === "/undo") { this.editor.clear(); await this.undo(); return; }
+    if (command === "/copy") { this.editor.clear(); this.copyLastAnswer(); return; }
     this.editor.clear();
     this.scroll = 0;
     try {
@@ -458,6 +460,19 @@ export class TuiApp {
       if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
     }
     this.scheduler.request();
+  }
+
+  /**
+   * Copy the last answer through the terminal's clipboard sequence (OSC 52), which most modern
+   * terminals honour; the text is Kumi's own answer, already free of control characters.
+   */
+  private copyLastAnswer(): void {
+    const answer = [...this.transcript.entries].reverse().find((entry): entry is Assistant => entry.kind === "assistant" && entry.text.trim().length > 0);
+    if (!answer) { this.notice("There's no answer to copy yet.", "info"); return; }
+    const text = sanitizeText(answer.text, this.secrets).trim();
+    if (Buffer.byteLength(text) > 64 * 1024) { this.notice("That answer is too long to copy this way; hold Shift and drag to select it.", "info"); return; }
+    this.tty.write(`\u001b]52;c;${Buffer.from(text, "utf8").toString("base64")}\u0007`);
+    this.notice("Copied Kumi's last answer. If it didn't arrive, your terminal may not allow it: hold Shift and drag to select instead.", "info");
   }
 
   /** Undo one change (the latest undoable one without an id) and say how it went. */

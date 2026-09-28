@@ -25,6 +25,15 @@ export class VirtualTerminal {
         index = end + 1;
         continue;
       }
+      if (data[index] === "\u001b") {
+        // OSC (clipboard, titles) ends at BEL or ESC \; it draws nothing. Other escapes are two characters.
+        if (data[index + 1] === "]") {
+          const bell = data.indexOf("\u0007", index); const st = data.indexOf("\u001b\\", index);
+          const ends = [bell < 0 ? Infinity : bell + 1, st < 0 ? Infinity : st + 2];
+          index = Math.min(...ends, data.length);
+        } else index += 2;
+        continue;
+      }
       let end = index;
       while (end < data.length && data[end] !== "\u001b") end++;
       for (const grapheme of graphemes(data.slice(index, end))) this.print(grapheme);

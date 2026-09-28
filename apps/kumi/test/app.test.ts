@@ -319,6 +319,26 @@ test("/undo takes back the latest change; a refused undo is kept and explained",
   await h.app.close();
 });
 
+test("/copy puts the last answer on the clipboard through the terminal", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/copy\r");
+  assert.ok(has(h.screen(), "There's no answer to copy yet."));
+  await h.type("hi\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "text", text: "Try a **shorter** release." });
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 10 });
+  h.emit({ type: "state", state: "idle" });
+  await h.type("/copy\r");
+  const sequence = /\u001b\]52;c;([A-Za-z0-9+/=]+)\u0007/.exec(h.written);
+  assert.ok(sequence, "an OSC 52 clipboard write");
+  assert.equal(Buffer.from(sequence![1]!, "base64").toString("utf8"), "Try a **shorter** release.");
+  assert.ok(has(h.screen(), "Copied Kumi's last answer."));
+  await h.app.close();
+});
+
 test("the narrow strip offers undo for the latest change", async () => {
   const h = harness(80, 24);
   void h.app.run();

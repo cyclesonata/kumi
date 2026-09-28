@@ -158,6 +158,7 @@ fresh detail references rather than treating names or history as authority.
 | `/help`, `/status` | Keys and commands; what Kumi is connected to |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/refresh` | Read fresh bounded observations without a model answer |
+| `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
 | `/new` | Discard the conversation and reconnect with fresh observations |
 | `/quit`, or Ctrl-C with an empty box | Close Kumi |
 | Esc or Ctrl-C during work | Stop; settled history is kept, unsettled work is discarded |
