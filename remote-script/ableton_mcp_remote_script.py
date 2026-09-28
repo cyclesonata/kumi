@@ -633,6 +633,8 @@ class LiveObjectMapper:
         self._owned_cleanup_tokens: dict[str, dict[str, Any]] = {}
         self._playback_state_digest: str | None = None
         self._playback_revision_counter = 0
+        # Set while reads share one snapshot (see _shared_reads).
+        self._read_cache: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -1509,6 +1511,37 @@ class LiveObjectMapper:
         return None
 
     def snapshot(self) -> dict[str, Any]:
+        cache = self._read_cache
+        if cache is not None and "snapshot" in cache: return cache["snapshot"]
+        result = self._build_snapshot()
+        if cache is not None: cache["snapshot"] = result
+        return result
+
+    def _shared_reads(self, work: Callable[[], Any]) -> Any:
+        """Runs `work` with its reads sharing one snapshot and one index of it.
+
+        The reads run on Live's thread in one go, so Live can't change between them. Checking a
+        mutation's authority reads every reference it names, and a parameter names every
+        parameter of its device: a snapshot per reference made one parameter of a big device take
+        seconds, growing with the Set."""
+        if self._read_cache is not None: return work()
+        self._read_cache = {}
+        try: return work()
+        finally: self._read_cache = None
+
+    def _device_and_parameter_rows(self) -> dict[str, Any]:
+        """Device and parameter rows by reference, the first of each in reading order."""
+        cache = self._read_cache
+        if cache is not None and "rows" in cache: return cache["rows"]
+        rows: dict[str, Any] = {}
+        for track in self.snapshot()["tracks"]:
+            for device in self._flatten_device_rows(track.get("devices", [])):
+                rows.setdefault(device["ref"], device)
+                for parameter in device["parameters"]: rows.setdefault(parameter["ref"], parameter)
+        if cache is not None: cache["rows"] = rows
+        return rows
+
+    def _build_snapshot(self) -> dict[str, Any]:
         set_ref = self.refs.put("set", self.song, "song")
         set_row: dict[str, Any] = {"ref": set_ref, "objectIdentity": self._capture_object_identity(self.song), "name": str(getattr(self.song, "name", "Live Set"))}
         file_path = getattr(self.song, "file_path", None)
@@ -1636,13 +1669,15 @@ class LiveObjectMapper:
         elif kind == "take_lane_clip":
             result = next((clip for track in self.snapshot()["tracks"] for lane in (track.get("takeLanes") or []) for clip in (lane.get("clips") or []) if clip["ref"] == reference), None)
         elif kind in {"device", "parameter"}:
-            for track in self.snapshot()["tracks"]:
-                for device in self._flatten_device_rows(track.get("devices", [])):
-                    if device["ref"] == reference:
-                        result = device; break
-                    result = next((parameter for parameter in device["parameters"] if parameter["ref"] == reference), None)
+            if self._read_cache is not None: result = self._device_and_parameter_rows().get(reference)
+            else:
+                for track in self.snapshot()["tracks"]:
+                    for device in self._flatten_device_rows(track.get("devices", [])):
+                        if device["ref"] == reference:
+                            result = device; break
+                        result = next((parameter for parameter in device["parameters"] if parameter["ref"] == reference), None)
+                        if result is not None: break
                     if result is not None: break
-                if result is not None: break
         elif kind == "locator":
             result = next((item for item in self._locator_items() if item["ref"] == reference), None)
         elif kind == "scene":
@@ -1688,7 +1723,8 @@ class LiveObjectMapper:
         supported = {"set", "song", "track", "group_track", "return_track", "main_track", "scene", "clip_slot", "clip", "session_clip", "arrangement_clip", "note", "locator", "device", "parameter", "selection", "routing_choice", "session_playback"}
         if kind not in supported:
             raise ValueError("unsupported discovery kind")
-        parent_required = {"clip_slot", "clip", "session_clip", "arrangement_clip", "note", "device", "parameter", "routing_choice"}
+        # Devices may be listed Set-wide, in pages, for an overview of what's on each track.
+        parent_required = {"clip_slot", "clip", "session_clip", "arrangement_clip", "note", "parameter", "routing_choice"}
         if kind in parent_required and parent is None:
             raise ValueError("a kind-specific parent reference is required")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
@@ -8727,6 +8763,10 @@ def _authority_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
             }
         identity = {"epoch": mapper.refs.epoch, "capture": capture}
         return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(identity).encode("utf-8")).hexdigest()
+    return mapper._shared_reads(lambda: _reference_state_digest(mapper, args))
+
+
+def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> str:
     references: list[str] = []
     def collect(value: Any, key: str = "") -> None:
         if isinstance(value, dict):

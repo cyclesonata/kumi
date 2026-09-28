@@ -1784,6 +1784,18 @@ test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clear
   assert.equal(other.chains.length, 0, "no other pad changed");
 });
 
+test("devices can be listed Set-wide in pages, for an overview; parameters still need their device", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const devices = await call(11, "live_discover", { kind: "device", fields: ["ref", "parentRef", "name"], limit: 100 }) as any;
+  assert.equal(devices.result.isError, false, JSON.stringify(devices));
+  const items = JSON.parse(devices.result.content[0].text).items as Array<{ parentRef: string }>;
+  assert.ok(items.length > 0 && items.every((item) => item.parentRef.startsWith("track:")), "every track's devices");
+  assert.equal(((await call(12, "live_discover", { kind: "parameter", limit: 100 })) as any).error.code, -32602);
+});
+
 test("samples go onto several empty pads as one change: one transaction, all or none, one undo", async () => {
   const simulator = new DeterministicLiveSimulator();
   const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));

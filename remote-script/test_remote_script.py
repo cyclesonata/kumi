@@ -1371,6 +1371,9 @@ class ControlSurfaceTests(unittest.TestCase):
         track_ref = mapper.discover("track")["items"][0]["ref"]; top = mapper.discover("device", parent=track_ref)["items"]
         self.assertEqual([item["name"] for item in top], ["Rack"])
         nested_rows = mapper.discover("device", parent=top[0]["chains"][0]["ref"])["items"]; self.assertEqual([item["name"] for item in nested_rows], ["Nested Utility", "Sibling"])
+        everywhere = mapper.discover("device", requested_fields=["name"])["items"]
+        self.assertEqual({item["ref"] for item in top + nested_rows} <= {item["ref"] for item in everywhere}, True, "the whole Set's devices, nested ones too, without a parent")
+        with self.assertRaisesRegex(ValueError, "parent reference is required"): mapper.discover("parameter")
         nested_row = nested_rows[0]; parameter = mapper.discover("parameter", parent=nested_row["ref"])["items"][0]
         self.assertEqual(parameter["parentRef"], nested_row["ref"]); self.assertEqual(mapper.get(nested_row["ref"])["name"], "Nested Utility")
         owner_identity = top[0]["chains"][0]["objectIdentity"]; siblings = [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for row in nested_rows]
@@ -4287,6 +4290,22 @@ class RackMacroDrumPadTests(unittest.TestCase):
         chains_revision = hashlib.sha256(mapper._bounded_canonical([mapper._capture_object_identity(chain) for chain in pad.chains]).encode()).hexdigest()
         result = mapper.invoke("drum-pad.delete-all-chains", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": chains_revision})
         self.assertEqual(result, {"deleted": 2}); self.assertEqual(pad.chains, [])
+
+    def test_an_authority_check_reads_the_set_once_however_many_references_it_names(self):
+        """A parameter names every parameter of its device; a snapshot for each made big devices take seconds."""
+        song = FakeSong(); device = FakeDevice(); device.parameters = [FakeParameter() for _ in range(40)]; song.tracks[0].devices = [device]
+        mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        args = {"ref": row["parameters"][0]["ref"], "expectedOwnerRef": row["ref"], "expectedTrackRef": mapper.snapshot()["tracks"][0]["ref"], "expectedSiblings": [{"ref": parameter["ref"], "objectIdentity": parameter["objectIdentity"]} for parameter in row["parameters"]]}
+        builds = []; build = LiveObjectMapper._build_snapshot
+        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self: builds.append(1) or build(self)):
+            shared = _authority_state_digest(mapper, args, "device.parameter.set")
+        self.assertEqual(len(builds), 1, "one snapshot for 42 references")
+        self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
+        alone = remote_module._reference_state_digest(mapper, args)
+        self.assertEqual(shared, alone, "the same digest as reading each reference on its own")
+        device.parameters[3].value = 0.75
+        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "and a later change still shows")
 
     def test_a_drum_rack_with_sounds_on_its_pads_reads_and_edits_like_any_rack(self):
         """Live lists a Drum Rack's chains both on the rack and on their pads; that isn't a cycle."""
