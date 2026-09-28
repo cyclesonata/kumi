@@ -132,6 +132,16 @@ test("the bridge is asked to expose exactly Kumi's tools, or only reads when non
   } finally { await tools.close(); }
 });
 
+test("the bridge's word on bad arguments comes back as a tool error; other failures stay generic", async () => {
+  const { tools } = await open();
+  try {
+    await tools.refresh(freshSignal());
+    const rejected = await tools.call("server_status", { action: "invalid-params" }, freshSignal());
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(rejected.content, [{ type: "text", text: "The bridge rejected the arguments: trackRef is required" }]);
+  } finally { await tools.close(); }
+});
+
 test("bounded SDK shutdown terminates only the owned stubborn child", { timeout: 8_000 }, async () => {
   const sibling = await open();
   try {

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { CallToolResultSchema, ListToolsResultSchema, ToolListChangedNotificationSchema,
+import { CallToolResultSchema, ErrorCode, McpError, ListToolsResultSchema, ToolListChangedNotificationSchema,
   type CallToolResult, type Implementation, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonObject } from "../core/contracts.js";
 
@@ -135,7 +135,14 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
         try {
           // SDK v1 cancellation belongs in the THIRD argument, after the result schema.
           return CallToolResultSchema.parse(await client.callTool({ name, arguments: args }, CallToolResultSchema, { signal, timeout, maxTotalTimeout: timeout }));
-        } catch { throw new Error(signal.aborted ? "MCP request cancelled" : "MCP request failed or timed out"); }
+        } catch (error) {
+          // The bridge's own word on bad arguments ("trackRef is required") helps the caller correct them.
+          if (!signal.aborted && error instanceof McpError && error.code === ErrorCode.InvalidParams) {
+            const reason = error.message.replace(/^(?:MCP error -?\d+:\s*)+/, "").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300);
+            return { isError: true, content: [{ type: "text", text: `The bridge rejected the arguments: ${reason}` }] };
+          }
+          throw new Error(signal.aborted ? "MCP request cancelled" : "MCP request failed or timed out");
+        }
       },
       onCatalogChanged(listener) { catalogListeners.add(listener); return () => { catalogListeners.delete(listener); }; },
       onDisconnect(listener) { disconnectListeners.add(listener); return () => { disconnectListeners.delete(listener); }; },

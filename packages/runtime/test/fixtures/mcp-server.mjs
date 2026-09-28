@@ -1,7 +1,7 @@
 // Synthetic MCP protocol fixture. Never connects to Ableton or claims real-Live provenance.
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeFileSync } from "node:fs";
 const mode = process.argv[2] ?? "normal";
@@ -30,6 +30,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   if (args.action === "exit") { process.exit(0); }
   if (args.action === "notify") { changed = true; await server.sendToolListChanged(); }
   if (args.action === "error") return { isError: true, content: [{ type: "text", text: "fixture failure" }], structuredContent: { fixture: true, reason: "expected-error" } };
+  if (args.action === "invalid-params") throw new McpError(ErrorCode.InvalidParams, "trackRef is required");
   if (args.action === "oversized") return { content: [{ type: "text", text: "x".repeat(70 * 1024) }] };
   if (args.action === "frame") return { content: [{ type: "text", text: "x".repeat(3 * 1024 * 1024) }] };
   const value = { fixture: true, calls: [...calls], cancelled, provenance: "synthetic-fixture", toolPolicy: process.env.ABLETON_MCP_TOOL_POLICY ?? null, toolAllow: process.env.ABLETON_MCP_TOOL_ALLOW ?? null, secretPresent: ["AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "KUMI_AUTH_FILE", "NODE_OPTIONS"].some((key) => Boolean(process.env[key])) };
