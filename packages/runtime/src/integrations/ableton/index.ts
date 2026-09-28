@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ConnectionState, Integration, JsonObject, KernelTool, Observation } from "../../core/contracts.js";
+import type { ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation } from "../../core/contracts.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
+import { startFocusFeed, type FocusFeed } from "./focus.js";
 
 function noAccess(key: string, now: Date): Observation {
   return { key, label: "Inference-only — No Live access", instructions: INSTRUCTIONS, tools: [],
@@ -24,6 +25,9 @@ interface Options {
   now?: () => Date;
   generation?: string;
   onDispatch?: (name: string) => void;
+  /** Basic focus: what the producer is looking at, reported when it changes. */
+  onFocus?: (focus: LiveFocus | null) => void;
+  focusIntervalMs?: number;
 }
 
 export function createAbletonIntegration(options: Options): Integration {
@@ -43,9 +47,10 @@ export function createAbletonIntegration(options: Options): Integration {
   let currentEpoch: number | undefined;
   let currentSet: string | undefined;
   let closing: Promise<void> | undefined;
+  let focusFeed: FocusFeed | undefined;
 
   const invalidate = () => { refs.clear(); cursors.clear(); currentEpoch = undefined; observationGeneration++; };
-  const loseAccess = () => { if (closed || lost) return; lost = true; available = false; invalidate(); options.onConnection("disconnected"); };
+  const loseAccess = () => { if (closed || lost) return; lost = true; available = false; invalidate(); focusFeed?.stop(); options.onConnection("disconnected"); };
   function changed() {
     invalidate(); options.onConnection("error");
     throw new ObservationError("Live epoch or Set identity changed; result discarded. Refresh before continuing.");
@@ -154,6 +159,13 @@ export function createAbletonIntegration(options: Options): Integration {
         tools = new AllowedTools(endpoint);
         unlisten.push(endpoint.onDisconnect(loseAccess), endpoint.onCatalogChanged(invalidate));
         available = true;
+        if (options.onFocus) {
+          const connected = endpoint;
+          // A fixed internal read, not a model tool call: it bypasses the model's allowlist,
+          // which is emptied while the catalog refreshes.
+          focusFeed = startFocusFeed({ read: (signal) => connected.call("live_discover", { kind: "selection", limit: 1 }, signal), onFocus: options.onFocus,
+            ...(options.focusIntervalMs ? { intervalMs: options.focusIntervalMs } : {}) });
+        }
       } catch {
         options.onConnection("error");
         throw new ObservationError("MCP startup failed; verify the standalone bridge and explicit configuration");
@@ -205,7 +217,7 @@ export function createAbletonIntegration(options: Options): Integration {
     },
     close() {
       if (closing) return closing;
-      closed = true; available = false; lifetime.abort(); invalidate();
+      closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop();
       for (const remove of unlisten) remove();
       closing = tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
       return closing;

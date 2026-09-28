@@ -2,7 +2,7 @@
  * Kumi's full-screen terminal app: a header, the conversation, the Live pane (FOCUS, NOW,
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
-import type { ConnectionState, SessionController, SessionEvent } from "@kumi/runtime";
+import type { ConnectionState, LiveFocus, SessionController, SessionEvent } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -10,7 +10,7 @@ import type { InputEvent } from "./keys.js";
 import { Renderer, type Cursor } from "./render.js";
 import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
-import { detectColorDepth, palette, StyleTable, type ColorDepth, type Style } from "./style.js";
+import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
 import { stepLabel, Transcript, type Entry, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { textWidth, truncate } from "./width.js";
@@ -60,6 +60,55 @@ const st = {
   warn: { fg: palette.warn } as Style,
 };
 
+/** A track colour for the focus chip, lightened when too dark to see on Kumi's background. */
+export function chipColor(color: string | undefined): Rgb {
+  if (!color) return palette.dim;
+  let rgb: Rgb;
+  try { rgb = hex(color); } catch { return palette.dim; }
+  const luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  if (luminance >= 0.3) return rgb;
+  const mix = (channel: number) => Math.round(channel + (255 - channel) * 0.45);
+  return [mix(rgb[0]), mix(rgb[1]), mix(rgb[2])];
+}
+
+/**
+ * The focus path, most specific last: track, then the clip in the Clip view, or the
+ * selected device and its last clicked parameter, plus where in Live that is.
+ */
+export function focusPath(focus: LiveFocus): { crumbs: string[]; value?: string; context: string } {
+  const crumbs: string[] = [];
+  let value: string | undefined;
+  if (focus.track) crumbs.push(focus.track.name);
+  if (focus.detail === "Clip" && focus.clip !== undefined) {
+    crumbs.push(focus.clip || "Untitled clip");
+  } else if (focus.detail === "Device" && focus.device) {
+    crumbs.push(focus.device);
+    const parameter = focus.parameter;
+    if (parameter && (!parameter.owner || parameter.owner === focus.device)) {
+      crumbs.push(parameter.name);
+      value = parameter.value;
+    }
+  } else if (focus.scene) {
+    crumbs.push(focus.scene);
+  }
+  const context = [focus.view, focus.detail ? `${focus.detail} view` : undefined,
+    focus.selectedNotes ? `${focus.selectedNotes} ${focus.selectedNotes === 1 ? "note" : "notes"} selected` : undefined]
+    .filter((part): part is string => Boolean(part)).join(" · ");
+  return { crumbs, ...(value ? { value } : {}), context };
+}
+
+/** Fit crumbs into `width` cells: shorten the middle first ("Keys › … › Rate"), then the last. */
+export function fitCrumbs(crumbs: readonly string[], width: number): string[] {
+  const joined = (parts: readonly string[]) => textWidth(parts.join(" › "));
+  if (joined(crumbs) <= width || crumbs.length === 0) return [...crumbs];
+  if (crumbs.length > 2) {
+    const collapsed = [crumbs[0]!, "…", crumbs[crumbs.length - 1]!];
+    if (joined(collapsed) <= width) return collapsed;
+    return [truncate(crumbs[0]!, 12), "…", truncate(crumbs[crumbs.length - 1]!, Math.max(1, width - textWidth(truncate(crumbs[0]!, 12)) - 6))];
+  }
+  return crumbs.length === 2 ? [truncate(crumbs[0]!, 12), truncate(crumbs[1]!, Math.max(1, width - textWidth(truncate(crumbs[0]!, 12)) - 3))] : [truncate(crumbs[0]!, width)];
+}
+
 /** "Current open Set: Night Drive — Remote Script · real-live" → "Night Drive". */
 export function setNameFrom(label: string): string | undefined {
   const match = /^Current open Set: (.*) — [^—]*$/.exec(label);
@@ -78,6 +127,7 @@ export class TuiApp {
   private current: Assistant | undefined;
   private connection: ConnectionState;
   private setName: string | undefined;
+  private focus: LiveFocus | null = null;
   private scroll = 0;
   private lastTotal = 0;
   private page = 10;
@@ -167,6 +217,9 @@ export class TuiApp {
         break;
       case "observation":
         this.setName = setNameFrom(event.label);
+        break;
+      case "focus":
+        this.focus = event.focus;
         break;
       case "notice":
         this.notice(event.message, "info");
@@ -497,13 +550,33 @@ export class TuiApp {
     return [{ text: "Live isn't connected", style: st.dim }];
   }
 
+  /** Draw "■ Track › Device › Parameter" (and, in the pane, where in Live) when focus is known. */
+  private drawFocusPath(screen: Screen, x: number, y: number, width: number, withContext: boolean): boolean {
+    if (this.connection !== "connected" || !this.focus?.track) return false;
+    const { crumbs, value, context } = focusPath(this.focus);
+    const room = Math.max(1, width - 2);
+    // The path stays whole where possible; a parameter's value moves to the second line when tight.
+    const inline = value !== undefined && textWidth(`${crumbs.join(" › ")} · ${value}`) <= room;
+    const parts = fitCrumbs(crumbs, inline ? room - textWidth(` · ${value}`) : room);
+    let column = screen.put(x, y, "■", { fg: chipColor(this.focus.track.color) });
+    column = screen.put(column, y, " ", st.text);
+    parts.forEach((part, index) => {
+      if (index > 0) column = screen.put(column, y, " › ", st.faint);
+      column = screen.put(column, y, part, index === parts.length - 1 && parts.length > 1 ? st.bright : st.text);
+    });
+    if (inline) screen.put(column, y, ` · ${value}`, st.bright);
+    const second = [inline ? undefined : value, context].filter(Boolean).join(" · ");
+    if (withContext && second) screen.put(x + 2, y + 1, truncate(second, Math.max(1, width - 2)), st.dim);
+    return true;
+  }
+
   private drawPane(screen: Screen, area: Rect): void {
     screen.fill(area, st.surface);
     const x = area.x + 2;
     const width = area.width - 4;
     const put = (row: number, text: string, style: Style) => screen.put(x, area.y + row, truncate(text, width), style);
     put(1, "FOCUS", st.label);
-    this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
+    if (!this.drawFocusPath(screen, x, area.y + 2, width, true)) this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
     put(6, "NOW", st.label);
     const now = this.nowLine();
     if (now.dot) {
@@ -523,7 +596,7 @@ export class TuiApp {
     const focus = this.focusLines()[0]!;
     const now = this.nowLine();
     const right = now.dot ? ` ${now.label}` : "";
-    screen.put(2, area.y, truncate(focus.text, Math.max(1, area.width - 16)), focus.style);
+    if (!this.drawFocusPath(screen, 2, area.y, Math.max(1, area.width - 16), false)) screen.put(2, area.y, truncate(focus.text, Math.max(1, area.width - 16)), focus.style);
     if (now.dot) {
       const at = area.width - 2 - textWidth(right) - 1;
       screen.put(at, area.y, "●", now.dot);

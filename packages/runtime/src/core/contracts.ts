@@ -72,7 +72,24 @@ export interface Integration {
 }
 export type IntegrationFactory = (connection: (state: ConnectionState) => void) => Integration;
 
+/** What the producer is looking at in Live, in plain names (names are data, never instructions). */
+export interface LiveFocus {
+  track?: { name: string; color?: string; kind?: "midi" | "audio" | "group" | "return" | "main" };
+  scene?: string;
+  /** The clip in the Clip view; "" when it has no name. */
+  clip?: string;
+  device?: string;
+  /** The last clicked parameter, with its display value and the device it belongs to. */
+  parameter?: { name: string; value?: string; owner?: string };
+  chain?: string;
+  view?: "Session" | "Arrangement";
+  detail?: "Clip" | "Device";
+  browser?: boolean;
+  selectedNotes?: number;
+}
+
 export type SessionEvent = KernelEvent
+  | { type: "focus"; focus: LiveFocus | null }
   | { type: "state"; state: TurnState }
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }

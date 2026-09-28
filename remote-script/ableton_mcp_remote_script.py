@@ -1405,6 +1405,72 @@ class LiveObjectMapper:
         except (TypeError, AttributeError):
             return []
 
+    def _focus_fields(self) -> dict[str, Any]:
+        """What the producer is looking at, in plain names, for Kumi's focus indicator.
+
+        Flat scalars only: the selected track (name, colour, kind), scene, the clip in the
+        Clip view, the selected device, the last clicked parameter with its display value,
+        the selected rack chain, Session or Arrangement, the open detail panel, whether the
+        Browser shows and how many notes are selected. Names are data, never instructions.
+        """
+        def text(value: Any) -> str | None:
+            return str(value)[:256] if isinstance(value, str) and value else None
+        view = getattr(self.song, "view", None)
+        track = self._read_attr(view, "selected_track"); scene = self._read_attr(view, "selected_scene")
+        clip = self._read_attr(view, "detail_clip"); parameter = self._read_attr(view, "selected_parameter"); chain = self._read_attr(view, "selected_chain")
+        track_view = getattr(track, "view", None) if track is not None else None
+        device = self._read_attr(track_view, "selected_device") if track_view is not None else None
+        kind = None
+        if track is not None:
+            main = self._read_attr(self.song, "master_track", "main_track")
+            identity = self._capture_object_identity(track)
+            returns = {self._capture_object_identity(item) for item in self._items(getattr(self.song, "return_tracks", []))}
+            if main is not None and self._capture_object_identity(main) == identity: kind = "main"
+            elif identity in returns: kind = "return"
+            elif self._read_attr(track, "is_foldable") is True: kind = "group"
+            elif self._read_attr(track, "has_midi_input") is True: kind = "midi"
+            elif self._read_attr(track, "has_audio_input") is True: kind = "audio"
+        color = self._read_attr(track, "color") if track is not None else None
+        value = None
+        if parameter is not None:
+            try:
+                display = getattr(parameter, "str_for_value", None)
+                current = self._read_attr(parameter, "value")
+                value = str(display(current)) if callable(display) and isinstance(current, (int, float)) else None
+            except Exception:
+                value = None
+        owner = self._read_attr(parameter, "canonical_parent") if parameter is not None else None
+        document = view_detail = browser = None
+        try:
+            app_view = getattr(self._application(), "view", None)
+            document = text(self._read_attr(app_view, "focused_document_view"))
+            visible = getattr(app_view, "is_view_visible", None)
+            if callable(visible):
+                view_detail = "Clip" if visible("Detail/Clip") else "Device" if visible("Detail/DeviceChain") else None
+                browser = bool(visible("Browser"))
+        except Exception:
+            pass
+        notes = None
+        if clip is not None and callable(getattr(clip, "get_selected_notes_extended", None)):
+            try: notes = len(clip.get_selected_notes_extended())
+            except Exception: notes = None
+        return {
+            "focusTrackName": text(self._read_attr(track, "name")) if track is not None else None,
+            "focusTrackColor": f"#{color & 0xFFFFFF:06x}" if isinstance(color, int) and not isinstance(color, bool) else None,
+            "focusTrackKind": kind,
+            "focusSceneName": text(self._read_attr(scene, "name")) if scene is not None else None,
+            "focusClipName": (text(self._read_attr(clip, "name")) or "") if clip is not None else None,
+            "focusDeviceName": text(self._read_attr(device, "name")) if device is not None else None,
+            "focusParameterName": text(self._read_attr(parameter, "name")) if parameter is not None else None,
+            "focusParameterValue": text(value),
+            "focusParameterOwner": text(self._read_attr(owner, "name")) if owner is not None else None,
+            "focusChainName": text(self._read_attr(chain, "name")) if chain is not None else None,
+            "focusView": {"Arranger": "Arrangement"}.get(document or "", document),
+            "focusDetail": view_detail,
+            "focusBrowser": browser,
+            "focusSelectedNotes": notes,
+        }
+
     def _all_track_objects(self) -> list[Any]:
         tracks = self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", [])); main = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
         return tracks + ([main] if main is not None else [])
@@ -1639,7 +1705,7 @@ class LiveObjectMapper:
             track_index = self._capture_index(track_objects, selected_track); track_ref = snapshot["tracks"][track_index]["ref"] if track_index is not None and track_index < len(snapshot["tracks"]) else None
             scene_objects = self._items(getattr(self.song, "scenes", [])); scene_index = self._capture_index(scene_objects, selected_scene); scene_ref = snapshot["scenes"][scene_index]["ref"] if scene_index is not None and scene_index < len(snapshot["scenes"]) else None
             highlighted_identity = self._capture_object_identity(highlighted_slot) if highlighted_slot is not None else None; slot_matches = [slot["ref"] for track in snapshot["tracks"] for slot in track.get("clipSlots", []) if highlighted_identity is not None and self._capture_same_object(self.refs.get(slot["ref"]), highlighted_slot, highlighted_identity)]; slot_ref = slot_matches[0] if len(slot_matches) == 1 else None
-            items = [{"ref": f"{self.refs.epoch}:selection:current", "parentRef": set_row["ref"], "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref}]
+            items = [{"ref": f"{self.refs.epoch}:selection:current", "parentRef": set_row["ref"], "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref, **self._focus_fields()}]
         else:
             # Routing choices are track-scoped Live objects. Enumerating a
             # non-existent Song.routing_choices collection made parent-scoped

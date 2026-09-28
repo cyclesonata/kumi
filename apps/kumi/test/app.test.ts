@@ -3,7 +3,7 @@ import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import type { SessionController, SessionEvent, TurnState } from "@kumi/runtime";
-import { setNameFrom, TuiApp } from "../src/tui/app.js";
+import { chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
 import { VirtualTerminal } from "./vt.js";
@@ -235,6 +235,40 @@ test("a failed turn says so, and losing Live is explained", async () => {
   assert.ok(has(lines, "Live disconnected."));
   assert.match(lines[0]!, /● Live not connected {2}$/);
   await h.app.close();
+});
+
+test("FOCUS shows where you are in Live, in the wide pane and the narrow strip", async () => {
+  const focus = { track: { name: "Bass", color: "#f59a3c", kind: "midi" as const }, device: "Operator", detail: "Device" as const, view: "Session" as const,
+    parameter: { name: "Filter Freq", value: "1.20 kHz", owner: "Operator" } };
+  for (const [columns, rows] of [[120, 36], [80, 24]] as const) {
+    const h = harness(columns, rows);
+    void h.app.run();
+    await delay(5);
+    connect(h);
+    h.emit({ type: "focus", focus });
+    const lines = h.screen();
+    if (columns === 120) {
+      assert.ok(has(lines, "■ Bass › Operator › Filter Freq") && has(lines, "1.20 kHz · Session · Device view"), "a tight pane moves the value to the second line");
+    } else {
+      assert.ok(has(lines, "■ Bass › Operator › Filter Freq · 1.20 kHz"), "the strip has room for the value");
+    }
+    h.emit({ type: "connection", state: "disconnected" });
+    assert.ok(!has(h.screen(), "■ Bass"), "no stale focus once Live is gone");
+    await h.app.close();
+  }
+});
+
+test("focus paths follow Live's detail view, shorten from the middle, and keep dark colours visible", () => {
+  assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Clip", clip: "", view: "Arrangement", selectedNotes: 2 }), { crumbs: ["Keys", "Untitled clip"], context: "Arrangement · Clip view · 2 notes selected" });
+  assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Device", device: "Reverb", parameter: { name: "Pan", owner: "Mixer" } }).crumbs, ["Keys", "Reverb"], "a parameter from elsewhere is not shown as the device's");
+  assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Device", device: "Reverb", parameter: { name: "Decay Time", value: "2.50 s", owner: "Reverb" } }), { crumbs: ["Keys", "Reverb", "Decay Time"], value: "2.50 s", context: "Device view" });
+  assert.deepEqual(focusPath({ track: { name: "Keys" }, scene: "Chorus" }).crumbs, ["Keys", "Chorus"]);
+  assert.deepEqual(fitCrumbs(["Keys", "Instrument Rack", "Pad Layer", "Chorus-Ensemble", "Rate"], 24), ["Keys", "…", "Rate"]);
+  assert.deepEqual(fitCrumbs(["Keys", "Reverb"], 40), ["Keys", "Reverb"]);
+  assert.deepEqual(chipColor("#f59a3c"), [245, 154, 60]);
+  const lifted = chipColor("#1a1a1a");
+  assert.ok(lifted[0] > 100, "a near-black track colour is lightened");
+  assert.deepEqual(chipColor(undefined), chipColor("not a colour"));
 });
 
 test("the Set name comes from the observation label", () => {

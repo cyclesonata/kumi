@@ -63,6 +63,7 @@ try {
       kernelFactory: async (options) => createAgentKernel({ ...options, binding }),
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
         : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
+          onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
       onEvent: (event) => terminal?.handleEvent(event),

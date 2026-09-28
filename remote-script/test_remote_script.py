@@ -1423,6 +1423,26 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(selection["selectedTrackRef"], canonical_track); self.assertEqual(mapper.get(selection["selectedTrackRef"])["name"], "Drums")
         self.assertEqual(selection["selectedSceneRef"], mapper.discover("scene")["items"][0]["ref"]); self.assertTrue(selection["highlightedClipSlotRef"].endswith(":0:0"))
 
+    def test_selection_reports_focus_in_plain_names(self):
+        song = FakeSong(); track = song.tracks[0]; track.color = 0xFF6F61; track.has_midi_input = True
+        device = FakeDevice(); device.name = "Operator"; track.devices = [device]
+        track.view = type("TrackView", (), {"selected_device": device})()
+        parameter = device.parameters[0]; parameter.canonical_parent = device; parameter.str_for_value = lambda value: f"{value:.2f} dB"
+        clip = type("Clip", (), {"name": "Verse", "get_selected_notes_extended": lambda self: [1, 2]})()
+        song.view = type("View", (), {"selected_track": track, "selected_scene": song.scenes[0], "highlighted_clip_slot": None, "detail_clip": clip, "selected_parameter": parameter, "selected_chain": None})()
+        app_view = type("AppView", (), {"focused_document_view": "Arranger", "is_view_visible": lambda self, name: name in {"Detail/DeviceChain", "Browser"}})()
+        mapper = LiveObjectMapper(song)
+        with patch.object(LiveObjectMapper, "_application", lambda self: type("App", (), {"view": app_view})()):
+            row = mapper.discover("selection")["items"][0]
+        self.assertEqual({key: value for key, value in row.items() if key.startswith("focus")}, {
+            "focusTrackName": "Drums", "focusTrackColor": "#ff6f61", "focusTrackKind": "midi", "focusSceneName": song.scenes[0].name or None,
+            "focusClipName": "Verse", "focusDeviceName": "Operator", "focusParameterName": "Gain", "focusParameterValue": "0.50 dB",
+            "focusParameterOwner": "Operator", "focusChainName": None, "focusView": "Arrangement", "focusDetail": "Device",
+            "focusBrowser": True, "focusSelectedNotes": 2,
+        })
+        # Without Live's application view (as in these fakes), the view fields are simply unknown.
+        self.assertIsNone(mapper.discover("selection")["items"][0]["focusView"])
+
     def test_proxy_identity_selection_tracks_recording_and_ambiguity_fail_closed(self):
         copier = __import__("copy").copy; song = FakeSong(); destination = song.tracks[0]; destination._live_ptr = 201; destination.arm = True; mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); destination_ref = snapshot["tracks"][0]["ref"]; fresh = copier(destination); song.tracks = [fresh]
         args = {"action": "start", "expectedSessionRecord": False, "expectedArrangementRecord": False, "destinationTrackRef": destination_ref, "destinationTrackIdentity": "live:201", "outputSafety": {"safe": True, "provenance": "unit-test"}}
