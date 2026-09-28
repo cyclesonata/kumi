@@ -144,12 +144,14 @@ export const CHANGES: readonly ChangeKind[] = [
   {
     tool: "set_device_parameter", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter",
     description: "Set one device parameter to a value between its min and max. deviceRef and parameterRef come from discovery in this turn.",
-    summarize(preview, input, track) {
+    summarize(preview, input, track, applied) {
       const parameter = record(preview.parameter); const device = record(preview.device);
       const name = label(parameter.name) ?? "parameter";
       const from = number(parameter.currentValue); const to = number(parameter.proposedValue ?? input.value);
       const known = track(device.trackRef);
-      const values = from !== undefined && to !== undefined ? ` ${formatNumber(from)} → ${formatNumber(to)}` : "";
+      // Live's own text ("2.50 kHz", "-6.0 dB") when the bridge read it before and after; plain numbers otherwise.
+      const text = shown(label(parameter.displayValue), label(applied?.displayValue));
+      const values = text ? ` ${text}` : from !== undefined && to !== undefined ? ` ${formatNumber(from)} → ${formatNumber(to)}` : "";
       const min = number(parameter.min); const max = number(parameter.max);
       return { title: `${label(device.name) ? `${label(device.name)} · ` : ""}${name}${values}`, ...(known ? { track: known } : {}),
         ...(from !== undefined && to !== undefined ? { from, to, ...(min !== undefined && max !== undefined && max > min ? { range: [min, max] as [number, number] } : {}) } : {}) };

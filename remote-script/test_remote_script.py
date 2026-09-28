@@ -1385,6 +1385,18 @@ class ControlSurfaceTests(unittest.TestCase):
         rack.chains[0] = chain_one; chain_one.devices = []; chain_two.devices = [nested]
         with self.assertRaises(ValueError): mapper.invoke("device.enable", {**base, "enabled": True})
 
+    def test_parameter_rows_show_the_value_as_lives_panel_does(self):
+        song = FakeSong(); parameter = song.tracks[0].devices[0].parameters[0]
+        parameter.display_value = 20000.0; parameter.str_for_value = lambda value: "20.0 kHz"
+        mapper = LiveObjectMapper(song)
+        track = mapper.discover("track")["items"][0]
+        device = mapper.discover("device", parent=track["ref"])["items"][0]
+        self.assertEqual(mapper.discover("parameter", parent=device["ref"])["items"][0]["displayValue"], "20.0 kHz")
+        parameter.str_for_value = lambda value: 1 / 0
+        self.assertEqual(mapper.discover("parameter", parent=device["ref"])["items"][0]["displayValue"], "20000.0", "Live 12's number when the text fails")
+        del parameter.str_for_value; del parameter.display_value
+        self.assertEqual(mapper.discover("parameter", parent=device["ref"])["items"][0]["displayValue"], "0.5", "the value itself otherwise")
+
     def test_device_parameter_discovery_and_guarded_mutation(self):
         mapper = LiveObjectMapper(FakeSong())
         track = mapper.discover("track")["items"][0]

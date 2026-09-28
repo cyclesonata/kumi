@@ -341,6 +341,13 @@ pan C → 5L`, and the answer used the same units: "Lowered 3-Audio by 2 dB and
 panned it slightly left (5L)." Long titles continue on a second HISTORY line,
 with each value kept whole.
 
+Device parameters first read "Drift · LP Freq 20000.0 → 159.0": Live 12's
+`display_value` is a bare number in the panel's units. Bridge 1.0.14 reads
+`str_for_value` first, as the mixer does, and its apply reports the new value's
+text. On real Live (UTC `2026-09-28T07:34Z`), after a lifecycle upgrade to 1.0.14,
+discovery showed "LP Freq 20.0 kHz" and the change read `Drift · LP Freq 20.0 kHz →
+159 Hz`; it and the Drift load and new track before it were undone.
+
 ## Scale on real Live
 
 Growing the disposable Set through the bridge (UTC `2026-09-28T06:10Z`–`06:20Z`):

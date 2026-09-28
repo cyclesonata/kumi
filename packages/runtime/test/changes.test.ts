@@ -285,3 +285,13 @@ test("every change kind has its own tool, a family, host-only bridge tools and a
   assert(HOST_TOOLS.has("live_undo"));
   assert(!HOST_TOOLS.has("live_audio_capture_apply") && !HOST_TOOLS.has("live_recording_apply") && !HOST_TOOLS.has("live_transport_apply"));
 });
+
+test("a device parameter's title uses Live's own text on both sides when the bridge read it", () => {
+  const kind = CHANGES.find((item) => item.tool === "set_device_parameter")!;
+  const preview = { device: { name: "Auto Filter", trackRef: "5:track:1" }, parameter: { name: "Frequency", currentValue: 0.6, proposedValue: 0.45, min: 0, max: 1, displayValue: "2.50 kHz" } };
+  const bass = () => ({ name: "Bass" });
+  const summary = kind.summarize(preview, {}, bass, { state: "applied", value: 0.45, displayValue: "1.21 kHz" });
+  assert.equal(summary.title, "Auto Filter · Frequency 2.50\u00a0kHz → 1.21\u00a0kHz");
+  assert.deepEqual([summary.from, summary.to, summary.range, summary.track], [0.6, 0.45, [0, 1], { name: "Bass" }], "the picture still has the numbers");
+  assert.equal(kind.summarize(preview, {}, bass).title, "Auto Filter · Frequency 0.6 → 0.45", "without Live's text for the new value, plain numbers");
+});

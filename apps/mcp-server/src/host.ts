@@ -79,6 +79,8 @@ interface DeviceParameterTransaction {
   authority: JsonObject;
   priorValue: number;
   proposedValue: number;
+  /** Live's own text for the applied value, from the verifying read. */
+  appliedDisplay?: string;
   confirmation: string;
   priorRevision: number;
   appliedRevision?: number;
@@ -6932,7 +6934,7 @@ export class McpHost {
     const transaction = this.deviceParameterTransactions.get(params.transactionId as string);
     if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
     if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, revision: transaction.appliedRevision, idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
@@ -6951,7 +6953,8 @@ export class McpHost {
       const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
       if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= currentRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
+      if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (transaction.state === "applying") { transaction.state = /cancelled before dispatch/.test(message) ? "previewed" : "uncertain"; if (transaction.state === "previewed") delete transaction.applyKey; }
@@ -8334,7 +8337,7 @@ export class McpHost {
     const transaction = this.deviceParameterTransactions.get(params.transactionId as string);
     if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
     if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, revision: transaction.appliedRevision, idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, idempotent: true });
     if (transaction.state === "uncertain") return this.transactionError(id, "Device-parameter state is uncertain; perform fresh discovery before retrying");
     if (transaction.state !== "previewed" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
@@ -8345,7 +8348,8 @@ export class McpHost {
       const verifiedSnapshot = this.adapter.snapshot(); const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
       if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= transaction.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
+      if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
     } catch (cause) { return this.adapterToolError(id, cause, "Device-parameter apply may be uncertain; perform fresh authoritative discovery and do not retry blindly."); }
   }
 

@@ -351,9 +351,11 @@ test("previews, applies idempotently, verifies, and guardedly undoes a device pa
   assert.equal((applied as any).result.isError, false);
   assert.equal(appliedValue.value, 0.75);
   assert.equal(appliedValue.idempotent, false);
+  assert.equal((appliedValue as { displayValue?: string }).displayValue, "0.75", "Live's own text for the new value");
   assert.ok(appliedValue.revision > proposed.parameter.revision);
   const repeated = host.handle({ jsonrpc: "2.0", id: 202, method: "tools/call", params: { name: "live_device_parameter_apply", arguments: { transactionId: proposed.transactionId, confirmation: proposed.confirmation, idempotencyKey: "parameter-apply-1" } } });
   assert.equal(JSON.parse((repeated as any).result.content[0].text).idempotent, true);
+  assert.equal(JSON.parse((repeated as any).result.content[0].text).displayValue, "0.75");
   const undone = host.handle({ jsonrpc: "2.0", id: 203, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: proposed.transactionId, confirmation: "undo", idempotencyKey: "parameter-undo-1" } } });
   assert.equal((undone as any).result.isError, false);
   assert.equal(JSON.parse((undone as any).result.content[0].text).value, before.value);
@@ -1569,7 +1571,8 @@ test("Browser-load undo still removes a device whose parameter was tweaked and r
   };
   const loaded = await load(9100); const rack = racks()[0];
   const tweak = body(await call(9102, "live_device_parameter_preview", { deviceRef: rack.ref, parameterRef: "parameter:rack-macro", value: 0.25 }));
-  assert.equal((await call(9103, "live_device_parameter_apply", { transactionId: tweak.transactionId, confirmation: tweak.confirmation, idempotencyKey: "tweak-apply-key" })).isError, false);
+  const tweaked = await call(9103, "live_device_parameter_apply", { transactionId: tweak.transactionId, confirmation: tweak.confirmation, idempotencyKey: "tweak-apply-key" });
+  assert.equal(tweaked.isError, false); assert.equal(body(tweaked).displayValue, "0.25", "Live's own text for the new value");
   assert.equal(body(await call(9104, "live_undo", { transactionId: tweak.transactionId, confirmation: "undo", idempotencyKey: "tweak-undo-key" })).state, "undone");
   assert.equal(rack.parameters[0].value, 0.5); assert.notEqual(rack.parameters[0].revision, 1, "the edit counter moved");
   rack.view = { selectedChainRef: null, selectedPadIndex: 3, padScrollPosition: 0, showChainDevices: true };

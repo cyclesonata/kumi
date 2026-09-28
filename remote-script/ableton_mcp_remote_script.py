@@ -1266,16 +1266,19 @@ class LiveObjectMapper:
             if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in numeric):
                 continue
             parameter_ref = self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}")
-            display = self._read_attr(parameter, "display_value")
+            # Live's own text for the value, as its panel shows it ("20.0 kHz"). Live 12's
+            # display_value is a bare number in those units, so it is only the fallback.
+            display = None
+            formatter = self._read_attr(parameter, "str_for_value")
+            if callable(formatter):
+                try:
+                    display = formatter(value)
+                except Exception:
+                    display = None
+            if display is None or str(display) == "":
+                display = self._read_attr(parameter, "display_value")
             if display is None:
-                display = self._read_attr(parameter, "str_for_value")
-                if callable(display):
-                    try:
-                        display = display(value)
-                    except Exception:
-                        display = value
-                if display is None:
-                    display = value
+                display = value
             parameters.append({
                 "ref": parameter_ref, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(parameter),
                 "name": str(self._read_attr(parameter, "name") or f"Parameter {parameter_index + 1}"),
