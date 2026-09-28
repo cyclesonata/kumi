@@ -10,7 +10,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeoutMs?: number; maxTurns?: number } = {}) {
+function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeoutMs?: number; idleTimeoutMs?: number; turnLimitMs?: number; maxTurns?: number } = {}) {
   const events: SessionEvent[] = [];
   const calls: string[] = [];
   const kernels: { closed: number }[] = [];
@@ -21,6 +21,7 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
   let refreshError = false;
   const session = createSession({
     onEvent: (event) => events.push(event), timeoutMs: options.timeoutMs ?? 5_000,
+    ...(options.idleTimeoutMs ? { idleTimeoutMs: options.idleTimeoutMs } : {}), ...(options.turnLimitMs ? { turnLimitMs: options.turnLimitMs } : {}),
     cancelGraceMs: 10, closeTimeoutMs: 25, ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
     kernelFactory: options.factory ?? (async ({ instructions, tools }) => {
       assert.equal(instructions, observation.instructions); assert.deepEqual(tools, []);
@@ -118,9 +119,40 @@ test("timeout is bounded and quarantines an uncooperative kernel", async () => {
   const h = harness({ timeoutMs: 15, run: async () => { if (++calls === 1) return new Promise(() => {}); return { stopReason: "completed" }; } });
   await h.session.start();
   await h.session.submit("timeout");
-  assert(h.events.some((e) => e.type === "error" && /timed out/.test(e.message)));
+  assert(h.events.some((e) => e.type === "error" && /without progress/.test(e.message)));
   await h.session.submit("recovered");
-  assert.equal(h.kernels.length, 2);
+  assert.equal(h.kernels.length, 2, "a kernel that didn't stop when asked is set aside");
+  await h.session.close();
+});
+
+test("a turn that keeps making progress runs past the no-progress limit; one that stops when asked keeps its conversation", async () => {
+  let mode: "busy" | "quiet" = "busy";
+  const h = harness({ idleTimeoutMs: 40, run: async (_input, signal, emit) => {
+    if (mode === "busy") { for (let step = 0; step < 8; step++) { await delay(15); emit({ type: "text", text: "." }); } return { stopReason: "completed" }; }
+    return new Promise((resolve) => signal.addEventListener("abort", () => resolve({ stopReason: "cancelled" }), { once: true }));
+  } });
+  await h.session.start();
+  await h.session.submit("build a patch");
+  assert(h.events.some((event) => event.type === "turn-complete" && event.result.stopReason === "completed"), "120 ms of steady progress outlives a 40 ms limit");
+  assert(!h.events.some((event) => event.type === "error"));
+  mode = "quiet";
+  await h.session.submit("think");
+  assert(h.events.some((event) => event.type === "error" && /Kumi stopped after 1 second without progress\. Anything it changed is in HISTORY/.test(event.message)));
+  await h.session.submit("carry on");
+  assert.equal(h.kernels.length, 1, "the kernel stopped when asked, so its conversation carries on");
+  assert(!h.events.some((event) => event.type === "notice" && /discarded/.test(event.message)));
+  await h.session.close();
+});
+
+test("however busy, a turn stops at its limit", async () => {
+  const h = harness({ idleTimeoutMs: 1_000, turnLimitMs: 60, run: (_input, signal, emit) => new Promise((resolve) => {
+    const timer = setInterval(() => emit({ type: "text", text: "." }), 5);
+    signal.addEventListener("abort", () => { clearInterval(timer); resolve({ stopReason: "cancelled" }); }, { once: true });
+  }) });
+  await h.session.start();
+  await h.session.submit("forever");
+  assert(h.events.some((event) => event.type === "error" && /this answer had run for/.test(event.message)));
+  assert(h.events.some((event) => event.type === "turn-complete" && event.result.stopReason === "cancelled"));
   await h.session.close();
 });
 

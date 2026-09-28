@@ -9,7 +9,12 @@ interface Options {
   kernelFactory: KernelFactory;
   integrationFactory: IntegrationFactory;
   onEvent: (event: SessionEvent) => void;
+  /** How long starting, refreshing or undoing may take. */
   timeoutMs?: number;
+  /** How long a turn may go without progress (streamed text, tool steps) before it stops; timeoutMs, or 3 minutes. */
+  idleTimeoutMs?: number;
+  /** However much progress it makes, a turn stops after this long. */
+  turnLimitMs?: number;
   closeTimeoutMs?: number;
   cancelGraceMs?: number;
   /** Prompts per session before /new is needed; none by default, since the kernel keeps its own context in bounds. */
@@ -23,14 +28,23 @@ interface Operation {
   done: Promise<void>;
   isTurn: boolean;
   phase: "start" | "refresh" | "inference" | "undo";
+  /** The turn moved on (text, a tool step): its no-progress timer starts over. */
+  progress?: () => void;
 }
+/** "3 minutes", "1 second". */
+const span = (ms: number) => {
+  const [count, unit] = ms >= 60_000 ? [Math.round(ms / 60_000), "minute"] : [Math.max(1, Math.round(ms / 1000)), "second"];
+  return `${count} ${unit}${count === 1 ? "" : "s"}`;
+};
 
 export function createSession(options: Options): SessionController {
   const timeoutMs = options.timeoutMs ?? 120_000;
+  const idleMs = options.idleTimeoutMs ?? options.timeoutMs ?? 180_000;
+  const turnLimitMs = options.turnLimitMs ?? 20 * 60_000;
   const closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
   const graceMs = options.cancelGraceMs ?? 500;
   const maxTurns = options.maxTurns;
-  for (const value of [timeoutMs, closeTimeoutMs, graceMs, maxTurns ?? 1]) if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid session bound");
+  for (const value of [timeoutMs, idleMs, turnLimitMs, closeTimeoutMs, graceMs, maxTurns ?? 1]) if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid session bound");
   let state: TurnState = "idle";
   let connection: ConnectionState = "disconnected";
   let observationLabel: string | undefined;
@@ -167,7 +181,7 @@ export function createSession(options: Options): SessionController {
     const op: Operation = { id: ++nextOperation, controller: new AbortController(), done: Promise.resolve(), isTurn, phase };
     active = op; setState("running");
     const startedAt = performance.now();
-    let timedOut = false;
+    let timedOut: "quiet" | "limit" | undefined;
     let workSettled = false;
     let settledResult: TurnResult | undefined;
     let grace: ReturnType<typeof setTimeout> | undefined;
@@ -175,7 +189,11 @@ export function createSession(options: Options): SessionController {
     const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
     const onAbort = () => { setState("cancelling"); grace = setTimeout(() => rejectAborted(new Error("Operation cancelled")), graceMs); };
     op.controller.signal.addEventListener("abort", onAbort, { once: true });
-    const timeout = setTimeout(() => { timedOut = true; op.controller.abort(); }, timeoutMs);
+    // A turn runs while it makes progress, up to its limit; anything else gets timeoutMs.
+    const stop = (why: "quiet" | "limit") => { timedOut ??= why; op.controller.abort(); };
+    let timeout = setTimeout(() => stop("quiet"), isTurn ? idleMs : timeoutMs);
+    const limit = isTurn ? setTimeout(() => stop("limit"), turnLimitMs) : undefined;
+    if (isTurn) op.progress = () => { if (!op.controller.signal.aborted) { clearTimeout(timeout); timeout = setTimeout(() => stop("quiet"), idleMs); } };
     op.done = (async () => {
       try {
         const working = Promise.resolve().then(() => work(op)).finally(() => { workSettled = true; });
@@ -188,24 +206,34 @@ export function createSession(options: Options): SessionController {
         }
       } catch (error) {
         if (op.controller.signal.aborted) {
-          if (!workSettled || timedOut) {
+          // A kernel that stopped when asked keeps its conversation, finished steps included; one
+          // that didn't is set aside, and the next turn starts from the last settled conversation.
+          if (!workSettled) {
             mustReset = true;
             try { await dropKernel(); } catch { emit({ type: "error", message: "Inference cleanup did not finish within its deadline." }); }
           }
-          if (timedOut) emit({ type: "error", message: "Turn timed out; work cancelled and late output discarded." });
-          if (isTurn) emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
+          if (timedOut && isTurn) {
+            emit({ type: "error", message: timedOut === "limit" ? `Kumi stopped: this answer had run for ${span(turnLimitMs)}. Anything it changed is in HISTORY; ask it to carry on.`
+              : `Kumi stopped after ${span(idleMs)} without progress. Anything it changed is in HISTORY; ask it to carry on.` });
+          } else if (timedOut) emit({ type: "error", message: `Kumi stopped waiting after ${span(timeoutMs)}.` });
+          if (isTurn) {
+            emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
+            if (workSettled) saveConversation();
+          }
         } else {
           const message = op.phase === "undo" ? (error instanceof KumiError ? error.message : "The undo didn't finish; check Live.")
             : op.phase !== "inference" ? "Context refresh failed; no answer was generated from old observations."
             : error instanceof KumiError ? error.message : "Inference failed; check the configured model, sign-in and connection.";
           emit({ type: "error", message });
+          // A failed answer keeps the steps it finished (see the kernel); keep them for next time too.
+          if (isTurn && op.phase === "inference") saveConversation();
           if (!isTurn && phase === "start") {
             try { await dropResources(); } catch { /* startup remains failed */ }
             throw new Error("Could not start Kumi session; check model login and connection.");
           }
         }
       } finally {
-        clearTimeout(timeout); clearTimeout(grace);
+        clearTimeout(timeout); clearTimeout(limit); clearTimeout(grace);
         op.controller.signal.removeEventListener("abort", onAbort);
         if (active === op) { active = undefined; setState("idle"); }
       }
@@ -228,7 +256,7 @@ export function createSession(options: Options): SessionController {
         const snapshot = await observe(op); assertCurrent(op);
         op.phase = "inference";
         return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
-          (event) => { if (current(op)) emit(event); });
+          (event) => { if (current(op)) { op.progress?.(); emit(event); } });
       });
     },
     refresh() {

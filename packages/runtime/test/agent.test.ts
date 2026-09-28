@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { APICallError, type LanguageModelV4, type LanguageModelV4CallOptions, type LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { KernelEvent, KernelTool } from "../src/core/contracts.js";
 import { KumiError } from "../src/core/errors.js";
-import { createAgentKernel, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
+import { createAgentKernel, STOPPED_NOTE, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
 
 type Script = (options: LanguageModelV4CallOptions, call: number) => LanguageModelV4StreamPart[] | ReadableStream<LanguageModelV4StreamPart> | Promise<never>;
 const usage = (input = 3, output = 2) => ({
@@ -299,27 +299,62 @@ test("long conversations stay in budget: earlier reads are cleared in requests a
   await h.kernel.close();
 });
 
-test("a failed or cancelled turn leaves the conversation as it was, even after the budget trimmed it for that turn", async () => {
-  let mode: "answer" | "fail" | "hang" = "answer"; let step = 0;
-  const big = "x".repeat(9_000);
+test("a stopped turn keeps the steps it finished, with a note; the step in progress, and a turn that finished none, leave no trace", async () => {
+  let mode: "answer" | "fail" | "hang" | "hang-first" = "answer"; let step = 0;
   const h = harness((options) => {
     if (mode === "answer") return [...text("fine"), finish()];
-    if (++step % 2 === 1) return [call("read", "{}", `big${step}`), finish("tool-calls")];
+    if (mode === "hang-first") return hanging(options, []);
+    if (++step % 2 === 1) return [call("read", "{}", `r${step}`), finish("tool-calls")];
     return mode === "fail" ? Promise.reject(new Error("provider down")) : hanging(options, []);
-  }, { tools: [tool("read", async () => ({ text: big }))], budget: { clearAt: 1024, limit: 8192 } });
-  for (const words of ["one", "two", "three"]) await h.kernel.run(`${words} ${"w".repeat(600)}`, new AbortController().signal, () => {});
-  const before = h.kernel.checkpoint().messages;
+  }, { tools: [tool("read", async () => ({ text: '{"tempo":120}' }))] });
+  await h.kernel.run("one", new AbortController().signal, () => {});
   mode = "fail";
-  await assert.rejects(h.kernel.run("four", new AbortController().signal, () => {}));
-  assert.match(JSON.stringify(h.requests.at(-1)!.prompt[0]), /Kumi removed the earlier part/, "that turn's request did drop the earlier exchanges");
-  assert.deepEqual(h.kernel.checkpoint().messages, before, "but the conversation is as it was");
+  await assert.rejects(h.kernel.run("two", new AbortController().signal, () => {}));
+  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "fine", "two", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.checkpoint().messages.slice(3).map((message) => (message as { role: string }).role), ["assistant", "tool", "assistant"], "the read and its result stay; the failed step goes");
   mode = "hang";
   const controller = new AbortController();
-  const cancelled = h.kernel.run("five", controller.signal, () => {});
+  const stopped = h.kernel.run("three", controller.signal, () => {});
   await delay(20); controller.abort();
-  assert.equal((await cancelled).stopReason, "cancelled");
-  assert.deepEqual(h.kernel.checkpoint().messages, before);
-  assert.equal(h.kernel.transcript().length, 6);
+  assert.equal((await stopped).stopReason, "cancelled");
+  assert.deepEqual(h.kernel.transcript().map((line) => line.text).slice(-2), ["three", STOPPED_NOTE]);
+  const settled = h.kernel.checkpoint().messages;
+  mode = "hang-first";
+  const early = new AbortController();
+  const nothing = h.kernel.run("four", early.signal, () => {});
+  await delay(20); early.abort();
+  assert.equal((await nothing).stopReason, "cancelled");
+  assert.deepEqual(h.kernel.checkpoint().messages, settled, "no finished step, no trace");
+  await h.kernel.close();
+});
+
+test("a turn stopped during a tool keeps what finished before it, never a call without its result", async () => {
+  let calls = 0;
+  const h = harness(() => (++calls === 1 ? [call("read", "{}", "r1"), finish("tool-calls")] : [call("slow", "{}", "s1"), finish("tool-calls")]), {
+    tools: [tool("read", async () => ({ text: "ok" })), tool("slow", () => new Promise<never>(() => {}))],
+  });
+  const controller = new AbortController();
+  const stopped = h.kernel.run("go", controller.signal, () => {});
+  await delay(20); controller.abort();
+  assert.equal((await stopped).stopReason, "cancelled");
+  const messages = h.kernel.checkpoint().messages as { role: string }[];
+  assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", "tool", "assistant"]);
+  assert.doesNotMatch(JSON.stringify(messages), /"s1"/, "the slow call, which has no result, is gone");
+  await h.kernel.close();
+});
+
+test("when a stopped turn's steps are kept, so is the budget's trimming for them, with its note", async () => {
+  let mode: "answer" | "fail" = "answer"; let step = 0;
+  const big = "x".repeat(9_000);
+  const h = harness(() => {
+    if (mode === "answer") return [...text("fine"), finish()];
+    return ++step === 1 ? [call("read", "{}", "big"), finish("tool-calls")] : Promise.reject(new Error("provider down"));
+  }, { tools: [tool("read", async () => ({ text: big }))], budget: { clearAt: 1024, limit: 8192 } });
+  for (const words of ["one", "two", "three"]) await h.kernel.run(`${words} ${"w".repeat(600)}`, new AbortController().signal, () => {});
+  mode = "fail";
+  await assert.rejects(h.kernel.run("four", new AbortController().signal, () => {}));
+  assert.match(JSON.stringify(h.kernel.checkpoint().messages[0]), /Kumi removed the earlier part/, "the model is told the start is gone");
+  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["four", STOPPED_NOTE]);
   await h.kernel.close();
 });
 

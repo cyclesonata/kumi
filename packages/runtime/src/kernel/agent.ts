@@ -32,7 +32,7 @@ export interface Checkpoint extends KernelCheckpoint { version: 1; messages: Lan
 
 export interface AgentKernelOptions extends KernelOptions {
   binding: ModelBinding;
-  /** Model calls per turn; each tool round trip is one more. */
+  /** Model calls per turn; each tool round trip is one more. A patch built knob by knob takes dozens. */
   maxSteps?: number;
   /** How much conversation to send; older Live reads are cleared first. */
   budget?: ContextBudget;
@@ -57,10 +57,12 @@ const MAX_TOOLS = 128;
 const MAX_INSTRUCTIONS = 64 * 1024;
 const MAX_STEER = 16 * 1024;
 const MAX_TOOL_ERROR = 4 * 1024;
+/** Ends a stopped turn's kept steps, for the model and in the transcript. */
+export const STOPPED_NOTE = "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
 
 export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   const { binding, instructions } = options;
-  const maxSteps = options.maxSteps ?? 24;
+  const maxSteps = options.maxSteps ?? 48;
   const budget = options.budget ?? DEFAULT_BUDGET;
   if (!instructions.trim() || Buffer.byteLength(instructions) > MAX_INSTRUCTIONS) throw new Error("Kernel instructions must be nonempty and at most 64 KiB.");
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new Error("maxSteps must be a positive integer.");
@@ -96,9 +98,18 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     let reported = false;
     const settled = (stopReason: TurnResult["stopReason"]): TurnResult => ({ stopReason, ...(reported ? { usage } : {}) });
     // What this turn sends as the earlier conversation, fitted to the budget. It becomes the
-    // history only when the turn settles, so a failed or cancelled turn leaves no trace, the
-    // budget's clearing included; fitting is deterministic, so the next turn sends the same.
+    // history only when the turn settles; fitting is deterministic, so the next turn sends the same.
     let earlier = history;
+    // A stopped turn (cancelled, timed out or failed) keeps the steps it finished, each model reply
+    // with all its tool results, so the conversation says what those steps changed in Live. The
+    // step in progress goes; a turn that finished no tool round leaves no trace.
+    const keepFinished = () => {
+      let end = messages.length;
+      const last = messages[end - 1];
+      if (last?.role === "assistant" && last.content.some((part) => part.type === "tool-call")) end--;
+      const finished = messages.slice(0, end);
+      if (finished.some((message) => message.role === "tool")) history = [...earlier, ...finished, { role: "assistant", content: [{ type: "text", text: STOPPED_NOTE }] }];
+    };
     try {
       for (let step = 0; ; step++) {
         if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("max-steps"); }
@@ -114,8 +125,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         for (const text of steering.splice(0)) { messages.push(user(text)); deliver({ type: "steer", text }); }
       }
     } catch (error) {
+      keepFinished();
       if (signal.aborted || lifetime.signal.aborted) return settled("cancelled");
-      if (failed.signal.aborted) throw new KumiError("output", "Inference output could not be delivered; the turn was discarded.");
+      if (failed.signal.aborted) throw new KumiError("output", "Inference output could not be delivered; the rest of the answer was dropped.");
       throw describeFailure(error, binding.id);
     }
   }

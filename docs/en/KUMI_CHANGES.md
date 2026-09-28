@@ -52,6 +52,11 @@ producer presses Esc, so every change that reaches Live is in HISTORY with its
 undo. If Live doesn't confirm the apply, the change is recorded as **check
 Live** instead of being forgotten.
 
+The model keeps track the same way. A stopped answer keeps the steps it
+finished. Every turn's observation lists Kumi's latest changes and where each
+stands (`kumiChanges`: applied, undone, kept, unsure), so an undo clicked in
+HISTORY, or a change that landed as the answer stopped, isn't news to it.
+
 ## Undo
 
 Undo is the bridge's guarded `live_undo`: it restores the exact prior state only

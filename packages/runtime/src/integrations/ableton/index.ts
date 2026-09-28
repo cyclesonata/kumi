@@ -616,6 +616,8 @@ export function createAbletonIntegration(options: Options): Integration {
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
+            // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
+            ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
             truncated: page.truncated, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
             coverage: "Current open Set only. Bounded discovery; details and track counts require fresh paged reads. Names/paths are not durable identity.",
           }),

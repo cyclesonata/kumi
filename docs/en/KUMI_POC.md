@@ -163,7 +163,7 @@ fresh detail references rather than treating names or history as authority.
 | `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
 | `/new` | Discard the conversation and reconnect with fresh observations |
 | `/quit`, or Ctrl-C with an empty box | Close Kumi |
-| Esc or Ctrl-C during work | Stop; settled history is kept, unsettled work is discarded |
+| Esc or Ctrl-C during work | Stop; the steps Kumi finished stay in the conversation, the one in progress is dropped |
 | Ctrl-C while typing | Clear the input box |
 | Page Up/Down, mouse wheel | Scroll the conversation; it stays put while new text arrives |
 
@@ -187,10 +187,15 @@ terminal is restored on exit, on crashes and on signals.
   Past about 400 KB the oldest exchanges drop off, and the model is told so.
   Reads go stale as you work, so they go first; clearing happens at those
   thresholds rather than on every request, so provider prompt caches keep working.
-- Prompts are capped at 16 KiB; turns at 120 seconds and 24 model steps; MCP
-  requests at 15 seconds. A cancelled or failed turn leaves no trace in the
-  conversation. One automatic retry happens only for a retryable provider failure
-  before any output of that step was shown.
+- Prompts are capped at 16 KiB. A turn runs while it makes progress (streamed
+  text, tool steps): it stops after 3 minutes without any, after 20 minutes in
+  all, or at 48 model steps. MCP requests are capped at 15 seconds. A stopped or
+  failed turn keeps the steps it finished, with a note that it stopped, so Kumi
+  knows what it already changed; the step in progress is dropped, and a turn that
+  finished no step leaves no trace. Each turn's observation also lists Kumi's
+  latest changes and where they stand, including undos clicked in HISTORY. One
+  automatic retry happens only for a retryable provider failure before any
+  output of that step was shown.
   Cleanup is bounded and targets only Kumi's owned child, never Live.
 - Discovery defaults to 25 rows and a 1,000-unit traversal budget. Parent and
   cursor references must come from the current observation. Partial pages remain

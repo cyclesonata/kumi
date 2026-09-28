@@ -182,6 +182,19 @@ test("a colour change shows the old and new colours; later changes, and its undo
   } finally { await b.integration.close(); }
 });
 
+test("each turn's observation lists Kumi's latest changes and where they stand, so an undo in HISTORY isn't news to the model", async () => {
+  const b = await opened();
+  try {
+    assert.equal((JSON.parse(b.observation.context) as JsonObject).kumiChanges, undefined, "nothing yet, nothing listed");
+    await tool(b.tools, "set_tempo").execute({ tempo: 124 }, signal());
+    const tempo = b.records.at(-1)!;
+    await b.integration.undo!(tempo.id, signal());
+    const next = await b.integration.observe(signal());
+    assert.deepEqual((JSON.parse(next.context) as JsonObject).kumiChanges, [{ change: tempo.id, what: "Tempo 120 → 124 BPM", state: "undone" }]);
+    assert.match(next.instructions, /kumiChanges/);
+  } finally { await b.integration.close(); }
+});
+
 test("undo goes through the bridge's guarded undo; a refusal keeps the change, says why and reuses its key", async () => {
   const b = await opened();
   try {
