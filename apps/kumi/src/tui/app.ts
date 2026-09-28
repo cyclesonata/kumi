@@ -717,10 +717,10 @@ export class TuiApp {
     }
     put(7, now.detail, now.detailStyle);
     const picture = this.flashing() ? changePicture(this.flashing()!, width) : undefined;
-    if (picture) {
+    picture?.slice(0, 2).forEach((line, row) => {
       let column = x;
-      for (const part of picture) column = screen.put(column, area.y + 8, part.text, part.style);
-    }
+      for (const part of line) column = screen.put(column, area.y + 8 + row, part.text, part.style);
+    });
     put(10, "HISTORY", st.label);
     this.drawHistory(screen, { x, y: area.y + 11, width, height: Math.max(0, area.height - 12) });
   }
@@ -816,7 +816,9 @@ export class TuiApp {
  * A change's before and after as positions, like a fader or a knob seen side on:
  * "██████░░░░ → ████░░░░░░". Only for values with a known span.
  */
-export function changePicture(change: ChangeRecord, width: number): { text: string; style: Style }[] | undefined {
+/** NOW's picture of a change, a line or two: a value moving within its span, or a new clip's notes. */
+export function changePicture(change: ChangeRecord, width: number): { text: string; style: Style }[][] | undefined {
+  if (change.clip) return clipPicture(change.clip, width);
   if (change.from === undefined || change.to === undefined || !change.range) return undefined;
   const [min, max] = change.range;
   if (!(max > min)) return undefined;
@@ -825,7 +827,48 @@ export function changePicture(change: ChangeRecord, width: number): { text: stri
     const filled = Math.round(Math.min(1, Math.max(0, (value - min) / (max - min))) * cells);
     return "█".repeat(filled) + "░".repeat(cells - filled);
   };
-  return [{ text: bar(change.from), style: st.faint }, { text: " → ", style: st.faint }, { text: bar(change.to), style: st.accent }];
+  return [[{ text: bar(change.from), style: st.faint }, { text: " → ", style: st.faint }, { text: bar(change.to), style: st.accent }]];
+}
+
+/** Braille dots for a cell's 2×4 grid, by row then column. */
+const BRAILLE = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]] as const;
+
+/**
+ * A clip as a tiny piano roll in braille, two rows high: time runs across, higher notes sit
+ * higher, louder notes are brighter. Up to eight different pitches get a lane each, spread out;
+ * more share lanes by pitch.
+ */
+function clipPicture(clip: NonNullable<ChangeRecord["clip"]>, width: number): { text: string; style: Style }[][] | undefined {
+  if (!(clip.length > 0) || !clip.notes.length) return undefined;
+  const cells = Math.max(8, Math.min(32, width));
+  const columns = cells * 2;
+  const pitches = [...new Set(clip.notes.map((note) => note.pitch))].sort((a, b) => b - a);
+  const high = pitches[0]!; const low = pitches[pitches.length - 1]!;
+  const lane = (pitch: number) => pitches.length === 1 ? 3
+    : pitches.length <= 8 ? Math.round(pitches.indexOf(pitch) * 7 / (pitches.length - 1)) : Math.round((high - pitch) * 7 / (high - low));
+  // The loudest velocity at each dot, 0 where there's no note.
+  const dots = Array.from({ length: 8 }, () => Array<number>(columns).fill(0));
+  for (const note of clip.notes) {
+    const first = Math.min(columns - 1, Math.max(0, Math.floor(note.start / clip.length * columns)));
+    const last = Math.max(first, Math.min(columns - 1, Math.ceil((note.start + note.duration) / clip.length * columns) - 1));
+    const row = dots[lane(note.pitch)]!;
+    for (let column = first; column <= last; column++) row[column] = Math.max(row[column]!, note.velocity);
+  }
+  return [0, 1].map((textRow) => {
+    const spans: { text: string; style: Style }[] = [];
+    for (let cell = 0; cell < cells; cell++) {
+      let bits = 0; let loudest = 0;
+      for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 2; dx++) {
+        const velocity = dots[textRow * 4 + dy]![cell * 2 + dx]!;
+        if (velocity) { bits |= BRAILLE[dy]![dx]!; loudest = Math.max(loudest, velocity); }
+      }
+      const style = loudest >= 64 ? st.accent : st.dim;
+      const text = String.fromCharCode(0x2800 + bits);
+      const previous = spans[spans.length - 1];
+      if (previous && previous.style === style) previous.text += text; else spans.push({ text, style });
+    }
+    return spans;
+  });
 }
 
 /** A catch-up as one line for the conversation. */

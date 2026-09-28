@@ -286,6 +286,16 @@ test("every change kind has its own tool, a family, host-only bridge tools and a
   assert(!HOST_TOOLS.has("live_audio_capture_apply") && !HOST_TOOLS.has("live_recording_apply") && !HOST_TOOLS.has("live_transport_apply"));
 });
 
+test("a new clip's record carries its notes, for NOW's picture", () => {
+  const kind = CHANGES.find((item) => item.tool === "write_midi_clip")!;
+  const notes = [60, 64].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96, channel: 1 }));
+  const summary = kind.summarize({ proposed: { name: "Chord", length: 4, notes } }, {}, () => undefined);
+  assert.equal(summary.title, "New MIDI clip “Chord” · 2 notes");
+  assert.deepEqual(summary.clip, { length: 4, notes: notes.map(({ channel: _channel, ...note }) => note) });
+  const many = kind.summarize({ proposed: { name: "Roll", length: 64, notes: Array.from({ length: 600 }, (_, index) => ({ pitch: 36, start: index / 10, duration: 0.1, velocity: 100 })) } }, {}, () => undefined);
+  assert.equal(many.title, "New MIDI clip “Roll” · 600 notes"); assert.equal(many.clip?.notes.length, 512, "the picture keeps the first 512");
+});
+
 test("a device parameter's title uses Live's own text on both sides when the bridge read it", () => {
   const kind = CHANGES.find((item) => item.tool === "set_device_parameter")!;
   const preview = { device: { name: "Auto Filter", trackRef: "5:track:1" }, parameter: { name: "Frequency", currentValue: 0.6, proposedValue: 0.45, min: 0, max: 1, displayValue: "2.50 kHz" } };

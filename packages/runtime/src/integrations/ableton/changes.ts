@@ -15,6 +15,7 @@ export interface ChangeSummary {
   from?: number;
   to?: number;
   range?: [number, number];
+  clip?: ChangeRecord["clip"];
 }
 
 export interface ChangeKind {
@@ -128,9 +129,16 @@ export const CHANGES: readonly ChangeKind[] = [
     description: "Write a new MIDI clip into an empty Session slot. trackRef is a MIDI track from discovery in this turn; sceneIndex 0 is the first scene; length and every note's start and duration are in beats from the clip start (a 4/4 bar is 4 beats); pitch 60 is middle C (C3 in Live); velocity is 1–127.",
     summarize(preview, input, track) {
       const proposed = record(preview.proposed);
-      const notes = Array.isArray(proposed.notes) ? proposed.notes.length : Array.isArray(input.notes) ? input.notes.length : 0;
+      const source: unknown[] = Array.isArray(proposed.notes) ? proposed.notes : Array.isArray(input.notes) ? input.notes : [];
       const known = track(record(preview.target).trackRef ?? input.trackRef);
-      return { title: `New MIDI clip ${quoted(proposed.name ?? input.name, "")} · ${plural(notes, "note")}`.replace("  ", " "), ...(known ? { track: known } : {}) };
+      const length = number(proposed.length ?? input.length);
+      // The notes as written, for NOW's picture of the clip.
+      const notes = source.slice(0, 512).flatMap((item) => {
+        const note = record(item); const pitch = number(note.pitch); const start = number(note.start); const duration = number(note.duration);
+        return pitch !== undefined && start !== undefined && duration !== undefined && duration > 0 ? [{ pitch, start, duration, velocity: number(note.velocity) ?? 100 }] : [];
+      });
+      return { title: `New MIDI clip ${quoted(proposed.name ?? input.name, "")} · ${plural(source.length, "note")}`.replace("  ", " "), ...(known ? { track: known } : {}),
+        ...(length !== undefined && length > 0 && notes.length ? { clip: { length, notes } } : {}) };
     },
   },
   {
@@ -203,5 +211,5 @@ export function newRecord(kind: ChangeKind, summary: ChangeSummary, state: Chang
   return { id: nextChangeId(), family: kind.family, title: summary.title, state, at,
     ...(summary.track ? { track: summary.track } : {}),
     ...(summary.from !== undefined ? { from: summary.from } : {}), ...(summary.to !== undefined ? { to: summary.to } : {}),
-    ...(summary.range ? { range: summary.range } : {}) };
+    ...(summary.range ? { range: summary.range } : {}), ...(summary.clip ? { clip: summary.clip } : {}) };
 }

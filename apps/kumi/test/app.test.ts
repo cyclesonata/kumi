@@ -341,7 +341,7 @@ test("/copy puts the last answer on the clipboard through the terminal", async (
 
 test("NOW draws a change's before and after as positions while it shows the change", async () => {
   const change: ChangeRecord = { id: "c9", family: "mixer", title: "Bass volume 0.0 dB → -6.0 dB", state: "applied", from: 0.8, to: 0.4, range: [0, 1], at: 1 };
-  assert.deepEqual(changePicture(change, 40)?.map((part) => part.text), ["██████████░░", " → ", "█████░░░░░░░"]);
+  assert.deepEqual(changePicture(change, 40)?.[0]?.map((part) => part.text), ["██████████░░", " → ", "█████░░░░░░░"]);
   const { range: _range, ...unspanned } = change;
   assert.equal(changePicture(unspanned, 40), undefined, "no span, no picture");
   const h = harness();
@@ -350,6 +350,28 @@ test("NOW draws a change's before and after as positions while it shows the chan
   connect(h);
   h.emit({ type: "change", change });
   assert.ok(has(h.screen(), "██████████░░ → █████░░░░░░░"));
+  await h.app.close();
+});
+
+test("NOW draws a new clip's notes as a tiny piano roll", async () => {
+  const chord: ChangeRecord = { id: "c10", family: "clip", title: "New MIDI clip “Chord” · 3 notes", state: "applied", at: 1,
+    clip: { length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) } };
+  const text = (line: { text: string }[] | undefined) => (line ?? []).map((part) => part.text).join("");
+  const lines = changePicture(chord, 12)!;
+  assert.deepEqual(lines.map(text), ["⠉".repeat(12), "⣉".repeat(12)], "three pitches in three lanes: top, middle and bottom");
+  const melody: ChangeRecord = { ...chord, clip: { length: 4, notes: [{ pitch: 72, start: 0, duration: 2, velocity: 100 }, { pitch: 60, start: 2, duration: 2, velocity: 30 }] } };
+  const [high, low] = changePicture(melody, 8)!;
+  assert.equal(text(high), "⠉⠉⠉⠉⠀⠀⠀⠀"); assert.equal(text(low), "⠀⠀⠀⠀⣀⣀⣀⣀", "time runs across, higher notes sit higher");
+  assert.notDeepEqual(low!.find((part) => part.text.includes("⣀"))!.style, high!.find((part) => part.text.includes("⠉"))!.style, "quieter notes are dimmer");
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "change", change: chord });
+  const screen = h.screen();
+  const row = screen.findIndex((line) => line.includes("⠉⠉⠉⠉⠉⠉⠉⠉"));
+  assert.ok(row > 0 && screen[row + 1]!.includes("⣉⣉⣉⣉⣉⣉⣉⣉"), "two rows under NOW");
+  assert.ok(screen[row - 1]!.includes("New MIDI clip"), "right under the change's title");
   await h.app.close();
 });
 

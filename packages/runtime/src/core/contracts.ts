@@ -111,6 +111,8 @@ export interface LiveFocus {
 export type ChangeFamily = "tempo" | "mixer" | "rename" | "structure" | "clip" | "device" | "parameter" | "locators" | "color";
 
 /** One change Kumi made in Live, as the producer sees it in HISTORY. Names inside are data. */
+export interface ClipNote { pitch: number; start: number; duration: number; velocity: number }
+
 export interface ChangeRecord {
   /** Unique for this Kumi process: "c1", "c2", … */
   id: string;
@@ -124,6 +126,8 @@ export interface ChangeRecord {
   to?: number;
   /** The span `from` and `to` move in, for drawing them as positions. */
   range?: [number, number];
+  /** A new clip's notes, for drawing it: positions in beats from the clip's start (the first 512 notes). */
+  clip?: { length: number; notes: ClipNote[] };
   /**
    * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
    * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live. "expired":

@@ -73,8 +73,14 @@ old line-by-line interface (`terminal.ts`).
 2. ~~**Kumi's edits**~~: done. Nine kinds of change, each a HISTORY entry backed by
    its bridge transaction, undone by a click, `/undo` or asking Kumi. NOW shows
    each change for a moment as it lands.
-3. **NOW building blocks**: knob, fader, device chain and piano roll drawn from
-   each change's before and after values, and producer units (dB, pan, bars).
+3. **NOW building blocks**: partly done. A mixer or device-parameter change shows
+   its before and after as positions (`██████████░░ → █████░░░░░░░`), in Live's
+   own units in the title ("-2.0 dB", "159 Hz"). A new MIDI clip shows its notes
+   as a two-row braille piano roll: time runs across, higher notes sit higher,
+   quieter notes are dimmer, and up to eight pitches get a lane each, so a drum
+   pattern reads as a grid. Still to do: colour swatches (the bridge would need
+   to report the new colour), a device chain, locators on a timeline, and bars
+   instead of beats.
 4. ~~**Saved sessions**~~: done for saved Sets. Opening Kumi on a Set picks up
    its conversation and shows the recent exchanges ("Continuing your conversation
    from 2 hours ago"); `/new` starts afresh.

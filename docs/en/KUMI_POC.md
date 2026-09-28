@@ -254,6 +254,6 @@ also times the reads a big Set depends on (tracks, and the Set snapshot Kumi
 catches up from), without touching `~/.kumi`.
 
 Next: a picture in NOW for the kinds of change that have none yet (colour,
-clips, locators, new tracks), bars instead of beats for locators, undo that
+locators, new tracks, devices), bars instead of beats for locators, undo that
 outlives the bridge connection, and the bridge's scale limits (see the evidence,
 "Scale on real Live").
