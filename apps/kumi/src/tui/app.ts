@@ -623,6 +623,12 @@ export class TuiApp {
     rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
   }
 
+  /** The change NOW is showing, for a few seconds after Kumi makes it. */
+  private flashing(): ChangeRecord | undefined {
+    if (!this.lastChange || performance.now() - this.lastChange.at >= CHANGE_FLASH_MS) return undefined;
+    return this.changes.find((change) => change.id === this.lastChange!.id);
+  }
+
   private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style } {
     if (this.closing) return { label: "", detail: "Closing…", detailStyle: st.dim };
     const state = this.options.controller.status().state;
@@ -680,6 +686,11 @@ export class TuiApp {
       screen.put(at + 1, area.y + 6, label, st.dim);
     }
     put(7, now.detail, now.detailStyle);
+    const picture = this.flashing() ? changePicture(this.flashing()!, width) : undefined;
+    if (picture) {
+      let column = x;
+      for (const part of picture) column = screen.put(column, area.y + 8, part.text, part.style);
+    }
     put(10, "HISTORY", st.label);
     this.drawHistory(screen, { x, y: area.y + 11, width, height: Math.max(0, area.height - 12) });
   }
@@ -769,6 +780,22 @@ export class TuiApp {
       if (chosen) screen.put(14, y, truncate(item.about, Math.max(1, width - 15)), st.bright);
     });
   }
+}
+
+/**
+ * A change's before and after as positions, like a fader or a knob seen side on:
+ * "██████░░░░ → ████░░░░░░". Only for values with a known span.
+ */
+export function changePicture(change: ChangeRecord, width: number): { text: string; style: Style }[] | undefined {
+  if (change.from === undefined || change.to === undefined || !change.range) return undefined;
+  const [min, max] = change.range;
+  if (!(max > min)) return undefined;
+  const cells = Math.max(4, Math.min(12, Math.floor((width - 3) / 2)));
+  const bar = (value: number) => {
+    const filled = Math.round(Math.min(1, Math.max(0, (value - min) / (max - min))) * cells);
+    return "█".repeat(filled) + "░".repeat(cells - filled);
+  };
+  return [{ text: bar(change.from), style: st.faint }, { text: " → ", style: st.faint }, { text: bar(change.to), style: st.accent }];
 }
 
 /** A catch-up as one line for the conversation. */

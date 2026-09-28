@@ -3,7 +3,7 @@ import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
-import { chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
+import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
 import { VirtualTerminal } from "./vt.js";
@@ -336,6 +336,20 @@ test("/copy puts the last answer on the clipboard through the terminal", async (
   assert.ok(sequence, "an OSC 52 clipboard write");
   assert.equal(Buffer.from(sequence![1]!, "base64").toString("utf8"), "Try a **shorter** release.");
   assert.ok(has(h.screen(), "Copied Kumi's last answer."));
+  await h.app.close();
+});
+
+test("NOW draws a change's before and after as positions while it shows the change", async () => {
+  const change: ChangeRecord = { id: "c9", family: "mixer", title: "Bass volume 0.0 dB → -6.0 dB", state: "applied", from: 0.8, to: 0.4, range: [0, 1], at: 1 };
+  assert.deepEqual(changePicture(change, 40)?.map((part) => part.text), ["██████████░░", " → ", "█████░░░░░░░"]);
+  const { range: _range, ...unspanned } = change;
+  assert.equal(changePicture(unspanned, 40), undefined, "no span, no picture");
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "change", change });
+  assert.ok(has(h.screen(), "██████████░░ → █████░░░░░░░"));
   await h.app.close();
 });
 

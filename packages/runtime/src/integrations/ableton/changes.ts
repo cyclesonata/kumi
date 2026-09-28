@@ -14,6 +14,7 @@ export interface ChangeSummary {
   track?: KnownTrack;
   from?: number;
   to?: number;
+  range?: [number, number];
 }
 
 export interface ChangeKind {
@@ -85,7 +86,7 @@ export const CHANGES: readonly ChangeKind[] = [
       const parts = mixerParts(prior, proposed, record(preview.priorDisplay), record(applied?.display));
       const from = number(prior.volume); const to = number(proposed.volume);
       return { title: `${known?.name ?? "Track"} ${parts.join(", ") || "mixer"}`, ...(known ? { track: known } : {}),
-        ...(from !== undefined && to !== undefined ? { from, to } : {}) };
+        ...(from !== undefined && to !== undefined ? { from, to, range: [0, 1] as [number, number] } : {}) };
     },
   },
   {
@@ -149,8 +150,9 @@ export const CHANGES: readonly ChangeKind[] = [
       const from = number(parameter.currentValue); const to = number(parameter.proposedValue ?? input.value);
       const known = track(device.trackRef);
       const values = from !== undefined && to !== undefined ? ` ${formatNumber(from)} → ${formatNumber(to)}` : "";
+      const min = number(parameter.min); const max = number(parameter.max);
       return { title: `${label(device.name) ? `${label(device.name)} · ` : ""}${name}${values}`, ...(known ? { track: known } : {}),
-        ...(from !== undefined && to !== undefined ? { from, to } : {}) };
+        ...(from !== undefined && to !== undefined ? { from, to, ...(min !== undefined && max !== undefined && max > min ? { range: [min, max] as [number, number] } : {}) } : {}) };
     },
   },
   {
@@ -198,5 +200,6 @@ export function nextChangeId(): string {
 export function newRecord(kind: ChangeKind, summary: ChangeSummary, state: ChangeRecord["state"], at: number): ChangeRecord {
   return { id: nextChangeId(), family: kind.family, title: summary.title, state, at,
     ...(summary.track ? { track: summary.track } : {}),
-    ...(summary.from !== undefined ? { from: summary.from } : {}), ...(summary.to !== undefined ? { to: summary.to } : {}) };
+    ...(summary.from !== undefined ? { from: summary.from } : {}), ...(summary.to !== undefined ? { to: summary.to } : {}),
+    ...(summary.range ? { range: summary.range } : {}) };
 }

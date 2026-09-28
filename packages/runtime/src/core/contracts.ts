@@ -122,6 +122,8 @@ export interface ChangeRecord {
   /** Before and after, for the picture (a fader position, a value). */
   from?: number;
   to?: number;
+  /** The span `from` and `to` move in, for drawing them as positions. */
+  range?: [number, number];
   /**
    * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
    * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live. "expired":
