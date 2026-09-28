@@ -1,0 +1,124 @@
+/** The conversation as entries, and how each entry becomes rows at a given width. */
+import { palette, type Rgb, type Style } from "./style.js";
+import { textWidth } from "./width.js";
+import { wrap, type Span } from "./wrap.js";
+
+export interface Step {
+  id: string;
+  label: string;
+  state: "running" | "done" | "error";
+  ms?: number;
+}
+
+export type Entry =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string; steps: Step[]; status: "running" | "done" | "stopped" | "failed"; elapsedMs?: number }
+  | { kind: "notice"; text: string; tone: "info" | "warn" };
+
+export interface Row {
+  spans: Span[];
+  /** Background painted behind the row's text (the user's own messages). */
+  band?: { bg: Rgb; width: number };
+  /** Text right-aligned at the end of the row, such as a step's duration. */
+  trailing?: Span;
+}
+
+const S = {
+  bright: { fg: palette.bright } as Style,
+  text: { fg: palette.text } as Style,
+  dim: { fg: palette.dim } as Style,
+  faint: { fg: palette.faint } as Style,
+  accent: { fg: palette.accent } as Style,
+  rule: { fg: palette.rule } as Style,
+  warn: { fg: palette.warn } as Style,
+  error: { fg: palette.error } as Style,
+};
+
+/** Words for what Kumi did, instead of tool names. */
+const STEP_LABELS: Record<string, string> = {
+  server_status: "checked the Ableton bridge",
+  live_status: "checked Live",
+  live_discover: "looked at your Set",
+  live_snapshot: "read your whole Set",
+};
+
+export function stepLabel(tool: string): string {
+  return STEP_LABELS[tool] ?? tool.replace(/^live_/, "").replaceAll("_", " ");
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+/** Rows for one entry, `width` cells of text wide. A user message's band adds a cell either side. */
+function entryRows(entry: Entry, width: number): Row[] {
+  const inner = Math.max(1, width);
+  if (entry.kind === "user") {
+    const lines = wrap([{ text: entry.text, style: S.bright }], inner);
+    const band = Math.max(...lines.map((line) => textWidth(line.map((span) => span.text).join("")))) + 2;
+    return lines.map((spans) => ({ spans, band: { bg: palette.raised, width: band } }));
+  }
+  if (entry.kind === "notice") {
+    const style = entry.tone === "warn" ? S.warn : S.faint;
+    return wrap([{ text: entry.text, style }], inner).map((spans) => ({ spans }));
+  }
+  const rows: Row[] = [];
+  if (entry.text) rows.push(...wrap([{ text: entry.text.replace(/\n+$/, ""), style: S.text }], inner).map((spans) => ({ spans })));
+  if (entry.steps.length) {
+    if (rows.length) rows.push({ spans: [] });
+    if (entry.status === "running") {
+      rows.push({ spans: [{ text: "▾ ", style: S.faint }, { text: "working", style: S.dim }] });
+      for (const step of entry.steps) {
+        const glyph = step.state === "running" ? { text: "…", style: S.accent } : step.state === "error" ? { text: "×", style: S.error } : { text: "✓", style: S.accent };
+        rows.push({
+          spans: [{ text: "│ ", style: S.rule }, glyph, { text: ` ${step.label}`, style: S.dim }],
+          ...(step.ms !== undefined ? { trailing: { text: seconds(step.ms), style: S.faint } } : {}),
+        });
+      }
+    } else {
+      const count = entry.steps.length;
+      rows.push({ spans: [
+        { text: "▸ ", style: S.faint },
+        { text: `${count} ${count === 1 ? "step" : "steps"}`, style: S.dim },
+        ...(entry.elapsedMs !== undefined ? [{ text: ` · ${seconds(entry.elapsedMs)}`, style: S.faint }] : []),
+      ] });
+    }
+  }
+  if (entry.status === "stopped") rows.push({ spans: [{ text: "stopped", style: S.faint }] });
+  if (entry.status === "failed" && !entry.text) rows.push({ spans: [{ text: "Kumi couldn't answer that; see the note below.", style: S.faint }] });
+  return rows;
+}
+
+/** Rows for the whole conversation at `width`, with a blank row between entries. */
+export class Transcript {
+  readonly entries: Entry[] = [];
+  private readonly revisions = new WeakMap<Entry, number>();
+  private readonly cache = new WeakMap<Entry, { width: number; revision: number; rows: Row[] }>();
+
+  add(entry: Entry): Entry {
+    this.entries.push(entry);
+    return entry;
+  }
+
+  /** Call after changing an entry, so its rows are laid out again. */
+  touch(entry: Entry): void {
+    this.revisions.set(entry, (this.revisions.get(entry) ?? 0) + 1);
+  }
+
+  clear(): void {
+    this.entries.length = 0;
+  }
+
+  rows(width: number): Row[] {
+    const all: Row[] = [];
+    for (const entry of this.entries) {
+      const revision = this.revisions.get(entry) ?? 0;
+      let cached = this.cache.get(entry);
+      if (!cached || cached.width !== width || cached.revision !== revision) {
+        cached = { width, revision, rows: entryRows(entry, width) };
+        this.cache.set(entry, cached);
+      }
+      if (all.length) all.push({ spans: [] });
+      all.push(...cached.rows);
+    }
+    return all;
+  }
+}

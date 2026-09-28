@@ -1,0 +1,86 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { test } from "node:test";
+const exec = promisify(execFile);
+const root = fileURLToPath(new URL("../../../../", import.meta.url));
+const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const jwt = (claims: object) => `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+
+test("the launcher explains an unbuilt checkout instead of failing with a stack trace", async () => {
+  const launcher = fileURLToPath(new URL("../../bin/kumi.mjs", import.meta.url));
+  const copy = await mkdtemp(join(tmpdir(), "kumi-launcher-"));
+  try {
+    await mkdir(join(copy, "bin"));
+    await writeFile(join(copy, "bin", "kumi.mjs"), await readFile(launcher));
+    await assert.rejects(exec(process.execPath, [join(copy, "bin", "kumi.mjs")], { timeout: 15_000 }), (error: unknown) =>
+      /npm run setup/.test((error as { stderr: string }).stderr) && !/at /.test((error as { stderr: string }).stderr));
+  } finally { await rm(copy, { recursive: true, force: true }); }
+});
+
+test("root npm start forwards CLI arguments from a different cwd; help requires no credential/model", async () => {
+  const { stdout, stderr } = await exec("npm", ["--prefix", root, "run", "kumi", "--", "--help"], {
+    cwd: tmpdir(), env: { ...process.env, KUMI_MODEL: "", KUMI_AUTH_FILE: "" }, timeout: 15_000,
+  });
+  assert.match(stdout, /--bridge-config/); assert.match(stdout, /--inference-only/); assert.match(stdout, /producer assistant for Ableton Live/);
+  assert.match(stdout, /npm run setup/); assert.match(stdout, /login openai-codex/); assert.match(stdout, /Node\.js 22, 24 or 25/);
+  assert.equal(stderr, "");
+});
+
+test("CLI rejects invalid configuration without echoing model/credential-like values", async () => {
+  await assert.rejects(exec(process.execPath, [cli, "--inference-only"], {
+    env: { ...process.env, KUMI_MODEL: "private-token", AI_GATEWAY_API_KEY: "private-token" }, timeout: 15_000,
+  }), (error: unknown) => {
+    const failure = error as Error & { code: number; stderr: string };
+    assert.equal(failure.code, 1); assert.match(failure.stderr, /KUMI_MODEL/); assert(!failure.stderr.includes("private-token")); return true;
+  });
+});
+
+test("missing credentials fail before the terminal starts, with sign-in guidance and no model request", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "kumi-cli-test-"));
+  try {
+    for (const [model, pattern] of [["openai-codex/gpt-6-astra", /login openai-codex/], ["anthropic/claude-sonnet-5", /ANTHROPIC_API_KEY/]] as const) {
+      await assert.rejects(exec(process.execPath, [cli, "--inference-only"], {
+        env: { ...process.env, KUMI_MODEL: model, KUMI_AUTH_FILE: join(dir, "absent.json"), ANTHROPIC_API_KEY: "", KUMI_SETTINGS_FILE: join(dir, "settings.json") }, timeout: 15_000,
+      }), (error: unknown) => {
+        const failure = error as Error & { code: number; stdout: string; stderr: string; killed?: boolean };
+        assert.equal(failure.code, 1); assert(!failure.killed); assert.match(failure.stderr, pattern);
+        assert.doesNotMatch(failure.stdout, /kumi>/, "terminal must not start"); return true;
+      });
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("login --from-pi imports only the ChatGPT session into an owner-only store; auth and logout never print secrets", async () => {
+  const home = await mkdtemp(join(tmpdir(), "kumi-cli-home-"));
+  const access = jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-cli" } });
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, KUMI_AUTH_FILE: join(home, ".kumi", "auth.json"), KUMI_SETTINGS_FILE: join(home, ".kumi", "settings.json"), OPENAI_API_KEY: "sk-private-env", ANTHROPIC_API_KEY: "" };
+  delete env.KUMI_MODEL;
+  try {
+    await mkdir(join(home, ".pi", "agent"), { recursive: true });
+    await writeFile(join(home, ".pi", "agent", "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", access, refresh: "refresh-private", expires: Date.now() + 7_200_000 } }), { mode: 0o600 });
+    const imported = await exec(process.execPath, [cli, "login", "openai-codex", "--from-pi"], { env, timeout: 15_000 });
+    assert.match(imported.stdout, /Signed in to ChatGPT/);
+    assert.match(imported.stdout, /Model: openai-codex\/gpt-6-astra/);
+    const authFile = join(home, ".kumi", "auth.json");
+    assert.equal((await stat(authFile)).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(await readFile(authFile, "utf8")).credentials["openai-codex"].accountId, "acct-cli");
+    const status = await exec(process.execPath, [cli, "auth"], { env, timeout: 15_000 });
+    assert.match(status.stdout, /openai-codex\s+signed in/);
+    assert.match(status.stdout, /openai\s+API key from OPENAI_API_KEY/);
+    assert.match(status.stdout, /anthropic\s+not configured/);
+    assert.match(status.stdout, /Model: openai-codex\/gpt-6-astra/);
+    assert.match((await exec(process.execPath, [cli, "model", "anthropic/claude-sonnet-5"], { env, timeout: 15_000 })).stdout, /Model set to anthropic\/claude-sonnet-5/);
+    assert.match((await exec(process.execPath, [cli, "model"], { env, timeout: 15_000 })).stdout, /Model: anthropic\/claude-sonnet-5/);
+    const removed = await exec(process.execPath, [cli, "logout", "openai-codex"], { env, timeout: 15_000 });
+    assert.match(removed.stdout, /Removed/);
+    assert.match((await exec(process.execPath, [cli, "auth"], { env, timeout: 15_000 })).stdout, /openai-codex\s+not signed in/);
+    for (const output of [imported.stdout, imported.stderr, status.stdout, removed.stdout]) {
+      for (const secret of [access, "refresh-private", "sk-private-env"]) assert(!output.includes(secret));
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

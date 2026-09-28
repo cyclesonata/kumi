@@ -1,0 +1,14 @@
+{
+  "name": "@kumi/app",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22 <23 || >=24 <25 || >=25 <26" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "probe:inference": "npm run build && node scripts/probe-inference.mjs"
+  },
+  "dependencies": { "@kumi/runtime": "0.0.1", "string-width": "8.1.0" }
+}
