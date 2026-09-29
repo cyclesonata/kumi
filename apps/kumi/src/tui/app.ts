@@ -187,7 +187,7 @@ export function touchedNext(before: LiveFocus | null, after: LiveFocus | null, w
   if (!after) return undefined;
   const clip = (): Touched => (after.view === "Arrangement" ? "arrangement" : "clip");
   const view = (): Touched => (after.view === "Arrangement" ? "arrangement" : "session");
-  if (!before) return after.detail === "Clip" ? clip() : after.detail === "Device" && after.device ? "device" : view();
+  if (!before) return after.detail === "Clip" ? clip() : after.detail === "Device" ? "device" : view();
   if (after.view !== before.view) return view();
   if (after.sceneIndex !== before.sceneIndex && after.view === "Session") return "session";
   if (after.detail === "Clip" && (before.detail !== "Clip" || after.slotRef !== before.slotRef || after.clip !== before.clip)) return clip();
@@ -361,7 +361,7 @@ export class TuiApp {
         // The session says what happened and what Kumi does about it (a notice).
         this.connection = event.state;
         // Focus can arrive before the connection says so; the tree is read once it does. Gone, it goes.
-        if (event.state === "connected") { this.readTree(true); this.readClip(true); }
+        if (event.state === "connected") { this.readTree(true); this.readClip(true); this.readStrip(true); }
         else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; this.clip = undefined; this.clipKey = undefined; this.strip = {}; }
         break;
       case "observation":

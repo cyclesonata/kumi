@@ -1034,3 +1034,14 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.41). In Li
 - Found on the way: the integration wrapper that falls back to chat without Live dropped both the
   tree and the pin, and a focus that arrived before "connected" never read the tree. Both fixed.
 - Devices draw as ◇ until the bridge sends Live's device type.
+
+## FOCUS's other views, and device selection, on real Live (bridge 1.0.45)
+
+- MIDI view: Kumi Keys' clip opened in the Clip view drew as a four-row piano roll, "2 bars · 3 notes".
+- Session strip: scene 3 selected on Kumi Keys showed its slots 1–7, clips and empty ones.
+- Arrangement strip: the timeline with the playhead at bar 17 of 312.
+- Device tree with Live's device types: `◆  Operator`, `▣  Audio Effect Rack (2)`, `≈  Chorus-Ensemble`.
+- Selecting a device in Live (bridges 1.0.42–1.0.44): every device and chain of Layered Pad,
+  Rack Lab 901 and Random 8's Drum Rack pads, three times in random order, waiting for Live's focus
+  feed to name each. 17 of 78 at best; selections lagged or landed elsewhere. Left out (1.0.45):
+  pointing at something stays inside Kumi.
