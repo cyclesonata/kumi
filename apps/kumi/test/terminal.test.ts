@@ -197,3 +197,14 @@ test("plain mode lists what Kumi remembers and forgets a note by its id", async 
   assert.match(text, /\[memory\] Use: \/forget <id>/);
   assert.match(text, /\[memory\] Will remember about you: Names buses BUS - <what>/);
 });
+
+test("a watched video is one line: what it is, where its words came from, the frames and the sound", async () => {
+  const f = fixture(); await delay(0);
+  f.emit({ type: "watched", title: "1 Minute Reese With Operator", url: "https://youtu.be/x", duration: 81, from: 0, to: 81, chapters: [], words: "automatic", lines: 6,
+    frames: [{ at: 5, thumb: { width: 32, height: 18, rgb: new Uint8Array(32 * 18 * 3) } }, { at: 65, thumb: { width: 32, height: 18, rgb: new Uint8Array(32 * 18 * 3) } }],
+    sound: { from: 20, to: 30 }, notes: ["Kumi couldn't take the frame at 1:10 (private-token)."] });
+  f.input.write("/quit\n"); assert.equal(await f.done, 0);
+  assert.match(f.output, /\[watched\] “1 Minute Reese With Operator” \(1:21\): 0:00–1:21, its automatic captions, frames at 0:05, 1:05, the sound at 0:20–0:30/);
+  assert.match(f.output, /\[watched\] Kumi couldn't take the frame at 1:10/);
+  assert.ok(!f.output.includes("private-token"));
+});

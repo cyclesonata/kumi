@@ -6,6 +6,7 @@ import { KumiError } from "./errors.js";
 import { memoryInstructions, memoryTools } from "./memory.js";
 import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
 import { listeningTools } from "../audio/tools.js";
+import { videoTools } from "../video/tool.js";
 import { OBSERVATION_MARKER } from "../kernel/budget.js";
 
 interface Options {
@@ -30,6 +31,8 @@ interface Options {
   listen?: boolean;
   /** The producer's saved recipes; without it none are offered. */
   recipes?: RecipeStore;
+  /** Let the model watch videos (tutorials): where videos are kept, and the programs Kumi fetches. */
+  watch?: { videosDir: string; toolsDir: string };
 }
 interface Operation {
   id: number;
@@ -81,6 +84,7 @@ export function createSession(options: Options): SessionController {
   // Files are found by path; the integration can also name something in the Set by its file.
   const listening = options.listen ? listeningTools({ onEvent: (event) => emit(event),
     resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
+  const watching = options.watch ? videoTools({ ...options.watch, onEvent: (event) => emit(event) }) : [];
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -173,7 +177,7 @@ export function createSession(options: Options): SessionController {
         assertCurrent(op);
         const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved)].filter(Boolean).join("\n\n");
         value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-          tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+          tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...watching, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
         if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
         kernel = { value, key: observation.key, revision, lifetime };
       } catch (error) { lifetime.abort(); throw error; }

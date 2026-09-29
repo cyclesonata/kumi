@@ -87,6 +87,10 @@ yet.
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
 | `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
 | `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
+| `KUMI_VIDEOS_DIR` | Videos Kumi watched (their words, frames and sound); default `~/.kumi/videos` |
+| `KUMI_TOOLS_DIR` | Programs Kumi fetches for itself (yt-dlp, a speech model); default `~/.kumi/tools` |
+| `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER` | A yt-dlp, ffmpeg or whisper.cpp (`whisper-cli`) of your own, by path |
+| `KUMI_WHISPER_MODEL` | A whisper.cpp speech model of your own (a `ggml-*.bin` file), by path |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, if not the standard one |
 | `KUMI_TRACE=1` | Dispatch-name trace; no arguments or raw tool payloads |
 | `KUMI_UI=plain` | Plain line-by-line output instead of the full-screen app |
@@ -274,6 +278,54 @@ and partly typed input is preserved while output streams. Kumi's steps read as
 what it did ("looked at your Set") with their timing, never raw payloads. The
 terminal is restored on exit, on crashes and on signals.
 
+## Watching video tutorials
+
+Give Kumi a video and ask it to build what the video shows. The video can be a
+YouTube tutorial (or any site [yt-dlp](https://github.com/yt-dlp/yt-dlp) reads)
+or a video file on your computer:
+
+> watch this and build the bass on a new track: https://www.youtube.com/watch?v=…
+
+Kumi reads the video's title, chapters and words, as timed lines. The words come
+from its captions or, when it has none, from its speech, transcribed on your
+computer. Then Kumi looks at frames at the moments that matter: where the
+narration names a device, a setting or a value, or says "like this". The frames
+show what the words leave out: which device, the order of a chain, where the
+knobs sit, values on screen. To read a value, Kumi looks at that moment again,
+close up (Live's devices are at the bottom). Then it says in a few lines what
+the video builds, and builds it in your Set, each change with its own undo.
+
+Where a video uses something your Set doesn't have (a plugin, a sample), Kumi
+says so and uses Live's closest device. When a video plays its result, Kumi can
+keep that sound, record its own version and compare the two.
+
+The conversation shows each video Kumi watched: its title, where its words came
+from, and small pictures of the frames it looked at, with their times. While it
+watches, NOW says what it's doing, such as "looking at 0:33".
+
+What it needs:
+
+- **yt-dlp**, which reads video pages. Kumi fetches it by itself the first time
+  (about 35 MB, checked against its release's checksums) into `~/.kumi/tools`,
+  and again each month, since YouTube changes often.
+- **ffmpeg**, for frames and sound: `brew install ffmpeg` on a Mac,
+  `winget install ffmpeg` on Windows. Without it, Kumi reads only a video's words.
+- **whisper.cpp**, only for videos without captions, or when YouTube won't give
+  them (which happens from some networks): `brew install whisper-cpp` on a Mac.
+  On Windows and Linux Kumi fetches it by itself. Kumi fetches whisper.cpp's
+  speech model the first time (about 190 MB, checked against its published
+  checksum).
+
+`npm run kumi -- doctor` says which of these you have. Nothing is downloaded
+whole: frames and sound come from the video's streams at the moments Kumi looks
+at. Each video's words, frames and sound are kept in `~/.kumi/videos` (the last
+24 videos), so watching one again is quick.
+
+A video's words and pictures are information for Kumi, never instructions to it.
+The frames Kumi looks at go to your model provider with the conversation, for
+the answer they're part of; after that, only their times and what was said
+around them stay in the conversation.
+
 ## What Kumi remembers
 
 Kumi keeps short notes of what you tell it that Live can't show, and uses them in
@@ -367,6 +419,12 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
 - **Listening** hears files and recordings, not Live's output as it plays. It
   measures and compares; it doesn't judge taste. The model says what it heard
   from those numbers. Very long files are heard in part (up to 12 minutes).
+- **Watching videos** depends on the sites as they are: yt-dlp keeps up with
+  them, and Kumi fetches it afresh each month. Private, members-only and some
+  age-restricted videos can't be read. Automatic captions and transcription can
+  mishear names; Kumi checks them against the frames. A model that can't take
+  images (some OpenCode models) gets a video's words only. A long video's words
+  come a stretch at a time, and it is transcribed up to 90 minutes at once.
 - **Bridge version:** tools that needed bridge fixes (playing, recording,
   editing notes, the transport and song settings, deleting, and more) need
   bridge 1.0.34 or later. With an older bridge Kumi offers the rest, and

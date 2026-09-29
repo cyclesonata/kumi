@@ -898,6 +898,34 @@ test("what Kumi heard shows as a small spectrum, and a comparison as dB over or 
   await h.app.close();
 });
 
+test("a video Kumi watched goes above the answer: its title, where its words came from, and the frames it looked at as small pictures; NOW says what it's doing meanwhile", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("watch this tutorial\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "w1", name: "watch_video" });
+  h.emit({ type: "doing", text: "transcribing what's said · 40%" });
+  assert.ok(has(h.screen(), "transcribing what's said · 40%"), "NOW says what it's doing");
+  h.emit({ type: "text", text: "It builds a Reese bass." });
+  const thumb = { width: 32, height: 18, rgb: new Uint8Array(32 * 18 * 3).fill(120) };
+  h.emit({ type: "watched", title: "1 Minute Reese With Operator", channel: "Au5", url: "https://www.youtube.com/watch?v=W87uuuGcq9c", duration: 81, from: 0, to: 81,
+    chapters: [], words: "transcribed", lines: 6, frames: [5, 15, 25, 35, 45].map((at) => ({ at, thumb })), notes: ["private-token leaked into a note"] });
+  h.emit({ type: "tool-end", id: "w1", name: "watch_video", isError: false, elapsedMs: 1200 });
+  await delay(5);
+  const lines = h.screen();
+  const watched = lines.findIndex((line) => line.includes("Watched “1 Minute Reese With Operator” · Au5 · 1:21"));
+  const answer = lines.findIndex((line) => line.includes("It builds a Reese bass."));
+  assert.ok(watched >= 0 && answer > watched, lines.join("\n"));
+  assert.ok(has(lines, "the whole video · its speech, transcribed by Kumi"));
+  assert.ok(lines.some((line) => /▀{10}/.test(line)), "small pictures");
+  assert.ok(lines.some((line) => line.includes("0:05") && line.includes("0:15")), "their times");
+  assert.ok(!lines.some((line) => line.includes("private-token")), "names and notes are shown safely");
+  assert.ok(!has(lines, "transcribing what's said · 40%"), "NOW moves on once the tool ends");
+  await h.app.close();
+});
+
 test("/recipes lists saved ways of working; one without blanks runs straight away, one with blanks asks what to run it on", async () => {
   const ran: string[] = []; const forgotten: string[] = [];
   const recipes = [

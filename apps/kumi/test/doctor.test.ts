@@ -19,7 +19,8 @@ function setup() {
   return { root, env, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 const io = (env: DoctorIo["env"], extra: Partial<DoctorIo> = {}): DoctorIo => ({ out: new Writable({ write(_c, _e, done) { done(); } }), env, nodeVersion: "v24.21.0",
-  terminal: { isTTY: true, columns: 120, rows: 36 }, probeLive: async () => ({ started: true, connected: true, set: "Night Drive", realLive: true }), nodeVersionOf: async () => "v24.1.0", ...extra });
+  terminal: { isTTY: true, columns: 120, rows: 36 }, probeLive: async () => ({ started: true, connected: true, set: "Night Drive", realLive: true }), nodeVersionOf: async () => "v24.1.0",
+  videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli" }), ...extra });
 
 test("the doctor says what's fine and exactly what to fix, without printing secrets", async () => {
   const s = setup();
@@ -55,5 +56,19 @@ test("the doctor explains Live, the bridge and the terminal in plain words", asy
     assert.match(missing.find((check) => /bridge isn't installed/.test(check.text))?.next ?? "", /npm run kumi -- bridge/);
     const unsigned = await doctorChecks(io({ ...s.env, KUMI_MODEL: "openai-codex/gpt-fixture" }));
     assert.equal(unsigned.find((check) => /ChatGPT/.test(check.text))?.next, "npm run kumi -- login openai-codex");
+  } finally { s.cleanup(); }
+});
+
+test("the doctor says what watching videos needs: ffmpeg for frames, whisper.cpp for videos without captions", async () => {
+  const s = setup();
+  try {
+    const all = await doctorChecks(io(s.env));
+    assert.equal(all.find((check) => /Watches videos/.test(check.text))?.status, "ok");
+    const noWhisper = await doctorChecks(io(s.env, { videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg" }) }));
+    const note = noWhisper.find((check) => /without captions needs whisper\.cpp/.test(check.text));
+    assert.equal(note?.status, "note"); assert.match(note?.next ?? "", /whisper/);
+    const noFfmpeg = await doctorChecks(io(s.env, { videoPrograms: async () => ({}) }));
+    assert.match(noFfmpeg.find((check) => /can't see its frames/.test(check.text))?.next ?? "", /ffmpeg/);
+    assert.ok(noFfmpeg.every((check) => check.status !== "fix" || !/video/.test(check.text)), "videos are never something to fix");
   } finally { s.cleanup(); }
 });

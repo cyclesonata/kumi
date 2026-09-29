@@ -52,6 +52,24 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
   and the differences in dB. The analysis runs on your computer; only numbers
   reach the model.
 
+### Watching video tutorials
+
+- `watch_video` watches a video you point Kumi to, a YouTube tutorial (or
+  another site's) or a video file, so it can build what the video shows. It
+  reads the title, chapters and words as timed lines. The words come from the
+  captions or, without them, from the speech, transcribed on your computer with
+  whisper.cpp. Kumi looks at frames where the narration names a device, a
+  setting or a value, and looks again close up to read a value on screen. It can
+  keep a stretch of the video's sound to compare with its own version.
+- The conversation shows each video watched, with small pictures of the frames
+  and their times; NOW says what Kumi is doing meanwhile.
+- yt-dlp and the speech model are fetched when first needed, each checked
+  against its published checksum; ffmpeg (for frames) and whisper.cpp (on a Mac)
+  are yours, and `kumi doctor` says whether you have them. Videos are kept in
+  `~/.kumi/videos`, so watching one again is quick.
+- Kumi's agent core shows the model images from tools for the rest of that
+  answer, then puts them away, keeping what was said around each.
+
 ### Recipes
 
 - Kumi saves ways of working as recipes (`save_recipe`) and replays them

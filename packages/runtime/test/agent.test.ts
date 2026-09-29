@@ -556,3 +556,54 @@ test("a conversation carried into other instructions (other notes, say) continue
   assert.doesNotMatch(JSON.stringify(other.requests[0]!.prompt), /sig-9/);
   await first.kernel.close(); await same.kernel.close(); await other.kernel.close();
 });
+
+test("a tool's images reach the model for the rest of the turn; when it ends they're put away, with the reasoning written after them", async () => {
+  const thinking = (id: string): LanguageModelV4StreamPart[] => [
+    { type: "reasoning-start", id, providerMetadata: { openai: { itemId: `rs_${id}`, reasoningEncryptedContent: "enc" } } },
+    { type: "reasoning-delta", id, delta: "thinking" }, { type: "reasoning-end", id }];
+  const h = harness((_options, n) => n === 1 ? [...thinking("a"), call("watch", "{}"), finish("tool-calls")]
+    : n === 2 ? [...thinking("b"), call("read", "{}", "c2"), finish("tool-calls")] : n === 3 ? [...thinking("c"), ...text("It loads Operator."), finish()] : [...text("again"), finish()], {
+    tools: [
+      tool("watch", async () => ({ text: "Video: a tutorial", images: [
+        { data: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2]), mediaType: "image/jpeg", caption: "Frame at 0:05" },
+        { data: new Uint8Array([1]), mediaType: "text/plain" },
+        { data: new Uint8Array([0x89, 0x50]), mediaType: "image/png" }] })),
+      tool("read", async () => ({ text: "tempo 120" })),
+    ],
+  });
+  await h.kernel.run("watch this", new AbortController().signal, () => {});
+  const shown = (request: LanguageModelV4CallOptions | undefined) => request?.prompt.find((message) => message.role === "tool");
+  // During the turn: words, each image after its caption (what models can't read is left out), as plain bytes.
+  const output = shown(h.requests[1])?.content[0];
+  assert.ok(output?.type === "tool-result" && output.output.type === "content");
+  assert.deepEqual(output.output.value.map((part) => part.type === "text" ? part.text : part.type === "file" ? part.mediaType : part.type),
+    ["Video: a tutorial", "Frame at 0:05", "image/jpeg", "image/png"]);
+  const image = output.output.value[2];
+  assert.ok(image?.type === "file" && image.data.type === "data" && image.data.data instanceof Uint8Array && !Buffer.isBuffer(image.data.data));
+  assert.equal(shown(h.requests[2])?.content[0]?.type === "tool-result" && (shown(h.requests[2])!.content[0] as { output: { type: string } }).output.type, "content");
+  // Settled: the words stay with a line saying images were there; reasoning before them stays, after them goes.
+  const settled = h.kernel.checkpoint().messages;
+  assert.deepEqual(settled[2], { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "watch",
+    output: { type: "text", value: "Video: a tutorial\nFrame at 0:05\n[2 images were shown here; they're no longer attached (the tool shows them again when asked).]" } }] });
+  assert.equal(settled[1]!.role === "assistant" && settled[1]!.content[0]?.type, "reasoning");
+  assert.ok(settled.slice(3).every((message) => message.role !== "assistant" || message.content.every((part) => part.type !== "reasoning")));
+  assert.doesNotMatch(JSON.stringify(settled), /"0":255/);
+  await h.kernel.run("and now?", new AbortController().signal, () => {});
+  assert.ok(!JSON.stringify(h.requests[3]?.prompt).includes("image/jpeg"));
+  await h.kernel.close();
+});
+
+test("a stopped turn keeps a tool's words, not its images", async () => {
+  const h = harness((options, n) => n === 1 ? [call("watch", "{}"), finish("tool-calls")] : hanging(options, []), {
+    tools: [tool("watch", async () => ({ text: "Video", images: [{ data: new Uint8Array([0xff, 0xd8]), mediaType: "image/jpeg" }] }))],
+  });
+  const controller = new AbortController();
+  const running = h.kernel.run("watch", controller.signal, () => {});
+  while (h.requests.length < 2) await delay(1);
+  controller.abort();
+  assert.equal((await running).stopReason, "cancelled");
+  const settled = JSON.stringify(h.kernel.checkpoint().messages);
+  assert.match(settled, /An image was shown here/);
+  assert.doesNotMatch(settled, /image\/jpeg/);
+  await h.kernel.close();
+});

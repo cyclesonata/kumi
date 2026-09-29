@@ -285,6 +285,13 @@ export function createTerminal(options: Options): Terminal {
       case "watching": notice(event.on ? "[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done." : "[live] Kumi stopped watching."); break;
       case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
       case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
+      case "watched": {
+        const at = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+        const words = { captions: "its captions", automatic: "its automatic captions", transcribed: "its speech, transcribed", none: "no words" }[event.words];
+        notice(`[watched] “${event.title.slice(0, 120)}”${event.duration ? ` (${at(event.duration)})` : ""}: ${at(event.from)}–${at(event.to)}, ${words}${event.frames.length ? `, frames at ${event.frames.map((frame) => at(frame.at)).join(", ")}` : ""}${event.sound ? `, the sound at ${at(event.sound.from)}–${at(event.sound.to)}` : ""}`);
+        for (const note of event.notes.slice(0, 3)) notice(`[watched] ${note}`);
+        break;
+      }
       case "turn-complete": {
         if (event.result.stopReason !== "cancelled" && !suppressOutput) presentation?.text(text.finish()); else text.discard();
         const usage = event.result.usage;

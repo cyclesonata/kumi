@@ -42,6 +42,10 @@ export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "K
 export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(homedir(), ".kumi", "memory.json"));
 /** The producer's recipes, one file each. */
 export const loadRecipesDir = (env: Env = process.env) => absoluteFile(env, "KUMI_RECIPES_DIR", join(homedir(), ".kumi", "recipes"));
+/** Videos Kumi watched (their words, frames and sound), kept so watching again is quick. */
+export const loadVideosDir = (env: Env = process.env) => absoluteFile(env, "KUMI_VIDEOS_DIR", join(homedir(), ".kumi", "videos"));
+/** Programs Kumi fetches for itself (yt-dlp, a speech model). */
+export const loadToolsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_TOOLS_DIR", join(homedir(), ".kumi", "tools"));
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
 

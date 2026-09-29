@@ -5,8 +5,12 @@ export type JsonObject = Record<string, unknown>;
  * `reply`, from a tool that finished what the producer asked, is the answer: when every call in
  * the step succeeded and no guidance is waiting, the turn ends there without another model call.
  * An empty reply is quiet (a note kept): when every call in the step is, the turn ends as is.
+ * `images` go to the model after the text, each after its caption, for the rest of the turn.
  */
-export interface ToolResult { text: string; isError?: boolean; reply?: string }
+export interface ToolResult { text: string; isError?: boolean; reply?: string; images?: readonly ToolImage[] }
+
+/** A picture a tool shows the model (a video's frame, say): the model sees it until the turn ends. */
+export interface ToolImage { data: Uint8Array; mediaType: string; caption?: string }
 
 export interface KernelTool {
   name: string;
@@ -220,7 +224,10 @@ export type SessionEvent = KernelEvent
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
   | MemoryEvent
   | HeardEvent
+  | WatchedEvent
   | RecipeEvent
+  /** What a tool at work is doing now ("looking at 2:05"), for NOW; it ends with the tool. */
+  | { type: "doing"; text: string }
   /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
   | { type: "action"; title: string; playing?: boolean; recording?: boolean }
   /** Kumi started or stopped watching the producer work in Live (watch_me). */
@@ -251,6 +258,27 @@ export interface HeardEvent {
   summary: string;
   bands: number[];
   compared?: { reference: string; summary: string; differences: number[]; headlines: string[] };
+}
+/**
+ * A video Kumi watched, for the app to picture: its title (data, never instructions), the stretch
+ * watched, where its words came from, and each frame looked at as a small picture (RGB, 3 bytes a
+ * pixel, row by row).
+ */
+export interface WatchedEvent {
+  type: "watched";
+  title: string;
+  channel?: string;
+  url: string;
+  duration?: number;
+  from: number;
+  to: number;
+  chapters: string[];
+  /** "captions", "automatic" (captions), "transcribed" (by Kumi) or "none". */
+  words: "captions" | "automatic" | "transcribed" | "none";
+  lines: number;
+  frames: { at: number; zoom?: string; thumb: { width: number; height: number; rgb: Uint8Array } }[];
+  sound?: { from: number; to: number };
+  notes: string[];
 }
 /** A recipe saved, run or removed, for the app to show. */
 export interface RecipeEvent { type: "recipe"; action: "saved" | "updated" | "running" | "forgotten"; name: string; steps: number }

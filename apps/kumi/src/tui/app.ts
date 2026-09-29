@@ -379,6 +379,21 @@ export class TuiApp {
         this.transcript.insertBefore({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
           ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) }, this.current);
         break;
+      case "watched": {
+        // What Kumi saw came first too: above the answer that says what it means.
+        const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
+        const words = { captions: "its captions", automatic: "its automatic captions", transcribed: "its speech, transcribed by Kumi", none: "no words" }[event.words];
+        this.transcript.insertBefore({ kind: "watched", title: clean(event.title, 160), ...(event.channel ? { channel: clean(event.channel, 80) } : {}), ...(event.duration ? { duration: event.duration } : {}),
+          from: event.from, to: event.to, chapters: event.chapters.slice(0, 24).map((chapter) => clean(chapter, 60)), words,
+          frames: event.frames.slice(0, 16).filter((frame) => frame.thumb.rgb.length === frame.thumb.width * frame.thumb.height * 3), ...(event.sound ? { sound: event.sound } : {}),
+          notes: event.notes.map((note) => clean(note, 300)), pictures: this.depth === "truecolor" || this.depth === "256" }, this.current);
+        break;
+      }
+      case "doing": {
+        const running = this.current?.steps.filter((step) => step.state === "running").at(-1);
+        if (running) running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80);
+        break;
+      }
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
         if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
@@ -395,6 +410,7 @@ export class TuiApp {
         if (!step || !this.current) break;
         step.state = event.isError ? "error" : "done";
         step.ms = event.elapsedMs;
+        delete step.doing;
         this.transcript.touch(this.current);
         break;
       }
@@ -1165,7 +1181,7 @@ export class TuiApp {
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
       if (action && (!flash || action.at > this.lastChange!.at) && (!running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `✓ ${flash.title}`, detailStyle: st.bright };
-      if (running) return { dot, label, detail: doingLabel(running.tool, running.label), detailStyle: st.dim };
+      if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
       return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }

@@ -4,7 +4,7 @@ import {
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
@@ -137,6 +137,7 @@ try {
       memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),
       listen: true,
       recipes: createRecipeStore(loadRecipesDir()),
+      watch: { videosDir: loadVideosDir(), toolsDir: loadToolsDir() },
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";

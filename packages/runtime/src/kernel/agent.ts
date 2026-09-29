@@ -2,12 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
   JSONSchema7, LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4FinishReason, LanguageModelV4FunctionTool,
-  LanguageModelV4Message, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolCall, LanguageModelV4ToolResultPart,
-  LanguageModelV4Usage, SharedV4ProviderMetadata,
+  LanguageModelV4Message, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolCall, LanguageModelV4ToolResultOutput,
+  LanguageModelV4ToolResultPart, LanguageModelV4Usage, SharedV4ProviderMetadata,
 } from "@ai-sdk/provider";
-import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, StreamingCall, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
+import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, StreamingCall, ToolImage, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
-import { DEFAULT_BUDGET, fit, OBSERVATION_MARKER, SHORTENED, type ContextBudget } from "./budget.js";
+import { DEFAULT_BUDGET, fit, OBSERVATION_MARKER, putAwayImages, SHORTENED, type ContextBudget } from "./budget.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
 
 export interface ModelRequest {
@@ -59,6 +59,9 @@ const MAX_STEER = 16 * 1024;
 const MAX_TOOL_ERROR = 4 * 1024;
 /** A tool's own answer to the producer, when it finished the request. */
 const MAX_REPLY = 8 * 1024;
+/** Images one tool result shows, and the media types models read. */
+const MAX_TOOL_IMAGES = 16;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 /** Ends a stopped turn's kept steps, for the model and in the transcript. */
 export const STOPPED_NOTE = "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
 
@@ -114,11 +117,11 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       const last = messages[end - 1];
       if (last?.role === "assistant" && last.content.some((part) => part.type === "tool-call")) end--;
       const finished = messages.slice(0, end);
-      if (finished.some((message) => message.role === "tool")) history = [...earlier, ...finished, { role: "assistant", content: [{ type: "text", text: STOPPED_NOTE }] }];
+      if (finished.some((message) => message.role === "tool")) history = [...earlier, ...withoutImages(finished), { role: "assistant", content: [{ type: "text", text: STOPPED_NOTE }] }];
     };
     try {
       for (let step = 0; ; step++) {
-        if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("max-steps"); }
+        if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...withoutImages(messages)]; return settled("max-steps"); }
         const fitted = fit(earlier, messages, budget);
         if (fitted.history !== earlier || fitted.turn !== messages) {
           // Kumi just changed what came before. Some providers bind a model's reasoning to the exact
@@ -144,9 +147,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
               deliver({ type: "text", text: spoke ? `\n\n${reply}` : reply });
               messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
             }
-            abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed");
+            abort.throwIfAborted(); history = [...earlier, ...withoutImages(messages)]; return settled("completed");
           }
-        } else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed"); }
+        } else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...withoutImages(messages)]; return settled("completed"); }
         for (const text of steering.splice(0)) { messages.push(user(text)); deliver({ type: "steer", text }); }
       }
     } catch (error) {
@@ -220,13 +223,13 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       const started = streamed?.begun || performance.now();
       if (!streamed?.begun) deliver({ type: "tool-start", id: call.toolCallId, name: call.toolName });
       const tool = tools.get(call.toolName);
-      let outcome: { text: string; isError: boolean };
+      let outcome: { text: string; isError: boolean; images?: readonly ToolImage[] };
       if (!tool) outcome = { text: `Unknown tool ${JSON.stringify(call.toolName.slice(0, 64))}; use only the supplied tools.`, isError: true };
       else if (!input && !streamed) outcome = { text: "Tool arguments must be a JSON object.", isError: true };
       else {
         try {
           const result = await untilAborted(streamed ? streamed.call.finish(input) : tool.execute(input!, abort), abort);
-          outcome = { text: result.text, isError: Boolean(result.isError) };
+          outcome = { text: result.text, isError: Boolean(result.isError), ...(result.images?.length ? { images: result.images } : {}) };
           if (!outcome.isError && typeof result.reply === "string") {
             if (result.reply.trim()) replies.push(result.reply.trim().slice(0, MAX_REPLY)); else quiet++;
           }
@@ -238,8 +241,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       abort.throwIfAborted();
       failed ||= outcome.isError;
       deliver({ type: "tool-end", id: call.toolCallId, name: call.toolName, isError: outcome.isError, elapsedMs: Math.round(performance.now() - started) });
-      results.push({ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName,
-        output: outcome.isError ? { type: "error-text", value: outcome.text } : { type: "text", value: outcome.text } });
+      results.push({ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName, output: toolOutput(outcome) });
     }
     return { results, ...(!failed && replies.length ? { reply: replies.join("\n\n") } : !failed && quiet === calls.length ? { reply: "" } : {}) };
   }
@@ -370,7 +372,7 @@ function user(text: string): LanguageModelV4Message {
 
 function restore(checkpoint: KernelCheckpoint, model: string, tools: string): LanguageModelV4Message[] {
   if (checkpoint?.version !== 1 || !Array.isArray(checkpoint.messages)) throw new Error("Unsupported checkpoint version.");
-  const messages = structuredClone(checkpoint.messages) as LanguageModelV4Message[];
+  const messages = withoutImages(structuredClone(checkpoint.messages) as LanguageModelV4Message[]);
   if (!checkpoint.origin) return messages;
   // Reasoning belongs to the model that wrote it, and Claude's to the tools it saw as well: another
   // model, or other tools, continue from the words, tool calls and results. (Older saves name only
@@ -391,6 +393,30 @@ export function withoutReasoning(messages: readonly LanguageModelV4Message[]): L
     const content = (message.content as { type: string; providerOptions?: unknown }[]).filter((part) => part.type !== "reasoning").map(plain);
     return content.length ? [{ ...plain(message as { providerOptions?: unknown }), content } as LanguageModelV4Message] : [];
   });
+}
+
+/** A tool's result as the model reads it: its words, then each image after its caption. */
+function toolOutput(outcome: { text: string; isError: boolean; images?: readonly ToolImage[] }): LanguageModelV4ToolResultOutput {
+  if (outcome.isError) return { type: "error-text", value: outcome.text };
+  const images = (outcome.images ?? []).filter((image) => IMAGE_TYPES.has(image.mediaType) && image.data.byteLength > 0).slice(0, MAX_TOOL_IMAGES);
+  if (!images.length) return { type: "text", value: outcome.text };
+  return { type: "content", value: [{ type: "text", text: outcome.text }, ...images.flatMap((image) => [
+    ...(image.caption ? [{ type: "text" as const, text: image.caption.slice(0, 1000) }] : []),
+    // A copy, as a plain byte array: a Buffer would measure (and save) as a list of numbers.
+    { type: "file" as const, data: { type: "data" as const, data: Uint8Array.from(image.data) }, mediaType: image.mediaType }])] };
+}
+
+/**
+ * A turn without the images its tools showed, each result saying how many it had: they served
+ * that turn, and kept, they'd cost every later request (and a saved conversation) their size. The
+ * reasoning written after the first goes too, since it was written seeing them. The same array
+ * when there were none.
+ */
+export function withoutImages(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
+  const cleared = putAwayImages(messages);
+  if (cleared === messages) return messages;
+  const first = cleared.findIndex((message, index) => message !== messages[index]);
+  return [...cleared.slice(0, first), ...withoutReasoning(cleared.slice(first))];
 }
 
 /** Resolve with the work, or reject as soon as the signal aborts; a late settlement is ignored. */

@@ -7,6 +7,7 @@ import { openCredentialStore, type OAuthCredential } from "../src/auth/store.js"
 import { KumiError } from "../src/core/errors.js";
 import { createAgentKernel } from "../src/kernel/agent.js";
 import { resolveModel } from "../src/providers/index.js";
+import type { LanguageModelV4Message } from "@ai-sdk/provider";
 
 interface Captured { url: string; headers: Headers; body: Record<string, unknown> & { input?: Record<string, unknown>[] }; form?: URLSearchParams }
 const jwt = (claims: object) => `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
@@ -195,6 +196,38 @@ test("missing keys, unknown providers and unsupported routes fail with configura
     await assert.rejects(resolveModel({ model: "opencode/gemini-3.5-pro", store, env: { OPENCODE_API_KEY: "k" } }), /Gemini/);
     for (const model of ["gateway/secret-value", "openai-codex/", "openai-codex/has space", "anthropic"]) {
       await assert.rejects(resolveModel({ model, store }), (error: unknown) => error instanceof KumiError && !error.message.includes("secret-value"));
+    }
+  });
+});
+
+test("a tool's images go to each model as its API takes them: OpenAI's at full detail, Anthropic's as image blocks, a words-only API's as a line saying so", async () => {
+  const messages: LanguageModelV4Message[] = [
+    { role: "user", content: [{ type: "text", text: "watch this" }] },
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "watch_video", input: {} }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "watch_video", output: { type: "content", value: [
+      { type: "text", text: "Video" }, { type: "text", text: "Frame at 0:05" }, { type: "file", data: { type: "data", data: new Uint8Array([0xff, 0xd8, 0xff]) }, mediaType: "image/jpeg" }] } }] },
+  ];
+  const key = "key-fixture-value";
+  const cases: [string, (request: Captured) => void][] = [
+    ["openai/gpt-6-luna", (request) => {
+      const output = (request.body.input as { type: string; output?: unknown }[]).find((item) => item.type === "function_call_output")?.output;
+      assert.deepEqual(output, [{ type: "input_text", text: "Video" }, { type: "input_text", text: "Frame at 0:05" }, { type: "input_image", image_url: "data:image/jpeg;base64,/9j/", detail: "high" }]);
+    }],
+    ["anthropic/claude-sonnet-5", (request) => {
+      const result = (request.body.messages as { content: { type: string; content?: unknown }[] }[]).flatMap((message) => message.content).find((part) => part.type === "tool_result");
+      assert.deepEqual((result?.content as unknown[]).at(-1), { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "/9j/" } });
+    }],
+    ["opencode/kimi-k2.6", (request) => {
+      const tool = (request.body.messages as { role: string; content: unknown }[]).find((message) => message.role === "tool");
+      assert.equal(tool?.content, "Video\nFrame at 0:05\n[An image this model can't be shown.]");
+    }],
+  ];
+  await withStore(undefined, async (store) => {
+    for (const [model, check] of cases) {
+      const { fetch, requests } = recorder(() => rejection());
+      const binding = await resolveModel({ model, store, fetch, env: { OPENAI_API_KEY: key, ANTHROPIC_API_KEY: key, OPENCODE_API_KEY: key } });
+      await assert.rejects(async () => binding.model.doStream({ ...binding.prepare({ instructions: "fixture instructions", messages, tools: [], sessionId: "s1" }), abortSignal: new AbortController().signal }));
+      check(requests[0]!);
     }
   });
 });

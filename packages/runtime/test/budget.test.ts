@@ -102,3 +102,19 @@ test("dropEarliest keeps whole exchanges from the end, starting where the produc
   assert.deepEqual(dropEarliest(messages, size(messages.slice(3))), messages.slice(3));
   assert.deepEqual(dropEarliest(messages, size(messages.slice(3)) - 1), []);
 });
+
+test("images count at what they cost a model, not their size; past the most a request carries, this turn's earliest are put away", () => {
+  const image = (id: string, bytes: number): LanguageModelV4Message => ({ role: "tool", content: [{ type: "tool-result", toolCallId: id, toolName: "watch_video",
+    output: { type: "content", value: [{ type: "text", text: `frames ${id}` }, { type: "file", data: { type: "data", data: new Uint8Array(bytes) }, mediaType: "image/jpeg" }] } }] });
+  // 30 frames of 200 kB each would be 6 MB as bytes; as a model's cost they fit the budget.
+  const turn = [user(observed("watch")), ...Array.from({ length: 30 }, (_, index) => image(`i${index}`, 200_000))];
+  const fitted = fit([], turn, { clearAt: 160 * 1024, limit: 400 * 1024 });
+  assert.equal(fitted.turn, turn);
+  const many = [user(observed("watch")), ...Array.from({ length: 45 }, (_, index) => image(`i${index}`, 10))];
+  const trimmed = fit([], many, { clearAt: 160 * 1024, limit: 400 * 1024 }).turn;
+  const kept = trimmed.filter((message) => message.role === "tool" && message.content.some((part) => part.type === "tool-result" && part.output.type === "content"));
+  assert.equal(kept.length, 40);
+  const first = trimmed[1];
+  assert.ok(first?.role === "tool" && first.content[0]?.type === "tool-result" && first.content[0].output.type === "text");
+  assert.equal(first.content[0].output.value, "frames i0\n[An image was shown here; it's no longer attached (the tool shows it again when asked).]");
+});

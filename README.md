@@ -19,6 +19,7 @@ It also:
 - plays, records and bounces audio (by resampling) when you ask;
 - listens to audio, such as a reference track, a sample or its own recording,
   and compares a mix with a reference;
+- watches video tutorials, from YouTube or a file, and builds what they show;
 - saves your ways of working as recipes to replay, including ones it learns by
   watching you;
 - keeps short notes of what you tell it;

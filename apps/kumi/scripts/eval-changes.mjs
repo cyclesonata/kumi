@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // Opt-in eval of how the configured model uses Kumi's tools: changes, playing and recording
-// (resampling), listening, recipes (watch_me included) and memory. It uses your sign-in and model
+// (resampling), listening, watching a tutorial, recipes (watch_me included) and memory. It uses your sign-in and model
 // but never Live: a synthetic bridge with the real bridge's tool schemas (bridge-tools.json, from
 // make-bridge-tools.mjs) stands in for a small, unsaved Set, one of whose tracks is named like an
 // instruction. Notes, recipes and audio go to a throwaway folder, never ~/.kumi.
 // npm run eval:changes --workspace @kumi/app [-- <part of a case name>]
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAbletonIntegration, createAgentKernel, createMemoryStore, createRecipeStore, createSession, openCredentialStore, resolveModel } from "@kumi/runtime";
+import { createAbletonIntegration, createAgentKernel, createMemoryStore, createRecipeStore, createSession, findFfmpeg, openCredentialStore, resolveModel } from "@kumi/runtime";
 import { loadInferenceConfig, safeError } from "../dist/src/config.js";
 
 const schemas = JSON.parse(readFileSync(new URL("./bridge-tools.json", import.meta.url), "utf8"));
@@ -165,6 +166,8 @@ const CASES = [
   { name: "compare to a reference", audio: true, prompts: ({ mix, reference }) => [`How does my mix at ${mix} compare with this reference, ${reference}? What's the biggest difference in tone?`],
     check: ({ heard, last }) => heard.some((event) => event.compared) && /bright|dark|high|top|treble|air|presence|brillian/i.test(last) },
   // Recipes: one the producer shows Kumi by hand.
+  { name: "watch a tutorial", video: true, prompts: ({ video }) => [`Watch this tutorial and build the bass it makes on a new MIDI track: ${video}`],
+    check: ({ tools, requests, last }) => tools.includes("watch_video") && /operator/i.test(last) && requests.some((request) => /Operator/.test(JSON.stringify(request.args ?? {}))) },
   { name: "watch me", prompts: ["Watch me set up my usual pad routine, then keep it as a recipe.", "Done."], between: (bridge) => bridge.work(),
     check: ({ tools, recipes }) => tools.filter((name) => name === "watch_me").length >= 2 && recipes.some((recipe) => recipe.steps.some((step) => step.tool === "add_tracks_and_scenes" || step.tool === "load_device")) },
   // Memory: what lasts is kept on its own, in the right place; nothing else is.
@@ -182,6 +185,16 @@ const CASES = [
     check: ({ state, last, conversation }) => state.tempo === 126 && state.tracks[2].name === "Rhodes" && state.tracks[1].volume < 0.85
       && /126/.test(last) && /Rhodes/.test(last) && /Kumi (cleared|removed)/.test(conversation) },
 ];
+
+/** A short tutorial video (a test picture and a tone) with its narration beside it, as captions. */
+function writeTutorial(ffmpeg, path) {
+  execFileSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=10:duration=20", "-f", "lavfi", "-i", "sine=frequency=55:duration=20",
+    "-c:v", "mpeg4", "-c:a", "aac", "-shortest", "-y", path]);
+  const lines = ["Making a Reese bass in one minute. Load Operator.", "Set voices to one and turn on glide.", "Crank oscillator B's fine tuning, then back it off a bit so it detunes against A.",
+    "Then load a Saturator, set it to hard curve, and put the dry wet at fifty percent."];
+  const at = (seconds) => `00:00:${String(seconds).padStart(2, "0")},000`;
+  writeFileSync(path.replace(/\.mp4$/, ".srt"), lines.map((line, index) => `${index + 1}\n${at(index * 5)} --> ${at(index * 5 + 4)}\n${line}\n`).join("\n"));
+}
 
 /** A few seconds of noise, filtered: `bright` keeps the top end, otherwise it's rolled off. */
 function writeNoise(path, bright) {
@@ -207,13 +220,18 @@ async function runCase(binding, testCase) {
   const recipes = createRecipeStore(join(folder, "recipes"));
   const audio = testCase.audio ? { mix: join(folder, "mix.wav"), reference: join(folder, "reference.wav") } : undefined;
   if (audio) { writeNoise(audio.mix, false); writeNoise(audio.reference, true); }
-  const prompts = typeof testCase.prompts === "function" ? testCase.prompts(audio) : testCase.prompts;
+  const ffmpeg = testCase.video ? await findFfmpeg() : undefined;
+  if (testCase.video && !ffmpeg) throw new Error("this case makes its video with ffmpeg, which isn't installed");
+  const video = ffmpeg ? join(folder, "tutorial.mp4") : undefined;
+  if (video) writeTutorial(ffmpeg, video);
+  const prompts = typeof testCase.prompts === "function" ? testCase.prompts({ ...audio, video }) : testCase.prompts;
   const producerFile = join(folder, "memory.json");
   if (testCase.seed?.producer) writeFileSync(producerFile, JSON.stringify({ version: 1, notes: testCase.seed.producer.map((text, index) => ({ id: `p${index + 1}`, text, at: Date.now() })) }), { mode: 0o600 });
   let text = ""; let last = ""; let kernel;
   const session = createSession({
     timeoutMs: 150_000,
     memory: createMemoryStore({ projectsDir: join(folder, "projects"), producerFile }), recipes, listen: true,
+    watch: { videosDir: join(folder, "videos"), toolsDir: join(folder, "tools") },
     kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
     integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change) }),
     onEvent: (event) => {

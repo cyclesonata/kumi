@@ -125,7 +125,7 @@ export async function resolveModel(options: ResolveModelOptions): Promise<ModelB
   }
   if (/^gemini-/.test(model)) throw new KumiError("config", "Gemini models through OpenCode are not supported yet.");
   return bind(createOpenAICompatible({ name: provider, apiKey, baseURL, fetch: identified, includeUsage: true }).chatModel(model), (request) => ({
-    prompt: [{ role: "system", content: request.instructions }, ...request.messages], ...toolOptions(request), headers: session(request),
+    prompt: [{ role: "system", content: request.instructions }, ...wordsOnly(request.messages)], ...toolOptions(request), headers: session(request),
   }));
 }
 
@@ -133,10 +133,29 @@ function toolOptions({ tools }: ModelRequest): Pick<LanguageModelV4CallOptions, 
   return tools.length ? { tools, toolChoice: { type: "auto" } } : {};
 }
 
+type ToolPart = Extract<LanguageModelV4Message, { role: "tool" }>["content"][number];
+/** Each tool result's images changed by `change`; messages without any stay as they are. */
+function mapImages(messages: LanguageModelV4Message[], change: (part: Extract<ToolPart, { type: "tool-result" }>) => ToolPart): LanguageModelV4Message[] {
+  return messages.map((message) => (message.role !== "tool" || !message.content.some((part) => part.type === "tool-result" && part.output.type === "content") ? message
+    : { ...message, content: message.content.map((part) => (part.type === "tool-result" && part.output.type === "content" ? change(part) : part)) }));
+}
+
+/** OpenAI-compatible chat carries only words in a tool result: each image becomes a line saying so. */
+function wordsOnly(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
+  return mapImages(messages, (part) => ({ ...part, output: { type: "text", value: part.output.type !== "content" ? "" : part.output.value
+    .map((item) => (item.type === "text" ? item.text : item.type === "file" ? "[An image this model can't be shown.]" : "")).filter(Boolean).join("\n") } }));
+}
+
+/** Frames of software have small print: OpenAI reads each image at full detail. */
+function inDetail(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
+  return mapImages(messages, (part) => (part.output.type !== "content" ? part : { ...part, output: { ...part.output, value: part.output.value
+    .map((item) => (item.type === "file" ? { ...item, providerOptions: { ...item.providerOptions, openai: { ...item.providerOptions?.openai, imageDetail: "high" } } } : item)) } }));
+}
+
 /** OpenAI Responses: stateless (store=false), so encrypted reasoning is replayed from Kumi's own history. */
 function responsesRequest(request: ModelRequest, extra: Record<string, string> = {}): LanguageModelV4CallOptions {
   return {
-    prompt: request.messages, ...toolOptions(request),
+    prompt: inDetail(request.messages), ...toolOptions(request),
     providerOptions: { openai: { instructions: request.instructions, store: false, promptCacheKey: request.sessionId, ...extra } },
   };
 }

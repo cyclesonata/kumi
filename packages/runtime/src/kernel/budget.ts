@@ -26,8 +26,46 @@ const CLEARED = " … [Kumi cleared the rest of this earlier result to save room
 const SMALL = 1024;
 /** What's kept of a cleared result; change results start with what changed. */
 const HEAD = 200;
+/** What an image costs, as bytes of conversation: a 1280×720 frame is about 1.2k tokens. */
+const IMAGE_BYTES = 4 * 1024;
+/** The most images a request carries; past this, this turn's earliest are put away. */
+export const MAX_IMAGES = 40;
+const putAway = (count: number) => `[${count === 1 ? "An image was" : `${count} images were`} shown here; ${count === 1 ? "it's" : "they're"} no longer attached (the tool shows ${count === 1 ? "it" : "them"} again when asked).]`;
 
-const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+/** Bytes as sent, with each image counted at what it costs a model rather than its size. */
+const bytes = (value: unknown) => {
+  let images = 0;
+  const json = JSON.stringify(value, (_key, item: unknown) => (item instanceof Uint8Array ? (images++, "") : item));
+  return Buffer.byteLength(json) + images * IMAGE_BYTES;
+};
+
+type ToolContent = Extract<LanguageModelV4Message, { role: "tool" }>["content"][number];
+type Output = Extract<ToolContent, { type: "tool-result" }>["output"];
+const imageCount = (output: Output) => (output.type === "content" ? output.value.filter((item) => item.type === "file").length : 0);
+/** A result's words, with a line where its images were. */
+const wordsOf = (output: Extract<Output, { type: "content" }>) => {
+  const images = imageCount(output);
+  return [...output.value.flatMap((item) => (item.type === "text" ? [item.text] : [])), ...(images ? [putAway(images)] : [])].join("\n");
+};
+
+/**
+ * The messages with the images tool results showed put away, all but the latest `keep`: a result
+ * keeps its words and says how many images it had. The same array when nothing changed.
+ */
+export function putAwayImages(messages: LanguageModelV4Message[], keep = 0): LanguageModelV4Message[] {
+  const count = (message: LanguageModelV4Message) => (message.role === "tool" ? message.content.reduce((sum, part) => sum + (part.type === "tool-result" ? imageCount(part.output) : 0), 0) : 0);
+  let excess = messages.reduce((sum, message) => sum + count(message), 0) - keep;
+  if (excess <= 0) return messages;
+  return messages.map((message) => {
+    if (excess <= 0 || message.role !== "tool" || !count(message)) return message;
+    const content = message.content.map((part) => {
+      if (excess <= 0 || part.type !== "tool-result" || part.output.type !== "content" || !imageCount(part.output)) return part;
+      excess -= imageCount(part.output);
+      return { ...part, output: { type: "text" as const, value: wordsOf(part.output) } };
+    });
+    return { ...message, content };
+  });
+}
 const lastIndex = (messages: readonly LanguageModelV4Message[], role: LanguageModelV4Message["role"]) => {
   for (let index = messages.length - 1; index >= 0; index--) if (messages[index]!.role === role) return index;
   return -1;
@@ -49,11 +87,14 @@ function clearUntil(messages: LanguageModelV4Message[], end: number, observation
     if (message.role === "tool") {
       let touched = false;
       const content = message.content.map((part) => {
-        if (part.type !== "tool-result" || (part.output.type !== "text" && part.output.type !== "error-text")) return part;
-        const { value } = part.output;
-        if (value.endsWith(CLEARED) || Buffer.byteLength(value) <= SMALL) return part;
+        if (part.type !== "tool-result") return part;
+        const output = part.output;
+        // Words and pictures: the pictures go with the rest.
+        const value = output.type === "text" || output.type === "error-text" ? output.value : output.type === "content" ? wordsOf(output) : undefined;
+        if (value === undefined || (output.type !== "content" && (value.endsWith(CLEARED) || Buffer.byteLength(value) <= SMALL))) return part;
         touched = true;
-        return { ...part, output: { ...part.output, value: value.slice(0, HEAD).replace(/[\uD800-\uDBFF]$/, "") + CLEARED } };
+        const kept = value.endsWith(CLEARED) || Buffer.byteLength(value) <= SMALL ? value : value.slice(0, HEAD).replace(/[\uD800-\uDBFF]$/, "") + CLEARED;
+        return { ...part, output: output.type === "content" ? { type: "text" as const, value: kept } : { ...output, value: kept } };
       });
       if (!touched) return message;
       changed = true;
@@ -107,6 +148,8 @@ export function noteShortened(messages: LanguageModelV4Message[]): LanguageModel
  * nothing had to go; otherwise the caller keeps the result, since the clearing now belongs to the conversation.
  */
 export function fit(history: LanguageModelV4Message[], turn: LanguageModelV4Message[], budget: ContextBudget): { history: LanguageModelV4Message[]; turn: LanguageModelV4Message[] } {
+  // A request carries only so many images: this turn's earliest go first.
+  turn = putAwayImages(turn, MAX_IMAGES);
   const turnBytes = () => bytes(turn);
   if (bytes(history) + turnBytes() <= budget.clearAt) return { history, turn };
   // Earlier turns first, keeping the one just before this whole: the producer may refer back to it.

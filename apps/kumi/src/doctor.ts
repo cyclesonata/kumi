@@ -7,8 +7,8 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, type ProviderId } from "@kumi/runtime";
-import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
+import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
+import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 
@@ -41,6 +41,8 @@ export interface DoctorIo {
   nodeVersionOf?: (command: string) => Promise<string | undefined>;
   /** This repository's bridge version, to compare with the installed one. */
   bundledBridgeVersion?: string;
+  /** Where ffmpeg and whisper.cpp are, for watching videos; looked up (nothing fetched) when left out. */
+  videoPrograms?: () => Promise<{ ffmpeg?: string | undefined; whisper?: string | undefined }>;
 }
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
@@ -145,6 +147,11 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     try { accessSync(projects, constants.W_OK); } catch { try { accessSync(dirname(projects), constants.W_OK); } catch { writable = false; } }
     checks.push(writable ? { status: "ok", text: `Remembers Sets in ${tilde(projects)}` } : { status: "note", text: `Can't write ${tilde(projects)}, so Kumi won't catch you up on Sets`, next: "Check that folder's permissions, or set KUMI_PROJECTS_DIR" });
   } catch { /* an invalid KUMI_PROJECTS_DIR is reported when Kumi starts */ }
+  // Watching videos: yt-dlp comes by itself when first needed; ffmpeg and whisper.cpp are the producer's.
+  const programs = await (io.videoPrograms ?? (async () => ({ ffmpeg: await findFfmpeg({ env }), whisper: await findWhisper({ env, toolsDir: loadToolsDir(env), installedOnly: true }) })))().catch(() => ({ ffmpeg: undefined, whisper: undefined }));
+  if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });
+  else if (!programs.whisper) checks.push({ status: "note", text: "Watches videos; one without captions needs whisper.cpp for its words", next: `Install it: ${whisperHint()}` });
+  else checks.push({ status: "ok", text: "Watches videos: frames with ffmpeg, speech with whisper.cpp" });
   const terminal = io.terminal ?? { isTTY: Boolean(process.stdout.isTTY), ...(process.stdout.columns ? { columns: process.stdout.columns } : {}), ...(process.stdout.rows ? { rows: process.stdout.rows } : {}) };
   if (!terminal.isTTY) checks.push({ status: "note", text: "Not a terminal window here, so Kumi uses plain lines" });
   else {
