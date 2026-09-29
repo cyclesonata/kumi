@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KUMI_VERSION, KumiError, openCredentialStore,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
@@ -113,7 +113,7 @@ try {
         catch (error) { if (error instanceof KumiError) return unavailableKernel(error, options.checkpoint); throw error; }
       },
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
-        : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
+        : withFallback(createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onChange: (change) => terminal?.handleEvent({ type: "change", change }),
           onAction: (action) => terminal?.handleEvent({ type: "action", ...action }),
@@ -121,6 +121,8 @@ try {
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
+        // A bridge that won't start (older in Live than Kumi's, say): chat without Live, and say how to fix it.
+        () => createInferenceOnlyIntegration(onConnection), (message) => terminal?.handleEvent({ type: "notice", message })),
       onEvent: (event) => terminal?.handleEvent(event),
       ...(config.mode === "live" ? { conversations: createConversationStore(loadProjectsDir()) } : {}),
       memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),

@@ -13,5 +13,6 @@ export { checkApiKey, listModels, type ModelInfo } from "./providers/models.js";
 export { openCredentialStore, validApiKey, type ApiKeyCredential, type Credential, type CredentialStore, type OAuthCredential } from "./auth/store.js";
 export { DEVICE_VERIFICATION_URL, LOGIN_HINT, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, readPiCodexLogin } from "./auth/openai-codex.js";
 export { BRIDGE_TOOLS, createAbletonIntegration, createInferenceOnlyIntegration } from "./integrations/ableton/index.js";
+export { withFallback } from "./integrations/fallback.js";
 export { parseFocus } from "./integrations/ableton/focus.js";
 export { createConversationStore, createProjectStore, since, type ProjectStore } from "./integrations/ableton/project.js";
