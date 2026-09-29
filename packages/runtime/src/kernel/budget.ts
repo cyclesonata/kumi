@@ -6,6 +6,7 @@
  * so providers' prompt caches keep working in between.
  */
 import type { LanguageModelV4Message } from "@ai-sdk/provider";
+import type { TranscriptLine } from "../core/contracts.js";
 
 export interface ContextBudget {
   /** Bytes of conversation (as JSON, roughly 3 per token) past which earlier turns are cleared. */
@@ -21,6 +22,22 @@ export const DEFAULT_BUDGET: ContextBudget = { clearAt: 160 * 1024, limit: 400 *
 export const OBSERVATION_MARKER = "\n\n<current_observation_untrusted>";
 /** Starts the first kept message once the earliest exchanges are gone. */
 export const SHORTENED = "[Kumi removed the earlier part of this conversation to save room.]\n\n";
+
+/**
+ * A conversation's words, for showing it: what the producer said and Kumi's answers. The host
+ * appends each turn's Live observation to the producer's words, and the budget may note that
+ * earlier exchanges are gone; neither is theirs.
+ */
+export function transcriptOf(messages: readonly unknown[]): TranscriptLine[] {
+  return messages.flatMap((raw): TranscriptLine[] => {
+    const message = raw as { role?: unknown; content?: unknown };
+    if (message?.role !== "user" && message?.role !== "assistant") return [];
+    const text = typeof message.content === "string" ? message.content
+      : Array.isArray(message.content) ? message.content.map((part: { type?: unknown; text?: unknown }) => (part?.type === "text" && typeof part.text === "string" ? part.text : "")).join("") : "";
+    const words = message.role === "user" ? text.split(OBSERVATION_MARKER)[0]!.replace(SHORTENED, "") : text;
+    return words.trim() ? [{ role: message.role, text: words.trim() }] : [];
+  });
+}
 const CLEARED = " … [Kumi cleared the rest of this earlier result to save room; read Live again if you need it.]";
 /** Results this small stay whole: change confirmations, refusals, short answers. */
 const SMALL = 1024;

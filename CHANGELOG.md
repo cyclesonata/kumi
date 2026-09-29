@@ -109,6 +109,23 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
 - Kumi keeps short notes of what you tell it that Live can't show, about you and
   about each saved Set. `/memory` shows and forgets them.
 
+### Conversations and reconnecting
+
+- If Live closes, or Kumi's bridge to it drops, Kumi says so, keeps the
+  conversation and reconnects on its own when Live is back (a late answer from
+  the bridge to a stopped request used to drop the connection for good). A
+  request Live's going away stopped is back in the input box, one Enter from sent
+  again. After 30 seconds without Live, Kumi asks whether it's open with the
+  bridge on. `/reconnect` tries again at once, and nothing about a connection
+  problem suggests `/new` any more.
+- Each Set's conversations are kept, the latest 20, an unsaved Set's too (they
+  move with the Set when it's first saved), with the HISTORY of each. `/new`
+  forgets this conversation and starts fresh, keeping the old one on screen
+  under a line and in `/conversations`, which goes back to any of them. `/new`
+  keeps the bridge, so earlier changes can still be undone.
+- ↑ and ↓ go through what you sent before, kept across `/new` and restarts in
+  `~/.kumi/input-history`, with keys and tokens left out.
+
 ### Models and sign-in
 
 - `/model`, `/effort`, `/login` and `/logout` inside Kumi. Models are listed

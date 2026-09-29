@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import type {
-  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
+  ChangeRecord, ConnectionState, ConversationStore, DisconnectCause, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
@@ -7,7 +8,7 @@ import { memoryInstructions, memoryTools } from "./memory.js";
 import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
 import { listeningTools } from "../audio/tools.js";
 import { videoTools } from "../video/tool.js";
-import { OBSERVATION_MARKER } from "../kernel/budget.js";
+import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
 
 interface Options {
   kernelFactory: KernelFactory;
@@ -23,8 +24,10 @@ interface Options {
   cancelGraceMs?: number;
   /** Prompts per session before /new is needed; none by default, since the kernel keeps its own context in bounds. */
   maxTurns?: number;
-  /** Keeps each saved Set's conversation between sessions; without it conversations end with Kumi. */
+  /** Keeps each Set's conversations between sessions; without it conversations end with Kumi. */
   conversations?: ConversationStore;
+  /** How long Live may be away before Kumi asks whether it's open. */
+  missingAfterMs?: number;
   /** What Kumi remembers about the producer and each saved Set; without it Kumi keeps no notes. */
   memory?: MemoryStore;
   /** Let the model hear audio files (reference tracks, samples, bounces). */
@@ -36,6 +39,8 @@ interface Options {
 }
 interface Operation {
   id: number;
+  /** A turn's request, to offer again when Live's going away stopped it. */
+  input?: string;
   controller: AbortController;
   done: Promise<void>;
   isTurn: boolean;
@@ -43,6 +48,14 @@ interface Operation {
   /** The turn moved on (text, a tool step): its no-progress timer starts over. */
   progress?: (event?: { type: string }) => void;
 }
+/** Where an unsaved Set keeps its conversations until it's saved. */
+const UNSAVED = "unsaved";
+const newConversationId = () => `${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
+/** HISTORY kept with a conversation: what it shows, without a clip's notes or where devices sit. */
+const MAX_CHANGES = 100;
+const lean = ({ clip: _clip, devices: _devices, ...change }: ChangeRecord): ChangeRecord => change;
+const STILL_MISSING = "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?";
+
 /** "3 minutes", "1 second". */
 const span = (ms: number) => {
   const [count, unit] = ms >= 60_000 ? [Math.round(ms / 60_000), "minute"] : [Math.max(1, Math.round(ms / 1000)), "second"];
@@ -70,6 +83,29 @@ export function createSession(options: Options): SessionController {
   let switched: { checkpoint: KernelCheckpoint; key: string } | undefined;
   /** Live went away while connected; cleared when it's back. */
   let away = false;
+  /** Asks whether Live is open, once it's been away a while. */
+  let missing: ReturnType<typeof setTimeout> | undefined;
+  /** The request Live's going away stopped, offered again when it's back. */
+  let interrupted: string | undefined;
+  /** Where the conversation is kept (its Set's project id, or "unsaved"), its id there, and what /conversations shows of it. */
+  let place: string | undefined;
+  let conversationId = newConversationId();
+  let conversationFirst: string | undefined;
+  let conversationTurns = 0;
+  /** Kumi's changes during this conversation, kept with it (a resumed conversation's HISTORY). */
+  let conversationChanges: ChangeRecord[] = [];
+  /** Kumi's changes while it's been running, as they stand now: HISTORY shows these already, with their undo. */
+  const seen = new Map<string, ChangeRecord>();
+  /** The conversation as it last settled: a turn that didn't stop when asked restarts from it. */
+  let settled: { checkpoint: KernelCheckpoint; key: string } | undefined;
+  /** A fresh bridge (/reconnect) carries the conversation over, unless a different saved Set is open then. */
+  let carry: { checkpoint: KernelCheckpoint; place: string | undefined } | undefined;
+  /** /new: the next conversation starts empty. */
+  let startFresh = false;
+  /** A conversation chosen in /conversations, to continue next. */
+  let chosen: { place: string; id: string; conversation: SavedConversation } | undefined;
+  /** Saves happen in order, one at a time. */
+  let saving: Promise<void> = Promise.resolve();
   /** The saved Set the conversation is about, when known. */
   let currentProject: string | undefined;
   /** Which Set is open, saved or not: notes about an unsaved Set are kept only if that Set is saved. */
@@ -112,22 +148,42 @@ export function createSession(options: Options): SessionController {
     const outcomes = await Promise.allSettled([dropKernel(), previous ? boundedClose(previous.close()) : Promise.resolve()]);
     if (outcomes.some((result) => result.status === "rejected")) throw new Error("Owned resource cleanup did not complete");
   }
-  function connectionChanged(generation: number, next: ConnectionState) {
+  function connectionChanged(generation: number, next: ConnectionState, cause?: DisconnectCause) {
     if (generation !== integrationGeneration || state === "closed") return;
     const lost = connection === "connected" && (next === "disconnected" || next === "error");
     const back = away && next === "connected";
     connection = next; emit({ type: "connection", state: next });
     if (lost) {
-      // Work in progress stops (it would act on a Live that's gone); a settled conversation stays.
+      // Work in progress stops (it would act on a Live that's gone); the conversation stays, and so
+      // does the request, to send again.
       observationLabel = undefined; away = true;
-      emit({ type: "notice", message: "Live disconnected. Kumi keeps the conversation and reconnects when Live is back; if it doesn't, use /new." });
+      emit({ type: "notice", message: cause === "live" ? "Live closed. Kumi will pick up where you left off when it's back."
+        : cause === "bridge" ? "Kumi's link to Live dropped. It's reconnecting, and will pick up where you left off."
+        : "Kumi lost touch with Live. It will pick up where you left off when Live is back." });
+      if (active?.isTurn && active.input) interrupted = active.input;
       active?.controller.abort();
+      clearTimeout(missing);
+      missing = setTimeout(() => { if (away && state !== "closed") emit({ type: "notice", message: STILL_MISSING }); }, options.missingAfterMs ?? 30_000);
+      missing.unref?.();
     } else if (back) {
-      away = false;
-      emit({ type: "notice", message: "Live is back." });
+      away = false; clearTimeout(missing);
+      const again = interrupted; interrupted = undefined;
+      emit({ type: "notice", message: again ? "Live is back. Your last request was stopped; press enter to send it again." : "Live is back." });
+      if (again) emit({ type: "resend", text: again });
       // Read the Set again right away when nothing else is running.
       if (!active && started) void perform(false, "refresh", async (op) => { await observe(op); return undefined; }).catch(() => {});
     }
+  }
+  /** A change Kumi made while it's been running (HISTORY has it, maybe with its undo). */
+  const ours = (change: ChangeRecord) => seen.get(change.id)?.at === change.at;
+  /** This conversation is `id` in `place` from now on (a kept one, when `conversation` is given). */
+  function begin(where: string, id: string, conversation?: SavedConversation) {
+    place = where; conversationId = id; settled = undefined;
+    conversationFirst = conversation?.first; conversationTurns = conversation?.turns ?? 0;
+    // Its HISTORY: changes from an earlier session get ids of their own, and Kumi can't undo them now.
+    conversationChanges = (conversation?.changes ?? []).map((change) => ours(change) ? seen.get(change.id)! : {
+      ...change, id: change.id.includes(":") ? change.id : `${id}:${change.id}`,
+      ...(change.state === "applied" || change.state === "unsure" ? { state: "expired" as const, note: "From an earlier session, so Kumi can't undo it now." } : {}) });
   }
   async function ensureKernel(op: Operation, observation: Observation) {
     assertCurrent(op);
@@ -154,51 +210,91 @@ export function createSession(options: Options): SessionController {
       if (identityChanged) turns = op.isTurn ? 1 : 0;
     } else if (!kernel && mustReset) reason = "cancelled";
     if (!kernel) {
-      // A saved Set's conversation carries on from its last settled turn.
+      const project = observation.project?.id;
+      // Which conversation this is, and where it carries on from.
+      let from = carried;
       let resumed: SavedConversation | undefined;
-      // A model change carries the conversation on (same Set only; a new Set starts its own).
-      if (!carried && switched?.key === observation.key) carried = switched.checkpoint;
-      switched = undefined;
-      if (!carried && observation.project && options.conversations) {
-        resumed = await options.conversations.load(observation.project.id).catch(() => undefined);
+      let picked = false;
+      // A fresh bridge (/reconnect) carries the conversation over, unless a different saved Set is open now.
+      const reconnected = carry && !(project && carry.place && carry.place !== UNSAVED && carry.place !== project) ? carry : undefined;
+      if (startFresh) begin(project ?? UNSAVED, newConversationId());
+      else if (chosen) { resumed = chosen.conversation; from = resumed.checkpoint; picked = true; begin(chosen.place, chosen.id, resumed); }
+      else if (from) { /* the same conversation, with other tools */ }
+      // A model change carries the conversation on (same Set only; a new Set has its own).
+      else if (switched?.key === observation.key) from = switched.checkpoint;
+      else if (reconnected) from = reconnected.checkpoint;
+      // A turn that didn't stop when asked: back to where the conversation last settled.
+      else if (reason === "cancelled" && settled?.key === observation.key) from = settled.checkpoint;
+      else {
+        // A Set this conversation isn't about yet (Kumi starting, another Set opened): the Set's own.
+        const kept = project && options.conversations ? await options.conversations.current(project).catch(() => undefined) : undefined;
         assertCurrent(op);
+        if (kept) { resumed = kept.conversation; from = kept.conversation.checkpoint; if (kept.id !== conversationId || place !== project) begin(project!, kept.id, kept.conversation); }
+        else begin(project ?? UNSAVED, newConversationId());
       }
-      const checkpoint = carried ?? resumed?.checkpoint;
-      const lifetime = new AbortController();
-      const abortCreation = () => lifetime.abort();
-      op.controller.signal.addEventListener("abort", abortCreation, { once: true });
-      let value: Kernel | undefined;
-      try {
-        // The notes go into the instructions once, when the conversation's kernel is built: they stay
-        // in the prompt cache, and a note kept meanwhile is in the conversation already.
-        const remembered = options.memory ? await options.memory.load(observation.project?.id).catch(() => undefined) : undefined;
-        assertCurrent(op);
-        const saved = options.recipes ? await options.recipes.list().catch(() => []) : [];
-        assertCurrent(op);
-        const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved)].filter(Boolean).join("\n\n");
-        value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-          tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...watching, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
-        if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
-        kernel = { value, key: observation.key, revision, lifetime };
-      } catch (error) { lifetime.abort(); throw error; }
-      finally { op.controller.signal.removeEventListener("abort", abortCreation); }
+      startFresh = false; chosen = undefined; switched = undefined; carry = undefined;
+      const build = async (checkpoint: KernelCheckpoint | undefined) => {
+        const lifetime = new AbortController();
+        const abortCreation = () => lifetime.abort();
+        op.controller.signal.addEventListener("abort", abortCreation, { once: true });
+        try {
+          // The notes go into the instructions once, when the conversation's kernel is built: they stay
+          // in the prompt cache, and a note kept meanwhile is in the conversation already.
+          const remembered = options.memory ? await options.memory.load(observation.project?.id).catch(() => undefined) : undefined;
+          assertCurrent(op);
+          const saved = options.recipes ? await options.recipes.list().catch(() => []) : [];
+          assertCurrent(op);
+          const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved)].filter(Boolean).join("\n\n");
+          const value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
+            tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...watching, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+          if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
+          return { value, lifetime };
+        } catch (error) { lifetime.abort(); throw error; }
+        finally { op.controller.signal.removeEventListener("abort", abortCreation); }
+      };
+      let built: { value: Kernel; lifetime: AbortController };
+      let unreadable: SavedConversation | undefined;
+      try { built = await build(from); }
+      catch (error) {
+        // A kept conversation this model can't continue: it's shown, and a fresh one starts (the kept one stays).
+        if (!resumed || error instanceof KumiError || !current(op)) throw error;
+        unreadable = resumed;
+        begin(project ?? UNSAVED, newConversationId());
+        built = await build(undefined);
+      }
+      const { value } = built;
+      kernel = { value, key: observation.key, revision, lifetime: built.lifetime };
       const set = observation.project?.name ?? "this Set";
-      if (reason === "set") emit({ type: "notice", message: resumed ? `The open Set changed; continuing your conversation about ${set}.` : "The open Set changed; starting a fresh conversation." });
-      else if (reason === "cancelled") emit({ type: "notice", message: resumed ? "Cancelled work was discarded; the conversation continues from before it." : "Cancelled work was discarded; starting a fresh conversation." });
-      else if (reason === "tools") emit({ type: "notice", message: resumed ? "Kumi's tools changed; the conversation continues." : "Kumi's tools changed; starting a fresh conversation." });
-      // Show the earlier exchanges when this conversation isn't already on screen.
-      if (resumed && (first || reason === "set")) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.().slice(-20) ?? [] });
+      if (unreadable) {
+        emit({ type: "resumed", savedAt: unreadable.savedAt, lines: transcriptOf(unreadable.checkpoint.messages).slice(-20), unreadable: true });
+        emit({ type: "notice", message: "Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here." });
+      } else {
+        if (reason === "set") emit({ type: "notice", message: resumed ? `The open Set changed; continuing your conversation about ${set}.` : "The open Set changed; starting a fresh conversation." });
+        else if (reason === "cancelled") emit({ type: "notice", message: from ? "Cancelled work was discarded; the conversation continues from before it." : "Cancelled work was discarded; starting a fresh conversation." });
+        else if (reason === "tools") emit({ type: "notice", message: from ? "Kumi's tools changed; the conversation continues." : "Kumi's tools changed; starting a fresh conversation." });
+        // Show the earlier exchanges when this conversation isn't already on screen.
+        // Changes HISTORY shows already (made while Kumi's been running) aren't listed again.
+        const earlier = conversationChanges.filter((change) => !ours(change));
+        if (resumed && (first || reason === "set" || picked)) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.().slice(-20) ?? [],
+          ...(earlier.length ? { changes: earlier } : {}), ...(picked ? { chosen: true } : {}) });
+      }
     }
     mustReset = false;
   }
-  /** Keep the settled conversation for its saved Set; best effort, never in the way of the answer. */
-  function saveConversation() {
-    const held = kernel; const project = currentProject;
-    if (!options.conversations || !held?.value.checkpoint || !project) return;
-    try {
-      const checkpoint = held.value.checkpoint();
-      void options.conversations.save(project, { savedAt: Date.now(), checkpoint }).catch(() => {});
-    } catch { /* the kernel was busy */ }
+  /** Keep the settled conversation with its Set (a turn's, when `turn`); best effort, never in the way of the answer. */
+  function saveConversation(turn: boolean) {
+    const held = kernel;
+    if (!held?.value.checkpoint) return;
+    let checkpoint: KernelCheckpoint;
+    try { checkpoint = held.value.checkpoint(); } catch { return; } // the kernel was busy
+    settled = { checkpoint, key: held.key };
+    if (turn) conversationTurns++;
+    conversationFirst ??= transcriptOf(checkpoint.messages).find((line) => line.role === "user")?.text.slice(0, 200);
+    const store = options.conversations; const where = place; const id = conversationId;
+    if (!store || !where) return;
+    const conversation: SavedConversation = { savedAt: Date.now(), checkpoint, turns: conversationTurns, ...(conversationFirst ? { first: conversationFirst } : {}),
+      ...(conversationChanges.length ? { changes: conversationChanges.slice(-MAX_CHANGES) } : {}) };
+    saving = saving.then(() => store.save(where, id, conversation)).catch(() => {});
   }
   async function observe(op: Operation) {
     assertCurrent(op);
@@ -212,6 +308,12 @@ export function createSession(options: Options): SessionController {
     // Notes about a Set made before its first save are kept now that it has a file.
     if (currentProject) void notes?.flush().catch(() => {});
     await ensureKernel(op, snapshot); assertCurrent(op);
+    // An unsaved Set's conversation goes with it to its folder when the Set is first saved.
+    if (place === UNSAVED && snapshot.project && options.conversations) {
+      const store = options.conversations; const id = conversationId; const to = snapshot.project.id;
+      place = to;
+      saving = saving.then(() => store.move(id, UNSAVED, to)).catch(() => {});
+    }
     observationLabel = snapshot.label;
     emit({ type: "observation", label: snapshot.label });
     return snapshot;
@@ -221,14 +323,14 @@ export function createSession(options: Options): SessionController {
     await dropResources(); assertCurrent(op);
     turns = 0; mustReset = false;
     const generation = ++integrationGeneration;
-    integration = options.integrationFactory((next) => connectionChanged(generation, next));
+    integration = options.integrationFactory((next, cause) => connectionChanged(generation, next, cause));
     await integration.start(op.controller.signal); assertCurrent(op);
     await observe(op); started = true;
   }
-  function perform(isTurn: boolean, phase: Operation["phase"], work: (op: Operation) => Promise<TurnResult | undefined>, limitMs = timeoutMs): Promise<void> {
+  function perform(isTurn: boolean, phase: Operation["phase"], work: (op: Operation) => Promise<TurnResult | undefined>, limitMs = timeoutMs, input?: string): Promise<void> {
     if (state === "closed") return Promise.reject(new Error("Session is closed"));
     if (active) return Promise.reject(new Error("Session is busy; cancel first"));
-    const op: Operation = { id: ++nextOperation, controller: new AbortController(), done: Promise.resolve(), isTurn, phase };
+    const op: Operation = { id: ++nextOperation, controller: new AbortController(), done: Promise.resolve(), isTurn, phase, ...(input !== undefined ? { input } : {}) };
     active = op; setState("running");
     const startedAt = performance.now();
     let timedOut: "quiet" | "limit" | undefined;
@@ -263,7 +365,7 @@ export function createSession(options: Options): SessionController {
         if (op.controller.signal.aborted) throw new Error("Operation cancelled");
         if (isTurn && result) {
           emit({ type: "turn-complete", result, elapsedMs: Math.round(performance.now() - startedAt) });
-          if (result.stopReason !== "cancelled") saveConversation();
+          if (result.stopReason !== "cancelled") saveConversation(true);
         }
       } catch (error) {
         if (op.controller.signal.aborted) {
@@ -279,7 +381,7 @@ export function createSession(options: Options): SessionController {
           } else if (timedOut) emit({ type: "error", message: `Kumi stopped waiting after ${span(limitMs)}.` });
           if (isTurn) {
             emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
-            if (workSettled) saveConversation();
+            if (workSettled) saveConversation(true);
           }
         } else {
           // Sign-in, billing and model problems say so wherever they happen (building the model's
@@ -291,7 +393,7 @@ export function createSession(options: Options): SessionController {
             : error instanceof KumiError ? error.message : "Inference failed; check the configured model, sign-in and connection.";
           emit({ type: "error", message, ...(error instanceof KumiError ? { kind: error.kind, ...(error.provider ? { provider: error.provider } : {}) } : {}) });
           // A failed answer keeps the steps it finished (see the kernel); keep them for next time too.
-          if (isTurn && op.phase === "inference") saveConversation();
+          if (isTurn && op.phase === "inference") saveConversation(true);
           if (!isTurn && phase === "start") {
             try { await dropResources(); } catch { /* startup remains failed */ }
             throw new Error("Could not start Kumi session; check model login and connection.");
@@ -317,25 +419,73 @@ export function createSession(options: Options): SessionController {
       if (!input.trim() || Buffer.byteLength(input) > 16 * 1024) return Promise.reject(new Error("Enter a nonempty prompt of at most 16 KiB"));
       if (maxTurns !== undefined && turns >= maxTurns) return Promise.reject(new Error("Conversation limit reached; use /new"));
       turns++;
+      // A new request: the one Live's going away stopped isn't offered again.
+      interrupted = undefined;
       return perform(true, "refresh", async (op) => {
         const snapshot = await observe(op); assertCurrent(op);
         op.phase = "inference";
         return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) { op.progress?.(event); emit(event); } });
-      });
+      }, undefined, input);
     },
     refresh() {
       if (!started) return Promise.reject(new Error("Session is not started"));
       return perform(false, "refresh", async (op) => { await observe(op); return undefined; });
     },
     newConversation() {
-      return perform(false, "start", async (op) => {
-        // A fresh start means the saved Set's conversation is gone too.
-        if (currentProject && options.conversations) await options.conversations.clear(currentProject).catch(() => {});
-        await reset(op);
-        emit({ type: "notice", message: "New conversation; the previous one is discarded." });
+      return perform(false, "refresh", async (op) => {
+        // The conversation so far stays kept with its Set (/conversations goes back to it); the next
+        // one starts empty, over the same bridge, so HISTORY's undo still works.
+        await dropKernel(); assertCurrent(op);
+        startFresh = true; turns = 0; mustReset = false; settled = undefined; interrupted = undefined;
+        const store = options.conversations; const where = place;
+        if (store && where) saving = saving.then(() => store.fresh(where)).catch(() => {});
+        if (integration) await observe(op); else await reset(op);
+        emit({ type: "notice", message: "New conversation. The last one is kept; /conversations goes back to it." });
         return undefined;
       });
+    },
+    reconnect() {
+      return perform(false, "start", async (op) => {
+        // A fresh bridge; the conversation carries over (unless a different saved Set is open by then).
+        let checkpoint: KernelCheckpoint | undefined;
+        try { checkpoint = kernel?.value.checkpoint?.(); } catch { checkpoint = undefined; }
+        checkpoint ??= settled?.checkpoint;
+        if (checkpoint) carry = { checkpoint, place };
+        await reset(op);
+        if (connection === "connected") emit({ type: "notice", message: "Reconnected to Live; the conversation carries on." });
+        return undefined;
+      });
+    },
+    async conversations() {
+      const store = options.conversations;
+      return store ? store.list(place ?? currentProject ?? UNSAVED).catch(() => []) : [];
+    },
+    async resumeConversation(id) {
+      const store = options.conversations; const where = place ?? currentProject ?? UNSAVED;
+      if (!store) return false;
+      if (id === conversationId && where === place) return true;
+      await saving;
+      const conversation = await store.load(where, id);
+      if (!conversation) return false;
+      await perform(false, "refresh", async (op) => {
+        // This conversation is kept already (after each settled turn); the chosen one carries on.
+        await dropKernel(); assertCurrent(op);
+        chosen = { place: where, id, conversation }; mustReset = false; turns = 0; interrupted = undefined;
+        await observe(op);
+        saveConversation(false);
+        return undefined;
+      });
+      return true;
+    },
+    watch(event) {
+      if (event.type !== "change") return;
+      const record = lean(event.change);
+      seen.set(record.id, record);
+      if (seen.size > 500) seen.delete(seen.keys().next().value!);
+      const index = conversationChanges.findIndex((change) => change.id === record.id);
+      if (index >= 0) conversationChanges[index] = record;
+      else { conversationChanges.push(record); if (conversationChanges.length > MAX_CHANGES) conversationChanges.shift(); }
     },
     async undo(id) {
       if (!started) throw new Error("Session is not started");
@@ -397,9 +547,14 @@ export function createSession(options: Options): SessionController {
       const op = active;
       state = "closed"; options.onEvent({ type: "state", state });
       op?.controller.abort();
+      clearTimeout(missing);
       closing = (async () => {
         try { if (op) await boundedClose(op.done).catch(() => {}); }
-        finally { await dropResources(); }
+        finally {
+          // The last turn's save lands before Kumi goes.
+          await boundedClose(saving).catch(() => {});
+          await dropResources();
+        }
       })();
       return closing;
     },

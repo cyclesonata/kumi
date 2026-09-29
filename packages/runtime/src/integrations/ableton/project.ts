@@ -3,12 +3,12 @@
  * privacy-redacted semantic snapshot) and, when it sees the Set again, says in plain words what
  * changed while it wasn't running. Nothing here changes Live.
  */
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { LanguageModelV4Message } from "@ai-sdk/provider";
 import type { CatchUp, ConversationStore, JsonObject, SavedConversation } from "../../core/contracts.js";
-import { dropEarliest, noteShortened } from "../../kernel/budget.js";
+import { dropEarliest, noteShortened, transcriptOf } from "../../kernel/budget.js";
 
 /** A Set's state as Kumi last saw it. */
 export interface Baseline {
@@ -63,20 +63,67 @@ export function createProjectStore(directory: string): ProjectStore {
 
 /** About 64k tokens: older exchanges drop off the front so a long-lived conversation stays quick. */
 const MAX_CONVERSATION_BYTES = 256 * 1024;
-const ID = /^[0-9a-f]{32}$/;
+/** HISTORY kept with each conversation. */
+const MAX_KEPT_CHANGES = 100;
 
-/** Each saved Set's conversation, next to its last-seen state; readable only by this user. */
+/** A new conversation's id: when it started, and a little randomness. */
+export const newConversationId = (at = Date.now()) => `${at.toString(36)}${randomBytes(3).toString("hex")}`;
+const PLACE = /^([0-9a-f]{32}|unsaved)$/;
+const CONVERSATION = /^[0-9a-z]{6,24}$/;
+/** Conversations kept per Set. */
+const MAX_KEPT = 20;
+
+/**
+ * Each Set's conversations, in its folder next to its last-seen state (an unsaved Set's in
+ * "unsaved"), one file each, with "current" naming the one the Set carries on with. Readable only
+ * by this user.
+ */
 export function createConversationStore(directory: string): ConversationStore {
-  const file = (project: string) => { if (!ID.test(project)) throw new Error("invalid project id"); return join(directory, project, "conversation.json"); };
+  const folder = (place: string) => { if (!PLACE.test(place)) throw new Error("invalid place"); return join(directory, place); };
+  const kept = (place: string) => join(folder(place), "conversations");
+  const fileOf = (place: string, id: string) => { if (!CONVERSATION.test(id)) throw new Error("invalid conversation id"); return join(kept(place), `${id}.json`); };
+  async function read(file: string): Promise<SavedConversation | undefined> {
+    try {
+      const value = JSON.parse(await readFile(file, "utf8")) as SavedConversation;
+      if (typeof value?.savedAt !== "number" || value.checkpoint?.version !== 1 || !Array.isArray(value.checkpoint.messages)) return undefined;
+      return { savedAt: value.savedAt, checkpoint: value.checkpoint, ...(Array.isArray(value.changes) ? { changes: value.changes } : {}),
+        ...(typeof value.first === "string" ? { first: value.first } : {}), ...(typeof value.turns === "number" ? { turns: value.turns } : {}) };
+    } catch { return undefined; }
+  }
+  const currentId = async (place: string) => {
+    try { const id = (await readFile(join(folder(place), "current"), "utf8")).trim(); return CONVERSATION.test(id) ? id : undefined; } catch { return undefined; }
+  };
+  /** An older Kumi kept one conversation per Set, in conversation.json: it becomes the first one kept. */
+  async function migrate(place: string) {
+    const legacy = join(folder(place), "conversation.json");
+    const value = await read(legacy);
+    if (!value) return;
+    const id = newConversationId(value.savedAt);
+    await writePrivately(kept(place), `${id}.json`, JSON.stringify(value));
+    if (!await currentId(place)) await writePrivately(folder(place), "current", id);
+    await rm(legacy, { force: true });
+  }
+  /** MAX_KEPT stay: the current one, and the others last saved most recently. */
+  async function trim(place: string) {
+    const current = `${await currentId(place)}.json`;
+    const names = (await readdir(kept(place)).catch(() => [])).filter((name) => /^[0-9a-z]{6,24}\.json$/.test(name));
+    const others = await Promise.all(names.filter((name) => name !== current).map(async (name) => ({ name, at: (await stat(join(kept(place), name)).catch(() => undefined))?.mtimeMs ?? 0 })));
+    const old = others.sort((a, b) => b.at - a.at).slice(MAX_KEPT - (names.includes(current) ? 1 : 0));
+    await Promise.all(old.map((file) => rm(join(kept(place), file.name), { force: true })));
+  }
   return {
-    async load(project) {
+    async current(place) {
       try {
-        const value = JSON.parse(await readFile(file(project), "utf8")) as SavedConversation;
-        if (typeof value?.savedAt !== "number" || value.checkpoint?.version !== 1 || !Array.isArray(value.checkpoint.messages)) return undefined;
-        return value;
+        await migrate(place);
+        const id = await currentId(place);
+        const conversation = id ? await read(fileOf(place, id)) : undefined;
+        return id && conversation ? { id, conversation } : undefined;
       } catch { return undefined; }
     },
-    async save(project, conversation) {
+    async load(place, id) {
+      try { await migrate(place); return await read(fileOf(place, id)); } catch { return undefined; }
+    },
+    async save(place, id, conversation) {
       const all = [...conversation.checkpoint.messages] as { role?: unknown }[];
       // Drop whole exchanges from the front: the kept part starts where the producer spoke.
       let messages = dropEarliest(all, MAX_CONVERSATION_BYTES);
@@ -88,11 +135,45 @@ export function createConversationStore(directory: string): ConversationStore {
       if (!messages.length) return;
       // As in the kernel, the model is told when the start of the conversation is gone.
       if (messages.length < all.length) messages = noteShortened(messages as LanguageModelV4Message[]);
-      const saved: SavedConversation = { savedAt: conversation.savedAt, checkpoint: { ...conversation.checkpoint, messages } };
-      file(project);
-      await writePrivately(join(directory, project), "conversation.json", JSON.stringify(saved));
+      // What /conversations shows is counted before any of it is dropped.
+      const said = transcriptOf(all).filter((line) => line.role === "user");
+      const saved: SavedConversation = { savedAt: conversation.savedAt, checkpoint: { ...conversation.checkpoint, messages },
+        ...(conversation.changes?.length ? { changes: conversation.changes.slice(-MAX_KEPT_CHANGES) } : {}),
+        first: (conversation.first ?? said[0]?.text ?? "").slice(0, 200), turns: Math.max(conversation.turns ?? 0, said.length) };
+      fileOf(place, id);
+      await writePrivately(kept(place), `${id}.json`, JSON.stringify(saved));
+      await writePrivately(folder(place), "current", id);
+      await trim(place);
     },
-    async clear(project) { await rm(file(project), { force: true }); },
+    async fresh(place) {
+      folder(place);
+      if (await currentId(place)) await writePrivately(folder(place), "current", "");
+    },
+    async list(place) {
+      try {
+        await migrate(place);
+        const current = await currentId(place);
+        const names = (await readdir(kept(place)).catch(() => [])).filter((name) => /^[0-9a-z]{6,24}\.json$/.test(name));
+        const rows = await Promise.all(names.map(async (name) => {
+          const id = name.slice(0, -5);
+          const value = await read(join(kept(place), name));
+          if (!value) return undefined;
+          const said = transcriptOf(value.checkpoint.messages).filter((line) => line.role === "user");
+          return { id, savedAt: value.savedAt, first: value.first ?? said[0]?.text.slice(0, 200) ?? "", turns: value.turns ?? said.length, current: id === current };
+        }));
+        return rows.filter((row) => row !== undefined).sort((a, b) => b.savedAt - a.savedAt);
+      } catch { return []; }
+    },
+    async move(id, from, to) {
+      const value = await read(fileOf(from, id));
+      if (!value) return;
+      fileOf(to, id);
+      await writePrivately(kept(to), `${id}.json`, JSON.stringify(value));
+      await writePrivately(folder(to), "current", id);
+      await rm(fileOf(from, id), { force: true });
+      if (await currentId(from) === id) await writePrivately(folder(from), "current", "");
+      await trim(to);
+    },
   };
 }
 

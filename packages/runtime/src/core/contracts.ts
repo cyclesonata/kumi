@@ -113,12 +113,30 @@ export interface Observation {
   project?: { id: string; name: string };
 }
 
-/** A Set's conversation, kept between sessions. */
-export interface SavedConversation { savedAt: number; checkpoint: KernelCheckpoint }
+/**
+ * A conversation, kept between sessions: `changes` are what Kumi changed during it (for HISTORY),
+ * `first` the producer's first request and `turns` how many they made.
+ */
+export interface SavedConversation { savedAt: number; checkpoint: KernelCheckpoint; changes?: ChangeRecord[]; first?: string; turns?: number }
+/** A kept conversation, as /conversations lists it. */
+export interface ConversationSummary { id: string; savedAt: number; first: string; turns: number; current: boolean }
+/**
+ * Each Set's conversations. `place` is a saved Set's project id, or "unsaved" for Sets without a
+ * file (their conversations move to the Set's own place when it's first saved). The one saved last
+ * is the place's current conversation, until the place starts afresh.
+ */
 export interface ConversationStore {
-  load(project: string): Promise<SavedConversation | undefined>;
-  save(project: string, conversation: SavedConversation): Promise<void>;
-  clear(project: string): Promise<void>;
+  /** The conversation `place` carries on with, if any. */
+  current(place: string): Promise<{ id: string; conversation: SavedConversation } | undefined>;
+  load(place: string, id: string): Promise<SavedConversation | undefined>;
+  /** Keep `id` as `place`'s current conversation; each place keeps its latest 20. */
+  save(place: string, id: string, conversation: SavedConversation): Promise<void>;
+  /** `place` starts afresh; its conversations stay listed. */
+  fresh(place: string): Promise<void>;
+  /** `place`'s conversations, newest first. */
+  list(place: string): Promise<ConversationSummary[]>;
+  /** A conversation moves with its Set (an unsaved Set's, when the Set is first saved). */
+  move(id: string, from: string, to: string): Promise<void>;
 }
 
 export interface Integration {
@@ -216,7 +234,14 @@ export type SessionEvent = KernelEvent
   | { type: "change"; change: ChangeRecord }
   | { type: "catch-up"; catchUp: CatchUp }
   /** A saved Set's conversation continues; `lines` are its recent exchanges. */
-  | { type: "resumed"; savedAt: number; lines: TranscriptLine[] }
+  /**
+   * A kept conversation continues (`lines` are its recent exchanges): the Set's own, one chosen in
+   * /conversations (`chosen`), or one this model couldn't continue (`unreadable`, shown only).
+   * `changes` are its HISTORY, which Kumi can't undo any more.
+   */
+  | { type: "resumed"; savedAt: number; lines: TranscriptLine[]; changes?: ChangeRecord[]; chosen?: boolean; unreadable?: boolean }
+  /** Live is back after stopping a request: the app offers to send `text` again. */
+  | { type: "resend"; text: string }
   | { type: "state"; state: TurnState }
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }
@@ -304,7 +329,16 @@ export interface SessionController {
   start(): Promise<void>;
   submit(input: string): Promise<void>;
   refresh(): Promise<void>;
+  /** Forget this conversation and start afresh; it stays in the Set's kept conversations. */
   newConversation(): Promise<void>;
+  /** A fresh bridge to Live, carrying the conversation over. */
+  reconnect?(): Promise<void>;
+  /** The open Set's kept conversations, newest first. */
+  conversations?(): Promise<ConversationSummary[]>;
+  /** Continue a kept conversation instead of this one (which stays kept); false when it's gone. */
+  resumeConversation?(id: string): Promise<boolean>;
+  /** Something the app saw that the session keeps with the conversation: a change Kumi made (HISTORY). */
+  watch?(event: { type: "change"; change: ChangeRecord } | { type: "action"; title: string; playing?: boolean; recording?: boolean }): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
   status(): SessionStatus;

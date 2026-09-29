@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -54,27 +54,62 @@ test("look-alike tracks the bridge can't tell apart still read as a rename and a
   assert.deepEqual(describeDiff(ambiguous.diff, ambiguous.before, ambiguous.after).lines, ["Renamed track “Vox” → “Lead Vox”", "Added track “Bells”"]);
 });
 
-test("each saved Set's conversation is kept privately, trimmed from the front when long", async () => {
+test("each Set's conversations are kept privately, trimmed from the front when long", async () => {
   const directory = mkdtempSync(join(tmpdir(), "kumi-conversations-"));
   try {
     const store = createConversationStore(directory);
-    const id = projectIdOf("/Music/Night Drive.als");
-    assert.equal(await store.load(id), undefined);
-    await store.save(id, { savedAt: 5, checkpoint: { version: 1, messages: [{ role: "user", content: "hi" }], origin: "openai-codex" } });
-    assert.deepEqual(await store.load(id), { savedAt: 5, checkpoint: { version: 1, messages: [{ role: "user", content: "hi" }], origin: "openai-codex" } });
-    if (process.platform !== "win32") assert.equal(statSync(join(directory, id, "conversation.json")).mode & 0o777, 0o600);
+    const place = projectIdOf("/Music/Night Drive.als");
+    assert.equal(await store.current(place), undefined);
+    const hi = { savedAt: 5, checkpoint: { version: 1 as const, messages: [{ role: "user", content: "hi" }], origin: "openai-codex" } };
+    await store.save(place, "abc123", hi);
+    assert.deepEqual(await store.current(place), { id: "abc123", conversation: { ...hi, first: "hi", turns: 1 } });
+    if (process.platform !== "win32") assert.equal(statSync(join(directory, place, "conversations", "abc123.json")).mode & 0o777, 0o600);
     const long = Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `${index}:${"x".repeat(10_000)}` }));
-    await store.save(id, { savedAt: 6, checkpoint: { version: 1, messages: long } });
-    const kept = (await store.load(id))!.checkpoint.messages as { role: string; content: string }[];
+    await store.save(place, "long01", { savedAt: 6, checkpoint: { version: 1, messages: long } });
+    const kept = (await store.load(place, "long01"))!.checkpoint.messages as { role: string; content: string }[];
     assert(kept.length < long.length && Buffer.byteLength(JSON.stringify(kept)) <= 256 * 1024);
     assert.equal(kept[0]!.role, "user", "it starts where the producer spoke"); assert.equal(kept.at(-1)!.content, long.at(-1)!.content, "the newest part is kept");
+    assert.equal((await store.load(place, "long01"))!.turns, 20, "turns are counted before any are dropped");
     const shaped = Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: `${index}:${"x".repeat(10_000)}` }] }));
-    await store.save(id, { savedAt: 7, checkpoint: { version: 1, messages: shaped } });
-    const noted = (await store.load(id))!.checkpoint.messages as { content: { text: string }[] }[];
+    await store.save(place, "long01", { savedAt: 7, checkpoint: { version: 1, messages: shaped } });
+    const noted = (await store.load(place, "long01"))!.checkpoint.messages as { content: { text: string }[] }[];
     assert.match(noted[0]!.content[0]!.text, /^\[Kumi removed the earlier part of this conversation to save room\.\]\n\n\d+:x/, "the model is told the start is gone, as in the kernel");
-    await store.clear(id);
-    assert.equal(await store.load(id), undefined);
-    assert.equal(await store.load("../escape"), undefined, "an invalid id reads as nothing");
+    assert.equal(await store.load("../escape", "abc123"), undefined, "an invalid place reads as nothing");
+    await assert.rejects(store.save(place, "../x", hi), /invalid/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("a fresh start keeps the last conversation listed; each Set keeps its latest 20; an unsaved Set's move on its first save", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "kumi-conversations-"));
+  const said = (text: string, savedAt: number) => ({ savedAt, checkpoint: { version: 1 as const, messages: [{ role: "user", content: [{ type: "text", text: `${text}\n\n<current_observation_untrusted>{}` }] }, { role: "assistant", content: "ok" }] } });
+  try {
+    const store = createConversationStore(directory);
+    const place = projectIdOf("/Music/Night Drive.als");
+    await store.save(place, "first1", said("make the bass wider", 1));
+    await store.fresh(place);
+    assert.equal(await store.current(place), undefined, "/new: nothing to carry on with");
+    await store.save(place, "second", said("tighten the drums", 2));
+    const listed = await store.list(place);
+    assert.deepEqual(listed.map((row) => [row.id, row.first, row.turns, row.current]), [["second", "tighten the drums", 1, true], ["first1", "make the bass wider", 1, false]],
+      "newest first, with the first request (not Live's observation) and the turns");
+    for (let index = 0; index < 22; index++) await store.save(place, `bulk${String(index).padStart(3, "0")}`, said(`request ${index}`, 10 + index));
+    const all = await store.list(place);
+    assert.equal(all.length, 20);
+    assert.equal(all.find((row) => row.current)?.id, "bulk021", "the latest saved is the current one");
+    // A Set without a file keeps its conversation under "unsaved" until it's saved.
+    const saved = projectIdOf("/Music/New Idea.als");
+    await store.save("unsaved", "draft1", said("sketch a chord progression", 3));
+    await store.move("draft1", "unsaved", saved);
+    assert.equal((await store.current(saved))?.id, "draft1");
+    assert.equal(await store.load("unsaved", "draft1"), undefined);
+    assert.deepEqual(await store.list("unsaved"), []);
+    // An older Kumi's single conversation.json becomes the first one kept.
+    const legacy = projectIdOf("/Music/Old.als");
+    mkdirSync(join(directory, legacy), { recursive: true });
+    writeFileSync(join(directory, legacy, "conversation.json"), JSON.stringify(said("from before", 4)));
+    assert.equal((await store.current(legacy))?.conversation.savedAt, 4);
+    assert.equal(existsSync(join(directory, legacy, "conversation.json")), false);
+    assert.deepEqual((await store.list(legacy)).map((row) => row.first), ["from before"]);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

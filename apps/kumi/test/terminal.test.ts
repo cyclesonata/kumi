@@ -44,7 +44,7 @@ test("header, transcript, tool timing, usage and command dispatch are concise an
   f.emit({ type: "turn-complete", elapsedMs: 55, result: { stopReason: "completed", usage: { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 } } });
   f.emit({ type: "error", message: "token=private-token\u001b[31m bad" });
   f.input.write("/quit\n"); assert.equal(await f.done, 0);
-  assert.match(f.output, /Kumi/); assert.match(f.output, /continue next time/i);
+  assert.match(f.output, /Kumi/); assert.match(f.output, /continues next time/i);
   assert.match(f.output, /No Live access/); assert.match(f.output, /hello world/); assert.equal(f.output.split("hello world").length, 2);
   assert.match(f.output, /live_status.*7 ms/); assert.match(f.output, /3.*2/); assert(!f.output.includes("private-token"));
   assert.deepEqual(f.calls, ["start", "refresh", "new", "submit:question", "close"]);
@@ -89,7 +89,7 @@ test("partial input and cursor survive streaming, notices and tool lines, includ
   f.input.write("XY\r"); await delay(0);
   assert(f.calls.includes(`submit:${prefix}abXYcd`));
   f.input.write("/quit\r"); await f.done; assert.equal(f.input.isRaw, false);
-  assert(stripVTControlCharacters(f.output).endsWith("Kumi closed. Conversations about saved Sets continue next time.\n"), "do not leave a dead Kumi prompt at exit");
+  assert(stripVTControlCharacters(f.output).endsWith("Kumi closed. Each Set's conversation continues next time.\n"), "do not leave a dead Kumi prompt at exit");
 });
 
 test("busy submit and refresh/new are rejected; Ctrl-C cancels work but preserves partly typed next input", async () => {
@@ -207,4 +207,24 @@ test("a watched video is one line: what it is, where its words came from, the fr
   assert.match(f.output, /\[watched\] “1 Minute Reese With Operator” \(1:21\): 0:00–1:21, its automatic captions, frames at 0:05, 1:05, the sound at 0:20–0:30/);
   assert.match(f.output, /\[watched\] Kumi couldn't take the frame at 1:10/);
   assert.ok(!f.output.includes("private-token"));
+});
+
+test("plain lines list a Set's conversations and go back to one; /reconnect and /new say what they do", async () => {
+  const f = fixture(); await delay(0);
+  const resumed: string[] = [];
+  f.controller.conversations = async () => [{ id: "now001", savedAt: Date.now(), first: "add a hi-hat groove", turns: 2, current: true },
+    { id: "old001", savedAt: Date.now() - 2 * 3600_000, first: "make the bass wider", turns: 5, current: false }];
+  f.controller.resumeConversation = async (id) => { resumed.push(id); return true; };
+  f.controller.reconnect = async () => { f.calls.push("reconnect"); };
+  f.input.write("/conversations\n"); await delay(5);
+  assert.match(f.output, /1\. add a hi-hat groove \(this one, 2 requests\) · 2\. make the bass wider \(2 hours ago, 5 requests\)/);
+  f.input.write("/conversations 2\n"); await delay(5);
+  assert.deepEqual(resumed, ["old001"]);
+  f.emit({ type: "resumed", savedAt: Date.now() - 2 * 3600_000, chosen: true, lines: [{ role: "user", text: "make the bass wider" }] });
+  assert.match(f.output, /Back to your conversation from 2 hours ago/);
+  assert.match(f.output, /you> make the bass wider/);
+  f.input.write("/reconnect\n/new\n"); await delay(5);
+  assert.ok(f.calls.includes("reconnect") && f.calls.includes("new"));
+  assert.match(f.output, /New conversation\. Kumi won't use what's above/);
+  f.input.end(); await f.done;
 });

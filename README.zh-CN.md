@@ -11,8 +11,8 @@ HISTORY 中，并可单独撤销。在你要求时，它还能播放、录音，
 它还能观看 YouTube 或本地文件中的视频教程，并在工程中搭建出教程里做的内容。
 它还能按你的描述制作 Max for Live MIDI 效果器，并放到你的轨道上。
 它会把你的工作流程存为可重放的配方，也能通过观察你的操作学会流程。它会记下你告诉
-它的简短笔记。它会记住每个已保存的工程，下次打开时接着之前的对话，并告诉你 Kumi
-关闭期间发生了哪些变化。
+它的简短笔记。它会保存每个工程的对话，下次打开时从上次停下的地方继续（`/conversations`
+可回到之前的对话）；对已保存的工程，还会告诉你 Kumi 关闭期间发生了哪些变化。
 
 ## 开始使用
 
@@ -30,7 +30,7 @@ npm run kumi -- doctor                 # 遇到问题时：检查所有环节并
 登录后会自动选择默认模型，可随时用 `npm run kumi -- model <provider>/<model>` 更改。
 也可以使用 API 密钥：`openai/`、`anthropic/`、`opencode/` 模型分别使用
 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENCODE_API_KEY`，运行
-`npm run kumi -- auth` 可查看可用的提供方。关于未保存工程的对话会在关闭 Kumi 后结束。
+`npm run kumi -- auth` 可查看可用的提供方。
 
 要连接 Live，请先关闭 Live，再运行 `npm run kumi -- bridge`：它会安装（或更新）桥接的
 Remote Script，然后等待你打开 Live。首次安装时，请在 Live 的
@@ -43,7 +43,8 @@ Remote Script，然后等待你打开 Live。首次安装时，请在 Live 的
 - [包含真实 Live 验收的验证记录（英文）](docs/evidence/kumi-poc.md)
 
 在终端中全屏运行（对话、Live 面板和输入框）。输入 `/` 查看命令，Esc 停止当前
-工作，`/stop` 停止 Live，Ctrl-C 先清空输入框，空时退出。[更新日志（英文）](CHANGELOG.md)。
+工作，`/stop` 停止 Live，Ctrl-C 先清空输入框，空时退出。Live 关闭后再次打开时，Kumi 会从中断的
+地方继续。`/new` 开始新的对话，之前的对话仍会保留。[更新日志（英文）](CHANGELOG.md)。
 使用 `npm run typecheck` 和 `npm test` 进行测试，无需凭据或 Live。
 
 ## 测试环境与后续计划

@@ -3,6 +3,7 @@ import type { Writable } from "node:stream";
 import stringWidth from "string-width";
 import { EFFORTS, since, type Effort, type ProviderId, PROVIDERS, type SessionController, type SessionEvent } from "@kumi/runtime";
 import { safeError } from "./config.js";
+import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
 import { sanitizeText, StreamingText } from "./text.js";
@@ -17,6 +18,8 @@ interface Options {
   startupNotice?: string;
   secrets?: readonly string[];
   closeTimeoutMs?: number;
+  /** What the producer typed before, for the up arrow; kept across /new, reconnects and restarts. */
+  history?: InputHistory;
 }
 export interface Terminal {
   run(): Promise<number>;
@@ -24,7 +27,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /stop · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = "/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -137,7 +140,7 @@ export function createTerminal(options: Options): Terminal {
       await Promise.race([controller.close(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("Shutdown deadline exceeded")), options.closeTimeoutMs ?? 6_000);
       })]);
-      if (!output.destroyed) presentation?.notice("Kumi closed. Conversations about saved Sets continue next time.", true);
+      if (!output.destroyed) presentation?.notice("Kumi closed. Each Set's conversation continues next time.", true);
     } catch (error) {
       code = 1;
       if (!output.destroyed) presentation?.notice(line(`[error] ${safeError(error, secrets)}`), true);
@@ -162,6 +165,8 @@ export function createTerminal(options: Options): Terminal {
     presentation?.submitted();
     const command = inputLine.trim();
     if (!command) { if (input.isTTY && output.isTTY) rl?.prompt(true); return; }
+    // Everything sent goes into the history, as a shell keeps it (secrets kept out).
+    options.history?.add(inputLine);
     if (command === "/quit") { await finish(); return; }
     if (command === "/help") { notice(HELP); return; }
     if (command === "/stop") {
@@ -201,6 +206,20 @@ export function createTerminal(options: Options): Terminal {
         notice(recipes.length ? `[recipes] ${recipes.map((recipe) => `${recipe.name}${recipe.params.length ? ` (needs ${recipe.params.map((param) => param.name).join(", ")})` : ""}: ${recipe.about}`).join(" · ")}` : "[recipes] None yet. Ask Kumi to save a way of working, or say \"watch me\" and do it in Live.");
         return;
       }
+      if (verb === "/conversations") {
+        const kept = await controller.conversations?.() ?? [];
+        if (!argument) {
+          const requests = (count: number) => `${count} ${count === 1 ? "request" : "requests"}`;
+          notice(kept.length ? `[conversations] ${kept.map((row, index) => `${index + 1}. ${sanitizeText(row.first, options.secrets).replaceAll("\n", " ").slice(0, 80) || "(nothing asked yet)"} (${row.current ? "this one" : since(row.savedAt, Date.now())}, ${requests(row.turns)})`).join(" · ")}. /conversations <number> goes back to one.`
+            : "[conversations] None kept yet: a conversation is kept once you've asked something.");
+          return;
+        }
+        const row = kept[Number.parseInt(argument, 10) - 1];
+        if (!row) { notice("[conversations] Use: /conversations <number>, with a number from /conversations."); return; }
+        if (row.current) { notice("[conversations] That's this one."); return; }
+        if (!await controller.resumeConversation?.(row.id)) notice("[conversations] That conversation isn't kept any more.");
+        return;
+      }
       if (verb === "/forget") {
         const note = argument ? await controller.forget?.(argument) : undefined;
         notice(note ? `[memory] Forgot: ${note.text}` : "[memory] Use: /forget <id>, with an id from /memory.");
@@ -215,7 +234,8 @@ export function createTerminal(options: Options): Terminal {
         const change = await controller.undo();
         if (change) notice(change.state === "undone" ? `[undo] Undid: ${change.title}` : `[undo] Kept: ${change.title}. ${change.note ?? ""}`.trim());
       } else if (command === "/refresh") await controller.refresh();
-      else if (command === "/new") await controller.newConversation();
+      else if (command === "/reconnect" && controller.reconnect) await controller.reconnect();
+      else if (command === "/new") { notice("── New conversation. Kumi won't use what's above ──"); await controller.newConversation(); }
       else if (command.startsWith("/")) notice("Unknown command. Use /help.");
       else { answering = true; try { await controller.submit(inputLine); } finally { answering = false; } }
     } catch (error) { if (!closing) reportError(error); }
@@ -248,7 +268,15 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
-      case "resumed": notice(`[resumed] Continuing your conversation from ${since(event.savedAt, Date.now())} (/new starts fresh).`); break;
+      case "resumed": {
+        const when = since(event.savedAt, Date.now());
+        notice(event.chosen ? `── Back to your conversation from ${when} ──` : event.unreadable ? `[resumed] Your conversation from ${when}, which this model can't continue:`
+          : `[resumed] Continuing your conversation from ${when} (/new starts fresh).`);
+        if (event.chosen || event.unreadable) for (const line of event.lines.slice(-6)) notice(`${line.role === "user" ? "you" : "kumi"}> ${sanitizeText(line.text, options.secrets).replaceAll("\n", " ").slice(0, 200)}`);
+        break;
+      }
+      // Live is back after stopping a request: it's in the line, ready to send again.
+      case "resend": if (input.isTTY && output.isTTY && rl && !rl.line) rl.write(event.text.replaceAll("\n", " ")); break;
       case "catch-up": {
         const { catchUp } = event;
         const when = since(catchUp.lastSeenAt, Date.now());
@@ -306,14 +334,16 @@ export function createTerminal(options: Options): Terminal {
       started = true;
       const tty = Boolean(input.isTTY && output.isTTY);
       if (tty) keys = new KeyInput(input);
-      rl = createInterface({ input: keys ?? input, output, terminal: tty, prompt: "kumi> ", historySize: 0, crlfDelay: Infinity });
+      // The up arrow goes through what was sent before, this session's and earlier ones'.
+      rl = createInterface({ input: keys ?? input, output, terminal: tty, prompt: "kumi> ", crlfDelay: Infinity,
+        ...(tty ? { historySize: 500, removeHistoryDuplicates: true, history: [...options.history?.entries ?? []].reverse().map((entry) => entry.replaceAll("\n", " ")) } : { historySize: 0 }) });
       presentation = new Presentation(rl, output, tty);
       rl.on("line", (value) => { void submitted(value).catch(reportError); });
       rl.on("SIGINT", interrupt);
       rl.on("close", () => { void finish(); });
       input.on("error", () => { void finish(1); }); output.on("error", () => { void finish(1); });
       notice(`Kumi · ${options.models.current().model ?? "no model chosen yet"} · ${options.mode === "inference-only" ? "MCP disconnected / No Live access" : "MCP connecting / Live unverified"}`);
-      notice("Conversations about saved Sets continue next time; others end when Kumi closes. /help for commands.");
+      notice("Each Set's conversations are kept: its latest continues next time, and /conversations goes back to earlier ones. /help for commands.");
       if (options.startupNotice) notice(options.startupNotice);
       // No model yet: the first one a signed-in provider lists.
       if (!options.models.current().model) {

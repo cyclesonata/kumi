@@ -24,8 +24,9 @@ It also:
 - saves your ways of working as recipes to replay, including ones it learns by
   watching you;
 - keeps short notes of what you tell it;
-- remembers each saved Set, so next time it picks up the conversation and says
-  what changed while it was closed.
+- keeps each Set's conversations, so next time it picks up where you left off
+  (`/conversations` goes back to earlier ones), and for a saved Set says what
+  changed while it was closed.
 
 ## Quick start
 
@@ -59,9 +60,9 @@ then it still starts and chats, and tells you Live isn't connected
 
 Kumi runs full screen in a terminal window: the conversation, a Live pane and the
 input box. Type `/` for commands; Esc stops Kumi's work; `/stop` stops Live;
-Ctrl-C clears the input box, then quits. Kumi keeps each saved Set's
-conversation for next time (an unsaved Set's ends when you quit). It reads the
-Set fresh before each answer; `/new` reconnects and clears the conversation.
+Ctrl-C clears the input box, then quits. If Live closes, Kumi picks up where you
+left off when it's back. It reads the Set fresh before each answer; `/new` starts
+a fresh conversation, and the last one stays kept.
 
 ## Tested with, and what's next
 

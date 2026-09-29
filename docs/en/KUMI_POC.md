@@ -85,6 +85,7 @@ yet.
 | `KUMI_AUTH_FILE` | Credential store path; default `~/.kumi/auth.json` |
 | `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
+| `KUMI_INPUT_HISTORY_FILE` | What you sent, for the up arrow (keys and tokens left out); default `~/.kumi/input-history` |
 | `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
 | `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
 | `KUMI_VIDEOS_DIR` | Videos Kumi watched (their words, frames and sound); default `~/.kumi/videos` |
@@ -267,7 +268,10 @@ and a tempo change about 4 s
 | `/recipes` | Your recipes; choose one to run or forget it |
 | `/refresh` | Read fresh bounded observations without a model answer |
 | `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
-| `/new` | Discard the conversation and reconnect with fresh observations |
+| `/new` | Forget this conversation and start fresh; what's above stays on screen under a line, and the conversation stays kept |
+| `/conversations` | This Set's kept conversations (the latest 20), with when and the first request; choose one to carry on with it |
+| `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (Kumi also reconnects on its own) |
+| ↑ and ↓ | Go through what you sent before, across `/new` and restarts (secrets are kept out of it) |
 | `/quit`, or Ctrl-C with an empty box | Close Kumi |
 | Esc or Ctrl-C during work | Stop; the steps Kumi finished stay in the conversation, the one in progress is dropped |
 | Ctrl-C while typing | Clear the input box |
@@ -382,10 +386,15 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
 
 ## Limits and failure behavior
 
-- **Conversations** are kept for saved Sets, in `~/.kumi/projects` next to what Kumi
-  last saw of each Set (readable only by you); the oldest exchanges drop off past
-  about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
-  end with Kumi.
+- **Conversations** are kept per Set in `~/.kumi/projects`, next to what Kumi last
+  saw of each Set (readable only by you): saved after every answer, the latest 20
+  per Set, the oldest exchanges dropping off past about 256 KB. An unsaved Set's
+  are kept under `unsaved` and move to the Set's own folder when it's first saved.
+  Opening Kumi on a saved Set carries on its latest conversation; `/new` starts
+  afresh and keeps the last one, and `/conversations` goes back to any of them.
+  Kumi's changes (HISTORY) are kept with each conversation and come back without
+  undo. A kept conversation the chosen model can't continue is shown, and a fresh
+  one starts.
 - **What Live's scripting can't do:** save the Set, export or freeze, map a macro
   or modulator to a parameter, set a macro's range, write notes into an
   Arrangement clip (Kumi writes the clip in Session view and copies it there),
@@ -414,28 +423,36 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
 - Discovery defaults to 25 rows and a 1,000-unit traversal budget. Parent and
   cursor references must come from the current observation. Partial pages remain
   partial; model-facing results over 64 KiB require a narrower query.
-- A failed refresh produces no answer based on old observations. Known epoch or
-  Set-identity changes reset the conversation; a changed tool catalog (new tools
+- A failed refresh produces no answer based on old observations. Opening another
+  Set switches to that Set's conversation; a changed tool catalog (new tools
   after a first clip, say) keeps it. Same-name/unsaved Set switches the bridge
   cannot distinguish are a limitation; use `/new` explicitly.
-- **Live closing or crashing:** Kumi notices within a second, keeps the
+- **Live closing or crashing:** Kumi notices within a second, says so ("Live
+  closed. Kumi will pick up where you left off when it's back."), keeps the
   conversation and reconnects on its own within seconds of Live being back
-  (starting a fresh bridge, which the bridge requires after a Live restart). Work
-  in progress when Live went away is stopped; messages sent meanwhile are answered
-  without Live and stay in the conversation. If the same Set file comes back, the
-  conversation carries on, and a note says what differs from what Kumi last saw.
-- Undo lasts as long as Live and Kumi's bridge connection: after Live restarts,
-  `/new` or a Kumi restart, earlier changes show **no undo** and can be undone
-  only in Live (Cmd-Z). One answer makes at most 40 changes.
+  (starting a fresh bridge, which the bridge requires after a Live restart). The
+  same happens when Kumi's bridge itself drops while Live stays open. The
+  conversation carries on even when Live comes back with a blank Set; only a
+  different saved Set switches to that Set's conversation. A request that was
+  running is stopped; when Live is back it's in the input box, one Enter from
+  sent again. Messages sent meanwhile are answered without Live and stay in the
+  conversation. If Live is still away after 30 seconds, Kumi asks whether it's
+  open with AbletonMcpBridge chosen as a Control Surface; `/reconnect` tries
+  again at once. Kumi never suggests `/new` for a connection problem.
+- Undo lasts as long as Live and Kumi's bridge connection: after Live restarts, a
+  fresh bridge (a reconnect) or a Kumi restart, earlier changes show **no undo**
+  and can be undone only in Live (Cmd-Z). `/new` keeps the bridge, so they can
+  still be undone. One answer makes at most 40 changes.
 - Catching up needs a saved Set; a Set is recognized by its file path (Save As
   starts afresh). Very large Sets (a comparison over about 1.5 MB) get "changed,
   too big to compare yet". Look-alike items the bridge can't match (empty tracks,
   say) are read by name and position, so a rename can occasionally show as a
   removal and an addition.
-- After a disconnect, observations are discarded and inference-only conversation
-  remains available with no Live tools. `/new` or restart reconnects; Kumi runs no
-  hidden reconnect loop. The standalone bridge retains its own status-refresh
-  behavior while its MCP process is connected.
+- After a disconnect, observations are discarded and the conversation carries on
+  without Live tools until Live is back. Kumi looks for Live every 2 seconds and
+  starts a fresh bridge as soon as Live's Remote Script answers (otherwise every
+  30 seconds). An answer from the bridge that arrives after Kumi stopped waiting
+  for it (Live quitting mid-request does this) no longer drops the connection.
 - A missing or refused sign-in, or a model the provider doesn't offer, is said
   plainly with the fix offered (sign in, choose another model). An unbuilt Kumi,
   invalid configuration or startup failure is reported with the command that

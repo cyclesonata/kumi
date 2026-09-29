@@ -22,6 +22,8 @@ export type Entry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; steps: Step[]; status: "running" | "done" | "stopped" | "failed"; elapsedMs?: number }
   | { kind: "notice"; text: string; tone: "info" | "warn" }
+  /** A line across the conversation: what's above it is a conversation Kumi no longer uses, say. */
+  | { kind: "divider"; text: string }
   /** Audio Kumi listened to: its tonal balance, or its differences from a reference. */
   | { kind: "heard"; file: string; summary: string; bands: number[]; compared?: { reference: string; summary: string; differences: number[] } }
   /** A video Kumi watched: what it is, where its words came from, and the frames it looked at (pictured when `pictures`). */
@@ -172,6 +174,10 @@ function entryRows(entry: Entry, width: number): Row[] {
   if (entry.kind === "notice") {
     const style = entry.tone === "warn" ? S.warn : S.faint;
     return wrap([{ text: entry.text, style }], inner).map((spans) => ({ spans }));
+  }
+  if (entry.kind === "divider") {
+    const rest = Math.max(2, inner - textWidth(entry.text) - 4);
+    return wrap([{ text: "── ", style: S.rule }, { text: entry.text, style: S.dim }, { text: ` ${"─".repeat(rest)}`, style: S.rule }], inner).map((spans) => ({ spans }));
   }
   if (entry.kind === "heard") return heardRows(entry, inner);
   if (entry.kind === "watched") return watchedRows(entry, inner);

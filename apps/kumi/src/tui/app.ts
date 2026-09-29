@@ -7,6 +7,7 @@ import {
   type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
+import type { InputHistory } from "../history.js";
 import { openBrowser } from "../login.js";
 import type { ModelControl } from "../models.js";
 import { sanitizeText, StreamingText } from "../text.js";
@@ -35,6 +36,8 @@ export interface TuiOptions {
   colorDepth?: ColorDepth;
   /** Milliseconds between animation frames; tests shorten it. */
   frameMs?: number;
+  /** What the producer typed before, for the up arrow; kept across /new, reconnects and restarts. */
+  history?: InputHistory;
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -65,7 +68,9 @@ interface PanelLine {
 const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking", medium: "Balanced", high: "Thorough", xhigh: "More thorough still", max: "As hard as it can" };
 
 const COMMANDS = [
-  { name: "/new", about: "Start a fresh conversation" },
+  { name: "/new", about: "Forget this conversation and start fresh" },
+  { name: "/conversations", about: "Go back to an earlier conversation about this Set" },
+  { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
   { name: "/stop", about: "Stop Live: clips, the transport and recording" },
   { name: "/refresh", about: "Read your Live Set again" },
@@ -81,6 +86,8 @@ const COMMANDS = [
   { name: "/quit", about: "Close Kumi" },
 ] as const;
 
+const MENU_NAME_WIDTH = Math.max(...COMMANDS.map((command) => command.name.length));
+
 /** Kumi's tools that act in Live without changing the Set. */
 const ACTION_TOOLS: ReadonlySet<string> = new Set(["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"]);
 /** Offered only with a ModelControl to answer them. */
@@ -88,12 +95,12 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
 const MAX_OUTPUT_BYTES = 256 * 1024;
-const FAREWELL = "Kumi closed. Conversations about saved Sets continue next time.";
+const FAREWELL = "Kumi closed. Each Set's conversation continues next time.";
 
 const st = {
   ground: { bg: palette.ground } as Style,
@@ -213,6 +220,8 @@ export class TuiApp {
   private planning: string | undefined;
   /** Changes Kumi made in the answer under way, for NOW. */
   private turnChanges = 0;
+  /** Going through what was sent before with the up arrow: where, and what was being typed. */
+  private recall: { index: number; draft: string } | undefined;
   /** The last message sent, to send again after a sign-in it was waiting for. */
   private lastSent: string | undefined;
   private readonly done: Promise<number>;
@@ -304,13 +313,23 @@ export class TuiApp {
         this.focus = event.focus;
         break;
       case "resumed": {
-        this.notice(`Continuing your conversation from ${since(event.savedAt, Date.now())}. /new starts fresh.`, "info");
+        const when = since(event.savedAt, Date.now());
+        if (event.chosen) this.transcript.add({ kind: "divider", text: `Back to your conversation from ${when}` });
+        else if (event.unreadable) this.notice(`Your conversation from ${when}, which this model can't continue:`, "info");
+        else this.notice(`Continuing your conversation from ${when}. /new starts fresh.`, "info");
         for (const line of event.lines) {
           const text = sanitizeText(line.text, this.secrets).slice(0, 16 * 1024);
           this.transcript.add(line.role === "user" ? { kind: "user", text } : { kind: "assistant", text, steps: [], status: "done" });
         }
+        // Its HISTORY comes back too, older than anything this session changed, and without undo.
+        const earlier = (event.changes ?? []).filter((change) => !this.changes.some((known) => known.id === change.id));
+        if (earlier.length) this.changes = [...earlier, ...this.changes].slice(-500);
         break;
       }
+      case "resend":
+        // Live is back: the stopped request is one enter away, unless something else is being typed.
+        if (this.editor.isEmpty) { this.editor.set(event.text); this.recall = undefined; }
+        break;
       case "catch-up":
         this.catchUp = event.catchUp;
         // The welcome screen shows it; once the conversation has started, it becomes a note.
@@ -536,8 +555,9 @@ export class TuiApp {
     if (name === "right") { if (alt || ctrl) this.editor.wordRight(); else this.editor.right(); return; }
     if (alt && name === "b") { this.editor.wordLeft(); return; }
     if (alt && name === "f") { this.editor.wordRight(); return; }
-    if (name === "up") { this.editor.vertical(width, -1); return; }
-    if (name === "down") { this.editor.vertical(width, 1); return; }
+    // Up and down move between the box's lines, then (past the first or last) through what was sent before.
+    if (name === "up") { if (!this.editor.vertical(width, -1)) this.recallOlder(); return; }
+    if (name === "down") { if (!this.editor.vertical(width, 1)) this.recallNewer(); return; }
     if (name === "home" || (ctrl && name === "a")) { this.editor.home(); return; }
     if (name === "end" || (ctrl && name === "e")) { this.editor.end(); return; }
     if (ctrl && name === "k") { this.editor.killToEnd(); return; }
@@ -553,6 +573,7 @@ export class TuiApp {
     if (this.menuDismissed || !text.startsWith("/") || /\s/.test(text)) return [];
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
       && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
+      && (command.name !== "/conversations" || this.options.controller.conversations !== undefined) && (command.name !== "/reconnect" || this.options.controller.reconnect !== undefined)
       && (command.name !== "/stop" || this.options.controller.stopLive !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
@@ -563,6 +584,9 @@ export class TuiApp {
     const command = raw.trim();
     if (!command) return;
     const { controller } = this.options;
+    // Everything sent goes into the history, as a shell keeps it (secrets kept out).
+    this.options.history?.add(raw);
+    this.recall = undefined;
     if (command === "/quit") { this.editor.clear(); await this.finish(0); return; }
     if (command === "/help") { this.editor.clear(); this.notice(HELP, "info"); return; }
     // The model and its sign-ins can change any time: an answer running now finishes as it started.
@@ -575,6 +599,11 @@ export class TuiApp {
     if (command === "/recipes" && controller.recipes) {
       this.editor.clear();
       await this.openRecipes().catch((error: unknown) => this.panelFailed(error));
+      return;
+    }
+    if (command === "/conversations" && controller.conversations) {
+      this.editor.clear();
+      await this.openConversations().catch((error: unknown) => this.panelFailed(error));
       return;
     }
     if (command === "/memory" && controller.memory) {
@@ -617,13 +646,18 @@ export class TuiApp {
         await controller.refresh();
       } else if (command === "/new") {
         this.activity = "starting fresh";
-        await controller.newConversation();
-        this.transcript.clear();
+        // What's above stays on screen, under a line saying Kumi won't use it. The bridge stays, and
+        // with it HISTORY's undo.
+        if (!this.transcript.isEmpty) this.transcript.add({ kind: "divider", text: "New conversation. Kumi won't use what's above" });
         this.current = undefined;
         this.watching = false;
-        // A fresh start is a new bridge connection: earlier changes stay listed, without their undo.
+        await controller.newConversation();
+      } else if (command === "/reconnect" && controller.reconnect) {
+        this.activity = "connecting to Live";
+        await controller.reconnect();
+        // A fresh bridge can't undo the old one's changes: they stay listed, without their undo.
         this.changes = this.changes.map((change) => change.state === "applied" || change.state === "unsure"
-          ? { ...change, state: "expired", note: "Kumi started fresh (/new), so it can't undo this; Live's own undo still can." } : change);
+          ? { ...change, state: "expired", note: "Kumi reconnected to Live since, so it can't undo this; Live's own undo still can." } : change);
       } else if (isCommand(command)) this.notice(`There's no ${command.split(/\s/)[0]} command. Type / to see them.`, "info");
       else {
         this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
@@ -839,6 +873,50 @@ export class TuiApp {
         if (!await controller.forget?.(item.value!)) this.notice("That note was already gone.", "info");
       } };
       this.scheduler.request();
+    } };
+    this.scheduler.request();
+  }
+
+  /** The up arrow: the message sent before the one in the box (what was being typed is kept). */
+  private recallOlder(): void {
+    const entries = this.options.history?.entries ?? [];
+    const index = (this.recall?.index ?? entries.length) - 1;
+    if (index < 0) return;
+    this.recall = { index, draft: this.recall?.draft ?? this.editor.text };
+    this.editor.set(entries[index]!);
+    // A recalled command doesn't open the / menu: the arrows keep going through the history.
+    this.menuDismissed = true;
+  }
+
+  /** The down arrow: the next message sent, and past the last, what was being typed. */
+  private recallNewer(): void {
+    if (!this.recall) return;
+    const entries = this.options.history?.entries ?? [];
+    const index = this.recall.index + 1;
+    if (index >= entries.length) { this.editor.set(this.recall.draft); this.recall = undefined; return; }
+    this.recall = { ...this.recall, index };
+    this.editor.set(entries[index]!);
+    this.menuDismissed = true;
+  }
+
+  /** /conversations: this Set's kept conversations, newest first; choosing one carries it on (this one stays kept). */
+  private async openConversations(): Promise<void> {
+    const { controller } = this.options;
+    const kept = await controller.conversations?.() ?? [];
+    const now = Date.now();
+    const requests = (count: number) => `${count} ${count === 1 ? "request" : "requests"}`;
+    const items: PickerItem[] = kept.length ? kept.map((row) => ({ label: sanitizeText(row.first, this.secrets).replaceAll("\n", " ").slice(0, 120) || "(nothing asked yet)", value: row.id,
+      note: `${row.current ? "this one" : since(row.savedAt, now)} · ${requests(row.turns)}`, noteTone: "faint" as const }))
+      : [{ label: "None kept yet: a conversation is kept once you've asked something", inert: true }];
+    const picker = new Picker(`Conversations about ${this.setName ?? "this Set"} · choose one to carry on with it`, items, { filterable: true });
+    this.panel = { kind: "pick", picker, choose: async (item) => {
+      this.closePanel();
+      const row = kept.find((candidate) => candidate.id === item.value);
+      if (!row || row.current) return;
+      if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+      this.activity = "going back to it";
+      const resumed = await controller.resumeConversation?.(row.id).catch((error: unknown) => { this.notice(safeError(error, this.secrets), "warn"); return true; });
+      if (resumed === false) this.notice("That conversation isn't kept any more.", "info");
     } };
     this.scheduler.request();
   }
@@ -1158,7 +1236,7 @@ export class TuiApp {
       add("  “How do I make my kick punchier?”");
     }
     add();
-    add("Kumi keeps the conversation for each saved Set.", st.faint);
+    add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
     rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
   }
 
@@ -1404,16 +1482,18 @@ export class TuiApp {
   private drawMenu(screen: Screen, boxTop: number, left: number): void {
     const items = this.menu();
     if (!items.length) return;
-    const width = Math.min(46, left - 2);
+    const width = Math.min(70, left - 2);
     const top = boxTop - items.length - 1;
     if (top < 2) return;
+    // What the chosen command does, in a column after the longest name.
+    const about = 3 + MENU_NAME_WIDTH + 2;
     screen.fill({ x: 1, y: top - 1, width, height: items.length + 1 }, st.raised);
     items.forEach((item, index) => {
       const y = top + index;
       const chosen = index === this.menuIndex;
       if (chosen) screen.fill({ x: 1, y, width, height: 1 }, st.selected);
       screen.put(3, y, item.name, chosen ? st.accent : st.text);
-      if (chosen) screen.put(14, y, truncate(item.about, Math.max(1, width - 15)), st.bright);
+      if (chosen) screen.put(about, y, truncate(item.about, Math.max(1, width - about - 1)), st.bright);
     });
   }
 }

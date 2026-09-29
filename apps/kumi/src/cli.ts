@@ -4,7 +4,8 @@ import {
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { liveUserLibrary, loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadInputHistoryFile, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
@@ -38,7 +39,7 @@ Kumi reads the open Live Set and makes the changes you ask for; each change can 
 and bounces when you ask, listens to audio (a reference, a sample, a recording) and compares it, keeps short notes
 of what you tell it that Live can't show, and saves your ways of working as recipes to replay, including ones it
 learns by watching you.
-In a session: /help /status /model /effort /login /logout /memory /recipes /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
+In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /undo /refresh /reconnect /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: npm run kumi -- bridge";
@@ -115,8 +116,9 @@ try {
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
         : withFallback(createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
-          onChange: (change) => terminal?.handleEvent({ type: "change", change }),
-          onAction: (action) => terminal?.handleEvent({ type: "action", ...action }),
+          // Kumi's changes are kept with the conversation too, for its HISTORY when it's resumed.
+          onChange: (change) => { controller.watch?.({ type: "change", change }); terminal?.handleEvent({ type: "change", change }); },
+          onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },
           onWatch: (on) => terminal?.handleEvent({ type: "watching", on }),
           projectStore: createProjectStore(loadProjectsDir()),
           ...(liveUserLibrary() ? { userLibrary: liveUserLibrary()! } : {}),
@@ -130,7 +132,7 @@ try {
           try { installed = config.mode === "live" ? readBridgeServer(config.bridgeConfig).version : undefined; } catch { installed = undefined; }
           const current = installed !== undefined && installed === bundledBridgeVersion;
           terminal?.handleEvent({ type: "notice", message: current
-            ? "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Then /new to connect."
+            ? "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Then /reconnect."
             : message });
         }),
       onEvent: (event) => terminal?.handleEvent(event),
@@ -143,6 +145,7 @@ try {
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
+      history: openInputHistory(loadInputHistoryFile(), secrets),
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
@@ -8,13 +11,14 @@ import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
 import type { ModelControl } from "../src/models.js";
+import { openInputHistory, type InputHistory } from "../src/history.js";
 import { fakeModels, MODELS } from "./fake-models.js";
 import { VirtualTerminal } from "./vt.js";
 
 const opened: TuiApp[] = [];
 afterEach(async () => { await Promise.all(opened.splice(0).map((app) => app.close())); });
 
-function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial<SessionController> = {}) {
+function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial<SessionController> = {}, history?: InputHistory) {
   const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false, setRawMode(value: boolean) { this.isRaw = value; } });
   let written = "";
   const output = Object.assign(new Writable({ write(chunk, _encoding, callback) { written += String(chunk); callback(); } }), { isTTY: true, columns, rows });
@@ -37,7 +41,7 @@ function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial
     ...extra,
   };
   let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
-  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
+  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
@@ -88,7 +92,7 @@ test("Kumi opens full screen with the header, the Live pane and the input box, a
   assert.equal(await done, 0);
   assert.ok(h.calls.includes("close"));
   assert.equal(h.input.isRaw, false);
-  assert.ok(h.written.endsWith(`${RESTORE}Kumi closed. Conversations about saved Sets continue next time.\n`), "the terminal is restored before the goodbye");
+  assert.ok(h.written.endsWith(`${RESTORE}Kumi closed. Each Set's conversation continues next time.\n`), "the terminal is restored before the goodbye");
 });
 
 test("typing and sending, then streaming text and steps in plain words, then the finished turn", async () => {
@@ -158,7 +162,7 @@ test("the / menu lists a few commands, moves with the arrows and runs the choice
   await delay(5);
   await h.type("/");
   let lines = h.screen();
-  assert.ok(lines.some((line) => line.includes("/new") && line.includes("Start a fresh conversation")));
+  assert.ok(lines.some((line) => line.includes("/new") && line.includes("Forget this conversation and start fresh")));
   assert.ok(has(lines, "/refresh") && !has(lines, "Read your Live Set again"), "only the highlighted command explains itself");
   await h.type("\u001b[B\u001b[B");
   assert.ok(has(h.screen(), "Read your Live Set again"));
@@ -245,11 +249,11 @@ test("a failed turn says so, and losing Live is explained", async () => {
   h.emit({ type: "state", state: "idle" });
   // As the session reports it: the state, then what Kumi does about it.
   h.emit({ type: "connection", state: "disconnected" });
-  h.emit({ type: "notice", message: "Live disconnected. Kumi keeps the conversation and reconnects when Live is back; if it doesn't, use /new." });
+  h.emit({ type: "notice", message: "Live closed. Kumi will pick up where you left off when it's back." });
   const lines = h.screen();
   assert.ok(has(lines, "Kumi couldn't answer that; see the note below."));
   assert.ok(has(lines, "anthropic rejected the credentials (HTTP 401)"));
-  assert.ok(has(lines, "Live disconnected. Kumi keeps the conversation"));
+  assert.ok(has(lines, "Live closed. Kumi will pick up where you left off"));
   assert.match(lines[0]!, /● Live not connected {2}$/);
   await h.app.close();
 });
@@ -438,13 +442,14 @@ test("a message typed while Kumi connects is kept and sent as soon as it's ready
   await h.app.close();
 });
 
-test("after /new, earlier changes stay listed without their undo", async () => {
-  const h = harness();
+test("after /reconnect, earlier changes stay listed without their undo", async () => {
+  const h = harness(120, 36, undefined, { async reconnect() { h.calls.push("reconnect"); } });
   void h.app.run();
   await delay(5);
   connect(h);
   h.emit({ type: "change", change: { id: "c5", family: "tempo", title: "Tempo 120 → 126 BPM", state: "applied", at: 1 } });
-  await h.type("/new\r");
+  await h.type("/reconnect\r");
+  assert.ok(h.calls.includes("reconnect"));
   await delay(10);
   const lines = h.screen();
   assert.ok(lines.some((line) => /Tempo 120 → 126 BPM +no undo/.test(line)));
@@ -962,5 +967,95 @@ test("/recipes lists saved ways of working; one without blanks runs straight awa
   assert.ok(has(h.screen(), "Run my recipe “Resample twice” on"), "the box says it, for the producer to finish");
   h.emit({ type: "recipe", action: "saved", name: "Vocal chain", steps: 4 });
   assert.ok(has(h.screen(), "Kumi saved the recipe “Vocal chain” (4 steps)"));
+  await h.app.close();
+});
+
+test("↑ and ↓ go back through what was sent, across /new and restarts, with secrets kept out of the history file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "kumi-history-"));
+  const file = join(directory, "input-history");
+  try {
+    const h = harness(120, 36, undefined, {}, openInputHistory(file, ["private-token"]));
+    void h.app.run();
+    await delay(5);
+    connect(h);
+    await h.type("make the bass wider\r");
+    await h.type("/new\r");
+    await h.type("use my key sk-ant-api03-Abcdefghijklmnopqrstuvwxyz0123456789 and private-token\r");
+    await h.type("half-typed");
+    // The input box is the last rows of the screen.
+    const box = () => h.screen().slice(-4).join("\n");
+    await h.type("\u001b[A");
+    assert.match(box(), /use my key \[redacted\] and \[redacted\]/, "a pasted key and a known secret come back redacted");
+    await h.type("\u001b[A");
+    assert.match(box(), /\/new/);
+    await h.type("\u001b[A");
+    assert.match(box(), /make the bass wider/, "a recalled command didn't open the / menu");
+    await h.type("\u001b[A");
+    assert.match(box(), /make the bass wider/, "the oldest stays");
+    await h.type("\u001b[B");
+    assert.match(box(), /\/new/);
+    await h.type("\u001b[B\u001b[B");
+    assert.match(box(), /half-typed/, "past the newest, what was being typed");
+    await h.app.close();
+    const saved = readFileSync(file, "utf8");
+    assert.ok(!saved.includes("sk-ant") && !saved.includes("private-token"), "the file never holds a secret");
+    if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.deepEqual(openInputHistory(file).entries, ["make the bass wider", "/new", "use my key [redacted] and [redacted]"], "a restart has it all");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("/new keeps what's above on screen under a line, and the bridge (HISTORY's undo stays)", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("make the bass wider\r");
+  h.emit({ type: "change", change: { id: "c1", family: "mixer", title: "Bass width 100% → 140%", state: "applied", at: Date.now() } });
+  await h.type("/new\r");
+  const lines = h.screen();
+  assert.ok(h.calls.includes("new"));
+  assert.ok(has(lines, "make the bass wider"), "the old conversation stays on screen");
+  assert.ok(has(lines, "New conversation. Kumi won't use what's above"));
+  assert.ok(lines.some((line) => line.includes("Bass width") && line.includes("undo")), "its changes can still be undone");
+  await h.app.close();
+});
+
+test("/conversations lists the Set's kept conversations and goes back to one, with its HISTORY", async () => {
+  const resumed: string[] = [];
+  const h = harness(120, 36, undefined, {
+    async conversations() { return [{ id: "now001", savedAt: Date.now(), first: "add a hi-hat groove", turns: 2, current: true }, { id: "old001", savedAt: Date.now() - 2 * 3600_000, first: "make the bass wider", turns: 5, current: false }]; },
+    async resumeConversation(id) { resumed.push(id); return true; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/conversations\r");
+  let lines = h.screen();
+  assert.ok(has(lines, "Conversations about Night Drive"));
+  assert.ok(lines.some((line) => line.includes("add a hi-hat groove") && line.includes("this one · 2 requests")));
+  assert.ok(lines.some((line) => line.includes("make the bass wider") && line.includes("2 hours ago · 5 requests")));
+  await h.type("\u001b[B\r");
+  assert.deepEqual(resumed, ["old001"]);
+  h.emit({ type: "resumed", savedAt: Date.now() - 2 * 3600_000, chosen: true, lines: [{ role: "user", text: "make the bass wider" }, { role: "assistant", text: "Widened it to 140%." }],
+    changes: [{ id: "old001:c4", family: "mixer", title: "Bass width 100% → 140%", state: "expired", note: "From an earlier session, so Kumi can't undo it now.", at: 1 }] });
+  lines = h.screen();
+  assert.ok(has(lines, "Back to your conversation from 2 hours ago"));
+  assert.ok(has(lines, "Widened it to 140%."));
+  assert.ok(lines.some((line) => line.includes("Bass width") && line.includes("no undo")), "its HISTORY is back, without undo");
+  await h.app.close();
+});
+
+test("when Live is back after stopping a request, it's in the box, one enter from sent again", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "notice", message: "Live is back. Your last request was stopped; press enter to send it again." });
+  h.emit({ type: "resend", text: "record the chorus into a new track" });
+  const lines = h.screen();
+  assert.ok(has(lines, "press enter to send it again"));
+  assert.ok(has(lines, "record the chorus into a new track"));
+  await h.type("\r");
+  assert.ok(h.calls.includes("submit:record the chorus into a new track"));
   await h.app.close();
 });

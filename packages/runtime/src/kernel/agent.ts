@@ -7,7 +7,7 @@ import type {
 } from "@ai-sdk/provider";
 import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, StreamingCall, ToolImage, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
-import { DEFAULT_BUDGET, fit, OBSERVATION_MARKER, putAwayImages, SHORTENED, type ContextBudget } from "./budget.js";
+import { DEFAULT_BUDGET, fit, putAwayImages, transcriptOf, type ContextBudget } from "./budget.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
 
 export interface ModelRequest {
@@ -264,16 +264,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       if (running) throw new Error("Kernel is busy; checkpoint between turns");
       return { version: 1, messages: structuredClone(history), origin: binding.id, tools: toolsKey };
     },
-    transcript() {
-      return history.flatMap((message): TranscriptLine[] => {
-        if (message.role !== "user" && message.role !== "assistant") return [];
-        const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-        // The host appends each turn's Live observation to the producer's words, and the budget
-        // may note that earlier exchanges are gone; neither is theirs.
-        const words = message.role === "user" ? text.split(OBSERVATION_MARKER)[0]!.replace(SHORTENED, "") : text;
-        return words.trim() ? [{ role: message.role, text: words.trim() }] : [];
-      });
-    },
+    transcript() { return transcriptOf(history); },
     close() {
       return closing ??= (async () => { lifetime.abort(); await active?.catch(() => {}); })();
     },

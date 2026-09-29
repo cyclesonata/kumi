@@ -98,9 +98,12 @@ old line-by-line interface (`terminal.ts`).
    pattern reads as a grid. A colour change shows the old and new colours as
    swatches (`████ → ████`), and the track's chip takes the new colour. Still to
    do: a device chain, locators on a timeline, and bars instead of beats.
-4. ~~**Saved sessions**~~: done for saved Sets. Opening Kumi on a Set picks up
-   its conversation and shows the recent exchanges ("Continuing your conversation
-   from 2 hours ago"); `/new` starts afresh.
+4. ~~**Saved sessions**~~: done. Every Set's conversations are kept (the latest
+   20). Opening Kumi on a Set picks up its latest and shows the recent exchanges
+   ("Continuing your conversation from 2 hours ago"), with its HISTORY (without
+   undo). `/new` starts afresh under a line ("New conversation. Kumi won't use
+   what's above"), `/conversations` goes back to an earlier one, and ↑ and ↓ go
+   through what you sent, across `/new` and restarts.
 5. ~~**Listening, notes and recipes**~~: done. What Kumi heard is a line in the
    conversation with a small spectrum (ten bands, sub to air, `▁▂▃▄▅▆▇█`), and a
    comparison shows each band as dB over or under the reference, coloured when
