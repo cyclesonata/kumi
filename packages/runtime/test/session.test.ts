@@ -20,6 +20,7 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
   let connection!: (state: ConnectionState) => void;
   let observation: Observation = { key: "epoch:1", label: "Fixture Set", context: "fresh fixture context", instructions: "fixture instructions", tools: [] };
   let refreshError = false;
+  let stops = 0; let stopWorks = true;
   const session = createSession({
     onEvent: (event) => events.push(event), timeoutMs: options.timeoutMs ?? 5_000,
     ...(options.idleTimeoutMs ? { idleTimeoutMs: options.idleTimeoutMs } : {}), ...(options.turnLimitMs ? { turnLimitMs: options.turnLimitMs } : {}),
@@ -43,6 +44,7 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
         async start() { listener("connecting"); listener("connected"); },
         async observe() { observations++; if (refreshError) throw new Error("secret-token-must-not-escape"); return observation; },
         async close() { integrationCloses++; },
+        async stopLive() { stops++; return stopWorks; },
       };
     },
   });
@@ -50,8 +52,27 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
     connection: (state: ConnectionState) => connection(state),
     setObservation: (next: Partial<Observation>) => { observation = { ...observation, ...next }; },
     failRefresh: () => { refreshError = true; },
+    get stops() { return stops; }, failStop: () => { stopWorks = false; },
   };
 }
+
+test("stopping Live goes straight to the integration, during a turn too, and NOW hears of it only when it worked", async () => {
+  const held = deferred<TurnResult>();
+  const h = harness({ run: async () => held.promise });
+  await h.session.start();
+  const running = h.session.submit("record the bass");
+  await delay(0);
+  assert.equal(await h.session.stopLive!(), true);
+  assert.equal(h.stops, 1);
+  assert.deepEqual(h.events.filter((event) => event.type === "action"), [{ type: "action", title: "Stopped", playing: false, recording: false }]);
+  assert.equal(h.session.status().state, "running", "the answer isn't cancelled by it");
+  held.resolve({ stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+  await running;
+  h.failStop();
+  assert.equal(await h.session.stopLive!(), false);
+  assert.equal(h.events.filter((event) => event.type === "action").length, 1);
+  await h.session.close();
+});
 
 test("fresh context per turn; streams text/tools/usage once and rejects concurrent submit", async () => {
   const held = deferred<TurnResult>();

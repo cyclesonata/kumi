@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -8,10 +9,13 @@ import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { defaultSampleFolders, findSamples, folderPath, type Sample } from "./samples.js";
-import { CHANGES, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { ACTIONS, type ActionKind } from "./actions.js";
+import { setMeter } from "./more-changes.js";
+import { atLeast } from "./bridge-version.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
-import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
+import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -20,7 +24,13 @@ const REF_KEY = /^(?:ref|parent)$|Refs?$/;
 /** Live's references: an epoch, a kind and a path ("1232800184424618:track:4"). */
 const LIVE_REF = /^\d+:[a-z][a-z_]{0,31}:/;
 const MAKE_CHANGES = "make_changes";
-const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
+/** A plan step that waits: while a recording runs, say. */
+const WAIT = "wait";
+const WATCH_TOOL = "watch_me";
+const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: action start just before they do it (Kumi notes the Set as it is; nothing in Live changes), then action stop when they say they're done. Stop gives what changed: tracks added (with routing, arming, monitoring), devices loaded (with the knobs they turned from Live's defaults; switches and modes aren't compared), clips recorded or made, and settings changed, each with its track. Turn that into save_recipe steps, with $blanks for what differs each time (the source track, say), check the steps with the producer, and say what you saved.";
+/** How many devices added while watching Kumi reads the settings of. */
+const WATCH_DEVICES = 12;
+const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools (or play, record, fire_scene and the like) with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) lets a recording run, as in bouncing a sound to audio: route and arm a new audio track, record, play, wait, stop. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const FIND_SAMPLES = "find_samples";
 const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
 const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
@@ -57,6 +67,8 @@ interface Options {
   focusIntervalMs?: number;
   /** A change Kumi made or undid in Live, for HISTORY. */
   onChange?: (change: ChangeRecord) => void;
+  /** Something Kumi did in Live that isn't a change to the Set (playing, launching, recording, showing), for NOW. */
+  onAction?: (action: { title: string; playing?: boolean; recording?: boolean }) => void;
   /** Bound on one apply or undo once sent; it runs to the end even if the turn is cancelled. */
   changeTimeoutMs?: number;
   /** Where Kumi keeps each saved Set's last-seen state; without it Kumi doesn't catch up. */
@@ -93,6 +105,8 @@ export function createAbletonIntegration(options: Options): Integration {
   let observationGeneration = 0;
   let currentEpoch: number | undefined;
   let currentSet: string | undefined;
+  /** The Set's tempo, for waits measured in beats. */
+  let currentTempo: number | undefined;
   let closing: Promise<void> | undefined;
   let focusFeed: FocusFeed | undefined;
   /** Tracks from this turn's discovery (names and colours), for HISTORY's chips. */
@@ -104,6 +118,8 @@ export function createAbletonIntegration(options: Options): Integration {
   let changesThisTurn = 0;
   /** Samples Kumi picked itself in this answer, so random picks don't repeat. */
   const picked = new Set<string>();
+  /** The Set as it was when the producer asked Kumi to watch them work, until they say they're done. */
+  let watching: { set: string | undefined; pages: JsonObject[]; devices: Set<string>; at: number } | undefined;
   const changeTimeoutMs = options.changeTimeoutMs ?? 30_000;
   /** The saved Set Kumi is keeping track of (unsaved Sets have no file, so nothing to remember). */
   let project: { identity: string; path?: string; name: string } | undefined;
@@ -488,6 +504,9 @@ export function createAbletonIntegration(options: Options): Integration {
     }).catch(() => { /* catching up is best effort */ });
   }
   const knownTrack = (ref: unknown) => (typeof ref === "string" ? known.get(ref) : undefined);
+  /** Whether the connected bridge is new enough for this tool (see `since`). */
+  const supported = (kind: { since?: string }) => !kind.since || atLeast(endpoint?.serverInfo?.version, kind.since);
+  const tooOld = (kind: { since?: string }) => `That needs the Ableton bridge ${kind.since} or later; this one is ${endpoint?.serverInfo?.version ?? "older"}. Tell the producer to update it (kumi doctor says how).`;
   /** New tracks go after the last one unless the model gave a position (the bridge's default is request order). */
   async function appendAtEnd(kind: ChangeKind, input: JsonObject, signal: AbortSignal): Promise<JsonObject> {
     const lacks = (items: unknown) => Array.isArray(items) && items.some((item) => item && typeof item === "object" && (item as JsonObject).index === undefined);
@@ -626,7 +645,9 @@ export function createAbletonIntegration(options: Options): Integration {
       return value;
     };
     type Stop = { step: number; tool: unknown; error: string };
-    const settled = (async (): Promise<Stop | undefined> => {
+    // What this plan's own steps set going: stopped again if the plan doesn't finish.
+    const running: { playing?: boolean; recording?: string | undefined } = {};
+    const steps_ = async (): Promise<Stop | undefined> => {
       for (let index = 0; ;) {
         await until(() => known(index));
         if (abandoned) return undefined;
@@ -669,17 +690,58 @@ export function createAbletonIntegration(options: Options): Integration {
           continue;
         }
         const kind = CHANGES.find((candidate) => candidate.tool === item.tool && !candidate.internal);
-        if (!kind) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
+        const action = kind ? undefined : ACTIONS.find((candidate) => candidate.tool === item.tool);
+        if (!kind && !action && item.tool !== WAIT) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
+        const needs = kind ?? action;
+        if (needs && !supported(needs)) return stop(tooOld(needs));
         let stepInput: JsonObject;
         try { stepInput = resolve(item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {}, step) as JsonObject; }
         catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
-        const outcome = await change(kind, stepInput, signal, confirmed);
+        if (item.tool === WAIT) {
+          // Recording and listening take as long as they take: wait by the clock, or by the beat at the Set's tempo.
+          const seconds = typeof stepInput.seconds === "number" ? stepInput.seconds : typeof stepInput.beats === "number" && currentTempo ? stepInput.beats * 60 / currentTempo : NaN;
+          if (!(seconds > 0 && seconds <= 120)) return stop("wait takes seconds (up to 120) or beats");
+          await delay(seconds * 1000, undefined, { signal });
+          done.push({ step, changed: `waited ${Math.round(seconds * 10) / 10} s`, change: null });
+          index++;
+          continue;
+        }
+        if (action) {
+          const outcome = await act(action, stepInput, signal);
+          if (outcome.isError) return stop(outcome.text);
+          if (outcome.done?.playing !== undefined) running.playing = outcome.done.playing;
+          if (outcome.done?.recording !== undefined) running.recording = outcome.done.recording ? String(stepInput.lane ?? "arrangement") : undefined;
+          done.push({ step, changed: outcome.done?.title ?? null, change: null });
+          index++;
+          continue;
+        }
+        const outcome = await change(kind!, stepInput, signal, confirmed);
         let reply: JsonObject = {};
         try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
         if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
         if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
         done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}), ...(Array.isArray(reply.lines) ? { lines: reply.lines } : {}) });
         index++;
+      }
+    };
+    /** A plan that recorded or played and then stopped short (a failed step, a cancelled turn) doesn't leave Live running. */
+    const quiet = async (): Promise<string | undefined> => {
+      if (!running.recording && !running.playing) return undefined;
+      const settle = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]);
+      const what = running.recording ? "the recording and playback" : "playback";
+      return await stopEverything(settle) ? `Kumi stopped ${what}, since the plan didn't finish.` : `The plan didn't finish and Live may still be ${running.recording ? "recording" : "playing"}; tell the producer.`;
+    };
+    const settled = (async (): Promise<Stop | undefined> => {
+      let outcome: Stop | undefined; let finished = false;
+      try {
+        outcome = await steps_();
+        finished = !outcome && !abandoned;
+        return outcome;
+      } finally {
+        if (!finished) {
+          const note = await quiet().catch(() => undefined);
+          if (note && outcome) outcome.error = `${outcome.error} ${note}`.slice(0, 800);
+        }
       }
     })();
     return {
@@ -720,6 +782,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new before changing anything");
       await ensureCatalog(signal); assertLease(lease, signal);
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
+      if (!supported(kind)) throw new ObservationError(tooOld(kind));
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
       requireFreshReferences(input);
       const prepared = kind.prepare ? await kind.prepare(input, changeContext(signal)) : input;
@@ -792,6 +855,127 @@ export function createAbletonIntegration(options: Options): Integration {
       return { text: error instanceof ObservationError ? error.message : "The change failed before anything happened in Live; discover again, then retry.", isError: true };
     }
   }
+  /**
+   * Something that isn't a change to the Set (playing, launching, recording, selecting, showing):
+   * the same preview and apply as a change, with the same checks, but no HISTORY entry or undo.
+   */
+  async function act(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup = false): Promise<{ text: string; isError: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
+    const outcome = await actOnce(kind, named, originalSignal, cleanup);
+    // Stopping must work whatever Live is doing: when the ordinary stop is refused, stop everything.
+    const stopping = (kind.tool === "play" && named.action === "stop") || (kind.tool === "record" && named.action === "stop");
+    if (!outcome.isError || !stopping || originalSignal.aborted) return outcome;
+    if (!await stopEverything(AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]))) return outcome;
+    const done = kind.tool === "record" ? { title: "Recording stopped", recording: false, playing: false } : { title: "Stopped", playing: false };
+    try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
+    return { text: JSON.stringify({ done: done.title, note: "Live's ordinary stop was refused, so Kumi stopped clips, the transport and recording together." }), isError: false, done };
+  }
+  async function actOnce(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup: boolean): Promise<{ text: string; isError: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    const input = lengthen(named) as JsonObject;
+    const lease = observationGeneration;
+    try {
+      signal.throwIfAborted();
+      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new first");
+      await ensureCatalog(signal); if (!cleanup) assertLease(lease, signal);
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError("Live doesn't offer that for the open Set right now");
+      if (!supported(kind) && !cleanup) throw new ObservationError(tooOld(kind));
+      if (!cleanup) requireFreshReferences(input);
+      const prepared = kind.prepare ? kind.prepare(input) : input;
+      if (typeof prepared === "string") return { text: prepared, isError: true };
+      const previewed = await tools.call(kind.preview, prepared, signal, { host: true }); if (!cleanup) assertLease(lease, signal);
+      if (previewed.isError) return { text: JSON.stringify(previewed), isError: true };
+      const preview = payload(previewed);
+      const { transactionId, confirmation } = preview;
+      if (typeof transactionId !== "string" || !transactionId || typeof confirmation !== "string" || !confirmation) throw new ObservationError("The bridge's preview was malformed; nothing happened");
+      const applied = await tools.call(kind.apply, { transactionId, confirmation, idempotencyKey: randomUUID() }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
+      if (applied.isError) return { text: JSON.stringify(applied), isError: true };
+      const done = kind.summarize(preview, prepared, knownTrack);
+      try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
+      return { text: JSON.stringify({ done: done.title, live: shorten(payload(applied)) }), isError: false, done };
+    } catch (error) {
+      return { text: error instanceof ObservationError ? error.message : "That didn't happen in Live; discover again, then retry.", isError: true };
+    }
+  }
+
+  /** Every device in the Set (to the bound discovery allows), with what identifies it and where it is. */
+  async function allDevices(signal: AbortSignal): Promise<JsonObject[]> {
+    const rows: JsonObject[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const read = payload(await tools!.call("live_discover", { kind: "device", fields: ["ref", "parentRef", "objectIdentity", "name", "className"], limit: 100, ...(cursor ? { cursor } : {}) }, signal, { host: true }));
+      rows.push(...(Array.isArray(read.items) ? read.items : []).map((item) => object(item)));
+      cursor = typeof read.nextCursor === "string" && read.nextCursor ? read.nextCursor : undefined;
+      if (!cursor) break;
+    }
+    return rows;
+  }
+  /** watch_me: note the Set now, or say what the producer changed since. */
+  async function watch(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(60_000)]);
+    try {
+      if (!available || lost || !tools) throw new ObservationError("Live isn't connected, so Kumi can't watch it.");
+      await ensureCatalog(signal);
+      if (!PROJECT_TOOLS.slice(1).every((name) => tools!.has(name))) throw new ObservationError("This bridge can't compare the Set's states, so Kumi can't learn routines by watching.");
+      if (input.action === "start") {
+        const [pages, devices] = await Promise.all([exportPages(signal), allDevices(signal)]);
+        watching = { set: currentSet, pages, devices: new Set(devices.map((device) => String(device.objectIdentity))), at: now().getTime() };
+        return { text: JSON.stringify({ watching: true, note: "Tell the producer to go ahead in Live and to say when they're done." }), isError: false };
+      }
+      if (!watching) return { text: "Kumi isn't watching yet: start first, before the producer does it.", isError: true };
+      if (watching.set !== currentSet) { watching = undefined; return { text: "A different Set is open now, so there's nothing to compare; start again.", isError: true }; }
+      const before = watching;
+      const [pages, devices, tracks] = await Promise.all([exportPages(signal), allDevices(signal),
+        tools.call("live_discover", { kind: "track", fields: ["ref", "name", "mediaKind"], limit: 100 }, signal, { host: true }).then((read) => payload(read).items)]);
+      const diff = payload(await tools.call("live_project_snapshot_diff", { beforePages: before.pages, afterPages: pages, limit: 200 }, signal, { host: true }));
+      const { changes, more } = describeWatch(diff, before.pages, pages);
+      const trackRows = (Array.isArray(tracks) ? tracks : []).map((item) => object(item));
+      const trackName = new Map(trackRows.map((track) => [String(track.ref), String(track.name ?? "")]));
+      // An added track is audio or MIDI, which the Set's snapshot doesn't say.
+      for (const change of changes) {
+        if (change.added !== "track") continue;
+        const media = trackRows.find((track) => track.name === change.name)?.mediaKind;
+        if (typeof media === "string") change.media = media;
+      }
+      // What the producer set on each device they added: the knobs away from Live's defaults.
+      const added = devices.filter((device) => !before.devices.has(String(device.objectIdentity))).slice(0, WATCH_DEVICES);
+      const settings = await Promise.all(added.map(async (device) => {
+        const read = payload(await tools!.call("live_discover", { kind: "parameter", parent: device.ref, fields: ["name", "value", "defaultValue", "displayValue"], limit: 100 }, signal, { host: true }));
+        const moved = (Array.isArray(read.items) ? read.items : []).map((item) => object(item))
+          .filter((parameter) => typeof parameter.defaultValue === "number" && typeof parameter.value === "number" && Math.abs(parameter.value - parameter.defaultValue) > 1e-6)
+          .map((parameter) => ({ name: parameter.name ?? null, value: parameter.value, ...(typeof parameter.displayValue === "string" ? { shows: parameter.displayValue } : {}) }));
+        const owner = trackName.get(String(device.parentRef));
+        return { device: device.name ?? device.className ?? null, className: device.className ?? null, ...(owner ? { on: owner } : { inside: "a rack" }), knobs: moved.slice(0, 24) };
+      }));
+      watching = undefined;
+      const seconds = Math.round((now().getTime() - before.at) / 1000);
+      return { text: JSON.stringify({ watched: `${seconds} s`, changes, ...(more ? { more } : {}), ...(settings.length ? { devicesAdded: settings } : {}),
+        ...(changes.length ? {} : { note: "Nothing in the Set changed while Kumi watched." }) }), isError: false };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { text: error instanceof ObservationError ? error.message : "Kumi couldn't compare the Set just now; try again.", isError: true };
+    }
+  }
+  /**
+   * Stop clips, the transport and recording at once, through the bridge's emergency stop, which
+   * works whatever Live is doing. True when Live is stopped afterwards (or already was).
+   */
+  async function stopEverything(signal: AbortSignal): Promise<boolean> {
+    try {
+      if (!available || lost || !tools) return false;
+      await ensureCatalog(signal);
+      if (!tools.has(EMERGENCY_STOP) || !tools.has("live_snapshot")) return false;
+      const playback = object(object(payload(await tools.call("live_snapshot", {}, signal, { host: true })).snapshot).playback);
+      const transport = object(playback.transport);
+      const targets = [...(Array.isArray(playback.firedTargets) ? playback.firedTargets : []), ...(Array.isArray(playback.playingTargets) ? playback.playingTargets : [])].map((target) => object(target));
+      const expectedTargets = [...new Set(targets.map((target) => `${String(target.trackRef)}|${String(target.clipSlotRef)}|${String(target.sceneRef)}`))].sort();
+      const session = transport.sessionRecord === true; const arrangement = transport.arrangementRecord === true;
+      const expectedRecording = session && arrangement ? "both" : session ? "session" : arrangement ? "arrangement" : "stopped";
+      if (transport.playing !== true && !expectedTargets.length && expectedRecording === "stopped") return true;
+      const result = await tools.call(EMERGENCY_STOP, { confirmation: "emergency-stop", expectedTargets, expectedRecording, idempotencyKey: randomUUID() }, signal, { host: true });
+      return !result.isError;
+    } catch { return false; }
+  }
+
   /** Undo one change through the bridge's guarded undo. Refusals keep the change and say why. */
   async function undoChange(target: string, signal: AbortSignal): Promise<{ record?: ChangeRecord; text: string; isError: boolean }> {
     const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied") : changes.get(target);
@@ -835,10 +1019,13 @@ export function createAbletonIntegration(options: Options): Integration {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
       execute: (input, signal) => invoke(tool.name, input, signal) }));
     // A change whose target an earlier step can create is offered by any bridge that makes changes (has undo).
-    const edits: KernelTool[] = CHANGES.filter((kind) => !kind.internal && ((kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply)))).map((kind) => ({
+    const edits: KernelTool[] = CHANGES.filter((kind) => !kind.internal && supported(kind) && ((kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply)))).map((kind) => ({
       name: kind.tool, description: kind.description,
       inputSchema: kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
       execute: (input, signal) => change(kind, input, signal) }));
+    const actions: KernelTool[] = ACTIONS.filter((kind) => supported(kind) && tools!.has(kind.preview) && tools!.has(kind.apply)).map((kind) => ({
+      name: kind.tool, description: kind.description, inputSchema: kind.inputSchema ?? tools!.tool(kind.preview)!.inputSchema as JsonObject,
+      execute: async (input, signal) => { const outcome = await act(kind, input, signal); return { text: outcome.text, isError: outcome.isError }; } }));
     const undo: KernelTool[] = tools!.has("live_undo") ? [{ name: UNDO_TOOL, description: UNDO_DESCRIPTION,
       inputSchema: { type: "object", properties: { change: { type: "string", minLength: 1, maxLength: 32, description: "A change id such as c3, or \"last\"" } }, required: ["change"], additionalProperties: false },
       execute: async (input, signal) => { const outcome = await undoChange(typeof input.change === "string" ? input.change : "last", signal); return { text: outcome.text, isError: outcome.isError }; } }] : [];
@@ -859,12 +1046,15 @@ export function createAbletonIntegration(options: Options): Integration {
     const batch: KernelTool[] = tools!.has("live_undo") && edits.length ? [{ name: MAKE_CHANGES, description: MAKE_CHANGES_DESCRIPTION,
       inputSchema: { type: "object", additionalProperties: false, required: ["steps"], properties: { steps: { type: "array", minItems: 1, maxItems: MAX_CHANGES_PER_TURN, items: {
         type: "object", additionalProperties: false, required: ["tool", "input"], properties: {
-          tool: { type: "string", enum: edits.map((item) => item.name) }, input: { type: "object", description: "What that tool takes; \"@name\" for what an earlier step made" },
+          tool: { type: "string", enum: [...edits.map((item) => item.name), ...actions.map((item) => item.name), WAIT] }, input: { type: "object", description: "What that tool takes; \"@name\" for what an earlier step made; wait takes {\"beats\": 8} or {\"seconds\": 4}" },
           as: { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,31}$", description: "Name what this step makes (a new track, a loaded device) for later steps" },
           each: { type: "object", description: "Repeat this step: each field's list gives that input field its value run by run, e.g. {\"note\": [36, 37, 38, 39]}, or several lists of one length, e.g. {\"parameterRef\": [\"parameter:3\", \"parameter:9\"], \"value\": [0.5, 1]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
         final: { type: "boolean", description: "These changes complete the request: Kumi says what changed and you aren't called again. Leave it out to see the results and carry on." } } },
       execute: (input, signal) => makeChanges(input, signal), stream: (signal, onStart) => streamChanges(signal, onStart) }] : [];
-    return [...reads, sampleSearch, ...edits, ...batch, ...undo];
+    const watcher: KernelTool[] = PROJECT_TOOLS.slice(1).every((name) => tools!.has(name)) ? [{ name: WATCH_TOOL, description: WATCH_DESCRIPTION,
+      inputSchema: { type: "object", additionalProperties: false, required: ["action"], properties: { action: { type: "string", enum: ["start", "stop"] } } },
+      execute: (input, signal) => watch(input, signal) }] : [];
+    return [...reads, sampleSearch, ...edits, ...actions, ...batch, ...undo, ...watcher];
   }
   return {
     async start(signal) {
@@ -881,6 +1071,27 @@ export function createAbletonIntegration(options: Options): Integration {
         options.onConnection("error");
         throw new ObservationError("MCP startup failed; verify the standalone bridge and explicit configuration");
       }
+    },
+    stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
+    /** An audio clip in the Set, named by its clipRef from discovery, as the file it plays; undefined for anything that isn't a clip. */
+    async audioFile(named, originalSignal) {
+      const given = named.trim(); const ref = longRefs.get(given) ?? given;
+      const arrangement = /^(\d+):arrangement_clip:(\d+):\d+$/.exec(ref); const session = /^(\d+):clip:(\d+):(\d+)$/.exec(ref);
+      if (!arrangement && !session) {
+        if (/^(arrangement_clip|clip):[\w:]+$/.test(given)) throw new ObservationError("That clip isn't one from this turn's discovery; discover it again.");
+        return undefined;
+      }
+      if (!available || lost || !tools) throw new ObservationError("Live isn't connected, so Kumi can't find that clip's file.");
+      const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(15_000)]);
+      // A Session clip's parent is its slot; an Arrangement clip's, its track.
+      const query = arrangement ? { kind: "arrangement-clip", parent: `${arrangement[1]}:track:${arrangement[2]}` } : { kind: "session-clip", parent: `${session![1]}:clip_slot:${session![2]}:${session![3]}` };
+      const read = await tools.call("live_discover", { ...query, fields: ["ref", "name", "isAudio", "filePath"], limit: 100 }, signal, { host: true });
+      const items = read.isError ? [] : payload(read).items;
+      const clip = (Array.isArray(items) ? items : []).map((item) => object(item)).find((item) => item.ref === ref);
+      if (!clip) throw new ObservationError("That clip isn't in the Set any more; discover it again.");
+      if (clip.isAudio === false) throw new ObservationError("That's a MIDI clip, which has no sound of its own: record its track to audio first (resampling), then listen to the recording.");
+      if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
+      return clip.filePath;
     },
     async observe(originalSignal) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
@@ -902,10 +1113,12 @@ export function createAbletonIntegration(options: Options): Integration {
         const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: 100 });
         const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: 100 });
         const settle = <T>(work: Promise<T>): Promise<{ value: T } | { error: unknown }> => work.then((value) => ({ value }), (error: unknown) => ({ error }));
+        const song = tools!.has("live_song_state") ? settle(tools!.call("live_song_state", {}, signal, { host: true }).then(payload)) : Promise.resolve(undefined);
         const discover = tools!.has("live_discover");
         const read = (args: JsonObject) => settle(discover ? tools!.call("live_discover", args, signal, { host: true }) : Promise.reject(new ObservationError("Required Set discovery capability is unavailable")));
         const [statusRead, setRead, tracksRead, devicesRead] = await Promise.all([
           settle(tools!.call("live_status", {}, signal, { host: true }).then(statusPayload)), read(setArgs), read(trackArgs), read(deviceArgs)]);
+        const songRead = await song;
         assertLease(lease, signal);
         if ("error" in statusRead) throw statusRead.error;
         const status = statusRead.value;
@@ -919,6 +1132,12 @@ export function createAbletonIntegration(options: Options): Integration {
         const row = page.items[0]!;
         const identity = setIdentity(row);
         currentEpoch = epoch; currentSet = identity; lastEpoch = epoch;
+        currentTempo = typeof row.tempo === "number" ? row.tempo : undefined;
+        // The time signature, for bars in titles and the model's arithmetic (a read that fails leaves 4/4).
+        const songState = songRead && "value" in songRead ? songRead.value : undefined;
+        const numerator = typeof songState?.signatureNumerator === "number" ? songState.signatureNumerator : 4;
+        const denominator = typeof songState?.signatureDenominator === "number" ? songState.signatureDenominator : 4;
+        setMeter(numerator, denominator);
         registerRows("set", page.items, setArgs, page.nextCursor);
         // The Set's tracks, with references usable in this turn: most requests then need no discovery first.
         let trackList: JsonObject[] | undefined; let moreTracks = false; let moreDevices = false;
@@ -991,7 +1210,8 @@ export function createAbletonIntegration(options: Options): Integration {
           ...(project?.identity === identity && project.path ? { project: { id: projectIdOf(project.path), name } } : {}),
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
-            set: { ref: typeof row.ref === "string" ? shortRef(row.ref) : row.ref, name, tempo: row.tempo ?? null, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null },
+            set: { ref: typeof row.ref === "string" ? shortRef(row.ref) : row.ref, name, tempo: row.tempo ?? null, timeSignature: `${numerator}/${denominator}`, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null,
+              ...(songState ? { recording: { session: songState.sessionRecord === true, arrangement: row.recording ?? null }, swing: songState.swingAmount ?? null } : {}) },
             ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.

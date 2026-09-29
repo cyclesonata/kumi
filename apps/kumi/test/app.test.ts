@@ -817,6 +817,30 @@ test("/memory shows what Kumi remembers, about you and this Set, and forgets a n
   await h.app.close();
 });
 
+test("/stop stops Live any time, even while Kumi answers, and NOW shows it", async () => {
+  let stops = 0; let works = true;
+  const h = harness(120, 36, undefined, { async stopLive() { stops++; if (works) h.emit({ type: "action", title: "Stopped", playing: false, recording: false }); return works; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "state", state: "running" });
+  await h.type("/stop\r");
+  await delay(10);
+  assert.equal(stops, 1, "not refused as busy");
+  assert.ok(has(h.screen(), "■ Stopped"));
+  assert.ok(!h.calls.includes("cancel"), "the answer carries on");
+  h.emit({ type: "state", state: "idle" });
+  works = false;
+  await h.type("/stop\r");
+  await delay(10);
+  assert.ok(has(h.screen(), "press space in Live"), "a stop that didn't work says what to do");
+  h.emit({ type: "connection", state: "disconnected" });
+  await h.type("/stop\r");
+  await delay(10);
+  assert.equal(stops, 2, "nothing to stop without Live");
+  await h.app.close();
+});
+
 // ---- listening and recipes
 
 test("what Kumi heard shows as a small spectrum, and a comparison as dB over or under the reference", async () => {

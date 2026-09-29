@@ -5,6 +5,9 @@
  * producers; names inside them are data.
  */
 import type { ChangeFamily, ChangeRecord, DevicePlacement, JsonObject } from "../../core/contracts.js";
+import { ACTIONS } from "./actions.js";
+import { FIXED_BRIDGE } from "./bridge-version.js";
+import { MORE_CHANGES, MORE_REFERENCE_FIELDS } from "./more-changes.js";
 
 /** A track as Kumi last saw it in discovery, for HISTORY's colour chip. */
 export interface KnownTrack { name: string; color?: string }
@@ -79,6 +82,8 @@ export interface ChangeKind {
   unavailable?: string;
   /** Never offered to the model: make_changes uses it for several of its steps at once. */
   internal?: boolean;
+  /** The first bridge version this works with in real Live; older bridges don't get the tool. */
+  since?: string;
   /** `applied` is the bridge's apply result, when there is one: it can carry Live's own text for the new values. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined, applied?: JsonObject): ChangeSummary;
 }
@@ -159,7 +164,7 @@ function mixerParts(prior: JsonObject, proposed: JsonObject, was: JsonObject, no
  * undo (see docs/evidence/kumi-poc.md); a change is only offered while the bridge advertises
  * both its preview and apply for the open Set.
  */
-export const CHANGES: readonly ChangeKind[] = [
+const BASE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "set_tempo", preview: "live_tempo_preview", apply: "live_tempo_apply", family: "tempo",
     description: "Change the Set's tempo in BPM (20–999).",
@@ -338,21 +343,37 @@ export const CHANGES: readonly ChangeKind[] = [
   {
     tool: "edit_rack", preview: "live_rack_preview", apply: "live_rack_apply", family: "device", always: true,
     unavailable: "There's no rack in the Set yet: load an Instrument Rack, Audio Effect Rack or MIDI Effect Rack with load_device first.",
-    description: "Add a chain to a rack (instrument, audio effect or MIDI effect rack): chains play side by side, in parallel; mark it with as and load devices into it with load_device's chainRef. Or add or remove one of the rack's macro controls. rackRef is the rack from discovery in this turn or an earlier step. Macro values are the rack's \"Macro 1\", \"Macro 2\", … parameters: set them with set_device_parameter.",
+    description: "Work on a rack (instrument, audio effect, MIDI effect or drum rack): add-chain (chains play side by side, in parallel; mark it with as and load devices into it with load_device's chainRef; index 0 is first), add-macro or remove-macro, randomize-macros (Live's Rand button), store-variation (the macros' current settings, as a new variation), recall-variation or delete-variation (index), select-variation (index), or copy-pad (a drum rack's pad sourceIndex to targetIndex, notes 0–127). rackRef is the rack from discovery in this turn or an earlier step. Macro values are the rack's \"Macro 1\", \"Macro 2\", … parameters: set them with set_device_parameter.",
     inputSchema: { type: "object", additionalProperties: false, required: ["rackRef", "action"], properties: {
-      rackRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["add-chain", "add-macro", "remove-macro"] },
-      index: { type: "integer", minimum: 0, maximum: 256, description: "For add-chain: where the chain goes, 0 is first; leave it out to add after the last" } } },
+      rackRef: { type: "string", minLength: 1, maxLength: 256 },
+      action: { type: "string", enum: ["add-chain", "add-macro", "remove-macro", "randomize-macros", "store-variation", "recall-variation", "delete-variation", "select-variation", "copy-pad"] },
+      index: { type: "integer", minimum: 0, maximum: 256, description: "add-chain: where the chain goes, 0 is first (left out, after the last); variations: which one, 0 is first" },
+      sourceIndex: { type: "integer", minimum: 0, maximum: 127 }, targetIndex: { type: "integer", minimum: 0, maximum: 127 } } },
     prepare(input) {
-      const action = input.action === "add-chain" ? "insert-chain" : input.action;
-      if (action !== "insert-chain" && action !== "add-macro" && action !== "remove-macro") return "action is add-chain, add-macro or remove-macro.";
-      return { action, rackRef: input.rackRef ?? null, ...(action === "insert-chain" && typeof input.index === "number" ? { index: input.index } : {}) };
+      const action = input.action === "add-chain" ? "insert-chain" : input.action === "select-variation" ? "set" : input.action;
+      const known = ["insert-chain", "add-macro", "remove-macro", "randomize-macros", "store-variation", "recall-variation", "delete-variation", "set", "copy-pad"];
+      if (typeof action !== "string" || !known.includes(action)) return "action is add-chain, add-macro, remove-macro, randomize-macros, store-variation, recall-variation, delete-variation, select-variation or copy-pad.";
+      const index = typeof input.index === "number" ? input.index : undefined;
+      if ((action === "recall-variation" || action === "delete-variation" || action === "set") && index === undefined) return "Say which variation: index, 0 is the first.";
+      if (action === "copy-pad" && (typeof input.sourceIndex !== "number" || typeof input.targetIndex !== "number")) return "copy-pad takes sourceIndex and targetIndex (pad notes).";
+      return { action, rackRef: input.rackRef ?? null,
+        ...(action === "insert-chain" && index !== undefined ? { index } : {}), ...(action === "recall-variation" || action === "delete-variation" ? { index } : {}),
+        ...(action === "set" ? { selectedVariationIndex: index } : {}), ...(action === "copy-pad" ? { sourceIndex: input.sourceIndex, targetIndex: input.targetIndex } : {}) };
     },
     produces(applied) { return typeof applied.chainRef === "string" ? { ref: applied.chainRef, kind: "chain" } : undefined; },
-    permanent: (input) => (input.action === "insert-chain" ? "Live gives Kumi no way to take a chain away again; delete it in Live if you don't want it." : undefined),
+    permanent: (input) => (input.action === "insert-chain" ? "Live gives Kumi no way to take a chain away again; delete it in Live if you don't want it."
+      : input.action === "delete-variation" ? "Live gives Kumi no way to bring a deleted variation back." : undefined),
     summarize(preview, input, _track, applied) {
       const devices = placement(applied?.placement);
       const rack = devices?.rack ?? label(preview.rackName) ?? "the rack";
       if (input.action === "insert-chain") return { title: `Added chain ${devices?.chain !== undefined ? `${devices.chain + 1} ` : ""}to ${rack}`, ...(devices ? { devices } : {}) };
+      const index = number(input.index ?? input.selectedVariationIndex);
+      if (input.action === "randomize-macros") return { title: `Randomized ${rack}'s macros` };
+      if (input.action === "store-variation") return { title: `Stored a variation of ${rack}'s macros` };
+      if (input.action === "recall-variation") return { title: `Recalled variation ${(index ?? 0) + 1} of ${rack}` };
+      if (input.action === "delete-variation") return { title: `Deleted variation ${(index ?? 0) + 1} of ${rack}` };
+      if (input.action === "set") return { title: `Selected variation ${(index ?? 0) + 1} of ${rack}` };
+      if (input.action === "copy-pad") return { title: `Copied pad ${noteName(number(input.sourceIndex) ?? 0)} to ${noteName(number(input.targetIndex) ?? 0)} in ${rack}` };
       const count = number(applied?.visibleMacroCount); const before = number(record(preview.prior).visibleMacroCount);
       return { title: input.action === "add-macro" ? `Added a macro to ${rack}` : `Removed a macro from ${rack}`, ...(count !== undefined ? { from: before ?? count, to: count, range: [1, 16] as [number, number] } : {}) };
     },
@@ -390,14 +411,28 @@ export const CHANGES: readonly ChangeKind[] = [
   },
 ];
 
+/** Every change Kumi can make: the first ones, then the rest of what Live exposes. */
+export const CHANGES: readonly ChangeKind[] = [...BASE_CHANGES, ...MORE_CHANGES, {
+  tool: "set_sidechain", since: FIXED_BRIDGE, preview: "live_device_io_preview", apply: "live_device_io_apply", family: "device",
+  description: "Feed a device from another track: a compressor's (or gate's, or auto filter's) sidechain, with action sidechain, deviceRef, and routingType and routingChannel exactly as Live names them (discover the device to see its choices); action routing for a device's own audio or MIDI input. The classic: the kick ducking the bass.",
+  summarize(_preview, input, track) {
+    const source = typeof input.routingType === "string" ? input.routingType.slice(0, 80) : "another track";
+    const owner = typeof input.deviceRef === "string" ? /^(\d+):device:(\d+)/.exec(input.deviceRef) : null;
+    const known = owner ? track(`${owner[1]}:track:${owner[2]}`) : undefined;
+    return { title: `${input.action === "sidechain" ? "Sidechain" : "Device input"} from ${source}${known ? ` on ${known.name}` : ""}`, ...(known ? { track: known } : {}) };
+  },
+}];
+
 export const UNDO_TOOL = "undo_change";
 export const UNDO_DESCRIPTION = "Undo one of your changes from this session: pass its change id (such as c3), or \"last\" for the latest one. It only works while nobody changed the same thing in Live since; if so, say what happened.";
 
 /** Bridge tools only Kumi calls, behind its change tools: previews, applies and undo. */
-export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), "live_undo"]);
+/** Stops clips, the transport and recording at once, whatever Live is doing: Kumi's stop when the ordinary one can't. */
+export const EMERGENCY_STOP = "live_session_emergency_stop";
+export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), ...ACTIONS.flatMap((kind) => [kind.preview, kind.apply]), "live_undo", EMERGENCY_STOP]);
 
 /** The fields of a change tool's input that name Live objects; they must come from discovery in this turn. */
-export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef", "chainRef", "rackRef"] as const;
+export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef", "chainRef", "rackRef", ...MORE_REFERENCE_FIELDS] as const;
 
 /** A bridge refusal, in plain words for HISTORY. The model also gets the bridge's own message. */
 export function undoNote(message: string): string {

@@ -32,6 +32,16 @@ test("root npm start forwards CLI arguments from a different cwd; help requires 
   assert.equal(stderr, "");
 });
 
+test("--version says Kumi's release, which is the packages' version", async () => {
+  const { KUMI_VERSION } = await import("@kumi/runtime");
+  const { stdout } = await exec(process.execPath, [cli, "--version"], { env: { ...process.env, KUMI_MODEL: "" }, timeout: 15_000 });
+  assert.equal(stdout, `Kumi ${KUMI_VERSION}\n`);
+  for (const file of ["package.json", "apps/kumi/package.json", "packages/runtime/package.json"]) {
+    assert.equal((JSON.parse(await readFile(join(root, file), "utf8")) as { version: string }).version, KUMI_VERSION, file);
+  }
+  assert.match(KUMI_VERSION, /^1\.\d+\.\d+$/);
+});
+
 test("CLI rejects invalid configuration without echoing model/credential-like values", async () => {
   await assert.rejects(exec(process.execPath, [cli, "--inference-only"], {
     env: { ...process.env, KUMI_MODEL: "private-token", AI_GATEWAY_API_KEY: "private-token" }, timeout: 15_000,

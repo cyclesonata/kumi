@@ -67,6 +67,7 @@ const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking",
 const COMMANDS = [
   { name: "/new", about: "Start a fresh conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
+  { name: "/stop", about: "Stop Live: clips, the transport and recording" },
   { name: "/refresh", about: "Read your Live Set again" },
   { name: "/copy", about: "Copy Kumi's last answer" },
   { name: "/model", about: "Choose the model Kumi talks to" },
@@ -80,6 +81,8 @@ const COMMANDS = [
   { name: "/quit", about: "Close Kumi" },
 ] as const;
 
+/** Kumi's tools that act in Live without changing the Set. */
+const ACTION_TOOLS: ReadonlySet<string> = new Set(["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"]);
 /** Offered only with a ModelControl to answer them. */
 const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logout"];
 
@@ -180,6 +183,8 @@ export class TuiApp {
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
+  /** The latest thing Kumi did in Live that isn't a change (playing, recording), for NOW. */
+  private lastAction: { title: string; at: number; glyph: string } | undefined;
   private undoing = false;
   /** Clickable areas from the last frame. */
   private hits: { x: number; y: number; width: number; action: () => void }[] = [];
@@ -348,6 +353,12 @@ export class TuiApp {
       case "forgot":
         this.notice(`Kumi forgot: ${event.note.text}`, "info");
         break;
+      case "action": {
+        const glyph = event.recording === true ? "●" : event.playing === true ? "▶" : event.playing === false || event.recording === false ? "■" : "›";
+        this.lastAction = { title: sanitizeText(event.title, this.secrets).slice(0, 120), at: performance.now(), glyph };
+        setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
+        break;
+      }
       case "recipe": {
         const steps = `${event.steps} ${event.steps === 1 ? "step" : "steps"}`;
         const text = event.action === "saved" ? `Kumi saved the recipe “${event.name}” (${steps})` : event.action === "updated" ? `Kumi updated the recipe “${event.name}” (${steps})`
@@ -515,7 +526,8 @@ export class TuiApp {
     const text = this.editor.text;
     if (this.menuDismissed || !text.startsWith("/") || /\s/.test(text)) return [];
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
-      && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined));
+      && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
+      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -542,6 +554,13 @@ export class TuiApp {
     if (command === "/memory" && controller.memory) {
       this.editor.clear();
       await this.openMemory().catch((error: unknown) => this.panelFailed(error));
+      return;
+    }
+    // Stopping Live works any time, even while Kumi answers (a plan recording, say).
+    if (command === "/stop" && controller.stopLive) {
+      this.editor.clear();
+      if (this.connection !== "connected") { this.notice("Live isn't connected, so there's nothing for Kumi to stop.", "info"); return; }
+      if (!await controller.stopLive()) this.notice("Kumi couldn't stop Live just now; press space in Live to stop it.", "warn");
       return;
     }
     if (command === "/status") {
@@ -805,7 +824,7 @@ export class TuiApp {
     const now = Date.now();
     const items: PickerItem[] = recipes.length ? recipes.map((recipe) => ({ label: recipe.name, detail: recipe.about, value: recipe.name,
       note: recipe.used ? `used ${since(recipe.lastUsed ?? recipe.created, now)}` : `${recipe.steps} steps`, noteTone: "faint" as const }))
-      : [{ label: "None yet: ask Kumi to save a way of working as a recipe", inert: true }];
+      : [{ label: "None yet: ask Kumi to save a way of working, or say “watch me” and do it in Live", inert: true }];
     const picker = new Picker("Your recipes · ways of working Kumi replays without planning again", items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => {
       const recipe = recipes.find((candidate) => candidate.name === item.value)!;
@@ -1131,12 +1150,16 @@ export class TuiApp {
       const running = this.current?.steps.at(-1)?.state === "running" ? this.current.steps.at(-1) : undefined;
       // How many changes this answer has made so far; a plan's show one by one as they land.
       const label = this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
+      const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
+      if (action && (!flash || action.at > this.lastChange!.at) && (!running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `✓ ${flash.title}`, detailStyle: st.bright };
       if (running) return { dot, label, detail: doingLabel(running.tool, running.label), detailStyle: st.dim };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
       return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }
     if (flash) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
+    const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
+    if (action) return { label: "", detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
     return { label: "", detail: "Ready", detailStyle: st.faint };
   }
 

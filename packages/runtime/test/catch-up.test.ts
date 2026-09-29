@@ -8,7 +8,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, JsonObject } from "../src/core/contracts.js";
 import type { McpEndpoint } from "../src/mcp/client.js";
 import { createAbletonIntegration } from "../src/integrations/ableton/index.js";
-import { createConversationStore, createProjectStore, describeDiff, projectIdOf, since, type Baseline } from "../src/integrations/ableton/project.js";
+import { createConversationStore, createProjectStore, describeDiff, describeWatch, projectIdOf, since, type Baseline } from "../src/integrations/ableton/project.js";
 
 // Generated from the bridge's own semantic snapshot code by fixtures/make-catch-up.mjs: a Set with
 // Drums and Bass, then tempo 120 → 124, Drums renamed Beats and its device removed, a Pad track
@@ -30,6 +30,22 @@ test("the bridge's semantic diff reads as a producer would say it, without knock
   assert(!lines.some((line) => line.includes("Kick Pattern")), "a clip whose track was renamed didn't itself change");
   const short = describeDiff(fixture.diff, fixture.before, fixture.after, 2);
   assert.equal(short.lines.length, 2); assert.equal(short.more, 3);
+});
+
+test("what changed while Kumi watched reads exactly, in the order a recipe would make it, each with its track", () => {
+  const { changes, more } = describeWatch(fixture.diff, fixture.before, fixture.after);
+  assert.equal(more, 0);
+  assert.deepEqual(changes.map((change) => [change.added ?? change.removed ?? change.changed, change.added ? "added" : change.removed ? "removed" : "changed", change.name]),
+    [["set", "changed", "Simulator Set"], ["track", "added", "Pad"], ["track", "changed", "Beats"], ["device", "removed", "Utility"], ["clip", "changed", "Bassline"]]);
+  assert.deepEqual(changes[0]!.what, [{ what: "tempo", from: 120, to: 124 }]);
+  const pad = changes[1]!;
+  assert.deepEqual(pad.routing, { inputType: "Ext. In", inputSubRouting: "1", outputType: "Main", outputSubRouting: "1/2" }, "how the new track is set up");
+  assert.deepEqual(Object.keys(pad.mixer as JsonObject), ["volume", "pan", "sends", "mute", "solo"], "the mixer without Live's rarely used settings");
+  assert.equal(changes[2]!.renamedFrom, "Drums", "a track removed and one added in its place is a rename");
+  assert.equal(changes[3]!.on, "Drums", "devices and clips say which track they're on");
+  assert.equal(changes[4]!.on, "Bass");
+  assert(!JSON.stringify(changes).match(/Hash|Fingerprint|parentSnapshotId|order/), "no bookkeeping");
+  assert.deepEqual(describeWatch(fixture.ambiguous.diff, fixture.ambiguous.before, fixture.ambiguous.after).changes, [{ unclear: "track", before: ["Vox"], after: ["Lead Vox", "Bells"] }]);
 });
 
 test("look-alike tracks the bridge can't tell apart still read as a rename and an addition", () => {
@@ -92,6 +108,8 @@ test("each saved Set's last state is kept privately, one folder per Set", async 
 function bridge(options: { path?: string; pages: JsonObject[] }) {
   const calls: string[] = [];
   let pages = options.pages;
+  // Devices in the Set, for watch_me: the Utility on Drums, then a Saturator the producer adds to Pad.
+  let devices: JsonObject[] = [{ ref: "3:device:0:0", parentRef: "3:track:0", objectIdentity: "live:1", name: "Utility", className: "StereoGain" }];
   let path = options.path; let setName = "Night Drive";
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo", "live_tempo_preview", "live_tempo_apply",
     "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -103,7 +121,16 @@ function bridge(options: { path?: string; pages: JsonObject[] }) {
     async call(name, args) {
       calls.push(name);
       if (name === "live_status") return wrap({ connected: true, adapter: "remote-script", provenance: "fake-live", epoch: 3 });
-      if (name === "live_discover") return wrap({ epoch: 3, kind: args.kind, items: args.kind === "set" ? [{ ref: "3:set:song", objectIdentity: "song", name: setName, tempo: 124 }] : [], revision: "r", truncated: false });
+      if (name === "live_discover") {
+        const items = args.kind === "set" ? [{ ref: "3:set:song", objectIdentity: "song", name: setName, tempo: 124 }]
+          : args.kind === "device" ? devices
+          : args.kind === "track" && args.fields ? [{ ref: "3:track:0", name: "Beats", mediaKind: "midi" }, { ref: "3:track:1", name: "Bass", mediaKind: "midi" }, { ref: "3:track:2", name: "Pad", mediaKind: "audio" }]
+          : args.kind === "parameter" && args.parent === "3:device:2:0" ? [
+            { name: "Device On", value: 1, defaultValue: null, displayValue: "On" }, { name: "Drive", value: 18, defaultValue: 0, displayValue: "18.0 dB" },
+            { name: "Dry/Wet", value: 1, defaultValue: 1, displayValue: "100 %" }, { name: "Type", value: 3, defaultValue: null, displayValue: "Digital Clip" }]
+          : [];
+        return wrap({ epoch: 3, kind: args.kind, items, revision: "r", truncated: false });
+      }
       if (name === "live_project_info") return wrap(path ? { path, exists: true, tracks: 3 } : { path: null, exists: false });
       if (name === "live_project_snapshot_export") return wrap(pages[0]!);
       if (name === "live_project_snapshot_diff") return wrap(fixture.diff);
@@ -115,7 +142,8 @@ function bridge(options: { path?: string; pages: JsonObject[] }) {
     onDisconnect() { return () => {}; },
     async close() {},
   };
-  return { endpoint, calls, setPages: (next: JsonObject[]) => { pages = next; }, saveAs: (next: string, name: string) => { path = next; setName = name; } };
+  return { endpoint, calls, setPages: (next: JsonObject[]) => { pages = next; }, saveAs: (next: string, name: string) => { path = next; setName = name; },
+    addDevice: (device: JsonObject) => { devices = [...devices, device]; } };
 }
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ms = 2_000): Promise<T> {
   const end = Date.now() + ms;
@@ -202,4 +230,32 @@ test("closing remembers the Set as Kumi leaves it", async () => {
     await integration.close();
     assert.equal((await store.load("/Music/Night Drive.als"))?.artifactId, artifactOf(fixture.after));
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("watch_me learns a routine: the Set before, the Set after, and the knobs the producer turned on what they added", async () => {
+  const b = bridge({ pages: fixture.before });
+  const integration = createAbletonIntegration({ connect: async () => b.endpoint, onConnection: () => {}, now: () => new Date(Date.UTC(2026, 8, 28, 12)) });
+  try {
+    await integration.start(AbortSignal.timeout(5_000));
+    let observation = await integration.observe(AbortSignal.timeout(5_000));
+    const watch = () => observation.tools.find((tool) => tool.name === "watch_me")!;
+    assert(watch(), "offered when the bridge can compare the Set's states");
+    const early = await watch().execute({ action: "stop" }, AbortSignal.timeout(5_000));
+    assert.equal(early.isError, true); assert.match(early.text, /start first/);
+    const started = await watch().execute({ action: "start" }, AbortSignal.timeout(5_000));
+    assert.equal(started.isError, false, started.text);
+    assert.match(started.text, /go ahead in Live/);
+    // The producer works in Live.
+    b.setPages(fixture.after);
+    b.addDevice({ ref: "3:device:2:0", parentRef: "3:track:2", objectIdentity: "live:2", name: "Saturator", className: "Saturator" });
+    observation = await integration.observe(AbortSignal.timeout(5_000));
+    const stopped = await watch().execute({ action: "stop" }, AbortSignal.timeout(5_000));
+    assert.equal(stopped.isError, false, stopped.text);
+    const seen = JSON.parse(stopped.text) as { changes: JsonObject[]; devicesAdded: JsonObject[] };
+    assert.equal(seen.changes.find((change) => change.added === "track")!.media, "audio", "an added track says whether it's audio or MIDI");
+    assert.deepEqual(seen.devicesAdded, [{ device: "Saturator", className: "Saturator", on: "Pad", knobs: [{ name: "Drive", value: 18, shows: "18.0 dB" }] }],
+      "only what moved from Live's defaults; switches and modes can't be compared");
+    const again = await watch().execute({ action: "stop" }, AbortSignal.timeout(5_000));
+    assert.equal(again.isError, true, "one watch, one answer");
+  } finally { await integration.close(); }
 });

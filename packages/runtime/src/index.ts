@@ -4,6 +4,7 @@ export { analyzeFile, compare, hear, type Analysis, type Comparison } from "./au
 export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
 export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
+export { KUMI_VERSION } from "./version.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";
 export { DEFAULT_BUDGET, type ContextBudget } from "./kernel/budget.js";

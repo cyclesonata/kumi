@@ -5,7 +5,7 @@ import { AudioError, audioPath, compare, hear, type Analysis } from "./index.js"
 export const LISTEN_TOOL = "listen";
 
 const DESCRIPTION = [
-  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_samples finds audio files by words in folders the producer names, such as ~/Downloads).",
+  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_samples finds audio files by words in folders the producer names, such as ~/Downloads) or, for an audio clip in the Set, its clipRef.",
   "Measures loudness (integrated LUFS, true peak, loudness range), tonal balance in named bands, stereo width per band, dynamics, tempo, key and the energy over time as a small text spectrogram;",
   "for a single sound (a note, a hit, a short sample), also its pitch, harmonics (which waveform it's like), envelope and movement (filter opening or closing, wobble or tremolo rate, at the tempo when known).",
   "With compare_to, sets file against the reference with loudness matched and lists what differs most (bands, brightness, width, compression, loudness).",
@@ -24,8 +24,8 @@ export function listeningTools(options: { onEvent: (event: HeardEvent) => void; 
   return [{
     name: LISTEN_TOOL, description: DESCRIPTION,
     inputSchema: { type: "object", additionalProperties: false, required: ["file"], properties: {
-      file: { type: "string", minLength: 1, maxLength: 1024, description: "The audio file: an absolute path or ~/…" },
-      compare_to: { type: "string", minLength: 1, maxLength: 1024, description: "A reference to set file against" },
+      file: { type: "string", minLength: 1, maxLength: 1024, description: "The audio: a file's absolute path or ~/…, or an audio clip's clipRef from discovery" },
+      compare_to: { type: "string", minLength: 1, maxLength: 1024, description: "A reference to set file against, the same ways" },
       focus: { type: "string", enum: ["mix", "sound"], description: "mix for a song or stem, sound for one note or hit; left out, chosen by length" },
       from_seconds: { type: "number", minimum: 0, description: "Where to start listening" },
       seconds: { type: "number", exclusiveMinimum: 0, maximum: 720, description: "How long to listen" } } },

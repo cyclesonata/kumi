@@ -1,3 +1,4 @@
+import { KUMI_VERSION } from "../version.js";
 import { arch, platform, release } from "node:os";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -12,7 +13,7 @@ export const PROVIDERS = ["openai-codex", "openai", "anthropic", "opencode", "op
 export type ProviderId = typeof PROVIDERS[number];
 /** Providers authenticated by API key, and the environment variable holding it. */
 export const API_KEY_ENV = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", opencode: "OPENCODE_API_KEY", "opencode-go": "OPENCODE_API_KEY" } as const;
-export const USER_AGENT = `kumi/0.0.1 (${platform()} ${release()}; ${arch()})`;
+export const USER_AGENT = `kumi/${KUMI_VERSION} (${platform()} ${release()}; ${arch()})`;
 
 /** How hard a model thinks before answering; providers take a subset (a model lists its own). */
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;

@@ -1,3 +1,4 @@
+import { KUMI_VERSION } from "../version.js";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -42,11 +43,13 @@ interface Options {
   connectTimeoutMs?: number;
   onDispatch?: (name: string) => void;
   /**
-   * Ask the bridge to expose exactly these tools; it refuses every other one, so playback,
-   * recording, audio capture and file tools stay off even if Kumi's own checks were bypassed.
-   * Without it the bridge runs read-only.
+   * Ask the bridge to expose exactly these tools (the ones Kumi's reads, changes and actions use);
+   * it refuses every other one, so audio capture, files, projects and realtime control stay off
+   * even if Kumi's own checks were bypassed. Without it the bridge runs read-only.
    */
   allowTools?: readonly string[];
+  /** Where the bridge runs; the repository root by default, where it finds the protocol registry. */
+  cwd?: string;
 }
 
 export async function connectMcp(options: Options): Promise<McpEndpoint> {
@@ -67,9 +70,9 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
   const transport = new OwnedStdioTransport({ command: process.execPath,
     args: [entry, ...(options.bridgeConfig ? ["--config", options.bridgeConfig] : []), ...(options.args ?? [])],
     // The standalone bridge resolves protocol assets from the repository root.
-    env: environment, stderr: "pipe", cwd: fileURLToPath(new URL("../../../../../", import.meta.url)), maxBufferSize: 2 * 1024 * 1024,
+    env: environment, stderr: "pipe", cwd: options.cwd ?? fileURLToPath(new URL("../../../../../", import.meta.url)), maxBufferSize: 2 * 1024 * 1024,
   });
-  const client = new Client({ name: "kumi", version: "0.0.1" }, { capabilities: {} });
+  const client = new Client({ name: "kumi", version: KUMI_VERSION }, { capabilities: {} });
   const catalogListeners = new Set<() => void>();
   const disconnectListeners = new Set<() => void>();
   let ready = false;

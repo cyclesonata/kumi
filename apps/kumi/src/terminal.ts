@@ -24,7 +24,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = "/help · /status · /undo · /stop · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -154,7 +154,7 @@ export function createTerminal(options: Options): Terminal {
     if (!busy()) { void finish(); return; }
     if (cancelling) return;
     cancelling = true; suppressOutput = true; text.discard();
-    notice("[cancelling] Cancelling current work; Live transport is untouched.");
+    notice("[cancelling] Cancelling current work.");
     void Promise.resolve().then(() => controller.cancel()).catch(reportError).finally(() => { cancelling = false; });
   }
   async function submitted(inputLine: string) {
@@ -164,6 +164,12 @@ export function createTerminal(options: Options): Terminal {
     if (!command) { if (input.isTTY && output.isTTY) rl?.prompt(true); return; }
     if (command === "/quit") { await finish(); return; }
     if (command === "/help") { notice(HELP); return; }
+    if (command === "/stop") {
+      if (!controller.stopLive) { notice("[stop] Kumi can't stop Live here."); return; }
+      // A stop shows as the "[live] Stopped" event.
+      if (!await controller.stopLive()) notice("[stop] Kumi couldn't stop Live just now; press space in Live.");
+      return;
+    }
     if (command === "/status") {
       const status = controller.status();
       notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}`);
@@ -190,7 +196,7 @@ export function createTerminal(options: Options): Terminal {
       }
       if (verb === "/recipes") {
         const recipes = await controller.recipes?.() ?? [];
-        notice(recipes.length ? `[recipes] ${recipes.map((recipe) => `${recipe.name}${recipe.params.length ? ` (needs ${recipe.params.map((param) => param.name).join(", ")})` : ""}: ${recipe.about}`).join(" · ")}` : "[recipes] None yet. Ask Kumi to save a way of working as a recipe.");
+        notice(recipes.length ? `[recipes] ${recipes.map((recipe) => `${recipe.name}${recipe.params.length ? ` (needs ${recipe.params.map((param) => param.name).join(", ")})` : ""}: ${recipe.about}`).join(" · ")}` : "[recipes] None yet. Ask Kumi to save a way of working, or say \"watch me\" and do it in Live.");
         return;
       }
       if (verb === "/forget") {
@@ -273,6 +279,7 @@ export function createTerminal(options: Options): Terminal {
       case "tool-end": if (!suppressOutput) notice(`[tool] ${event.name} ${event.isError ? "error" : "success"} · ${event.elapsedMs} ms`); break;
       case "remembered": notice(`[memory] ${event.replaced ? "Updated" : "Will remember"}${event.scope === "producer" ? " about you" : ""}: ${event.note.text}${event.pending ? " (once the Set is saved)" : ""}`); break;
       case "forgot": notice(`[memory] Forgot: ${event.note.text}`); break;
+      case "action": notice(`[live] ${event.title}`); break;
       case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
       case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
       case "turn-complete": {

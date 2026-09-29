@@ -67,6 +67,8 @@ test("without arguments, uses the bridge configuration named by the installed Re
   } finally { rmSync(dir, { recursive: true, force: true }); }
   assert.deepEqual(loadConfig(["--inference-only"], env), { mode: "inference-only", ...loadInferenceConfig(env) });
   assert.deepEqual(loadConfig(["--help"], {}), { mode: "help" });
+  assert.deepEqual(loadConfig(["--version"], {}), { mode: "version" });
+  assert.deepEqual(loadConfig(["-v"], {}), { mode: "version" });
 });
 
 test("the chosen model persists in an owner-only settings file; KUMI_MODEL overrides it", () => {

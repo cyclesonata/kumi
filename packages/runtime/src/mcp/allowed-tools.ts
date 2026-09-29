@@ -3,7 +3,8 @@ import type { JsonObject } from "../core/contracts.js";
 import type { McpEndpoint } from "./client.js";
 
 /** Tools the model may call directly: reads. */
-export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read"]);
+export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read",
+  "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect"]);
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_HOST_RESULT_BYTES = 4 * 1024 * 1024;
 const MAX_CATALOG_BYTES = 1024 * 1024;

@@ -505,7 +505,9 @@ test("every change kind has its own tool, a family, host-only bridge tools and a
     assert(["tempo", "mixer", "rename", "structure", "clip", "device", "parameter", "locators", "color"].includes(kind.family));
   }
   assert(HOST_TOOLS.has("live_undo"));
-  assert(!HOST_TOOLS.has("live_audio_capture_apply") && !HOST_TOOLS.has("live_recording_apply") && !HOST_TOOLS.has("live_transport_apply"));
+  // Playing and recording are Kumi's tools now (used when the producer asks); capture, files, projects and realtime control stay off.
+  assert(HOST_TOOLS.has("live_transport_apply") && HOST_TOOLS.has("live_recording_apply") && HOST_TOOLS.has("live_transport_action_apply"));
+  for (const off of ["live_audio_capture_apply", "live_project_backup_apply", "live_realtime_arm_apply", "live_application_dialog_apply", "live_device_state_save"]) assert(!HOST_TOOLS.has(off), off);
 });
 
 test("a new clip's record carries its notes, for NOW's picture", () => {

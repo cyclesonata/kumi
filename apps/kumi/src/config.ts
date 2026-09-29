@@ -19,6 +19,7 @@ export interface InferenceConfig {
 export type LoginMethod = "browser" | "device" | "import-pi" | "key";
 export type AppConfig =
   | { mode: "help" }
+  | { mode: "version" }
   | { mode: "auth"; authFile: string; settingsFile: string }
   | { mode: "login"; provider: ProviderId; method: LoginMethod; authFile: string; piAuthFile: string; settingsFile: string }
   | { mode: "logout"; provider: ProviderId; authFile: string }
@@ -89,6 +90,7 @@ const LOGIN_METHODS: Record<string, LoginMethod> = { "": "browser", "--device": 
 
 export function loadConfig(args: readonly string[], env: Env = process.env): AppConfig {
   if (args.length === 1 && args[0] === "--help") return { mode: "help" };
+  if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) return { mode: "version" };
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
   if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
   if (args[0] === "model" && args.length <= 2) {

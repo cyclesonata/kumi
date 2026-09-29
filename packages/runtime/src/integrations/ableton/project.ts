@@ -202,3 +202,91 @@ export function since(savedAt: number, now: number): string {
 export function catchUpFrom(name: string, baseline: Baseline, described: { lines: string[]; more: number }): CatchUp {
   return { set: name, lastSeenAt: baseline.savedAt, lines: described.lines, more: described.more };
 }
+
+/**
+ * Each track's coordinate in a snapshot (what its devices and clips name as their parent), to its
+ * name: the bridge's own derivation, a short hash of the track's kind, name and structure, counted
+ * where tracks look alike.
+ */
+function trackCoordinates(pages: readonly JsonObject[]): Map<string, string> {
+  const tracks = [...records(pages).values()].filter((row) => row.kind === "track").sort((a, b) => Number(a.order) - Number(b.order));
+  const counts = new Map<string, number>(); const names = new Map<string, string>();
+  for (const row of tracks) {
+    const data = (row.data ?? {}) as JsonObject;
+    const canonical = `{"kind":${JSON.stringify(data.kind ?? null)},"name":${JSON.stringify(row.name ?? null)},"structureHash":${JSON.stringify(data.structureHash ?? null)}}`;
+    const base = `track-snapshot:${createHash("sha256").update(canonical).digest("hex").slice(0, 20)}`;
+    const count = (counts.get(base) ?? 0) + 1; counts.set(base, count);
+    names.set(`${base}-${count}`, typeof row.name === "string" ? row.name : "(unnamed)");
+  }
+  return names;
+}
+
+const small = (value: unknown): unknown => {
+  if (value === null || typeof value !== "object") return typeof value === "string" ? value.slice(0, 120) : value;
+  const text = JSON.stringify(value);
+  return text.length <= 240 ? value : `${text.slice(0, 237)}…`;
+};
+
+/** What a newly added item is, in the fields that say how to make it again. */
+function madeOf(kind: string, row: Row): JsonObject {
+  const data = (row.data ?? {}) as JsonObject; const location = (data.location ?? {}) as JsonObject;
+  const name = typeof row.name === "string" && row.name !== "unavailable" ? row.name : undefined;
+  if (kind === "track") {
+    const mixer = (data.mixer ?? {}) as JsonObject;
+    const kept = Object.fromEntries(["volume", "pan", "sends", "mute", "solo"].filter((key) => mixer[key] !== null && mixer[key] !== undefined).map((key) => [key, mixer[key]!]));
+    return { ...(name ? { name } : {}), trackKind: data.kind ?? null, routing: small(data.routing) as JsonObject, armed: data.armed ?? null, monitoring: data.monitoring ?? null, mixer: kept };
+  }
+  if (kind === "device") return { ...(name ? { name } : {}), className: data.className ?? null, position: data.siblingOrder ?? null, ...(typeof data.depth === "number" && data.depth > 0 ? { insideRack: true } : {}) };
+  if (kind === "clip") return { ...(name ? { name } : {}), clipKind: data.clipKind ?? null, lane: location.lane ?? null, ...(typeof location.sceneOrder === "number" ? { scene: location.sceneOrder } : {}), start: data.start ?? null, length: data.length ?? null };
+  return name ? { name } : {};
+}
+
+/**
+ * What changed in the Set while Kumi watched the producer work, compact and exact, for the model
+ * to turn into a recipe: what was added (with how it's set up), removed, renamed or changed, and
+ * on which track.
+ */
+export function describeWatch(diff: JsonObject, before: readonly JsonObject[], after: readonly JsonObject[], limit = 40): { changes: JsonObject[]; more: number } {
+  const was = records(before); const now = records(after);
+  const tracks = new Map([...trackCoordinates(before), ...trackCoordinates(after)]);
+  const on = (row: Row | undefined) => { const parent = ((row?.data ?? {}) as JsonObject).parentSnapshotId; return typeof parent === "string" && tracks.has(parent) ? { on: tracks.get(parent)! } : {}; };
+  const changes: JsonObject[] = [];
+  for (const item of (Array.isArray(diff.items) ? diff.items : []) as JsonObject[]) {
+    const kind = String(item.kind);
+    if (!["set", "track", "scene", "clip", "device", "locator"].includes(kind)) continue;
+    if (item.type === "ambiguity") {
+      const names = (ids: unknown, from: Map<string, Row>) => (Array.isArray(ids) ? ids : []).map((id) => from.get(String(id))?.name).filter((name): name is string => typeof name === "string");
+      changes.push({ unclear: kind, before: names(item.beforeSnapshotIds, was), after: names(item.afterSnapshotIds, now) });
+      continue;
+    }
+    if (item.type !== "change" || !Array.isArray(item.facets)) continue;
+    const facets = item.facets as string[];
+    const old = typeof item.beforeSnapshotId === "string" ? was.get(item.beforeSnapshotId) : undefined;
+    const current = typeof item.afterSnapshotId === "string" ? now.get(item.afterSnapshotId) : undefined;
+    if (facets.includes("added") && current) { changes.push({ added: kind, ...madeOf(kind, current), ...on(current), order: current.order ?? null }); continue; }
+    if (facets.includes("removed") && old) { changes.push({ removed: kind, name: old.name ?? null, ...on(old), order: old.order ?? null }); continue; }
+    const what = (Array.isArray(item.details) ? item.details as JsonObject[] : [])
+      .filter((detail) => typeof detail.path === "string" && !DERIVED.test(detail.path) && !/Hash$|Fingerprint$|\/hash$/.test(detail.path))
+      .map((detail) => ({ what: String(detail.path).replace(/^\/data\//, "").replace(/\//g, "."), from: small(detail.before) ?? null, to: small(detail.after) ?? null }));
+    const renamed = facets.includes("renamed") && old && current && old.name !== current.name;
+    if (!what.length && !renamed) {
+      // A device's settings are compared as a whole: say it changed, the model reads the values if they matter.
+      if (kind === "device" && (current ?? old)) changes.push({ changed: kind, name: (current ?? old)!.name ?? null, ...on(current ?? old), what: "its settings" });
+      continue;
+    }
+    changes.push({ changed: kind, name: (current ?? old)?.name ?? null, ...on(current ?? old), ...(renamed ? { renamedFrom: old!.name ?? null } : {}), ...(what.length ? { what: what.slice(0, 12) } : {}) });
+  }
+  // A removed and an added item of one kind in the same place: renamed (and maybe changed).
+  for (const gone of changes.filter((change) => change.removed !== undefined)) {
+    const fresh = changes.find((change) => change.added === gone.removed && change.order === gone.order && change.on === gone.on);
+    if (!fresh) continue;
+    const { added, order: _order, ...rest } = fresh;
+    changes.splice(changes.indexOf(fresh), 1, { changed: added!, ...rest, renamedFrom: gone.name ?? null, note: "renamed and changed" });
+    changes.splice(changes.indexOf(gone), 1);
+  }
+  // In the order a recipe would make them: the Set, then tracks, scenes, devices and clips.
+  const rank = (change: JsonObject) => ["set", "track", "scene", "device", "clip", "locator"].indexOf(String(change.added ?? change.removed ?? change.changed ?? change.unclear));
+  const ordered = changes.map((change, index) => ({ change, index })).sort((a, b) => rank(a.change) - rank(b.change) || a.index - b.index)
+    .map(({ change }) => { const { order: _order, ...rest } = change; return rest; });
+  return { changes: ordered.slice(0, limit), more: Math.max(0, ordered.length - limit) };
+}

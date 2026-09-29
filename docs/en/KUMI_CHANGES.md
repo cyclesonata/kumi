@@ -23,8 +23,36 @@ to be dependable.
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
 | `load_sample` | A sample in a new Simpler on an empty MIDI track: one `find_samples` returned, or one Kumi picks | `live_device_*` (insert with a sample) |
 | `load_sample_to_pad` | A sample on an empty pad of a Drum Rack; undo clears the pad | `live_drum_pad_*` (load-sample, load-samples) |
-| `make_changes` | Several of these changes in one call, in order (see [Plans](#plans-in-one-reply)) | the tools above |
+| `set_transport` ¹ | The loop, metronome, punch in and out, and the playhead position | `live_transport_*` |
+| `set_song` ¹ | Time signature, swing, launch quantization and MIDI record quantization | `live_song_settings_*` |
+| `set_scale` ¹ | Live 12's Scale Mode: root and scale | `live_tuning_*` |
+| `set_groove` ¹ | The global groove amount, or one groove in the pool | `live_groove_*` |
+| `set_routing` ¹ | A track's input and output (another track, "Post FX", "Resampling"), arming and monitoring | `live_routing_*` |
+| `set_mixer_options` ¹ | Track on/off, crossfade assignment, split stereo panning, the crossfader | `live_mixer_extended_*` |
+| `set_sidechain` ¹ | A device's sidechain input | `live_device_io_*` |
+| `set_clip` | A clip's loop, launch mode and quantization, legato, colour, mute, velocity amount | `live_clip_properties_*` |
+| `set_audio_clip` ¹ | An audio clip's gain, pitch, loop, warping and warp mode, fades | `live_audio_clip_*` |
+| `edit_clip` | Crop to the loop, double the loop, copy a region within the clip (Live gives no undo; HISTORY keeps it) | `live_clip_action_*` |
+| `duplicate_clip` | Copy a clip to a Session slot or into the Arrangement (how MIDI reaches the Arrangement) | `live_clip_duplicate_*` |
+| `move_clip` ¹ | Move an Arrangement clip, or a Session clip to another slot | `live_clip_move_*` |
+| `add_arrangement_clip` | An empty MIDI clip in the Arrangement | `live_arrangement_clip_*` |
+| `import_audio` | An audio file (one `find_samples` returned) into a Session slot or a take lane | `live_audio_import_*` |
+| `set_warp_markers` ¹ | Add, move or delete a warp marker | `live_warp_marker_*` |
+| `change_notes` ¹, `delete_notes`, `edit_notes` ¹ | Notes by id: pitch, timing, velocity, probability; delete; quantize, one pitch, duplicate | `live_note_update_*`, `live_note_delete_*`, `live_note_edit_*` |
+| `transform_midi` ¹ | 23 transforms and generators: transpose, scale-constrain, swing, humanize, arpeggiate, euclidean, chord progressions, drum patterns, basslines… | `live_midi_transform_*` |
+| `capture_midi` ¹ | Live's Capture MIDI | `live_capture_midi_*` |
+| `set_automation` | Automation inside a Session clip for one device parameter | `live_automation_*` |
+| `change_structure` | A return track added, a track or scene duplicated, a return deleted ¹ (no undo) | `live_track_structure_*` |
+| `set_scene`, `capture_scene` ¹ | A scene's colour, tempo and time signature; capture the playing clips as a new scene | `live_scene_*`, `live_scene_capture_*` |
+| `switch_device`, `move_device` ¹, `move_device_to` | A device on or off; along its chain; to another track or into a rack's chain | `live_device_*`, `live_device_advanced_*` |
+| `delete_device` ¹ | Delete a device when the producer asks (no undo; HISTORY keeps it) | `live_device_delete_*` |
+| `set_chain` | A rack chain's mute, solo or colour | `live_chain_*` |
+| `replace_sample` ¹ | Another sample in a Simpler | `live_simpler_*` |
+| `set_device_details` ¹, `use_looper` ¹ | A device's settings beyond its parameters; operating a Looper | `live_device_specialized_*`, `live_looper_*` |
+| `make_changes` | Several of these changes, and actions and waits, in one call, in order (see [Plans](#plans-in-one-reply)) | the tools above |
 | `undo_change` | Undo one of these changes, or the latest | `live_undo` |
+
+¹ Needs bridge 1.0.34 or later ([bridge versions](#bridge-versions)).
 
 Reads for planning a change: `live_discover`, `live_snapshot`,
 `live_browser_search`, `live_note_read`, `live_status`, `server_status`, and
@@ -48,8 +76,66 @@ the rack and points it at the pad's note. On Live 12.4 the first route works.
 `load_sample_to_pad` is offered even before the Set has a Drum Rack, because an
 earlier step of the same answer usually loads one.
 
-Not yet: playback and recording, deleting things, saving, files, audio capture
-and listening. The model is told so and says so plainly.
+Not available through Live's scripting: saving the Set, exporting, freezing,
+mapping macros or modulators, deleting clips or scenes, and editing the
+Arrangement's automation lanes. The model is told so and says so plainly.
+
+## Playing, recording and other actions
+
+Some of what Kumi does isn't a change to the Set, so it has nothing to undo and
+no HISTORY entry. NOW shows each one as it happens ("▶ Playing from the start
+marker", "● Recording in the Arrangement on Bounce", "■ Stopped").
+
+| Kumi tool | What it does | Bridge transaction |
+| --- | --- | --- |
+| `play` ¹ | Start, continue, stop, play the selection, stop all clips, tap tempo, nudge | `live_transport_action_*` |
+| `fire_scene` ¹, `launch_clip` | Launch a scene, or one Session clip | `live_scene_fire_*`, `live_clip_launch_*` |
+| `record` ¹ | Start or stop recording, in the Session or the Arrangement | `live_recording_*` |
+| `jump_to_locator` | Move the playhead to the next, previous or a named locator | `live_locator_jump_*` |
+| `select` ¹, `show` | Select a track, clip, device or parameter to show it; switch views, zoom, follow | `live_selection_*`, `live_view_*` |
+| `wait` (in `make_changes`) | Let a recording run: beats at the Set's tempo, or seconds (up to 120) | none |
+
+The model uses them only when the producer asks to hear, record or see
+something. A plan that started playback or recording and then stops short (a
+step failed, or the producer pressed Esc) stops them again. Stopping never
+depends on the rest of Live's state: when Live refuses the ordinary stop, Kumi
+uses the bridge's emergency stop, which stops clips, the transport and recording
+together. `/stop` does the same any time.
+
+Resampling is a plan of these, because Live gives scripts no bounce. The plan:
+
+1. Add an audio track and route its input from the source (`inputSubRouting`
+   "Post FX"), or from "Resampling" for the whole mix.
+2. Arm it with monitoring off.
+3. Set the playhead and start recording on the Arrangement lane.
+4. Play, wait the length plus the release tail, then stop.
+5. Stop recording and disarm the track.
+
+The recording is an ordinary audio clip that `listen` can hear by its clipRef.
+
+## Watching the producer work
+
+`watch_me` learns a routine the producer does by hand. On `start` Kumi records
+the Set's state (the bridge's semantic snapshot) and which devices exist. On
+`stop` it compares the two snapshots and returns what changed, as exact data:
+
+- tracks added, with their routing, arming, monitoring and mixer, and whether
+  they're audio or MIDI;
+- devices loaded and where, with the parameters turned from Live's defaults
+  (continuous parameters only: Live gives no default for switches and modes);
+- clips recorded or made, and settings that changed, each with its track.
+
+The model turns that into a recipe with `save_recipe`, with blanks for what
+differs each time. Nothing in Live changes while Kumi watches.
+
+## Bridge versions
+
+Kumi 1.0 works with the bridge it ships with (1.0.34). On bridge 1.0.33 in real
+Live, the tools marked ¹ above were refused, not confirmed, or couldn't be
+tested. Two examples: the transport refused changes while Live played, and arming a
+track wasn't confirmed. Kumi reads the bridge's version when it connects and
+doesn't offer a tool the bridge is too old for. A plan that names one stops
+before anything happens and says to update the bridge; `kumi doctor` says how.
 
 ## Racks
 

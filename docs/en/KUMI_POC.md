@@ -1,12 +1,15 @@
-# Kumi terminal POC
+# Kumi
 
-Kumi is a streaming producer-assistant conversation about the **current open
-Ableton Live Set**: it reads the Set and makes the changes you ask for, each with
-its own undo ([how changes work](KUMI_CHANGES.md)). For a saved Set it picks up
-the conversation next time and says what changed meanwhile, and it keeps short
-notes of what you tell it that Live can't show ([what Kumi remembers](#what-kumi-remembers)).
-Playback control, recording and listening are not implemented yet. It runs its own agent core and the
-independent Ableton MCP Beyond bridge for Live access.
+Kumi 1.0 is a producer assistant for the **current open Ableton Live Set**, in
+your terminal. It reads the Set and makes the changes you ask for, each with its
+own undo ([how changes work](KUMI_CHANGES.md)). When you ask, it plays, records
+and bounces audio. It listens to audio, such as a reference track, a sample or
+its own recording, and compares one with another. It saves your ways of
+working as [recipes](#recipes-and-watching-you-work) to replay, including ones
+it learns by watching you. For a saved Set it picks up the conversation next
+time and says what changed meanwhile. It keeps short notes of what you tell it
+that Live can't show ([what Kumi remembers](#what-kumi-remembers)). It runs its
+own agent core and the independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
 
@@ -82,6 +85,8 @@ yet.
 | `KUMI_AUTH_FILE` | Credential store path; default `~/.kumi/auth.json` |
 | `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
+| `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
+| `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, if not the standard one |
 | `KUMI_TRACE=1` | Dispatch-name trace; no arguments or raw tool payloads |
 | `KUMI_UI=plain` | Plain line-by-line output instead of the full-screen app |
@@ -128,17 +133,17 @@ npm run kumi -- --bridge-config /absolute/path/bridge-config.json
 
 Keep the secret in the bridge's separate private file, never in the command.
 Kumi starts only its fixed local Node MCP child and asks it to expose exactly
-Kumi's tools; the bridge refuses everything else (playback, recording, audio
-capture, files). The model gets reads (`server_status`, `live_status`,
-`live_discover`, `live_snapshot`, `live_browser_search`, `live_note_read`) and
-Kumi's change tools (`set_tempo`, `set_mixer`, `rename`, `add_tracks_and_scenes`,
-`write_midi_clip`, `load_device`, `set_device_parameter`, `set_locators`,
-`set_track_color`, `undo_change`). Each change runs the bridge's preview and
-apply as one step and lands in HISTORY with its undo; see
-[how Kumi changes your Set](KUMI_CHANGES.md). Only currently advertised tools are
-offered. The bridge's audio, resource and prompt surfaces are not wired into Kumi
-yet. A running Live process or an installed script is not
-connectivity proof: check the displayed Remote Script / `real-live` observation.
+Kumi's tools; the bridge refuses everything else (audio capture, project files
+and backups, realtime control, dialogs). The model gets Live reads (the Set, its
+tracks, devices, clips, notes, the song's settings, the Browser) and Kumi's own
+tools for changes, playing and recording, listening, samples, recipes and notes.
+Each change runs the bridge's preview and apply as one step and lands in HISTORY
+with its undo; see [how Kumi changes your Set](KUMI_CHANGES.md) for the full list.
+Only tools the bridge currently advertises are offered, and a tool that needs a
+newer bridge than the installed one isn't offered at all
+([bridge versions](KUMI_CHANGES.md#bridge-versions)). A running Live process or
+an installed script is not connectivity proof: check the displayed Remote Script
+/ `real-live` observation.
 An unavailable or disconnected bridge is shown as **No Live access**. See the
 bridge [user guide](USER_GUIDE.md), [safety guide](LIVE_SAFETY.md),
 [operations](OPERATIONS.md) and [recovery](RECOVERY.md) for its details.
@@ -183,6 +188,57 @@ another rack, and NOW draws the chains with the new device lit. Kumi sets
 macros and adds them, but Live doesn't let it map a macro or a modulator to a
 parameter: you do that in Live ([racks](KUMI_CHANGES.md#racks)).
 
+**Playing, recording and bouncing.** Kumi plays and stops the Set, launches
+clips and scenes, and moves the playhead when you ask to hear something. It
+records when you ask. It never plays or records on its own. Live gives scripts
+no bounce, freeze or export, so Kumi bounces by resampling, all in one plan. It
+adds an audio track fed from the source track, or from "Resampling" for the
+whole mix, and arms it. Then it records the length you want in the Arrangement
+and disarms the track. The recording stays in the Set as an audio clip for the
+next round of effects. If a plan stops partway (a step fails, or you press Esc),
+Kumi stops the recording and playback it started. `/stop` stops Live, meaning
+clips, the transport and recording, at any time, even while Kumi answers. If
+Live refuses its ordinary stop, Kumi uses the bridge's emergency stop.
+
+**Listening.** Kumi hears audio files and the Set's audio clips: a reference
+track, a sample, a bounce or a recording. It measures:
+
+- loudness: integrated LUFS, true peak and loudness range;
+- tonal balance in ten named bands, from sub to air, and stereo width in each;
+- dynamics, tempo and key;
+- for a single sound, its pitch, harmonics (which waveform it's like), envelope
+  and movement (an LFO's rate, at the tempo).
+
+Given a reference, it matches the loudness and says what differs most, so it can
+match a mix's EQ and compression or rebuild a sound. The conversation shows what
+it heard as a small spectrum, and a comparison as dB over or under the
+reference. To hear a track or the mix, Kumi records it first (resampling), then
+listens to the recording. It reads WAV and AIFF itself, and MP3, M4A, FLAC and
+the like through macOS's `afconvert` or `ffmpeg`. The analysis runs on your
+computer: only the numbers go to the model, never the audio.
+
+## Recipes and watching you work
+
+Kumi saves ways of working as recipes you can replay any time, in any Set: a
+vocal chain, a drum bus, a sidechain, a resampling loop, a session layout. There
+are three ways to make one:
+
+- **After Kumi does it.** Ask it to keep what it just did as a recipe.
+- **By describing it.** Describe a routine you repeat, and Kumi writes it down.
+- **By showing it.** Say "watch me". Kumi notes the Set as it is, you do the
+  routine by hand in Live, and you say when you're done. Kumi then sees what
+  changed: tracks added with their routing and arming, devices loaded with the
+  knobs you turned from Live's defaults, recordings and mixer moves. It turns
+  that into a recipe with blanks for what differs each time, such as the track
+  to work on, and says what the recipe will do. Switches and modes (on/off, a
+  filter type) can't be compared with a default, so Kumi reads them in Live if
+  they matter.
+
+Ask for a recipe by name ("resample the Reese twice") to run it; it runs as one
+plan, with each change in HISTORY and undoable. `/recipes` lists them. Choose one
+to run it (Kumi asks what to run it on when it has blanks) or forget it. Recipes
+are kept in `~/.kumi/recipes`, one file each, readable only by you.
+
 **Speed.** Kumi plans a request in one reply where it can: a whole plan of
 changes goes in one call, and when the plan completes the request Kumi itself
 lists what changed, so the model isn't asked again. Each turn's observation
@@ -202,6 +258,8 @@ and a tempo change about 4 s
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
 | `/memory` | What Kumi remembers, about you and this Set; choose a note to forget it |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
+| `/stop` | Stop Live: clips, the transport and recording (works while Kumi answers) |
+| `/recipes` | Your recipes; choose one to run or forget it |
 | `/refresh` | Read fresh bounded observations without a model answer |
 | `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
 | `/new` | Discard the conversation and reconnect with fresh observations |
@@ -250,10 +308,15 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
 - **Conversations** are kept for saved Sets, in `~/.kumi/projects` next to what Kumi
   last saw of each Set (readable only by you); the oldest exchanges drop off past
   about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
-  end with Kumi. Kumi keeps notes, not skills: a way of working isn't saved as a
-  recipe to replay yet.
-- **Bars and beats:** Kumi doesn't see the Set's time signature yet (the bridge's
-  Set row lacks it), so turning bars into beats for clips and locators assumes 4/4.
+  end with Kumi.
+- **What Live's scripting can't do:** save the Set, export or freeze, map a macro
+  or modulator to a parameter, set a macro's range, write notes into an
+  Arrangement clip (Kumi writes the clip in Session view and copies it there),
+  delete clips or scenes, or show Kumi the Arrangement's automation lanes for
+  editing. Kumi says so and suggests the way round.
+- **Deleting:** Kumi deletes a device or a return track only when you ask, and
+  can't bring it back (Live's own undo can). Everything else it removes by undoing
+  its own change.
 - **Long conversations** have no turn limit. Past about 160 KB (roughly 50k
   tokens), earlier turns' larger Live reads shrink to their opening and a note to
   read again, and earlier turns' Live observations are dropped; the producer's
@@ -300,8 +363,13 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
   plainly with the fix offered (sign in, choose another model). An unbuilt Kumi,
   invalid configuration or startup failure is reported with the command that
   fixes it. Neither includes provider payloads or credentials.
-- Metadata is not audio: no listening, quality scoring, edits, playback control,
-  recording, rack construction or song generation is implemented.
+- **Listening** hears files and recordings, not Live's output as it plays. It
+  measures and compares; it doesn't judge taste. The model says what it heard
+  from those numbers. Very long files are heard in part (up to 12 minutes).
+- **Bridge version:** tools that needed bridge fixes (playing, recording,
+  editing notes, the transport and song settings, deleting, and more) need
+  bridge 1.0.34 or later. With an older bridge Kumi offers the rest, and
+  `kumi doctor` says how to upgrade.
 
 ## Privacy and verification
 
@@ -345,6 +413,6 @@ also times the reads a big Set depends on (tracks, and the Set snapshot Kumi
 catches up from), without touching `~/.kumi`.
 
 Next: a picture in NOW for the kinds of change that have none yet (locators,
-new tracks, devices), bars instead of beats for locators, undo that
-outlives the bridge connection, and the bridge's scale limits (see the evidence,
-"Scale on real Live").
+new tracks, devices), undo that outlives the bridge connection, hearing Live's
+output directly, and the bridge's scale limits (see the evidence, "Scale on real
+Live").

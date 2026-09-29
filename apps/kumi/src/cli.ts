@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KumiError, openCredentialStore,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KUMI_VERSION, KumiError, openCredentialStore,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
 
-const HELP = `Kumi — producer assistant for Ableton Live
+const HELP = `Kumi ${KUMI_VERSION} — producer assistant for Ableton Live
 
 First run (Node.js 22 or 24):
   npm run setup                          Install and build Kumi and the Ableton bridge
@@ -27,14 +27,16 @@ More:
   npm run kumi -- model [<provider>/<model>]   Show or choose the model
   npm run kumi -- auth                   Show which providers are usable (no secrets)
   npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
+  npm run kumi -- --version              Show Kumi's version
 
 Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
 a key). An API key in ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENCODE_API_KEY is used when set.
 KUMI_MODEL overrides the chosen model.
-Kumi reads the open Live Set and makes changes you ask for; each change can be undone. It keeps short notes
-of what you tell it that Live can't show (about you, and about each saved Set). Playback control, recording
-and listening are not implemented yet.
-In a session: /help /status /model /effort /login /logout /memory /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
+Kumi reads the open Live Set and makes the changes you ask for; each change can be undone. It plays, records
+and bounces when you ask, listens to audio (a reference, a sample, a recording) and compares it, keeps short notes
+of what you tell it that Live can't show, and saves your ways of working as recipes to replay, including ones it
+learns by watching you.
+In a session: /help /status /model /effort /login /logout /memory /recipes /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, see docs/en/KUMI_POC.md (Connect to Live).";
@@ -77,6 +79,7 @@ try {
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
+  else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
   else if (config.mode === "auth") await authStatus(config, { out: process.stdout, env: process.env });
   else if (config.mode === "logout") await logout(config, { out: process.stdout, env: process.env });
   else if (config.mode === "model") {
@@ -110,6 +113,7 @@ try {
         : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onChange: (change) => terminal?.handleEvent({ type: "change", change }),
+          onAction: (action) => terminal?.handleEvent({ type: "action", ...action }),
           projectStore: createProjectStore(loadProjectsDir()),
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),

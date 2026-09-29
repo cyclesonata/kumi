@@ -361,6 +361,12 @@ export function createSession(options: Options): SessionController {
       emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
       return true;
     },
+    async stopLive() {
+      if (!integration?.stopLive) return false;
+      const stopped = await integration.stopLive(AbortSignal.timeout(options.timeoutMs ?? 30_000)).catch(() => false);
+      if (stopped) emit({ type: "action", title: "Stopped", playing: false, recording: false });
+      return stopped;
+    },
     async cancel() { const op = active; if (!op) return; op.controller.abort(); await op.done; },
     async reconfigure() {
       if (state === "closed") throw new Error("Session is closed");

@@ -123,6 +123,8 @@ export interface Integration {
   undo?(id: string | undefined, signal: AbortSignal): Promise<ChangeRecord>;
   /** The audio file behind something in the Set the model names (a clip, say); undefined when it isn't one. */
   audioFile?(named: string, signal: AbortSignal): Promise<string | undefined>;
+  /** Stop clips, the transport and recording in Live at once; true when Live is stopped afterwards. */
+  stopLive?(signal: AbortSignal): Promise<boolean>;
 }
 export type IntegrationFactory = (connection: (state: ConnectionState) => void) => Integration;
 
@@ -218,7 +220,9 @@ export type SessionEvent = KernelEvent
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
   | MemoryEvent
   | HeardEvent
-  | RecipeEvent;
+  | RecipeEvent
+  /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
+  | { type: "action"; title: string; playing?: boolean; recording?: boolean };
 
 /** "producer": true of them in any project; "set": about one saved Set. */
 export type MemoryScope = "producer" | "set";
@@ -287,6 +291,8 @@ export interface SessionController {
   /** Run a recipe that has no blanks, straight away (no model involved); what it did, in words. */
   runRecipe?(name: string): Promise<{ text: string; isError: boolean }>;
   forgetRecipe?(name: string): Promise<boolean>;
+  /** Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't. */
+  stopLive?(): Promise<boolean>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

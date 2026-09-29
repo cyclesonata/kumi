@@ -7,7 +7,10 @@ import { createAbletonIntegration } from "../../src/integrations/ableton/index.j
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
-export function bridge(options: { padBatches?: boolean; parameters?: boolean; racks?: boolean } = {}) {
+type Options = { padBatches?: boolean; parameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
+  /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
+  /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string };
+export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = 120;
@@ -21,7 +24,10 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
     "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
-    ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : [])];
+    ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
+    ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop"] : [])];
+  // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
+  const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0 };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
@@ -35,11 +41,20 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
   const catalogListeners = new Set<() => void>();
   let transactions = 0;
   const endpoint: McpEndpoint = {
-    pid: null, serverInfo: { name: "kumi-synthetic-bridge", version: "1" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
+    pid: null, serverInfo: { name: "kumi-synthetic-bridge", version: options.version ?? "1" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
     async list() { return { tools: catalog.filter((tool) => drumRack || !tool.name.startsWith("live_drum_pad_")) }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
       if (name === "live_status") return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null });
+      if (name === "live_snapshot") return wrap({ epoch, snapshot: { set: { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set" },
+        playback: { transport: { playing: transport.playing, sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, firedTargets: [],
+          playingTargets: transport.playing ? [{ trackRef: "7:track:0", clipSlotRef: "7:clip_slot:0:0", sceneRef: "7:scene:0" }] : [] } } });
+      if (name === "live_session_emergency_stop") {
+        const expected = transport.sessionRecord && transport.arrangementRecord ? "both" : transport.sessionRecord ? "session" : transport.arrangementRecord ? "arrangement" : "stopped";
+        if (args.confirmation !== "emergency-stop" || args.expectedRecording !== expected) return refusal("expected recording mode does not match fresh authoritative playback");
+        transport.playing = false; transport.sessionRecord = false; transport.arrangementRecord = false; transport.emergencyStops++;
+        return wrap({ stopped: true, stoppedTargets: args.expectedTargets ?? [], recordingStopped: expected !== "stopped" });
+      }
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
@@ -49,7 +64,10 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
             { ref: "7:device:0:0:0:0", parentRef: "7:chain:0:0:0", name: "Operator", className: "Operator" },
             { ref: "7:device:0:1", parentRef: "7:track:0", name: "Reverb", className: "Reverb" }]
           : args.kind === "device" && options.parameters ? [{ ref: "7:device:0:0", parentRef: "7:track:0", name: "Operator", className: "Operator" }]
-          : args.kind === "parameter" && options.parameters ? ["Osc-A Level", "Filter Freq", "Ae Release"].map((name, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name, value: 0, min: 0, max: 1 })) : [];
+          : args.kind === "parameter" && options.parameters ? ["Osc-A Level", "Filter Freq", "Ae Release"].map((name, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name, value: 0, min: 0, max: 1 }))
+          : args.kind === "clip-slot" && options.audioClip ? [{ ref: "7:clip_slot:0:0", parentRef: "7:track:0", sceneIndex: 0, clipRef: "7:clip:0:0" }, { ref: "7:clip_slot:0:1", parentRef: "7:track:0", sceneIndex: 1, clipRef: null }]
+          : args.kind === "session-clip" && options.audioClip ? [{ ref: "7:clip:0:0", parentRef: "7:clip_slot:0:0", name: "Bounce", isAudio: true, filePath: options.audioClip }]
+          : args.kind === "arrangement-clip" && options.audioClip ? [{ ref: "7:arrangement_clip:1:0", parentRef: "7:track:1", name: "Beat", isAudio: false, filePath: null }] : [];
         // Like the bridge, a parent narrows the rows to those it holds.
         return wrap({ epoch: 7, kind: args.kind, items: args.parent === undefined ? items : (items as JsonObject[]).filter((item) => item.parentRef === args.parent), revision: "r1", truncated: false });
       }
@@ -83,6 +101,17 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
         if (applyFailure === "uncertain") return refusal("Apply is uncertain; perform fresh discovery.", { state: "uncertain" });
         if (applyFailure === "unreadable") return { content: [{ type: "text", text: "not json" }] };
         if (transaction.name === "live_tempo_preview") tempo = Number(transaction.args.tempo);
+        if (transaction.name === "live_transport_action_preview") {
+          if (transaction.args.action === "stop" && transport.refuseStop && transport.playing) return refusal("request failed: missing, expired, stale, or mismatched mutation preflight");
+          if (transaction.args.action === "start" || transaction.args.action === "continue") transport.playing = true;
+          if (transaction.args.action === "stop") transport.playing = false;
+          return wrap({ transactionId: args.transactionId, state: "applied", done: transaction.args.action });
+        }
+        if (transaction.name === "live_recording_preview") {
+          const on = transaction.args.action === "start";
+          if (transaction.args.lane === "arrangement") transport.arrangementRecord = on; else transport.sessionRecord = on;
+          return wrap({ transactionId: args.transactionId, state: "applied", recording: on });
+        }
         if (transaction.name === "live_session_structure_preview") {
           const added = (transaction.args.tracks as JsonObject[]).map((item) => ({ name: String(item.name), color: 0 }));
           tracks = [...tracks, ...added];
@@ -140,6 +169,7 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
       const value = await work();
       return { value, trips: deepest, calls: requests.length - before };
     },
+    transport,
     liveAway: () => { live = false; },
     liveBack: () => { live = true; epoch++; },
     refuseUndo: (text: string) => { undoRefusal = text; },
@@ -158,7 +188,7 @@ export function bridge(options: { padBatches?: boolean; parameters?: boolean; ra
 }
 export const signal = () => new AbortController().signal;
 export function tool(tools: readonly KernelTool[], name: string) { const found = tools.find((item) => item.name === name); assert(found, `${name} is offered`); return found; }
-export async function opened(options: { padBatches?: boolean; parameters?: boolean; racks?: boolean } = {}) {
+export async function opened(options: Options = {}) {
   const b = bridge(options);
   await b.integration.start(signal());
   const observation = await b.integration.observe(signal());
