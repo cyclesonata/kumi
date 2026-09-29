@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// Opt-in acceptance run on real Live: every change Kumi can make, each undone through Kumi's
-// undo, on the Set you name; plus how long the reads a big Set depends on take. It changes the
-// open Set and then puts it back, so run it on a disposable copy. No model and no sign-in.
+// Opt-in acceptance run on real Live: every kind of change Kumi can make, each undone through
+// Kumi's undo, on the Set you name; Kumi 1.0's playing, bouncing, listening and watching; and how
+// long the reads a big Set depends on take. It changes the open Set (and plays it briefly), then
+// puts it back, so run it on a disposable copy. No model and no sign-in.
 //   npm run accept:live --workspace @kumi/app -- --set "Kumi Focus Demo"
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAbletonIntegration, createProjectStore } from "@kumi/runtime";
+import { createAbletonIntegration, createProjectStore, hear } from "@kumi/runtime";
 import { findBridgeConfig } from "../dist/src/config.js";
 
 const argv = process.argv.slice(2);
@@ -32,7 +33,7 @@ const scratch = await mkdtemp(join(tmpdir(), "kumi-accept-"));
 const store = createProjectStore(scratch);
 let exported; let looked = 0;
 const timedStore = { load: (path) => store.load(path), save: async (baseline) => { exported ??= { ms: performance.now() - looked, pages: baseline.pages.length, bytes: Buffer.byteLength(JSON.stringify(baseline.pages)) }; return store.save(baseline); } };
-const integration = createAbletonIntegration({ bridgeConfig, projectStore: timedStore, onConnection: () => {}, onChange: (change) => records.set(change.id, change) });
+const integration = createAbletonIntegration({ bridgeConfig, projectStore: timedStore, onConnection: () => {}, onChange: (change) => records.set(change.id, change), changeTimeoutMs: 30_000 });
 
 let observation;
 const tool = (name) => observation.tools.find((item) => item.name === name);
@@ -67,6 +68,82 @@ async function state() {
   const scenes = await all("scene", { fields: ["name"] });
   const locators = await all("locator", { fields: ["name", "position"] });
   return { tempo: set.items[0]?.tempo, tracks: tracks.items.map((row) => row.name), scenes: scenes.items.length, locators: locators.items.map((row) => `${row.name}@${row.position}`), reads: { tracks } };
+}
+
+/** Kumi 1.0: the song and scenes, clips and notes, a device off and on, a bounce heard back, playing and showing, watching. */
+async function acceptOneDotZero(change, target) {
+  const skip = (name) => process.stdout.write(`  skip           ${name} isn't offered by this bridge\n`);
+  const maybe = async (name, input) => (tool(name) ? change(name, input) : (skip(name), undefined));
+  const fresh = async () => { observation = await integration.observe(signal()); return (await all("track", { fields: ["name"] })).items; };
+  process.stdout.write("\n1.0: the song, clips, notes and devices\n");
+  let tracks = await fresh();
+  await maybe("set_transport", { loopEnabled: true, loopStart: 4096, loopLength: 16 });
+  await maybe("set_song", { swingAmount: 0.2 });
+  const scene = (await all("scene", { fields: ["name"] })).items[0];
+  if (scene) await maybe("set_scene", { ref: scene.ref, tempo: 121, tempoEnabled: true });
+  const pad = tracks.filter((row) => row.name === "Kumi Pad").at(-1);
+  const slot = pad ? (await all("clip-slot", { parent: pad.ref, fields: ["clipRef"] })).items.find((row) => row.clipRef) : undefined;
+  if (slot) {
+    await maybe("set_clip", { clipRef: slot.clipRef, looping: true, loopStart: 0, loopEnd: 4 });
+    const notes = contentOf((await run("live_note_read", { clipRef: slot.clipRef, selected: false, noteIds: [0, 1, 2, 3] })).body).notes ?? [];
+    if (notes[0]) await maybe("change_notes", { clipRef: slot.clipRef, notes: [{ id: notes[0].id, velocity: 80 }] });
+    await maybe("transform_midi", { clipRef: slot.clipRef, transform: "transpose", params: { semitones: 2 }, scope: "in-place" });
+    // The chord goes into the Arrangement too, where the bounce below records it from.
+    await maybe("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: 4096 });
+  }
+  tracks = await fresh();
+  const padNow = tracks.filter((row) => row.name === "Kumi Pad").at(-1);
+  const drift = padNow ? (await all("device", { parent: padNow.ref, fields: ["name"] })).items[0] : undefined;
+  if (drift) { await maybe("switch_device", { deviceRef: drift.ref, enabled: false }); await maybe("switch_device", { deviceRef: drift.ref, enabled: true }); }
+  if (stopping || !padNow) return;
+
+  process.stdout.write("\n1.0: a bounce, heard back\n");
+  if (!tool("record") || !tool("set_routing")) { skip("record"); }
+  else {
+    const plan = await run("make_changes", { steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kumi Bounce", kind: "audio" }], scenes: [] }, as: "bounce" },
+      { tool: "set_routing", input: { trackRef: "@bounce", inputType: "Kumi Pad", inputSubRouting: "Post FX", arm: true, monitoring: "off" } },
+      { tool: "set_transport", input: { position: 4096, loopEnabled: false } },
+      { tool: "record", input: { action: "start", lane: "arrangement", destinationTrackRef: "@bounce" } },
+      { tool: "play", input: { action: "continue" } },
+      { tool: "wait", input: { beats: 4 } },
+      { tool: "play", input: { action: "stop" } },
+      { tool: "record", input: { action: "stop", lane: "arrangement" } },
+      { tool: "set_routing", input: { trackRef: "@bounce", arm: false } },
+    ] });
+    say(plan.ok, plan.ms, plan.ok ? `resampled the pad onto a new audio track, in ${plan.body?.done?.length ?? "?"} steps` : `resampling: ${plan.error}`);
+    if (plan.ok) {
+      const bounce = (await fresh()).filter((row) => row.name === "Kumi Bounce").at(-1);
+      const clip = bounce ? (await all("arrangement-clip", { parent: bounce.ref, fields: ["isAudio", "length"] })).items.find((row) => row.isAudio) : undefined;
+      const t0 = performance.now();
+      try {
+        const file = clip ? await integration.audioFile(clip.ref, signal()) : undefined;
+        const heard = file ? await hear(file, { signal: signal() }) : undefined;
+        say(Boolean(heard && heard.loudness.integratedLufs !== null), performance.now() - t0, heard ? `heard the bounce: ${Math.round(heard.seconds * 10) / 10} s at ${heard.loudness.integratedLufs} LUFS${heard.key ? `, ${heard.key.name}` : ""}` : "no recorded audio to hear");
+      } catch (error) { say(false, performance.now() - t0, `listening: ${String(error?.message ?? error).slice(0, 200)}`); }
+    }
+  }
+  if (stopping) return;
+
+  process.stdout.write("\n1.0: playing and showing (no HISTORY; nothing to undo)\n");
+  for (const [name, input] of [["select", { trackRef: target.ref }], ["show", { action: "focus-view", view: "Arranger" }], ["play", { action: "start" }], ["play", { action: "stop" }]]) {
+    if (!tool(name)) { skip(name); continue; }
+    const outcome = await run(name, input);
+    say(outcome.ok, outcome.ms, outcome.ok ? outcome.body?.done ?? name : `${name}: ${outcome.error}`);
+    if (name === "play" && input.action === "start") await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  if (stopping) return;
+
+  process.stdout.write("\n1.0: watching a change by hand\n");
+  if (!tool("watch_me")) { skip("watch_me"); return; }
+  const started = await run("watch_me", { action: "start" });
+  say(started.ok, started.ms, started.ok ? "watching the Set" : `watch_me start: ${started.error}`);
+  if (!started.ok) return;
+  await maybe("set_mixer", { trackRef: target.ref, volume: 0.6 });
+  observation = await integration.observe(signal());
+  const seen = await run("watch_me", { action: "stop" });
+  const what = seen.body?.changes ?? [];
+  say(seen.ok && what.length > 0, seen.ms, seen.ok ? `saw ${what.length} ${what.length === 1 ? "change" : "changes"}: ${JSON.stringify(what).slice(0, 160)}` : `watch_me stop: ${seen.error}`);
 }
 
 let exitCode = 1;
@@ -122,6 +199,7 @@ try {
             if (knob) await change("set_device_parameter", { deviceRef: device.ref, parameterRef: knob.ref, value: knob.min + (knob.max - knob.min) * 0.3 });
             else say(false, undefined, "no Drift parameter to change");
           }
+          if (!stopping) await acceptOneDotZero(change, target);
         }
       }
     } catch (error) { say(false, undefined, `stopped making changes: ${String(error?.message ?? error).slice(0, 200)}`); }
@@ -137,6 +215,7 @@ try {
       } catch (error) { say(false, performance.now() - t1, `${record.title}: ${String(error?.message ?? error).slice(0, 200)}`); }
     }
     for (const record of records.values()) if (record.state === "unsure") say(false, undefined, `unsure, check Live: ${record.title}`);
+    await integration.stopLive?.(signal()).catch(() => false);
 
     process.stdout.write("\n");
     try {
