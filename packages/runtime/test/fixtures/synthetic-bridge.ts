@@ -15,7 +15,7 @@ export function bridge(options: Options = {}) {
   const records: ChangeRecord[] = [];
   let tempo = 120;
   let live = true; let epoch = 7;
-  let tracks = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 }];
+  let tracks: { name: string; color: number; armed?: boolean }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 }];
   let undoRefusal: string | undefined;
   let applyFailure: "throw" | "uncertain" | "unreadable" | undefined;
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
@@ -25,7 +25,7 @@ export function bridge(options: Options = {}) {
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
     "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
     ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
-    ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop"] : [])];
+    ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop", "live_routing_preview", "live_routing_apply"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
   const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
@@ -67,7 +67,7 @@ export function bridge(options: Options = {}) {
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
-          ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color }))
+          ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true }))
           : args.kind === "device" && options.racks ? [
             { ref: "7:device:0:0", parentRef: "7:track:0", name: "Instrument Rack", className: "InstrumentGroupDevice", chainList: [{ ref: "7:chain:0:0:0", name: "Keys" }, { ref: "7:chain:0:0:1", name: "Pad" }] },
             { ref: "7:device:0:0:0:0", parentRef: "7:chain:0:0:0", name: "Operator", className: "Operator" },
@@ -116,7 +116,14 @@ export function bridge(options: Options = {}) {
           if (transaction.args.action === "stop") transport.playing = false;
           return wrap({ transactionId: args.transactionId, state: "applied", done: transaction.args.action });
         }
+        if (transaction.name === "live_routing_preview" && typeof transaction.args.arm === "boolean") {
+          const index = Number(String(transaction.args.trackRef).split(":").at(-1));
+          if (tracks[index]) tracks[index] = { ...tracks[index]!, armed: transaction.args.arm };
+          return wrap({ transactionId: args.transactionId, state: "applied" });
+        }
         if (transaction.name === "live_recording_preview") {
+          // Like the bridge: the destination must be the only armed track.
+          if (transaction.args.action === "start" && tracks.some((track, index) => track.armed && `7:track:${index}` !== transaction.args.destinationTrackRef)) return refusal("adapter request failed");
           const on = transaction.args.action === "start";
           if (transaction.args.lane === "arrangement") transport.arrangementRecord = on; else transport.sessionRecord = on;
           // Like the bridge when Live doesn't confirm in time: it happened, but the answer can't say so.
@@ -188,6 +195,9 @@ export function bridge(options: Options = {}) {
       return { value, trips: deepest, calls: requests.length - before };
     },
     transport,
+    /** A track armed in Live (by the producer, or left armed). */
+    arm: (index: number, armed = true) => { if (tracks[index]) tracks[index] = { ...tracks[index]!, armed }; },
+    armed: () => tracks.flatMap((track, index) => (track.armed ? [index] : [])),
     liveAway: () => { live = false; },
     liveBack: () => { live = true; epoch++; },
     refuseUndo: (text: string) => { undoRefusal = text; },

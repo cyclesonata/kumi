@@ -936,7 +936,18 @@ export function createAbletonIntegration(options: Options): Integration {
    * the same preview and apply as a change, with the same checks, but no HISTORY entry or undo.
    */
   async function act(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup = false): Promise<{ text: string; isError: boolean; maybe?: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
-    const outcome = await actOnce(kind, named, originalSignal, cleanup);
+    // Live records onto one armed track only: another one armed (a leftover, or one the producer
+    // armed) refuses the recording. It's disarmed first, each a change with its undo, and said.
+    let disarmed: string[] = [];
+    if (kind.tool === "record" && named.action === "start" && typeof named.destinationTrackRef === "string" && !cleanup) {
+      const cleared = await disarmOthers(named.destinationTrackRef, originalSignal);
+      if (typeof cleared === "string") return { text: cleared, isError: true };
+      disarmed = cleared;
+    }
+    const recorded = await actOnce(kind, named, originalSignal, cleanup);
+    const first = `after disarming ${disarmed.join(", ")}`;
+    const outcome = disarmed.length && !recorded.isError ? { ...recorded, text: JSON.stringify({ ...JSON.parse(recorded.text) as JsonObject, disarmedFirst: disarmed }),
+      ...(recorded.done ? { done: { ...recorded.done, title: `${recorded.done.title}, ${first}` } } : {}) } : recorded;
     // Stopping must work whatever Live is doing: when the ordinary stop is refused, stop everything.
     const stopping = (kind.tool === "play" && named.action === "stop") || (kind.tool === "record" && named.action === "stop");
     if (!outcome.isError || !stopping || originalSignal.aborted) return outcome;
@@ -944,6 +955,23 @@ export function createAbletonIntegration(options: Options): Integration {
     const done = kind.tool === "record" ? { title: "Recording stopped", recording: false, playing: false } : { title: "Stopped", playing: false };
     try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
     return { text: JSON.stringify({ done: done.title, note: "Live's ordinary stop was refused, so Kumi stopped clips, the transport and recording together." }), isError: false, done };
+  }
+  /** Disarms every armed track but `destination`, each a change; their names, or why one couldn't be. */
+  async function disarmOthers(destination: string, signal: AbortSignal): Promise<string[] | string> {
+    const read = await invoke("live_discover", { kind: "track", fields: ["ref", "name", "armed"], limit: 100 }, signal);
+    // Unread, the recording's own check decides.
+    if (read.isError) return [];
+    let items: { ref?: unknown; name?: unknown; armed?: unknown }[] = [];
+    try { items = ((JSON.parse(read.text) as { live?: { items?: typeof items } }).live?.items ?? []); } catch { return []; }
+    const routing = CHANGES.find((candidate) => candidate.tool === "set_routing");
+    const disarmed: string[] = [];
+    for (const track of items.filter((item) => item.armed === true && typeof item.ref === "string" && item.ref !== destination && item.ref !== lengthen(destination))) {
+      const name = typeof track.name === "string" ? track.name.slice(0, 80) : "a track";
+      const outcome = routing ? await change(routing, { trackRef: track.ref as string, arm: false }, signal) : { text: "Live doesn't offer disarming here", isError: true };
+      if (outcome.isError) return `${name} is armed too, and Live records onto one armed track only; Kumi couldn't disarm it: ${outcome.text.slice(0, 200)}`;
+      disarmed.push(name);
+    }
+    return disarmed;
   }
   async function actOnce(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup: boolean): Promise<{ text: string; isError: boolean; maybe?: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);

@@ -199,3 +199,27 @@ test("moving a device retires its track's device references, so a later step can
     assert.equal(b.requests.filter((request) => request.name === "live_device_preview").length, 1, "only the move reached Live");
   } finally { await b.integration.close(); }
 });
+
+test("recording starts after Kumi disarms any other armed track, each a change with its undo, and says which", async () => {
+  const b = await opened({ transport: true, version: FIXED_BRIDGE });
+  try {
+    b.arm(1);
+    // The bridge records onto one armed track only; the destination is armed in the same plan.
+    const tracks = await tool(b.tools, "live_discover").execute({ kind: "track", fields: ["ref", "name", "armed"] }, signal());
+    const destination = (JSON.parse(tracks.text) as { live: { items: { ref: string }[] } }).live.items[0]!.ref;
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "set_routing", input: { trackRef: destination, arm: true } },
+      { tool: "record", input: { action: "start", lane: "arrangement", destinationTrackRef: destination } },
+      { tool: "record", input: { action: "stop", lane: "arrangement" } },
+    ] }, signal());
+    assert.equal(plan.isError, false, plan.text);
+    assert.deepEqual(b.armed(), [0], "only the destination stays armed");
+    assert.match(plan.text, /Recording in the Arrangement on Fixture Bass, after disarming Fixture Drums/);
+    const disarm = b.records.find((record) => record.title === "Fixture Drums: disarmed");
+    assert.ok(disarm && disarm.state === "applied", "the disarm is in HISTORY, undoable");
+    // Nothing else armed: nothing is disarmed.
+    const again = await tool(b.tools, "record").execute({ action: "start", lane: "arrangement", destinationTrackRef: destination }, signal());
+    assert.equal(again.isError, false, again.text);
+    assert.doesNotMatch(again.text, /disarmedFirst/);
+  } finally { await b.integration.close(); }
+});
