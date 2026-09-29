@@ -1,8 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type {
   ChangeRecord, ConnectionState, ConversationStore, DisconnectCause, Integration, IntegrationFactory, JsonObject, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
-  SessionController, SessionEvent, SessionStatus, ToolResult, TurnResult, TurnState,
-} from "./contracts.js";
+  SessionController, SessionEvent, SessionStatus, ToolResult, TurnResult, TurnState, PinnedNode } from "./contracts.js";
 import { KumiError } from "./errors.js";
 import { memoryInstructions, memoryTools } from "./memory.js";
 import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
@@ -339,12 +338,12 @@ export function createSession(options: Options): SessionController {
       ...(conversationChanges.length ? { changes: conversationChanges.slice(-MAX_CHANGES) } : {}) };
     saving = saving.then(() => store.save(where, id, conversation)).catch(() => {});
   }
-  async function observe(op: Operation) {
+  async function observe(op: Operation, pinned?: PinnedNode) {
     assertCurrent(op);
     if (!integration) throw new Error("Integration not started");
     op.phase = "refresh";
     observationLabel = undefined;
-    const snapshot = await integration.observe(op.controller.signal);
+    const snapshot = await integration.observe(op.controller.signal, pinned ? { pinned } : undefined);
     assertCurrent(op);
     // The Set was saved since the last look (its first save, or its file written again): a technique
     // drafted from work in it is kept.
@@ -466,7 +465,7 @@ export function createSession(options: Options): SessionController {
       if (started) return Promise.reject(new Error("Session already started"));
       return perform(false, "start", async (op) => { await reset(op); return undefined; });
     },
-    submit(input) {
+    submit(input, extra) {
       if (state === "closed") return Promise.reject(new Error("Session is closed"));
       if (active) return Promise.reject(new Error("Session is busy; cancel first"));
       if (!started) return Promise.reject(new Error("Session is not started"));
@@ -476,7 +475,7 @@ export function createSession(options: Options): SessionController {
       // A new request: the one Live's going away stopped isn't offered again.
       interrupted = undefined;
       return perform(true, "refresh", async (op) => {
-        const snapshot = await observe(op); assertCurrent(op);
+        const snapshot = await observe(op, extra?.pinned); assertCurrent(op);
         // The Set as it is now (read first: a deleted build's gone), then the producer's words, may say
         // what they thought of the last build; and a new turn begins.
         learned?.drafts.said(input); learned?.drafts.turnStarted(input);
@@ -591,6 +590,10 @@ export function createSession(options: Options): SessionController {
       if (!recipe || !await options.recipes!.remove(recipe.name)) return false;
       emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
       return true;
+    },
+    async deviceTree(trackRef) {
+      if (!integration?.deviceTree || connection !== "connected") return undefined;
+      return integration.deviceTree(trackRef, AbortSignal.timeout(10_000)).catch(() => undefined);
     },
     async stopLive() {
       if (!integration?.stopLive) return false;

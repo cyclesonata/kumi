@@ -1143,3 +1143,58 @@ test("/status says the tokens this session's answers took on an API key, and not
   assert.ok(!plan.screen().join("\n").includes("tokens in"));
   await plan.app.close();
 });
+
+test("FOCUS's Device view draws the track's devices as a tree; a row pointed at by mouse or keyboard goes with the next message", async () => {
+  const fx = (ref: string, name: string) => ({ ref, name, className: name, deviceType: "audio_effect" as const });
+  const tree = { trackRef: "3:track:3", devices: [fx("d0", "Chorus-Ensemble"), fx("d1", "Compressor"),
+    { ref: "d2", name: "Audio Effect Rack", className: "AudioEffectGroupDevice", canHaveChains: true, chains: [
+      { ref: "c0", name: "Chain 1", devices: [fx("d2a", "Saturator"), fx("d2b", "EQ Eight")] }, { ref: "c1", name: "Chain 2", devices: [fx("d2c", "Utility")] }] },
+    fx("d3", "Gate")] };
+  const reads: string[] = []; const sent: unknown[] = [];
+  const h = harness(120, 40, undefined, {
+    async deviceTree(ref) { reads.push(ref); return tree; },
+    async submit(text, extra) { sent.push({ text, ...(extra ?? {}) }); },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const focus = { track: { name: "4-Audio", color: "#e2b93b", kind: "audio" as const }, trackRef: "3:track:3", device: "Saturator", chain: "Chain 1", detail: "Device" as const, view: "Session" as const };
+  h.emit({ type: "focus", focus });
+  await delay(5);
+  let lines = h.screen();
+  for (const row of ["FOCUS · Device", "■  4-Audio", "├ ≈  Chorus-Ensemble", "├ ▣  Audio Effect Rack", "│ ├ ○  Chain 1", "│ │ ├ ≈  Saturator", "│ │ └ ≈  EQ Eight", "│ └ ○  Chain 2 (1)", "└ ≈  Gate"]) assert.ok(has(lines, row), row);
+  // The focus feed reads twice a second; the tree is read again only when the track or its selected device changes.
+  h.emit({ type: "focus", focus: { ...focus } });
+  h.emit({ type: "focus", focus: { ...focus, device: "EQ Eight" } });
+  await delay(5);
+  assert.equal(reads.length, 2);
+  h.emit({ type: "focus", focus });
+  await delay(5);
+  // By mouse: the row is pointed at, and shown above the input box.
+  lines = h.screen();
+  const row = lines.findIndex((line) => line.includes("│ │ ├ ≈  Saturator"));
+  await h.type(click(lines, row, "Saturator"));
+  lines = h.screen();
+  assert.ok(has(lines, "≈  Audio Effect Rack › Chain 1 › Saturator  ×"));
+  await h.type("make it gentler\r");
+  await delay(5);
+  assert.deepEqual(sent.at(-1), { text: "make it gentler", pinned: { trackRef: "3:track:3", ref: "d2a", node: "device", name: "Saturator", trail: ["Audio Effect Rack", "Chain 1"], siblings: ["EQ Eight"], track: "4-Audio" } });
+  // Esc clears it; × does too.
+  await h.type("\u001b");
+  await delay(30);
+  assert.ok(!has(h.screen(), "Chain 1 › Saturator  ×"));
+  // By keyboard: Tab moves into the tree at what's selected in Live, arrows move, Enter points.
+  await h.type("\t");
+  await h.type("\u001b[B");
+  await h.type("\r");
+  lines = h.screen();
+  assert.ok(has(lines, "≈  Audio Effect Rack › Chain 1 › EQ Eight  ×"));
+  await h.type("and brighter\r");
+  await delay(5);
+  assert.equal((sent.at(-1) as { pinned: { name: string } }).pinned.name, "EQ Eight");
+  lines = h.screen();
+  const clear = lines.findIndex((line) => line.includes("EQ Eight  ×"));
+  await h.type(click(lines, clear, "×"));
+  assert.ok(!has(h.screen(), "EQ Eight  ×"));
+  await h.app.close();
+});

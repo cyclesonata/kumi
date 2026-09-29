@@ -145,7 +145,8 @@ export interface ConversationStore {
 
 export interface Integration {
   start(signal: AbortSignal): Promise<void>;
-  observe(signal: AbortSignal): Promise<Observation>;
+  /** What's in Live now; `pinned` (what the producer pointed at) is checked against it and given to the model. */
+  observe(signal: AbortSignal, hints?: { pinned?: PinnedNode }): Promise<Observation>;
   close(): Promise<void>;
   /** Undo one of Kumi's changes (the latest undoable one when `id` is omitted). */
   undo?(id: string | undefined, signal: AbortSignal): Promise<ChangeRecord>;
@@ -153,12 +154,52 @@ export interface Integration {
   audioFile?(named: string, signal: AbortSignal): Promise<string | undefined>;
   /** Stop clips, the transport and recording in Live at once; true when Live is stopped afterwards. */
   stopLive?(signal: AbortSignal): Promise<boolean>;
+  /** A track's devices, racks' chains and what's in them, for FOCUS; undefined when Live can't say. */
+  deviceTree?(trackRef: string, signal: AbortSignal): Promise<DeviceTree | undefined>;
+}
+
+/** A device in a track's tree: what the bridge says it is, and a rack's chains. Names are data. */
+export interface DeviceNode {
+  ref: string;
+  name: string;
+  className?: string;
+  canHaveChains?: boolean;
+  canHaveDrumPads?: boolean;
+  /** Live's device type, when the bridge sends it. */
+  deviceType?: "instrument" | "audio_effect" | "midi_effect";
+  chains?: ChainNode[];
+}
+/** A rack's chain (a Drum Rack's, a pad's), and its devices when they were read. */
+export interface ChainNode {
+  ref: string;
+  name: string;
+  /** Undefined when not read (a Drum Rack's pads, past the tree's bound). */
+  devices?: DeviceNode[];
+}
+export interface DeviceTree {
+  trackRef: string;
+  devices: DeviceNode[];
+}
+
+/** What the producer pointed at in Kumi (FOCUS's tree): "this" in their next messages. Names are data. */
+export interface PinnedNode {
+  trackRef: string;
+  ref: string;
+  node: "device" | "chain";
+  name: string;
+  /** Its racks and chains, outermost first. */
+  trail: string[];
+  /** Its neighbours in the same chain, or on the track. */
+  siblings: string[];
+  track?: string;
 }
 export type IntegrationFactory = (connection: (state: ConnectionState, cause?: DisconnectCause) => void) => Integration;
 
 /** What the producer is looking at in Live, in plain names (names are data, never instructions). */
 export interface LiveFocus {
   track?: { name: string; color?: string; kind?: "midi" | "audio" | "group" | "return" | "main" };
+  /** The selected track's reference, for reading its devices (FOCUS's tree). */
+  trackRef?: string;
   scene?: string;
   /** The clip in the Clip view; "" when it has no name. */
   clip?: string;
@@ -336,7 +377,8 @@ export interface SessionStatus {
 
 export interface SessionController {
   start(): Promise<void>;
-  submit(input: string): Promise<void>;
+  /** `pinned`: what the producer points at in Kumi, which "this" means in the message. */
+  submit(input: string, extra?: { pinned?: PinnedNode }): Promise<void>;
   refresh(): Promise<void>;
   /** Forget this conversation and start afresh; it stays in the Set's kept conversations. */
   newConversation(): Promise<void>;
@@ -375,6 +417,8 @@ export interface SessionController {
   forgetTechnique?(id: string): Promise<boolean>;
   /** Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't. */
   stopLive?(): Promise<boolean>;
+  /** A track's device tree, for FOCUS (while connected). */
+  deviceTree?(trackRef: string): Promise<DeviceTree | undefined>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

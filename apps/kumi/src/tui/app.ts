@@ -3,8 +3,8 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type RecipeSummary, type SessionController, type SessionEvent,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -19,6 +19,8 @@ import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
 import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
+import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
+import { treeRows, treeWindow, type TreeRow } from "./tree.js";
 import { textWidth, truncate } from "./width.js";
 import { wrap } from "./wrap.js";
 
@@ -39,6 +41,8 @@ export interface TuiOptions {
   history?: InputHistory;
   /** Opens a sign-in link in the producer's browser; without it the link is only shown (tests). */
   openBrowser?: (url: string) => void;
+  /** Icons as glyphs or two-letter badges; found from the terminal when left out. */
+  icons?: IconStyle;
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -182,6 +186,16 @@ export class TuiApp {
   private readonly editor = new Editor();
   /** What this session's answers took, for /status on an API key. */
   private readonly used = { input: 0, output: 0, cached: 0, answers: 0 };
+  private readonly icons: IconStyle;
+  /** FOCUS's device view: the focused track's devices, read when the track or its selected device changes. */
+  private tree: DeviceTree | undefined;
+  private treeKey: string | undefined;
+  private treeReading = false;
+  private treeAgain = false;
+  /** The keyboard's place in the tree (Tab moves into it); undefined while typing. */
+  private treeCursor: number | undefined;
+  /** What the producer points at: shown above the input box and sent with each message until cleared. */
+  private pinned: (PinnedNode & { kind: IconKind }) | undefined;
   private readonly transcript = new Transcript();
   /** Kept out of everything shown; keys pasted into Kumi join it. */
   private readonly secrets: string[];
@@ -241,6 +255,7 @@ export class TuiApp {
     this.stream = new StreamingText(this.secrets);
     this.connection = options.mode === "inference-only" ? "disconnected" : "connecting";
     this.depth = options.colorDepth ?? detectColorDepth();
+    this.icons = options.icons ?? detectIconStyle();
     this.renderer = new Renderer(this.depth);
     this.scheduler = new FrameScheduler(() => this.draw(), options.frameMs ?? 16);
     this.tty = new Tty({
@@ -317,6 +332,7 @@ export class TuiApp {
         break;
       case "focus":
         this.focus = event.focus;
+        this.readTree();
         break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());
@@ -349,6 +365,8 @@ export class TuiApp {
           if (this.changes.length > 500) this.changes.shift();
           if (this.current) this.turnChanges++;
           this.lastChange = { id: event.change.id, at: performance.now() };
+          // A change on the focused track may have added or moved devices.
+          if (event.change.track?.name && event.change.track.name === this.focus?.track?.name) this.readTree(true);
           // NOW shows the change for a moment, then one more frame puts it back.
           setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
         }
@@ -528,6 +546,8 @@ export class TuiApp {
     if (this.closing) return;
     if (this.panel && (event.type === "text" || event.type === "paste" || event.type === "key")) { this.panelInput(event); this.scheduler.request(); return; }
     if (event.type === "text" || event.type === "paste") {
+      // Typing goes back to the input box.
+      this.treeCursor = undefined;
       this.editor.insert(sanitizeText(event.text));
       this.menuDismissed = false;
     } else if (event.type === "key") {
@@ -544,6 +564,22 @@ export class TuiApp {
     const { name, ctrl, alt, shift } = event;
     const menu = this.menu();
     const width = this.inputWidth();
+    // In FOCUS's tree: arrows move, Enter points at the row, Esc or Tab goes back to typing.
+    if (this.treeCursor !== undefined) {
+      const rows = this.treeShown();
+      if (!rows) this.treeCursor = undefined;
+      else if (!ctrl && !alt && (name === "up" || name === "down")) { this.treeCursor = Math.max(0, Math.min(rows.length - 1, this.treeCursor + (name === "up" ? -1 : 1))); return; }
+      else if (!ctrl && !alt && name === "enter") { this.pin(rows[Math.min(this.treeCursor, rows.length - 1)]!); this.treeCursor = undefined; return; }
+      else if (name === "escape" || name === "tab") { this.treeCursor = undefined; return; }
+      else this.treeCursor = undefined;
+    }
+    // Tab, outside the command menu, moves into the tree, at what's selected in Live.
+    if (name === "tab" && !menu.length && !ctrl && !alt) {
+      const shown = this.tree && this.focus?.trackRef === this.tree.trackRef ? (this.treeCursor = 0, this.treeShown()) : undefined;
+      if (shown) { const at = shown.findIndex((row) => row.role === "focus"); this.treeCursor = at >= 0 ? at : 0; }
+      else this.treeCursor = undefined;
+      return;
+    }
     if (ctrl && name === "c") {
       if (this.busy) this.cancel();
       else if (!this.editor.isEmpty) this.editor.clear();
@@ -558,6 +594,7 @@ export class TuiApp {
     if (name === "escape") {
       if (menu.length) this.menuDismissed = true;
       else if (this.busy) this.cancel();
+      else if (this.pinned) this.unpin();
       return;
     }
     if (menu.length && (name === "up" || name === "down")) {
@@ -698,6 +735,45 @@ export class TuiApp {
   // ---- the model, and signing in
 
   /** The model for the header and /status: "Claude Sonnet 5.5 · high". */
+  /**
+   * Read the focused track's device tree when the track, or the device selected on it, changes (or,
+   * `again`, after a change on it). One read at a time; a change meanwhile reads once more after.
+   */
+  private readTree(again = false): void {
+    const ref = this.focus?.trackRef; const read = this.options.controller.deviceTree;
+    if (!ref || !read || this.connection !== "connected") return;
+    const key = `${ref}\u0000${this.focus?.device ?? ""}`;
+    if (!again && key === this.treeKey) return;
+    this.treeKey = key;
+    if (this.treeReading) { this.treeAgain = true; return; }
+    this.treeReading = true;
+    void read.call(this.options.controller, ref).then((tree) => { if (tree && tree.trackRef === this.focus?.trackRef) this.tree = tree; }, () => {})
+      .finally(() => {
+        this.treeReading = false;
+        if (this.treeAgain) { this.treeAgain = false; this.readTree(true); }
+        if (!this.closing) this.scheduler.request();
+      });
+  }
+
+  /** The tree's rows while FOCUS shows it: Live's Device view on the focused track, or the keyboard in it. */
+  private treeShown(): TreeRow[] | undefined {
+    const focus = this.focus; const tree = this.tree;
+    if (this.connection !== "connected" || !focus?.track || !tree || tree.trackRef !== focus.trackRef) return undefined;
+    if (focus.detail !== "Device" && this.treeCursor === undefined) return undefined;
+    const rows = treeRows(tree, { ...(focus.device ? { device: focus.device } : {}), ...(focus.chain ? { chain: focus.chain } : {}) });
+    return rows.length ? rows : undefined;
+  }
+
+  /** Point at a row: it's shown above the input box, and "this" in the next messages means it. */
+  private pin(row: TreeRow): void {
+    const focus = this.focus;
+    if (!focus?.trackRef) return;
+    this.pinned = { trackRef: focus.trackRef, ref: row.ref, node: row.node, name: row.name, trail: row.trail, siblings: row.siblings, kind: row.kind, ...(focus.track ? { track: focus.track.name } : {}) };
+    this.scheduler.request();
+  }
+
+  private unpin(): void { this.pinned = undefined; this.scheduler.request(); }
+
   /**
    * On an API key, what this session's answers took, for /status: tokens, which is what the provider
    * bills (its prices aren't in its model list, so Kumi doesn't guess a cost). A ChatGPT plan isn't
@@ -1116,7 +1192,8 @@ export class TuiApp {
     this.activity = "thinking";
     this.pendingTurn = true;
     this.scheduler.request();
-    try { await this.options.controller.submit(raw); }
+    const pinned = this.pinned ? (({ kind: _kind, ...node }) => node)(this.pinned) : undefined;
+    try { await this.options.controller.submit(raw, pinned ? { pinned } : undefined); }
     catch (error) {
       // Refused before it started (busy, closed): no turn is coming.
       this.pendingTurn = false;
@@ -1191,11 +1268,14 @@ export class TuiApp {
     const boxHeight = visibleRows + 2;
     const boxTop = rows - 1 - boxHeight;
     const dock = pane ? 0 : 2;
-    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3) };
+    // What the producer points at sits just above the input box, taking a line from the conversation.
+    const chip = this.pinned ? 1 : 0;
+    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3 - chip) };
     this.page = Math.max(1, conversation.height - 2);
     this.drawConversation(screen, conversation);
     if (pane) this.drawPane(screen, { x: left, y: 1, width: pane, height: rows - 1 });
     else this.drawDock(screen, { x: 0, y: boxTop - dock - 1, width: columns, height: dock });
+    if (chip) this.drawPin(screen, 3, boxTop - dock - 2, left - 6);
     let cursor: Cursor | undefined = this.drawComposer(screen, { x: 1, y: boxTop, width: left - 2, height: boxHeight }, layout, visibleRows);
     if (this.panel) cursor = this.drawPanel(screen, this.panel, boxTop, left);
     else this.drawMenu(screen, boxTop, left);
@@ -1355,28 +1435,90 @@ export class TuiApp {
     const width = area.width - 4;
     const put = (row: number, text: string, style: Style) => screen.put(x, area.y + row, truncate(text, width), style);
     put(1, "FOCUS", st.label);
-    if (!this.drawFocusPath(screen, x, area.y + 2, width, true)) this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
-    put(6, "NOW", st.label);
+    // Live's Device view on the focused track: its devices as a tree (HISTORY gives up the room).
+    const rows = this.treeShown();
+    let nowAt = 6;
+    if (rows) {
+      screen.put(x + 5, area.y + 1, " · Device", st.faint);
+      nowAt = 3 + this.drawTree(screen, x, area.y + 2, width, rows, Math.max(3, Math.min(12, area.height - 16))) + 1;
+    } else if (!this.drawFocusPath(screen, x, area.y + 2, width, true)) this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
+    put(nowAt, "NOW", st.label);
     const now = this.nowLine();
     if (now.dot) {
       const label = ` ${now.label}`;
       const at = x + width - textWidth(label) - 1;
-      screen.put(at, area.y + 6, "●", now.dot);
-      screen.put(at + 1, area.y + 6, label, st.dim);
+      screen.put(at, area.y + nowAt, "●", now.dot);
+      screen.put(at + 1, area.y + nowAt, label, st.dim);
     }
-    put(7, now.detail, now.detailStyle);
+    put(nowAt + 1, now.detail, now.detailStyle);
     const picture = this.flashing() ? changePicture(this.flashing()!, width, this.depth) : undefined;
     picture?.slice(0, 2).forEach((line, row) => {
       let column = x;
-      for (const part of line) column = screen.put(column, area.y + 8 + row, part.text, part.style);
+      for (const part of line) column = screen.put(column, area.y + nowAt + 2 + row, part.text, part.style);
     });
     // MEMORY, under HISTORY, once Kumi has kept something this session: its latest three, each with its forget.
     const shown = Math.min(3, this.kept.length);
     const memoryRows = shown ? shown + 2 + (this.kept.length > shown ? 1 : 0) : 0;
-    const historyRows = Math.max(0, area.height - 12 - memoryRows);
-    put(10, "HISTORY", st.label);
-    this.drawHistory(screen, { x, y: area.y + 11, width, height: historyRows });
-    if (shown && historyRows >= 2) this.drawMemory(screen, { x, y: area.y + 11 + historyRows + 1, width, height: memoryRows - 1 });
+    const historyRows = Math.max(0, area.height - nowAt - 6 - memoryRows);
+    put(nowAt + 4, "HISTORY", st.label);
+    this.drawHistory(screen, { x, y: area.y + nowAt + 5, width, height: historyRows });
+    if (shown && historyRows >= 2) this.drawMemory(screen, { x, y: area.y + nowAt + 5 + historyRows + 1, width, height: memoryRows - 1 });
+  }
+
+  /** "▣ Audio Effect Rack › Chain 1 › Saturator  ×": what the next messages mean by "this"; × clears it. */
+  private drawPin(screen: Screen, x: number, y: number, width: number): void {
+    const pin = this.pinned!;
+    const clear = "×";
+    const mark = icon(pin.kind, this.icons);
+    let column = screen.put(x, y, mark.text, mark.style) + 1;
+    const room = Math.max(1, x + width - column - 3);
+    const parts = fitCrumbs([...(pin.trail.length ? pin.trail : pin.track ? [pin.track] : []), pin.name], room);
+    parts.forEach((part, index) => {
+      if (index > 0) column = screen.put(column, y, " › ", st.faint);
+      column = screen.put(column, y, part, index === parts.length - 1 ? st.bright : st.dim);
+    });
+    const at = column + 2;
+    screen.put(at, y, clear, st.faint);
+    this.hits.push({ x: at, y, width: 1, action: () => this.unpin() });
+  }
+
+  /**
+   * The track, then its tree: lines faint, the path to what's selected in Live in plain text, the rest
+   * quieter, what's selected (or pointed at) in the accent. At most `most` rows, the rest folded to
+   * "n more". Clicking a row points at it. The rows it used, the track's included.
+   */
+  private drawTree(screen: Screen, x: number, y: number, width: number, rows: readonly TreeRow[], most: number): number {
+    const track = this.focus!.track!;
+    const mark = icon(trackKind(track.kind), this.icons, chipColor(track.color));
+    screen.put(x, y, mark.text, mark.style);
+    screen.put(x + 3, y, truncate(track.name, Math.max(1, width - 3)), st.text);
+    const focused = rows.some((row) => row.role === "focus");
+    const keep = this.treeCursor ?? rows.findIndex((row) => row.role === "focus");
+    const view = treeWindow(rows, most, keep);
+    // Folded ends take a row each, from the window's own.
+    const cutAbove = view.above > 0 ? 1 : 0; const cutBelow = view.below > 0 ? 1 : 0;
+    const visible = view.rows.slice(cutAbove, view.rows.length - cutBelow);
+    let row = y + 1;
+    if (cutAbove) screen.put(x, row++, `  ${view.above + 1} more`, st.faint);
+    visible.forEach((item) => {
+      const index = rows.indexOf(item);
+      const cursor = this.treeCursor === index;
+      if (cursor) screen.fill({ x: x - 1, y: row, width: width + 2, height: 1 }, st.selected);
+      let column = screen.put(x, row, item.prefix, st.faint);
+      const mark = icon(item.kind, this.icons);
+      column = screen.put(column, row, mark.text, mark.style) + 1;
+      const emphasis = item.role === "focus" || item.ref === this.pinned?.ref;
+      const style = emphasis ? st.accent : !focused || item.role === "path" ? st.text : st.dim;
+      const count = item.count ? ` (${item.count})` : "";
+      const name = truncate(item.name, Math.max(1, x + width - column - textWidth(count)));
+      column = screen.put(column, row, name, style);
+      if (count) screen.put(column, row, count, st.faint);
+      const at = row;
+      this.hits.push({ x, y: at, width, action: () => { this.treeCursor = undefined; this.pin(item); } });
+      row++;
+    });
+    if (cutBelow) screen.put(x, row++, `  ${view.below + 1} more`, st.faint);
+    return row - y;
   }
 
   /** What Kumi kept this session, newest first, each with its forget (or "forgotten"). */

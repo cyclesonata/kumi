@@ -6,7 +6,7 @@ import { basename, dirname } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { CatchUp, ChangeRecord, ConnectionState, DisconnectCause, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
+import type { CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
@@ -662,6 +662,76 @@ export function createAbletonIntegration(options: Options): Integration {
     };
   }
 
+  /**
+   * A track's devices, level by level: the track's own, then each rack's chains read together
+   * (one of Live's display ticks per level), to a bound. A Drum Rack's pads are listed, not opened.
+   * The model's references aren't touched: this is for FOCUS and for checking a pin.
+   */
+  async function readDeviceTree(trackRef: string, signal: AbortSignal): Promise<DeviceTree | undefined> {
+    if (!available || lost || !tools?.has("live_discover") || !/^\d+:track:\d+$/.test(trackRef)) return undefined;
+    const fields = ["parentRef", "name", "className", "canHaveChains", "canHaveDrumPads", "chainList", "deviceType"];
+    const read = async (parent: string): Promise<JsonObject[]> => {
+      const rows: JsonObject[] = []; let cursor: string | undefined;
+      for (let page = 0; page < 4; page++) {
+        const result = await tools!.call("live_discover", { kind: "device", parent, fields, limit: 100, ...(cursor ? { cursor } : {}) }, signal, { host: true });
+        if (result.isError) throw new ObservationError("Live didn't list the devices");
+        const body = payload(result);
+        rows.push(...(Array.isArray(body.items) ? body.items as JsonObject[] : []));
+        cursor = typeof body.nextCursor === "string" ? body.nextCursor : undefined;
+        if (!cursor) break;
+      }
+      return rows;
+    };
+    const node = (row: JsonObject): DeviceNode => ({
+      ref: String(row.ref), name: typeof row.name === "string" ? row.name.slice(0, 256) : "Device",
+      ...(typeof row.className === "string" ? { className: row.className.slice(0, 128) } : {}),
+      ...(typeof row.canHaveChains === "boolean" ? { canHaveChains: row.canHaveChains } : {}),
+      ...(typeof row.canHaveDrumPads === "boolean" ? { canHaveDrumPads: row.canHaveDrumPads } : {}),
+      ...(row.deviceType === "instrument" || row.deviceType === "audio_effect" || row.deviceType === "midi_effect" ? { deviceType: row.deviceType } : {}),
+      ...(Array.isArray(row.chainList) ? { chains: (row.chainList as JsonObject[]).filter((chain) => chain && typeof chain.ref === "string").slice(0, 128)
+        .map((chain) => ({ ref: String(chain.ref), name: typeof chain.name === "string" ? chain.name.slice(0, 256) : "Chain" })) } : {}),
+    });
+    try {
+      const devices = (await read(trackRef)).map(node);
+      let level: ChainNode[] = devices.filter((device) => device.canHaveDrumPads !== true).flatMap((device) => device.chains ?? []);
+      let count = devices.length;
+      for (let depth = 0; depth < 6 && level.length && count < 400; depth++) {
+        const read_ = await Promise.all(level.map((chain) => read(chain.ref)));
+        const next: ChainNode[] = [];
+        level.forEach((chain, index) => {
+          chain.devices = read_[index]!.map(node); count += chain.devices.length;
+          for (const device of chain.devices) if (device.canHaveDrumPads !== true) next.push(...(device.chains ?? []));
+        });
+        level = next;
+      }
+      return { trackRef, devices };
+    } catch { signal.throwIfAborted(); return undefined; }
+  }
+
+  /**
+   * What the producer pointed at in Kumi, checked against the Set now: still there (by its reference,
+   * or by name where it was), it's given to the model with a reference for this turn; gone, it says so.
+   */
+  async function checkPin(pin: PinnedNode, signal: AbortSignal): Promise<JsonObject> {
+    const tree = await readDeviceTree(pin.trackRef, signal).catch(() => undefined);
+    const found: { ref: string; trail: string[] }[] = [];
+    const walk = (devices: readonly DeviceNode[], trail: string[]) => {
+      for (const device of devices) {
+        if (pin.node === "device" && device.name === pin.name) found.push({ ref: device.ref, trail });
+        for (const chain of device.chains ?? []) {
+          if (pin.node === "chain" && chain.name === pin.name) found.push({ ref: chain.ref, trail: [...trail, device.name] });
+          walk(chain.devices ?? [], [...trail, device.name, chain.name]);
+        }
+      }
+    };
+    if (tree) walk(tree.devices, []);
+    const same = found.find((item) => item.ref === pin.ref) ?? found.find((item) => item.trail.join("\u0000") === pin.trail.join("\u0000"));
+    if (!same) return { gone: `The producer pointed at “${pin.name}”${pin.track ? ` on ${pin.track}` : ""} in Kumi, and it isn't there any more: say so, and ask what they mean.` };
+    refs.set(same.ref, pin.node);
+    return { ref: shortRef(same.ref), kind: pin.node, name: pin.name, ...(same.trail.length ? { in: same.trail.join(" › ") } : {}), ...(pin.track ? { track: pin.track } : {}),
+      ...(pin.siblings.length ? { nextTo: pin.siblings.slice(0, 12) } : {}), note: "The producer pointed at this in Kumi: \"this\", \"this device\" or \"this group\" in their message means it." };
+  }
+
   /** Saved versions of the Set copied this session (file, size, time): one copy each. */
   const copied = new Set<string>();
   /**
@@ -1261,6 +1331,8 @@ export function createAbletonIntegration(options: Options): Integration {
       }
     },
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
+    /** A track's devices, racks' chains and what's in them, for FOCUS. */
+    deviceTree: (trackRef, signal) => readDeviceTree(trackRef, AbortSignal.any([signal, lifetime.signal])),
     /** An audio clip in the Set, named by its clipRef from discovery, as the file it plays; undefined for anything that isn't a clip. */
     async audioFile(named, originalSignal) {
       const given = named.trim(); const ref = longRefs.get(given) ?? given;
@@ -1281,7 +1353,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
       return clip.filePath;
     },
-    async observe(originalSignal) {
+    async observe(originalSignal, hints) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       signal.throwIfAborted();
       if (!started || closed) throw new ObservationError("Integration is not open");
@@ -1383,6 +1455,8 @@ export function createAbletonIntegration(options: Options): Integration {
         const continues = previous !== undefined && (previous.identity === identity || (reconnected && !otherFile));
         const key = continues ? previous!.key : JSON.stringify([generation, epoch, identity]);
         const afterReconnect = reconnected; reconnected = false;
+        // What the producer pointed at in Kumi, if it's still there, for "this" in their message.
+        const pinned = hints?.pinned ? await checkPin(hints.pinned, signal) : undefined; assertLease(lease, signal);
         project = { identity, name, ...(path ? { path } : {}) };
         previous = { key, name, identity, ...(path ? { path, project: { id: projectIdOf(path), name } } : {}) };
         if (newSet) catchUp(identity, name, afterReconnect);
@@ -1404,6 +1478,7 @@ export function createAbletonIntegration(options: Options): Integration {
               ...(songState ? { recording: { session: songState.sessionRecord === true, arrangement: row.recording ?? null }, swing: songState.swingAmount ?? null } : {}) },
             ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
+            ...(pinned ? { pinned } : {}),
             // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
             ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
