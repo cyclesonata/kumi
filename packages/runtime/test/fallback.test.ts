@@ -26,3 +26,16 @@ test("a bridge that won't start leaves Kumi chatting without Live, saying how to
   const stopped = withFallback(integration("live", async () => { throw new KumiError("live", "x"); }, []), () => integration("chat", async () => {}, []), () => assert.fail("no fallback when stopped"));
   await assert.rejects(stopped.start(controller.signal), /x/);
 });
+
+test("while Live is there, everything the integration offers passes through: the device tree, and what the producer pointed at", async () => {
+  const seen: unknown[] = [];
+  const pinned = { trackRef: "1:track:0", ref: "1:device:0:0", node: "device" as const, name: "Saturator", trail: [], siblings: [] };
+  const live: Integration = { start: async () => {}, close: async () => {},
+    observe: async (_signal, hints) => { seen.push(hints); return observation("live"); },
+    deviceTree: async (trackRef) => ({ trackRef, devices: [] }) };
+  const wrapped = withFallback(live, () => integration("chat", async () => {}, []), () => {});
+  await wrapped.start(AbortSignal.timeout(1_000));
+  await wrapped.observe(AbortSignal.timeout(1_000), { pinned });
+  assert.deepEqual(seen, [{ pinned }]);
+  assert.deepEqual(await wrapped.deviceTree!("1:track:0", AbortSignal.timeout(1_000)), { trackRef: "1:track:0", devices: [] });
+});

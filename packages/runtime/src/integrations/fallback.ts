@@ -20,7 +20,7 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
         onFallback(error.message);
       }
     },
-    observe: (signal) => current.observe(signal),
+    observe: (signal, hints) => current.observe(signal, hints),
     close: () => current.close(),
     undo: (id, signal) => {
       if (!current.undo) throw new KumiError("request", "Kumi isn't connected to Live, so it can't undo.");
@@ -28,5 +28,6 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
     },
     audioFile: async (named, signal) => current.audioFile?.(named, signal),
     stopLive: async (signal) => (current.stopLive ? current.stopLive(signal) : false),
+    deviceTree: async (trackRef, signal) => current.deviceTree?.(trackRef, signal),
   };
 }

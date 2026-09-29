@@ -326,6 +326,9 @@ export class TuiApp {
       case "connection":
         // The session says what happened and what Kumi does about it (a notice).
         this.connection = event.state;
+        // Focus can arrive before the connection says so; the tree is read once it does. Gone, it goes.
+        if (event.state === "connected") this.readTree(true);
+        else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; }
         break;
       case "observation":
         this.setName = setNameFrom(event.label);

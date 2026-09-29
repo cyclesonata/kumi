@@ -37,6 +37,9 @@ test("two devices of one name are told apart by the chain selected in Live", () 
   assert.deepEqual(focusPathRefs(audio, "Saturator", "Chain 1"), ["d2", "c0", "d2a"]);
   assert.deepEqual(focusPathRefs(audio, "Saturator", undefined), ["d2", "c0", "d2a"], "else the first");
   assert.equal(focusPathRefs(audio, "Reverb", undefined), undefined);
+  // The selected device isn't on this track (Live keeps it from before), but the chain selected is: its path opens.
+  assert.deepEqual(focusPathRefs(audio, "Reverb", "Chain 2"), ["d2", "c1"]);
+  assert.deepEqual(lines(audio, { device: "Reverb", chain: "Chain 2" }).slice(2, 5), ["├ Audio Effect Rack ·", "│ ├ Chain 1 (2)", "│ └ Chain 2 ◀"]);
 });
 
 test("rows carry their kind, where they are and their neighbours, for the icon, the pin and the model", () => {

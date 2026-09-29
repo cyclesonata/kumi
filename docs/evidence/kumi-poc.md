@@ -1019,3 +1019,18 @@ Live reads `back_to_arranger` true after it; pressing Back to Arrangement (and S
 it false but the bounce stays silent, and nothing else in the song state or the tracks' playing
 slots differs from a fresh start. A Live restart clears it. Repro: `scene-add-undo.mjs`, then
 accept:live, in `.pi/kumi-evidence/kernel`.
+
+## FOCUS's device tree and pointing, on real Live
+
+Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.41). In Live, the track
+"Layered Pad" and its Instrument Rack's "Operator" chain were selected, and the Device view shown.
+
+- FOCUS read `FOCUS · Device`, `■  Layered Pad`, `└ ▣  Instrument Rack`, with the chains
+  `├ ○  Wavetable (2)` and `└ ○  Operator` open on `Operator`, `Reverb`, `Chorus-Ensemble`. Live
+  reported a selected device that isn't on that track, so the path opened to the selected chain.
+- Tab, ↓ ↓, Enter pointed at Reverb: the chip read `◇  Instrument Rack › Operator › Reverb  ×`.
+  Asked "What is this device, and where is it?", Kumi answered "It's Reverb, inside the Operator
+  chain of Layered Pad's Instrument Rack, between Operator and Chorus-Ensemble", with no reads.
+- Found on the way: the integration wrapper that falls back to chat without Live dropped both the
+  tree and the pin, and a focus that arrived before "connected" never read the tree. Both fixed.
+- Devices draw as ◇ until the bridge sends Live's device type.

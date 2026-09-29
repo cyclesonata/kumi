@@ -22,9 +22,25 @@ export interface TreeRow {
   siblings: string[];
 }
 
-/** Where Live's selected device is: the path of racks and chains to it, by reference; undefined when it isn't found. */
+/**
+ * Where Live's selection is: the path of racks and chains to the selected device, by reference, or,
+ * when that isn't on this track, to the selected chain; undefined when neither is found.
+ */
 export function focusPathRefs(tree: DeviceTree, device: string | undefined, chain: string | undefined): string[] | undefined {
-  if (!device) return undefined;
+  const onDevice = device ? devicePath(tree, device, chain) : undefined;
+  if (onDevice || !chain) return onDevice;
+  const walk = (devices: readonly DeviceNode[], trail: string[]): string[] | undefined => {
+    for (const item of devices) for (const child of item.chains ?? []) {
+      if (child.name === chain) return [...trail, item.ref, child.ref];
+      const deeper = walk(child.devices ?? [], [...trail, item.ref, child.ref]);
+      if (deeper) return deeper;
+    }
+    return undefined;
+  };
+  return walk(tree.devices, []);
+}
+
+function devicePath(tree: DeviceTree, device: string, chain: string | undefined): string[] | undefined {
   const found: string[][] = [];
   const walk = (devices: readonly DeviceNode[], trail: string[], parentChain?: string) => {
     for (const item of devices) {
