@@ -222,7 +222,9 @@ export type SessionEvent = KernelEvent
   | HeardEvent
   | RecipeEvent
   /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
-  | { type: "action"; title: string; playing?: boolean; recording?: boolean };
+  | { type: "action"; title: string; playing?: boolean; recording?: boolean }
+  /** Kumi started or stopped watching the producer work in Live (watch_me). */
+  | { type: "watching"; on: boolean };
 
 /** "producer": true of them in any project; "set": about one saved Set. */
 export type MemoryScope = "producer" | "set";

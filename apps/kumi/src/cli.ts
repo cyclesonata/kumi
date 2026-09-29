@@ -117,6 +117,7 @@ try {
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onChange: (change) => terminal?.handleEvent({ type: "change", change }),
           onAction: (action) => terminal?.handleEvent({ type: "action", ...action }),
+          onWatch: (on) => terminal?.handleEvent({ type: "watching", on }),
           projectStore: createProjectStore(loadProjectsDir()),
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),

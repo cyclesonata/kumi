@@ -841,6 +841,21 @@ test("/stop stops Live any time, even while Kumi answers, and NOW shows it", asy
   await h.app.close();
 });
 
+test("between \"watch me\" and \"done\", NOW says Kumi is watching", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "watching", on: true });
+  await delay(5);
+  assert.ok(has(h.screen(), "Watching your changes in Live"));
+  h.emit({ type: "watching", on: false });
+  await delay(5);
+  const lines = h.screen();
+  assert.ok(!has(lines, "Watching your changes") && has(lines, "Ready"));
+  await h.app.close();
+});
+
 // ---- listening and recipes
 
 test("what Kumi heard shows as a small spectrum, and a comparison as dB over or under the reference", async () => {

@@ -185,6 +185,8 @@ export class TuiApp {
   private lastChange: { id: string; at: number } | undefined;
   /** The latest thing Kumi did in Live that isn't a change (playing, recording), for NOW. */
   private lastAction: { title: string; at: number; glyph: string } | undefined;
+  /** Kumi is watching the producer work in Live (watch_me), until they say they're done. */
+  private watching = false;
   private undoing = false;
   /** Clickable areas from the last frame. */
   private hits: { x: number; y: number; width: number; action: () => void }[] = [];
@@ -359,6 +361,10 @@ export class TuiApp {
         setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
         break;
       }
+      case "watching":
+        this.watching = event.on;
+        this.scheduler.request();
+        break;
       case "recipe": {
         const steps = `${event.steps} ${event.steps === 1 ? "step" : "steps"}`;
         const text = event.action === "saved" ? `Kumi saved the recipe “${event.name}” (${steps})` : event.action === "updated" ? `Kumi updated the recipe “${event.name}” (${steps})`
@@ -592,6 +598,7 @@ export class TuiApp {
         await controller.newConversation();
         this.transcript.clear();
         this.current = undefined;
+        this.watching = false;
         // A fresh start is a new bridge connection: earlier changes stay listed, without their undo.
         this.changes = this.changes.map((change) => change.state === "applied" || change.state === "unsure"
           ? { ...change, state: "expired", note: "Kumi started fresh (/new), so it can't undo this; Live's own undo still can." } : change);
@@ -1160,6 +1167,8 @@ export class TuiApp {
     if (flash) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
     const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
     if (action) return { label: "", detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
+    // Between "watch me" and "done", NOW says so: the producer is working in Live meanwhile.
+    if (this.watching) return { dot: st.accent, label: "watching", detail: "Watching your changes in Live; tell Kumi when you're done", detailStyle: st.text };
     return { label: "", detail: "Ready", detailStyle: st.faint };
   }
 

@@ -71,6 +71,8 @@ interface Options {
   onChange?: (change: ChangeRecord) => void;
   /** Something Kumi did in Live that isn't a change to the Set (playing, launching, recording, showing), for NOW. */
   onAction?: (action: { title: string; playing?: boolean; recording?: boolean }) => void;
+  /** Kumi started (true) or stopped (false) watching the producer work (watch_me), for NOW. */
+  onWatch?: (on: boolean) => void;
   /** Bound on one apply or undo once sent; it runs to the end even if the turn is cancelled. */
   changeTimeoutMs?: number;
   /** Where Kumi keeps each saved Set's last-seen state; without it Kumi doesn't catch up. */
@@ -932,6 +934,7 @@ export function createAbletonIntegration(options: Options): Integration {
     return rows;
   }
   /** watch_me: note the Set now, or say what the producer changed since. */
+  const watchingNow = (on: boolean) => { try { options.onWatch?.(on); } catch { /* a listener failure must not affect Live */ } };
   async function watch(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(60_000)]);
     try {
@@ -941,10 +944,11 @@ export function createAbletonIntegration(options: Options): Integration {
       if (input.action === "start") {
         const [pages, devices] = await Promise.all([exportPages(signal), allDevices(signal)]);
         watching = { set: currentSet, pages, devices: new Set(devices.map((device) => String(device.objectIdentity))), at: now().getTime() };
+        watchingNow(true);
         return { text: JSON.stringify({ watching: true, note: "Tell the producer to go ahead in Live and to say when they're done." }), isError: false };
       }
       if (!watching) return { text: "Kumi isn't watching yet: start first, before the producer does it.", isError: true };
-      if (watching.set !== currentSet) { watching = undefined; return { text: "A different Set is open now, so there's nothing to compare; start again.", isError: true }; }
+      if (watching.set !== currentSet) { watching = undefined; watchingNow(false); return { text: "A different Set is open now, so there's nothing to compare; start again.", isError: true }; }
       const before = watching;
       const [pages, devices, tracks] = await Promise.all([exportPages(signal), allDevices(signal),
         tools.call("live_discover", { kind: "track", fields: ["ref", "name", "mediaKind"], limit: 100 }, signal, { host: true }).then((read) => payload(read).items)]);
@@ -968,7 +972,7 @@ export function createAbletonIntegration(options: Options): Integration {
         const owner = trackName.get(String(device.parentRef));
         return { device: device.name ?? device.className ?? null, className: device.className ?? null, ...(owner ? { on: owner } : { inside: "a rack" }), knobs: moved.slice(0, 24) };
       }));
-      watching = undefined;
+      watching = undefined; watchingNow(false);
       const seconds = Math.round((now().getTime() - before.at) / 1000);
       return { text: JSON.stringify({ watched: `${seconds} s`, changes, ...(more ? { more } : {}), ...(settings.length ? { devicesAdded: settings } : {}),
         ...(changes.length ? {} : { note: "Nothing in the Set changed while Kumi watched." }) }), isError: false };

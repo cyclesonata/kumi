@@ -280,6 +280,7 @@ export function createTerminal(options: Options): Terminal {
       case "remembered": notice(`[memory] ${event.replaced ? "Updated" : "Will remember"}${event.scope === "producer" ? " about you" : ""}: ${event.note.text}${event.pending ? " (once the Set is saved)" : ""}`); break;
       case "forgot": notice(`[memory] Forgot: ${event.note.text}`); break;
       case "action": notice(`[live] ${event.title}`); break;
+      case "watching": notice(event.on ? "[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done." : "[live] Kumi stopped watching."); break;
       case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
       case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
       case "turn-complete": {

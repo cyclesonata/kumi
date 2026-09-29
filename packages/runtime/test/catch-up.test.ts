@@ -234,7 +234,8 @@ test("closing remembers the Set as Kumi leaves it", async () => {
 
 test("watch_me learns a routine: the Set before, the Set after, and the knobs the producer turned on what they added", async () => {
   const b = bridge({ pages: fixture.before });
-  const integration = createAbletonIntegration({ connect: async () => b.endpoint, onConnection: () => {}, now: () => new Date(Date.UTC(2026, 8, 28, 12)) });
+  const watching: boolean[] = [];
+  const integration = createAbletonIntegration({ connect: async () => b.endpoint, onConnection: () => {}, now: () => new Date(Date.UTC(2026, 8, 28, 12)), onWatch: (on) => watching.push(on) });
   try {
     await integration.start(AbortSignal.timeout(5_000));
     let observation = await integration.observe(AbortSignal.timeout(5_000));
@@ -257,5 +258,6 @@ test("watch_me learns a routine: the Set before, the Set after, and the knobs th
       "only what moved from Live's defaults; switches and modes can't be compared");
     const again = await watch().execute({ action: "stop" }, AbortSignal.timeout(5_000));
     assert.equal(again.isError, true, "one watch, one answer");
+    assert.deepEqual(watching, [true, false], "NOW hears when watching starts and ends");
   } finally { await integration.close(); }
 });
