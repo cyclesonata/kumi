@@ -21,8 +21,9 @@ every state below.
   accent (mint `#86e3b5`) and Live's own track colours; colour always means
   something. Words before symbols; the only symbols are `■` track colour,
   `●` live/active/new value, `○` offline/old value, `✓` done, `…` working,
-  `▾`/`▸` open/closed group and `›` path. Motion only shows that something is
-  happening or changing.
+  `▾`/`▸` open/closed group and `›` path, plus the transport's own `▶`, `●` and
+  `■` when NOW shows Kumi playing, recording or stopping. Motion only shows that
+  something is happening or changing.
 - **Speak music.** Tool activity reads as "looked at Bass and Drums", never as a
   tool name. No startup dumps; the `/` menu is short and curated.
 - **Focus in two tiers.** Basic focus for everyone comes from Live's scripting
@@ -83,9 +84,12 @@ old line-by-line interface (`terminal.ts`).
 
 1. ~~**Focus feed**~~: done for the basic tier (Live's scripting API, read twice a
    second, shown when it changes). Next, the opt-in Accessibility tier.
-2. ~~**Kumi's edits**~~: done. Nine kinds of change, each a HISTORY entry backed by
-   its bridge transaction, undone by a click, `/undo` or asking Kumi. NOW shows
-   each change for a moment as it lands.
+2. ~~**Kumi's edits**~~: done. Almost every change Live's scripting allows, each a
+   HISTORY entry backed by its bridge transaction, undone by a click, `/undo` or
+   asking Kumi. NOW shows each change for a moment as it lands, and what Kumi
+   plays or records ("▶ Playing from the start marker", "● Recording in the Arrangement
+   on Bounce", "■ Stopped"), which leaves no HISTORY entry. `/stop` stops Live
+   any time.
 3. **NOW building blocks**: partly done. A mixer or device-parameter change shows
    its before and after as positions (`██████████░░ → █████░░░░░░░`), in Live's
    own units in the title ("-2.0 dB", "159 Hz"). A new MIDI clip shows its notes
@@ -97,6 +101,12 @@ old line-by-line interface (`terminal.ts`).
 4. ~~**Saved sessions**~~: done for saved Sets. Opening Kumi on a Set picks up
    its conversation and shows the recent exchanges ("Continuing your conversation
    from 2 hours ago"); `/new` starts afresh.
+5. ~~**Listening, notes and recipes**~~: done. What Kumi heard is a line in the
+   conversation with a small spectrum (ten bands, sub to air, `▁▂▃▄▅▆▇█`), and a
+   comparison shows each band as dB over or under the reference, coloured when
+   it matters (±1.5 dB). A note Kumi keeps, a recipe it saves or runs, is one
+   faint line; `/memory` and `/recipes` open them in the panel above the input
+   box.
 
 Done alongside: the welcome screen catches you up on a saved Set ("Since you were
 last here · 3 days ago", a few plain-words lines); once the conversation has
