@@ -763,3 +763,23 @@ The eval also found four faults in Kumi, fixed with tests:
 - notes framed only as "context, not instructions" kept a naming habit from
   applying;
 - `watch_me` asked before saving.
+
+## Bridge 1.0.34 into Live, with `kumi bridge`
+
+On the test Mac (UTC `2026-09-29T04:53Z`), `npm run kumi -- bridge --yes` ran from a clean checkout at
+`7db5c5c`, with Live quit (a SIGTERM to Live holding the testbed Set). It printed:
+
+- "Kumi's bridge is 1.0.34; the one Live uses is 1.0.33. Updating it takes a minute."
+- Then it packed the bridge, installed its package under `~/.kumi/bridge`, and had the
+  lifecycle plan and apply the upgrade.
+- "Done: the Ableton bridge 1.0.34 is installed".
+
+The lifecycle's status afterwards read: receipt `installed-restart-required`, package 1.0.34,
+Remote Script and package valid. The bridge configuration now names the new package.
+
+Reopened with the testbed, Live stopped at its own "Live unexpectedly quit while you were
+working on the Live Set … Would you like to recover your work?". Live asks this before it
+loads control surfaces, so the new Remote Script can't answer it, and nothing here can click
+it. So 1.0.34 hasn't yet run on real Live. After choosing No, `validate-1.0.mjs` in
+`.pi/kumi-evidence/kernel` checks each 1.0.34 fix on the testbed, undoing everything, and
+`accept:live` covers 1.0's tools end to end.

@@ -84,10 +84,12 @@ export const ACTIONS: readonly ActionKind[] = [
   },
   {
     tool: "select", since: FIXED_BRIDGE, preview: "live_selection_preview", apply: "live_selection_apply",
-    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view), deviceRef, parameterRef or chainRef. Use it when they ask where something is, or ask to see it.",
+    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view) or chainRef. Use it when they ask where something is, or ask to see it. (Live's scripting can't select a device or a parameter: select its track, or its chain, instead.)",
+    // What Live's scripting really selects: the bridge's device and parameter fields don't work on real Live.
+    inputSchema: { type: "object", additionalProperties: false, properties: { trackRef: REF, sceneRef: REF, slotRef: REF, detailClipRef: REF, chainRef: REF } },
     summarize(_preview, input, track) {
       const known = track(input.trackRef);
-      return { title: known ? `Selected ${known.name}` : input.detailClipRef ? "Showing the clip" : input.deviceRef ? "Showing the device" : "Selected it in Live" };
+      return { title: known ? `Selected ${known.name}` : input.detailClipRef ? "Showing the clip" : input.chainRef ? "Showing the chain" : "Selected it in Live" };
     },
   },
   {
