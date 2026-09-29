@@ -158,6 +158,7 @@ test("plain mode names the model, lists a provider's, and sets the model and eff
   const done = terminal.run();
   await delay(0);
   input.write("/model\n/model openai-codex\n/model openai-codex/gpt-6-luna\n/effort low\n/effort turbo\n/logout openai-codex\n"); await delay(20);
+  terminal.handleEvent({ type: "error", message: "Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).", kind: "auth", provider: "anthropic" });
   input.end(); assert.equal(await done, 0);
   const text = stripVTControlCharacters(output);
   assert.match(text, /Kumi · openai-codex\/gpt-6-astra/);
@@ -167,5 +168,6 @@ test("plain mode names the model, lists a provider's, and sets the model and eff
   assert.match(text, /\[effort\] low\./);
   assert.match(text, /\[effort\] Choose one of low, medium, high, xhigh, max or default\./);
   assert.match(text, /\[logout\] Signed out of openai-codex\./);
+  assert.match(text, /\[login\] Sign in from a shell: npm run kumi -- login anthropic/, "a sign-in failure names the command that fixes it");
   assert.deepEqual(fake.calls.filter((call) => !call.startsWith("list")), ["choose:openai-codex/gpt-6-luna", "effort:low", "signout:openai-codex"]);
 });

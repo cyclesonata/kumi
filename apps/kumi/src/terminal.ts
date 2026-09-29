@@ -238,7 +238,11 @@ export function createTerminal(options: Options): Terminal {
         break;
       }
       case "notice": notice(event.message); break;
-      case "error": reportError(new Error(event.message)); text.discard(); break;
+      case "error":
+        reportError(new Error(event.message)); text.discard();
+        // Plain lines can't show the key box: say which command signs in there.
+        if (event.kind === "auth" && event.provider && (PROVIDERS as readonly string[]).includes(event.provider)) notice(`[login] Sign in from a shell: npm run kumi -- login ${event.provider}`);
+        break;
       case "text": {
         if (suppressOutput) return;
         firstTextMs ??= Math.round(performance.now() - startedAt);
