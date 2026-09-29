@@ -180,6 +180,8 @@ export class TuiApp {
   private readonly scheduler: FrameScheduler;
   private readonly table = new StyleTable();
   private readonly editor = new Editor();
+  /** What this session's answers took, for /status on an API key. */
+  private readonly used = { input: 0, output: 0, cached: 0, answers: 0 };
   private readonly transcript = new Transcript();
   /** Kept out of everything shown; keys pasted into Kumi join it. */
   private readonly secrets: string[];
@@ -453,6 +455,8 @@ export class TuiApp {
         break;
       }
       case "turn-complete": {
+        const usage = event.result.usage;
+        if (usage) { this.used.input += usage.inputTokens; this.used.output += usage.outputTokens; this.used.cached += usage.cacheReadTokens; this.used.answers++; }
         const entry = this.current;
         if (!entry) break;
         const cancelled = event.result.stopReason === "cancelled";
@@ -641,7 +645,7 @@ export class TuiApp {
     if (command === "/status") {
       this.editor.clear();
       const status = controller.status();
-      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}`, "info");
+      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${this.tokensUsed()}`, "info");
       return;
     }
     // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
@@ -694,6 +698,18 @@ export class TuiApp {
   // ---- the model, and signing in
 
   /** The model for the header and /status: "Claude Sonnet 5.5 · high". */
+  /**
+   * On an API key, what this session's answers took, for /status: tokens, which is what the provider
+   * bills (its prices aren't in its model list, so Kumi doesn't guess a cost). A ChatGPT plan isn't
+   * billed by the token, so nothing is said there.
+   */
+  private tokensUsed(): string {
+    const provider = this.options.models?.current().provider;
+    if (!provider || PROVIDER_INFO[provider].signIn !== "api-key" || !this.used.answers) return "";
+    const count = (n: number) => (n < 1_000 ? `${n}` : n < 1_000_000 ? `${(n / 1_000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`);
+    return ` · this session: ${count(this.used.input)} tokens in${this.used.cached ? ` (${count(this.used.cached)} cached)` : ""}, ${count(this.used.output)} out`;
+  }
+
   private modelLabel(): string | undefined {
     const current = this.options.models?.current();
     if (!current) return undefined;

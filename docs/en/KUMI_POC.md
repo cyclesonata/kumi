@@ -285,7 +285,7 @@ and a tempo change about 4 s
 | Enter | Send |
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
-| `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model |
+| `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model (on an API key, also the tokens this session's answers took; prices aren't in the providers' model lists, so Kumi shows tokens, not a cost) |
 | `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
 | `/memory` | What Kumi remembers, about you and this Set; choose a note to forget it |

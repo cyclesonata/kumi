@@ -1125,3 +1125,21 @@ test("/memory lists notes, techniques and recipes; choosing a technique offers t
   assert.deepEqual(forgotten, ["t1"]);
   await h.app.close();
 });
+
+test("/status says the tokens this session's answers took on an API key, and nothing about them on a ChatGPT plan", async () => {
+  const keyed = harness(240, 36, fakeModels({ model: "anthropic/claude-sonnet-5-5", signedIn: ["anthropic"], lists: MODELS }).control);
+  void keyed.app.run();
+  await delay(10);
+  keyed.emit({ type: "turn-complete", result: { stopReason: "completed", usage: { inputTokens: 9_000, outputTokens: 700, cacheReadTokens: 6_000, cacheWriteTokens: 0 } }, elapsedMs: 900 });
+  keyed.emit({ type: "turn-complete", result: { stopReason: "completed", usage: { inputTokens: 4_500, outputTokens: 520, cacheReadTokens: 2_000, cacheWriteTokens: 0 } }, elapsedMs: 900 });
+  await keyed.type("/status\r");
+  assert.ok(has(keyed.screen(), "this session: 13.5k tokens in (8.0k cached), 1.2k out"));
+  await keyed.app.close();
+  const plan = harness(160, 36, fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS }).control);
+  void plan.app.run();
+  await delay(10);
+  plan.emit({ type: "turn-complete", result: { stopReason: "completed", usage: { inputTokens: 9_000, outputTokens: 700, cacheReadTokens: 0, cacheWriteTokens: 0 } }, elapsedMs: 900 });
+  await plan.type("/status\r");
+  assert.ok(!plan.screen().join("\n").includes("tokens in"));
+  await plan.app.close();
+});

@@ -175,6 +175,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
 
 ### Setup
 
+- On an API key, `/status` says the tokens this session's answers took (in,
+  cached, out).
+
 - `npm run kumi -- bridge` installs the bridge into Live, or updates it, in one
   command. It runs the bridge's own lifecycle (plan, apply, rollback), refuses
   while Live is open, and waits for Live afterwards. `kumi doctor` and a failed
