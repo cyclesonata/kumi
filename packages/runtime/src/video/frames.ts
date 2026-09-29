@@ -8,9 +8,8 @@ import { run } from "./programs.js";
 export interface Input { url: string; headers?: Record<string, string> }
 export interface Thumb { width: number; height: number; rgb: Buffer }
 
-/** The small picture of a frame drawn in the terminal: this many pixels across, 16:9. */
+/** The small picture of a frame drawn in the terminal: this many pixels across (a 16:9 frame is 18 high). */
 export const THUMB_WIDTH = 32;
-export const THUMB_HEIGHT = 18;
 
 /** ffmpeg's input arguments for a stream or a file, starting at `at` seconds. */
 function source(input: Input, at: number): string[] {
@@ -48,15 +47,17 @@ export async function frameAt(ffmpeg: string, input: Input | undefined, at: numb
   return { jpeg, thumb: await thumbOf(ffmpeg, path, signal) };
 }
 
-/** A frame's thumbnail: its pixels, THUMB_WIDTH × THUMB_HEIGHT, three bytes each. */
+/** A frame's thumbnail: its pixels, THUMB_WIDTH across and as tall as its shape makes it (18 for 16:9), three bytes each. */
 export async function thumbOf(ffmpeg: string, jpeg: string, signal?: AbortSignal): Promise<Thumb> {
-  // A close-up keeps its shape, on black.
-  const fit = `scale=${THUMB_WIDTH}:${THUMB_HEIGHT}:force_original_aspect_ratio=decrease,pad=${THUMB_WIDTH}:${THUMB_HEIGHT}:(ow-iw)/2:(oh-ih)/2`;
-  const { stdout } = await run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-nostdin", "-i", jpeg, "-vf", fit, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+  // A PPM says its own size: a close-up is wider than 16:9.
+  const { stdout } = await run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-nostdin", "-i", jpeg, "-vf", `scale=${THUMB_WIDTH}:-2`, "-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-"],
     { encoding: "buffer", timeoutMs: 20_000, ...(signal ? { signal } : {}) });
-  const rgb = stdout as Buffer;
-  if (rgb.length !== THUMB_WIDTH * THUMB_HEIGHT * 3) throw new Error("the frame's thumbnail came out the wrong size");
-  return { width: THUMB_WIDTH, height: THUMB_HEIGHT, rgb };
+  const data = stdout as Buffer;
+  const header = /^P6\s+(\d+)\s+(\d+)\s+255\s/.exec(data.subarray(0, 32).toString("latin1"));
+  const width = Number(header?.[1]); const height = Number(header?.[2]);
+  const rgb = header ? data.subarray(header[0].length) : Buffer.alloc(0);
+  if (!header || width !== THUMB_WIDTH || height < 2 || height > THUMB_WIDTH || rgb.length !== width * height * 3) throw new Error("the frame's thumbnail came out wrong");
+  return { width, height, rgb: Buffer.from(rgb) };
 }
 
 /**

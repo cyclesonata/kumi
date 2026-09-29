@@ -161,7 +161,7 @@ test("watching a video file: its captions, frames at the moments that matter, a 
   assert.equal(watched.frames.length, 3);
   for (const frame of watched.frames) {
     assert.deepEqual([...frame.jpeg.subarray(0, 2)], [0xff, 0xd8]);
-    assert.equal(frame.thumb.rgb.length, 32 * 18 * 3);
+    assert.deepEqual([frame.thumb.width, frame.thumb.height, frame.thumb.rgb.length], [32, 18, 32 * 18 * 3]);
   }
   assert.ok(watched.frames.some((frame) => frame.said.includes("Saturator")));
   assert.ok(watched.sound && existsSync(watched.sound.file) && watched.sound.from === 2 && watched.sound.to === 4);
@@ -173,6 +173,8 @@ test("watching a video file: its captions, frames at the moments that matter, a 
   assert.equal(again.lines.length, 2);
   assert.equal(again.frames.length, 1);
   assert.equal(again.frames[0]!.region, "bottom");
+  // A close-up's picture keeps its shape: the bottom 40% of 16:9 is wider than tall.
+  assert.deepEqual([again.frames[0]!.thumb.width, again.frames[0]!.thumb.height], [32, 8]);
   assert.ok(existsSync(join(videosDir, kept!, "frames", "7.0-bottom.jpg")));
   const range = await watchVideo({ url: video, from: 5, to: 9, frames: 0 }, { videosDir, toolsDir });
   assert.deepEqual([range.from, range.to, range.lines.map((line) => line.at)], [5, 9, [6]]);

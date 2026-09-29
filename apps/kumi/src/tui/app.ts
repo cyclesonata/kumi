@@ -385,7 +385,8 @@ export class TuiApp {
         const words = { captions: "its captions", automatic: "its automatic captions", transcribed: "its speech, transcribed by Kumi", none: "no words" }[event.words];
         this.transcript.insertBefore({ kind: "watched", title: clean(event.title, 160), ...(event.channel ? { channel: clean(event.channel, 80) } : {}), ...(event.duration ? { duration: event.duration } : {}),
           from: event.from, to: event.to, chapters: event.chapters.slice(0, 24).map((chapter) => clean(chapter, 60)), words,
-          frames: event.frames.slice(0, 16).filter((frame) => frame.thumb.rgb.length === frame.thumb.width * frame.thumb.height * 3), ...(event.sound ? { sound: event.sound } : {}),
+          frames: event.frames.slice(0, 16).filter((frame) => frame.thumb.width > 0 && frame.thumb.width <= 64 && frame.thumb.height > 0 && frame.thumb.height <= 64
+            && frame.thumb.rgb.length === frame.thumb.width * frame.thumb.height * 3), ...(event.sound ? { sound: event.sound } : {}),
           notes: event.notes.map((note) => clean(note, 300)), pictures: this.depth === "truecolor" || this.depth === "256" }, this.current);
         break;
       }
