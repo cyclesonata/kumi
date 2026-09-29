@@ -783,3 +783,104 @@ loads control surfaces, so the new Remote Script can't answer it, and nothing he
 it. So 1.0.34 hasn't yet run on real Live. After choosing No, `validate-1.0.mjs` in
 `.pi/kumi-evidence/kernel` checks each 1.0.34 fix on the testbed, undoing everything, and
 `accept:live` covers 1.0's tools end to end.
+
+## Watching a video tutorial
+
+On the test Mac (Apple M4, macOS 15; 2026-09-29, UTC 14:20–15:00), with
+`openai-codex/gpt-6-astra`, Live 12.4.15b4 holding the testbed Set, and bridge
+1.0.34 in Live. The tutorial was Au5's "1 Minute Reese With Operator"
+(`youtube.com/watch?v=W87uuuGcq9c`, 1:21).
+
+**The pieces, measured one by one**
+
+- yt-dlp 2026.08.19, fetched by Kumi and checked against `SHA2-256SUMS`. The
+  single-file macOS build took 7–8 s to start each time (it unpacks itself); the
+  unpacked build (`yt-dlp_macos.zip`) took 0.2 s after macOS's first-launch check.
+  Kumi fetches the unpacked build.
+- Reading the page (title, formats, captions list) took about 1 s with Node running
+  YouTube's JavaScript (`--js-runtimes node:…`). Without a JavaScript runtime,
+  yt-dlp warned that formats may be missing.
+- YouTube's caption address answered **HTTP 429** ("Sorry…") on the web, tv and
+  android_vr clients during one part of the session, and gave the automatic captions
+  in another. When refused, Kumi transcribed the audio stream with whisper.cpp
+  1.9.4 (Homebrew, Metal) and `ggml-small.en-q5_1.bin` (190 MB, fetched once in
+  about 12 s, checked against Hugging Face's SHA-256). 81 s of speech took about
+  5 s, with punctuation and the devices named right ("Load Operator. Set voices to
+  1, enable pitch envelope…"). The automatic captions had none, and misheard a few
+  words ("respace").
+- A frame from the 720p h264 stream took 0.7 s; from 1080p, 3.4 s. At 1280 wide
+  they read the same, so whole frames come from 720p and close-ups from the
+  sharpest stream.
+- The ChatGPT backend took a frame inside a tool result. Asked for the device chain
+  and Operator's levels, gpt-6-astra answered "Operator → Dynamic Tube →
+  Saturator" and A −12 dB, B −21 dB, C −23 dB, D −∞ dB, reading Operator's rows
+  bottom-up as the device draws them. That request was 1,299 input tokens.
+- The first watch, with both fetches and the transcription, took 36 s; a fresh
+  watch with the programs in place, 2.2 s; a watch from the folder, under 1 s.
+
+**The real app, full screen in a PTY (140×44)**
+
+Asked "Watch this tutorial and build the Reese bass it makes on a new MIDI track:
+<link>", Kumi finished in **130.6 s, 9 steps**, including the first fetch of yt-dlp
+and the speech model:
+
+1. It watched the video (32.8 s). NOW said "reading the video's page", "reading
+   the captions", then "transcribing what's said · 21%" and "· 97%". YouTube
+   refused the captions, so the words were transcribed. The conversation showed
+   "Watched “1 Minute Reese With Operator | Bass Tutorial” · Au5 · 1:21 · the
+   whole video · its speech, transcribed by Kumi", with eight small pictures of
+   the frames and their times.
+2. It watched again (5.1 s): close-ups of Live's devices at 0:38, 0:46, 0:53, 0:57
+   and 1:00, and the video's own sound from 0:54 to 1:02, which it heard ("Heard
+   the video's sound, 0:54–1:02 · unpitched · … 21.53 Hz level LFO").
+3. It said what the video builds: "Operator with detuned FM, white noise and
+   105 ms glide, then Dynamic Tube → three Saturator/EQ Three pairs → a final
+   digital clipper. The result is bass-heavy with a gritty stereo top."
+4. It built it on a new MIDI track, "Au5 Tutorial Reese", in three make_changes
+   plans (the devices about 58 s after the request, parameters from about 101 s,
+   corrections from about 123 s), NOW showing each change as it landed.
+   The chain: Operator (25 parameters), Dynamic Tube, and three Saturator and
+   EQ Three pairs: Hard Curve on each Saturator, the last set to Digital Clip,
+   and EQ Three's mid down 1.94 dB and its high band moved. Each change was in
+   HISTORY with its undo.
+5. It named the one setting it couldn't make: "Operator's Voices control isn't
+   exposed here, so set it to 1 in Live." (Live's API doesn't offer Operator's
+   voice count to scripts.)
+
+**The eval**
+
+`npm run eval:changes -- "watch a tutorial"` makes a 20-second test video with
+ffmpeg and a narration beside it as captions. It passed in 30.9 s. The model
+watched it, then looked again at 0:14 zoomed on the bottom to check a value
+before building, loaded Operator and Saturator on a new track, and said it
+couldn't read the detune amount from the frame (a test picture).
+
+## Bridge 1.0.34 on real Live
+
+With Live's recovery prompt answered, `validate-1.0.mjs` ran on the testbed (UTC
+15:00, Live 12.4.15b4, bridge 1.0.34 in Live, this checkout's host). What 1.0.33
+refused now works:
+
+- changes while Live plays (play, loop, swing, select, the song's state, stop);
+- a return track, then a track inserted after it, then deleting the return;
+- deleting a device the producer named (Auto Pan-Tremolo);
+- an audio clip's pitch and gain; the groove amount; capturing a scene;
+- storing and randomizing a rack's variations;
+- note edits: a note's velocity, transposing in place, quantizing to 1/16, each
+  undone. (The script's own first attempt read note ids the clip doesn't have; a
+  failed read clears Kumi's references by design, so its edits were refused. Run
+  again reading note 1, all three worked and were undone.)
+- `watch_me`: start, a change by hand, stop.
+
+Still refused on real Live, for the bridge:
+
+- **Arming and monitoring:** "routing postcondition was not confirmed" (16 s).
+- **Firing a scene:** "Live didn't confirm this"; stopping worked.
+- **Recording:** "Recording preview refused; obtain fresh authoritative state and
+  explicit output-safety evidence" (adapter request failed), so the resampling plan
+  stopped before recording, after copying the clip, adding "Val Bounce" and
+  routing it.
+- **Undoing structure:** undoing an added track, a captured scene and an imported
+  clip came back "Live didn't confirm the undo". Of the run's 21 changes, 18 had
+  an undo to try and 8 were undone; the rest were kept or unsure. They're in the
+  testbed Set, along with the tutorial's "Au5 Tutorial Reese" track.
