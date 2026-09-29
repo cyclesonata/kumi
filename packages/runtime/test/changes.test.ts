@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -661,4 +661,35 @@ test("an undo the bridge refused says the real reason in HISTORY", () => {
   assert.match(undoNote("Undo refused before anything changed in Live: request failed: transaction-owned structure cleanup must proceed from the highest positional authority"), /^A track Kumi made after it is still there/);
   assert.match(undoNote("transport undo refused while playing: only the playhead changed; stop playback first"), /^Stop playback, then undo it/);
   assert.equal(undoNote("routing changed after apply; undo refused"), "It changed in Live since, so Kumi left it as it is.");
+});
+
+test("before a plan of three steps or more, or one that deletes, Kumi keeps a copy of the Set as last saved, once for each saved version", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "kumi-backup-"));
+  const saved = join(folder, "Song.als"); writeFileSync(saved, "set");
+  const b = await opened({ savedSet: saved });
+  try {
+    const plan = () => tool(b.tools, "make_changes");
+    const backups = () => b.requests.filter((request) => request.name === "live_project_backup_apply").length;
+    const small = await plan().execute({ steps: [{ tool: "set_tempo", input: { tempo: 121 } }, { tool: "set_tempo", input: { tempo: 122 } }] }, signal());
+    assert.equal(small.isError, false, small.text);
+    assert.equal(backups(), 0, "two steps: no copy");
+    const big = await plan().execute({ steps: [121, 122, 123].map((tempo) => ({ tool: "set_tempo", input: { tempo } })), final: true }, signal());
+    assert.equal(big.isError, false, big.text);
+    assert.equal(b.requests.find((request) => request.name === "live_project_backup_preview")!.args.allowedRoot, folder, "next to the Set");
+    assert.equal(JSON.parse(big.text).copy, join(folder, "Song.backup-5.als"));
+    assert.match(String(big.reply), /kept a copy of your Set as last saved, next to it: Song\.backup-5\.als$/);
+    await plan().execute({ steps: [124, 125, 126].map((tempo) => ({ tool: "set_tempo", input: { tempo } })) }, signal());
+    assert.equal(backups(), 1, "the same saved version is copied once");
+    // Saved again: a new version, copied before the next big plan.
+    utimesSync(saved, new Date(), new Date(Date.now() + 5_000));
+    const again = await plan().execute({ steps: [127, 128, 129].map((tempo) => ({ tool: "set_tempo", input: { tempo } })) }, signal());
+    assert.equal(backups(), 2);
+    assert.ok(JSON.parse(again.text).copyNote);
+  } finally { await b.integration.close(); rmSync(folder, { recursive: true, force: true }); }
+  // An unsaved Set has nothing to copy, and the plan goes ahead.
+  const unsaved = await opened();
+  try {
+    const result = await tool(unsaved.tools, "make_changes").execute({ steps: [121, 122, 123].map((tempo) => ({ tool: "set_tempo", input: { tempo } })) }, signal());
+    assert.equal(result.isError, false); assert.equal(JSON.parse(result.text).copy, undefined);
+  } finally { await unsaved.integration.close(); }
 });

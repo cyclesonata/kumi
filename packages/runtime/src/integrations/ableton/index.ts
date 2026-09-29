@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, ChangeRecord, ConnectionState, DisconnectCause, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
@@ -20,8 +21,10 @@ import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Base
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
+/** A verified copy of the Set as last saved, kept before big plans. */
+const BACKUP_TOOLS = ["live_project_backup_preview", "live_project_backup_apply"];
 /** Every bridge tool Kumi may call: the model's reads, and those behind Kumi's own tools. */
-export const BRIDGE_TOOLS: readonly string[] = [...new Set([...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS])];
+export const BRIDGE_TOOLS: readonly string[] = [...new Set([...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS])];
 /** Keys whose values are Live references: ref, parent, trackRef, parentRef, selectedTrackRef… */
 const REF_KEY = /^(?:ref|parent)$|Refs?$/;
 /** Live's references: an epoch, a kind and a path ("1232800184424618:track:4"). */
@@ -194,7 +197,7 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Use this bridge connection from now on: its tools, its disconnect signal and the focus feed. */
   function attach(connected: McpEndpoint) {
     endpoint = connected;
-    tools = new AllowedTools(connected, new Set([...HOST_TOOLS, ...PROJECT_TOOLS]));
+    tools = new AllowedTools(connected, new Set([...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS]));
     // A changed catalog is read again on next use (AllowedTools listens for it); only losing the bridge ends access.
     unlisten.push(connected.onDisconnect(loseAccess));
     focusFeed?.stop();
@@ -655,6 +658,33 @@ export function createAbletonIntegration(options: Options): Integration {
     };
   }
 
+  /** Saved versions of the Set copied this session (file, size, time): one copy each. */
+  const copied = new Set<string>();
+  /**
+   * Before a plan of three steps or more, or one that deletes, a copy of the Set as last saved, next
+   * to it (the bridge's verified backup), once for each saved version. Unsaved work isn't in the file,
+   * so it isn't in the copy; Kumi's own changes have their undo in HISTORY. Where it is, or nothing
+   * when there's no saved file or the bridge can't; the plan goes ahead either way.
+   */
+  async function keepCopy(signal: AbortSignal): Promise<string | undefined> {
+    const path = project?.path;
+    if (!path || !BACKUP_TOOLS.every((name) => tools?.has(name))) return undefined;
+    let version: string;
+    try { const stats = statSync(path); version = `${path}:${stats.size}:${stats.mtimeMs}`; } catch { return undefined; }
+    if (copied.has(version)) return undefined;
+    try {
+      const previewed = await tools!.call("live_project_backup_preview", { confirmation: "backup", allowedRoot: dirname(path) }, signal, { host: true });
+      if (previewed.isError) return undefined;
+      const transactionId = payload(previewed).transactionId;
+      if (typeof transactionId !== "string") return undefined;
+      const applied = await tools!.call("live_project_backup_apply", { transactionId, confirmation: "apply", idempotencyKey: randomUUID() }, signal, { host: true });
+      const backup = applied.isError ? undefined : payload(applied).backup;
+      if (typeof backup !== "string") return undefined;
+      copied.add(version);
+      return backup;
+    } catch { signal.throwIfAborted(); return undefined; }
+  }
+
   /**
    * A plan's steps run in order as they arrive (all at once, or one by one as the model writes
    * them). Steps in a row on one device wait for the next to arrive, so they still become one
@@ -672,6 +702,8 @@ export function createAbletonIntegration(options: Options): Integration {
     signal.addEventListener("abort", nudge, { once: true });
     const made = new Map<string, string>();
     const done: JsonObject[] = [];
+    /** Where the copy of the Set this plan kept first is, if it kept one. */
+    let copy: string | undefined; let copyChecked = false;
     // Steps in a row on one device become one change, in one Live request, when the bridge can:
     // samples onto a rack's pads, and parameters of a device.
     const schemaOf = (kind: ChangeKind) => object(object(tools?.tool(kind.preview)?.inputSchema ?? {}).properties ?? {});
@@ -731,6 +763,7 @@ export function createAbletonIntegration(options: Options): Integration {
           }
         }
         if (!started) { started = true; onStart?.(); }
+        if (!copyChecked && (index >= 2 || /^delete_/.test(String(item.tool)))) { copyChecked = true; copy = await keepCopy(signal); }
         if (batch && run > 1) {
           let inputs: JsonObject[];
           try { inputs = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
@@ -822,19 +855,21 @@ export function createAbletonIntegration(options: Options): Integration {
       abandon() { abandoned = true; nudge(); return settled.then(() => {}, () => {}); },
       async result(final: boolean): Promise<{ text: string; isError: boolean; reply?: string }> {
         const stopped = await settled;
+        const kept = copy ? { copy, copyNote: "Before this, Kumi kept a copy of the Set as last saved, next to it. Tell the producer in a few words, with the file's name." } : {};
         await until(() => closed || abandoned);
         if (stopped) {
           // A plan refused before anything happened says only why.
           if (!done.length && failure?.at === 0) return { text: failure.error, isError: true };
-          return { text: JSON.stringify({ done, stopped, ...(steps.length > stopped.step ? { skipped: steps.length - stopped.step } : {}) }), isError: true };
+          return { text: JSON.stringify({ done, stopped, ...(steps.length > stopped.step ? { skipped: steps.length - stopped.step } : {}), ...kept }), isError: true };
         }
         if (!done.length) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
-        const text = JSON.stringify({ done });
+        const text = JSON.stringify({ done, ...kept });
         if (!final) return { text, isError: false };
         // The plan finished the request: Kumi says what changed, sparing the producer a model reply.
         // A line for each thing changed: a change of several parameters gives one for each.
         const lines = done.flatMap((item) => Array.isArray(item.lines) ? item.lines : [item.changed]).filter((line): line is string => typeof line === "string" && line.length > 0);
-        return { text, isError: false, reply: lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}` };
+        const copied = copy ? `\n\nFirst, Kumi kept a copy of your Set as last saved, next to it: ${basename(copy)}` : "";
+        return { text, isError: false, reply: `${lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}`}${copied}` };
       },
     };
   }

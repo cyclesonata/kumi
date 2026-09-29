@@ -23,6 +23,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
   - devices on or off, moved (also across tracks and into racks) and deleted;
   - rack chains and variations, a Simpler's sample, audio import, Capture MIDI,
     device-specific settings and the Looper.
+- Before a plan of three steps or more, or one that deletes, Kumi keeps a copy
+  of the Set as last saved next to it, once for each saved version, and says
+  where it is.
 - Each change is in HISTORY with its undo. The few Live can't take back
   (deleting a device or return track, cropping a clip) are kept there with that
   said.

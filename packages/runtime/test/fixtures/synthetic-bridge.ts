@@ -9,7 +9,8 @@ import { createAbletonIntegration } from "../../src/integrations/ableton/index.j
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
 type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
   /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
-  /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string };
+  /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string;
+  /** The Set's saved file, which the bridge can back up (live_project_backup_*). */ savedSet?: string };
 export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
@@ -25,6 +26,7 @@ export function bridge(options: Options = {}) {
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
     "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
     ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
+    ...(options.savedSet ? ["live_project_backup_preview", "live_project_backup_apply"] : []),
     ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop", "live_routing_preview", "live_routing_apply"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
   const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
@@ -65,7 +67,7 @@ export function bridge(options: Options = {}) {
         return wrap({ epoch: 7, kind: args.kind, items: rows.slice(from, from + limit), revision: "r1", truncated: Boolean(next), ...(next ? { nextCursor: next } : {}) });
       }
       if (name === "live_discover") {
-        const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
+        const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo, ...(options.savedSet ? { filePath: options.savedSet } : {}) };
         const items = args.kind === "set" ? [set] : args.kind === "track"
           ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true }))
           : args.kind === "device" && options.racks ? [
@@ -84,6 +86,7 @@ export function bridge(options: Options = {}) {
         const id = `tx${++transactions}`;
         pending.set(id, { name, args });
         const base = { transactionId: id, epoch: 7, confirmation: name === "live_mixer_preview" ? "secret-confirmation-token-0123456789" : "apply" };
+        if (name === "live_project_backup_preview") return wrap({ ...base, path: options.savedSet, allowedRoot: args.allowedRoot, impact: "creates-verified-backup" });
         if (name === "live_tempo_preview") return wrap({ ...base, priorTempo: tempo, proposedTempo: args.tempo });
         if (name === "live_mixer_preview") return wrap({ ...base, trackRef: args.trackRef, prior: { volume: 0.85, pan: 0 }, ...(args.volume === 0.4 ? { priorDisplay: { volume: "0.0 dB", pan: "C" } } : {}), proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
@@ -110,6 +113,7 @@ export function bridge(options: Options = {}) {
         if (applyFailure === "uncertain") return refusal("Apply is uncertain; perform fresh discovery.", { state: "uncertain" });
         if (applyFailure === "unreadable") return { content: [{ type: "text", text: "not json" }] };
         if (transaction.name === "live_tempo_preview") tempo = Number(transaction.args.tempo);
+        if (transaction.name === "live_project_backup_preview") return wrap({ transactionId: args.transactionId, state: "applied", backup: String(options.savedSet).replace(/\.als$/, `.backup-${transactions}.als`), verified: true });
         if (transaction.name === "live_transport_action_preview") {
           if (transaction.args.action === "stop" && transport.refuseStop && transport.playing) return refusal("request failed: missing, expired, stale, or mismatched mutation preflight");
           if (transaction.args.action === "start" || transaction.args.action === "continue") transport.playing = true;

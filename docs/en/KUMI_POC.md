@@ -175,6 +175,13 @@ devices are on a specific track. Ask for a change, such as “Set the tempo to 1
 and rename 3-Audio to Bass”: each change appears in HISTORY with **undo** beside
 it. Rename a track manually in Live and ask again.
 
+**A copy before big changes.** Before a plan of three steps or more, or one that
+deletes something, Kumi keeps a copy of the Set as last saved, next to it
+(`Song.backup-<date>.als`), and says so. It makes one copy for each saved
+version. Unsaved work isn't in the file, so it isn't in the copy; Kumi's own
+changes have their undo in HISTORY, and Live keeps its own backups of each save
+in the project's Backup folder.
+
 **Catching up.** Kumi remembers each saved Set as it last saw it and, the next
 time you open Kumi on that Set, the welcome screen says what changed meanwhile
 ("Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track
