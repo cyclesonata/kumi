@@ -93,13 +93,18 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
     for (const listener of [...disconnectListeners]) listener();
   };
   client.onclose = disconnectedOnce;
-  client.onerror = () => { disconnectedOnce(); void close().catch(() => {}); };
+  // An answer (or progress) for a request Kumi stopped waiting for can cross the cancel on its way:
+  // Live quitting mid-request does this. The connection is fine; anything else ends it.
+  client.onerror = (error) => {
+    if (/^Received a (response for an unknown message ID|progress notification for an unknown token)/.test(error?.message ?? "")) return;
+    disconnectedOnce(); void close().catch(() => {});
+  };
   client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
     for (const listener of [...catalogListeners]) listener();
   });
   function requireReady(signal: AbortSignal) {
     signal.throwIfAborted();
-    if (!ready || closing) throw new Error("MCP is disconnected; use /new to establish a fresh connection");
+    if (!ready || closing) throw new Error("Kumi's link to Live is down; it reconnects when Live is back.");
   }
   function close(): Promise<void> {
     if (closing) return closing;

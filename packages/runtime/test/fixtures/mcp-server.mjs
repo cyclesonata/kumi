@@ -28,6 +28,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     await delay(60_000, undefined, { signal: extra.signal });
   }
   if (args.action === "exit") { process.exit(0); }
+  // An answer that crosses the client's cancel: written after it, as a bridge finishing its work does.
+  if (args.action === "late") {
+    const id = extra.requestId;
+    setTimeout(() => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "{}" }] } })}\n`), 150);
+    await delay(60_000, undefined, { signal: extra.signal }).catch(() => {});
+    await delay(60_000);
+  }
   if (args.action === "notify") { changed = true; await server.sendToolListChanged(); }
   if (args.action === "error") return { isError: true, content: [{ type: "text", text: "fixture failure" }], structuredContent: { fixture: true, reason: "expected-error" } };
   if (args.action === "invalid-params") throw new McpError(ErrorCode.InvalidParams, "trackRef is required");

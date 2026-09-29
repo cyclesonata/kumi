@@ -51,6 +51,20 @@ test("unknown and mutation calls never reach the server; fresh call-time catalog
   } finally { await tools.close(); }
 });
 
+test("an answer arriving after its request was cancelled doesn't cost the connection", async () => {
+  const { client, tools } = await open();
+  let disconnected = false;
+  client.onDisconnect(() => { disconnected = true; });
+  try {
+    await tools.refresh(freshSignal());
+    // Live quits mid-request: Kumi stops the turn, and the bridge's answer to it is already on its way.
+    await assert.rejects(client.call("server_status", { action: "late" }, AbortSignal.timeout(50)));
+    await delay(400);
+    assert.equal(disconnected, false, "still connected");
+    assert.deepEqual(data(await tools.call("server_status", {}, freshSignal())).fixture, true);
+  } finally { await tools.close(); }
+});
+
 test("catalog loops, excess tools and duplicates fail closed", async () => {
   for (const mode of ["repeat-cursor", "excessive", "duplicate", "catalog-bytes"]) {
     const { tools } = await open(mode);
