@@ -417,6 +417,24 @@ def _owned_device_row(value: Any) -> Any:
     return {key: _owned_device_row(item) for key, item in value.items() if key != "revision" and not (key == "view" and "canHaveChains" in value)}
 
 
+def _expanded_pad_chains(value: Any, depth: int = 0) -> Any:
+    """A row with each pad's `listedOnRack` chains replaced by the rack's rows, as the host's
+    expandPadChains reads it: fingerprints hash what the host sees, or a loaded kit never matches."""
+    if depth > 48: return value
+    if isinstance(value, list): return [_expanded_pad_chains(item, depth + 1) for item in value]
+    if not isinstance(value, dict): return value
+    row = {key: _expanded_pad_chains(item, depth + 1) for key, item in value.items()}
+    if not isinstance(row.get("drumPads"), list): return row
+    chains = {chain.get("objectIdentity"): chain for chain in (row.get("chains") if isinstance(row.get("chains"), list) else []) if isinstance(chain, dict)}
+    pads = []
+    for pad in row["drumPads"]:
+        if isinstance(pad, dict) and isinstance(pad.get("chains"), list):
+            pad = {**pad, "chains": [chains.get(chain.get("objectIdentity"), {**chain, "devices": []}) if isinstance(chain, dict) and chain.get("listedOnRack") is True else chain for chain in pad["chains"]]}
+        pads.append(pad)
+    row["drumPads"] = pads
+    return row
+
+
 # Values that move continuously on their own (CPU impact, meters, and while Live plays the Set's
 # playhead and a playing clip's position): excluded from the short-lived preflight->apply authority
 # digest, or it would almost never match on a track with signal or while the song plays. Preflight
@@ -3328,13 +3346,13 @@ class LiveObjectMapper:
     def _mapped_fingerprint(self, reference: str) -> str:
         row = self.get(reference)
         if not isinstance(row, dict): raise ValueError("created object fingerprint is unavailable")
-        if reference.split(":")[1:2] == ["device"]: row = _owned_device_row(row)
+        if reference.split(":")[1:2] == ["device"]: row = _owned_device_row(_expanded_pad_chains(row))
         # A clip's content, not where its playback is: the host fingerprints clips the same way.
         return hashlib.sha256(self._bounded_canonical(_without_fields(row, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
 
     def _ownership_fingerprint(self, reference: str) -> str:
         if not reference.startswith(f"{self.refs.epoch}:"): raise ValueError("created object reference is malformed")
-        snapshot = self.snapshot()
+        snapshot = _expanded_pad_chains(self.snapshot())
         if f":track:" in reference:
             track = next((row for row in snapshot["tracks"] if row["ref"] == reference), None)
             if track is None: raise ValueError("created track fingerprint is unavailable")
@@ -9409,6 +9427,7 @@ class AbletonMcpBridge:
         self._stop = threading.Event()
         self._clients: set[socket.socket] = set()
         self._connections: list[_Connection] = []
+        self._pump_turn = 0
         self._secret_value = secret
         self._executed_mutations: dict[str, dict[str, Any]] = {}
         self._pending_mutations: dict[str, dict[str, Any]] = {}
@@ -9460,7 +9479,11 @@ class AbletonMcpBridge:
         self.queue.inline_thread = threading.get_ident()
         try:
             self._accept_pending()
-            for connection in list(self._connections):
+            # Each tick starts with the next connection and serves every one at least one request,
+            # so a client with slow reads queued can't hold the others past their deadlines.
+            connections = list(self._connections); self._pump_turn += 1
+            start = self._pump_turn % len(connections) if connections else 0
+            for connection in connections[start:] + connections[:start]:
                 self._service(connection, deadline)
         finally:
             self.queue.inline_thread = None
@@ -9501,7 +9524,7 @@ class AbletonMcpBridge:
                 connection.inbound += chunk
                 if len(connection.inbound) > MAX_WIRE_BYTES: self._close(connection); return
             frames = 0
-            while not connection.auth.invalid and b"\n" in connection.inbound and frames < MAX_FRAMES_PER_PUMP and time.monotonic() < deadline:
+            while not connection.auth.invalid and b"\n" in connection.inbound and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.monotonic() < deadline):
                 line, connection.inbound = connection.inbound.split(b"\n", 1)
                 if not line: continue
                 frames += 1

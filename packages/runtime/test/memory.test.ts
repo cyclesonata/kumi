@@ -74,6 +74,23 @@ test("notes about an unsaved Set wait for its first save; unreadable files mean 
   } finally { f.done(); }
 });
 
+test("a note about an unsaved Set goes with that Set, not into the next saved Set opened", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kumi-memory-"));
+  const store = createMemoryStore({ projectsDir: join(dir, "projects"), producerFile: join(dir, "memory.json") });
+  let project: string | undefined; let set = "unsaved-a";
+  const notes = memoryTools({ store, project: () => project, set: () => set, onEvent: () => {} });
+  const remember = notes.tools.find((item) => item.name === "remember")!;
+  try {
+    await remember.execute({ note: "The Reese is the main bass", about: "set" }, new AbortController().signal);
+    set = "saved-b"; project = PROJECT; await notes.flush();
+    assert.deepEqual((await store.load(PROJECT)).set, [], "Set B never heard about A's Reese");
+    set = "unsaved-c"; project = undefined;
+    await remember.execute({ note: "Verse two drops the hats", about: "set" }, new AbortController().signal);
+    project = "b".repeat(32); await notes.flush();
+    assert.deepEqual((await store.load(project)).set.map((note) => note.text), ["Verse two drops the hats"], "the same Set, saved, keeps its note");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("the model reads the notes as context in the producer's words, not as instructions", () => {
   assert.equal(memoryInstructions({ producer: [], set: [] }, "Night Drive"), "");
   const block = memoryInstructions({ producer: [{ id: "p1", text: "Likes short reverbs", at: 1 }], set: [{ id: "s2", text: "The Reese is the main bass", at: 2 }] }, "Night Drive");

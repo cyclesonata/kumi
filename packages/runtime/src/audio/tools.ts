@@ -27,7 +27,8 @@ export function listeningTools(options: { onEvent: (event: HeardEvent) => void; 
       file: { type: "string", minLength: 1, maxLength: 1024, description: "The audio: a file's absolute path or ~/…, or an audio clip's clipRef from discovery" },
       compare_to: { type: "string", minLength: 1, maxLength: 1024, description: "A reference to set file against, the same ways" },
       focus: { type: "string", enum: ["mix", "sound"], description: "mix for a song or stem, sound for one note or hit; left out, chosen by length" },
-      from_seconds: { type: "number", minimum: 0, description: "Where to start listening" },
+      from_seconds: { type: "number", minimum: 0, description: "Where to start listening in file" },
+      compare_from_seconds: { type: "number", minimum: 0, description: "Where to start listening in the reference; left out, its start" },
       seconds: { type: "number", exclusiveMinimum: 0, maximum: 720, description: "How long to listen" } } },
     async execute(input, signal) {
       const file = typeof input.file === "string" ? input.file : "";
@@ -40,7 +41,9 @@ export function listeningTools(options: { onEvent: (event: HeardEvent) => void; 
           options.onEvent({ type: "heard", file: mine.file, summary: summary(mine), bands: mine.balance.bands.map((band) => band.db) });
           return { text: JSON.stringify(trimSound(mine)) };
         }
-        const reference = await hear(await locate(input.compare_to, signal), { ...common, ...(mine.analyzed.focus ? { focus: mine.analyzed.focus } : {}) });
+        // The reference's own place: the same seconds into another song are rarely the same part of it.
+        const { start: _mine, ...rest } = common;
+        const reference = await hear(await locate(input.compare_to, signal), { ...rest, ...(typeof input.compare_from_seconds === "number" ? { start: input.compare_from_seconds } : {}), ...(mine.analyzed.focus ? { focus: mine.analyzed.focus } : {}) });
         const comparison = compare(mine, reference);
         options.onEvent({ type: "heard", file: mine.file, summary: summary(mine), bands: mine.balance.bands.map((band) => band.db),
           compared: { reference: reference.file, summary: summary(reference), differences: comparison.balance.map((band) => band.difference), headlines: comparison.headlines } });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,6 +61,17 @@ test("choosing a model and an effort keeps them for next time; an effort the new
     await assert.rejects(f.control.binding(), (error: unknown) => error instanceof KumiError && error.kind === "auth" && error.provider === "anthropic");
     assert.equal(await f.control.signOut("anthropic"), false);
   } finally { f.done(); }
+});
+
+test("a new OpenCode key reaches a model on either OpenCode gateway, since Zen and Go share it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kumi-models-app-"));
+  const settingsFile = join(dir, "settings.json"); writeFileSync(settingsFile, JSON.stringify({ model: "opencode-go/some-model" }));
+  let changes = 0;
+  const control = createModelControl({ store: openCredentialStore(join(dir, "auth.json")), settingsFile, env: {}, fetch: async () => { throw new Error("offline"); }, changed: async () => { changes++; } });
+  try {
+    assert.equal(await control.saveKey("opencode", "oc-fixture-key-0001"), "unreachable");
+    assert.equal(changes, 1, "the Go model's connection is made again with the new key");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("with KUMI_MODEL set, a model chosen in Kumi lasts until it closes; a key in the environment isn't Kumi's to remove", async () => {

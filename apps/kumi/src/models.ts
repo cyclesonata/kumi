@@ -148,7 +148,9 @@ export function createModelControl(options: {
       if (verdict === "refused") return verdict;
       await store.update(info.credential, async () => ({ type: "api-key", key: trimmed }));
       catalog.delete(provider); if (provider === "opencode") catalog.delete("opencode-go"); if (provider === "opencode-go") catalog.delete("opencode");
-      if (model && parseModelId(model)?.provider === provider) { bound = undefined; await options.changed(); }
+      // By the key, not the provider: OpenCode Zen and Go share one.
+      const current = model ? parseModelId(model)?.provider : undefined;
+      if (current && PROVIDER_INFO[current].credential === info.credential) { bound = undefined; await options.changed(); }
       return verdict;
     },
     async signInChatGPT(io) {

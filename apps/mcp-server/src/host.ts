@@ -6013,14 +6013,23 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Chain state is uncertain; perform fresh discovery before retrying."); }
   }
 
+  /** A Drum Rack pad by reference, at any depth: preview finds nested racks (drumRackPad), so apply and undo must too. */
   private drumPadRow(snapshot: LiveSnapshot, padRef: LiveRef): JsonObject {
+    const visit = (devices: unknown, depth: number): JsonObject | undefined => {
+      if (!Array.isArray(devices) || depth > 16) return undefined;
+      for (const device of devices.filter(isObject)) {
+        const pads = ((device.drumPads as unknown[]) ?? []).filter(isObject);
+        const pad = pads.find((candidate) => candidate.ref === padRef);
+        if (pad) return pad;
+        for (const chain of [...((device.chains as unknown[]) ?? []), ...pads.flatMap((item) => (item.chains as unknown[]) ?? [])].filter(isObject)) { const found = visit(chain.devices, depth + 1); if (found) return found; }
+      }
+      return undefined;
+    };
     for (const track of snapshot.tracks as unknown as JsonObject[]) {
-      for (const device of ((track.devices as unknown[]) ?? []).filter(isObject)) {
-        const pad = ((device.drumPads as unknown[]) ?? []).filter(isObject).find((candidate) => candidate.ref === padRef);
-        if (pad) {
-          if (!isNonEmptyString(pad.objectIdentity, 256)) throw new Error("drum pad identity is unavailable");
-          return pad;
-        }
+      const pad = visit(track.devices, 0);
+      if (pad) {
+        if (!isNonEmptyString(pad.objectIdentity, 256)) throw new Error("drum pad identity is unavailable");
+        return pad;
       }
     }
     throw new Error("drum pad reference is not authoritative");

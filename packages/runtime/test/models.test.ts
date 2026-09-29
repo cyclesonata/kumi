@@ -33,9 +33,12 @@ test("ChatGPT's models come from its own list: hidden ones left out, its order k
       { slug: "gpt-reserve", display_name: "Reserve", priority: 0, visibility: "hide" },
       { slug: "gpt-6-astra", display_name: "GPT-6 Astra", priority: 1, visibility: "list", default_reasoning_level: "medium",
         supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }, { effort: "turbo" }] },
+      { slug: "gpt-6-nova", display_name: "GPT-6 Nova", priority: 0, visibility: "list" },
+      { slug: "gpt-6-draft", display_name: "GPT-6 Draft", visibility: "list" },
     ] }) });
     const models = await listModels("openai-codex", { store, fetch });
-    assert.deepEqual(models.map((model) => model.id), ["openai-codex/gpt-6-astra", "openai-codex/gpt-6-luna"]);
+    assert.deepEqual(models.map((model) => model.id), ["openai-codex/gpt-6-nova", "openai-codex/gpt-6-astra", "openai-codex/gpt-6-luna", "openai-codex/gpt-6-draft"], "priority 0 is first; none is last");
+    models.splice(0, 1); models.pop();
     assert.deepEqual(models[0]!.efforts.map((level) => level.effort), ["low", "medium", "high", "xhigh"], "a level Kumi can't send is left out");
     assert.equal(models[0]!.defaultEffort, "medium");
     assert.deepEqual(models[1], { id: "openai-codex/gpt-6-luna", provider: "openai-codex", model: "gpt-6-luna", name: "GPT-6 Luna", description: "Fast",

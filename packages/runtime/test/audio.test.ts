@@ -193,6 +193,7 @@ test("a song-length file is analyzed quickly, part by part", async () => {
   assert.ok(ms < 6000, `75 seconds took ${Math.round(ms)} ms`);
   const part = await analyzeFile(path, { start: 30, seconds: 30 });
   assert.equal(part.analyzed.from, "0:30"); assert.equal(part.analyzed.to, "1:00");
+  await assert.rejects(analyzeFile(path, { start: 90 }), /no audio in that part of the file: it's 1:15 long/, "past the end isn't its last moment");
 });
 
 test("the listen tool hears a file, or sets it against a reference with loudness matched, and tells the app", async () => {
@@ -213,7 +214,11 @@ test("the listen tool hears a file, or sets it against a reference with loudness
   assert.ok(body.comparison.balance.find((band) => band.band === "low mids")!.difference > 3, "the extra low mids show, loudness-matched");
   assert.match(body.comparison.headlines.join(" | "), /low mids \(250–500 Hz\) \+\d+\.\d dB over the reference/);
   assert.match(body.comparison.headlines.join(" | "), /LU quieter overall/);
-  assert.equal(events.length, 2);
+  // Listening from 5 s into the mix hears a 3-second reference from its own start, not past its end.
+  const short = wav("short-reference.wav", [bright.subarray(0, seconds(3)), bright.subarray(0, seconds(3))]);
+  const later = await listen!.execute({ file: mine, compare_to: short, focus: "mix", from_seconds: 5 }, signal);
+  assert.equal(later.isError, undefined, later.text); assert.ok((JSON.parse(later.text) as { comparison: unknown }).comparison);
+  assert.equal(events.length, 3);
   const heard = events[1] as { type: string; compared: { reference: string; differences: number[] } };
   assert.equal(heard.type, "heard"); assert.equal(heard.compared.reference, "reference.wav"); assert.equal(heard.compared.differences.length, 10);
   const missing = await listen!.execute({ file: join(folder, "nowhere.wav") }, signal);

@@ -95,11 +95,12 @@ const FORGET_DESCRIPTION = "Remove a note, by its id, when the producer says it'
 
 /**
  * The remember and forget tools for one session. `project` is the saved Set now open (undefined
- * while it's unsaved: notes about it wait until it's saved, in this session). Each write is quiet:
- * the turn needs no model reply for it.
+ * while it's unsaved: notes about it wait until it's saved, in this session). `set` says which Set
+ * is open, saved or not, so a waiting note is kept only for the Set it was about. Each write is
+ * quiet: the turn needs no model reply for it.
  */
-export function memoryTools(options: { store: MemoryStore; project: () => string | undefined; onEvent: (event: MemoryEvent) => void }) {
-  const pending: string[] = [];
+export function memoryTools(options: { store: MemoryStore; project: () => string | undefined; set?: () => string | undefined; onEvent: (event: MemoryEvent) => void }) {
+  const pending: Array<{ text: string; set: string | undefined }> = [];
   let queue: Promise<unknown> = Promise.resolve();
   // Writes go one at a time, so two notes in one reply don't race for the same id.
   const serial = <T>(work: () => Promise<T>): Promise<T> => { const next = queue.then(work, work); queue = next.catch(() => undefined); return next; };
@@ -109,7 +110,7 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
     const project = scope === "set" ? options.project() : undefined;
     if (scope === "set" && !project) {
       // An unsaved Set has nowhere to keep notes yet; they're kept once it's saved.
-      if (pending.length < MAX_NOTES) pending.push(text);
+      if (pending.length < MAX_NOTES) pending.push({ text, set: options.set?.() });
       const note: MemoryNote = { id: `s${pending.length}`, text, at: Date.now() };
       options.onEvent({ type: "remembered", scope, note, pending: true });
       return quiet({ kept: "once the Set is saved" });
@@ -167,11 +168,13 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
   return {
     tools,
     forget: (id: string) => serial(() => forget(id)),
-    /** The Set was saved: notes about it made meanwhile are kept now. */
+    /** The Set was saved: notes about it made meanwhile are kept now. Notes about another Set, one closed unsaved, go. */
     async flush(): Promise<void> {
       const project = options.project();
       if (!project || !pending.length) return;
-      const texts = pending.splice(0);
+      const open = options.set?.();
+      const texts = pending.splice(0).filter((note) => note.set === open).map((note) => note.text);
+      if (!texts.length) return;
       await serial(async () => {
         const memory = await options.store.load(project);
         const notes = [...memory.set];

@@ -72,9 +72,10 @@ export async function analyzeSource(source: AudioSource, name: string, options: 
   const { sampleRate, channels } = source;
   if (sampleRate < 8000 || sampleRate > 384000) throw new AudioError(`A sample rate of ${sampleRate} Hz isn't one Kumi can analyze.`);
   const total = source.frames / sampleRate;
-  const startSeconds = Math.min(Math.max(0, options.start ?? 0), Math.max(0, total - 0.05));
+  const startSeconds = Math.max(0, options.start ?? 0);
   const length = Math.min(options.seconds ?? MAX_SECONDS, MAX_SECONDS, total - startSeconds);
-  if (!(length > 0.02)) throw new AudioError("There's no audio in that part of the file.");
+  // A start at or past the end is a request for audio the file doesn't have, not for its last moment.
+  if (!(length > 0.02)) throw new AudioError(startSeconds > 0 ? `There's no audio in that part of the file: it's ${clock(total)} long.` : "There's no audio in that part of the file.");
   const focus = options.focus === "mix" || options.focus === "sound" ? options.focus : length <= SOUND_SECONDS ? "sound" : "mix";
   source.seek(startSeconds * sampleRate);
   const frames = Math.floor(length * sampleRate);

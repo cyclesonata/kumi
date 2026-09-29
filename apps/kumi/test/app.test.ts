@@ -171,6 +171,9 @@ test("the / menu lists a few commands, moves with the arrows and runs the choice
   assert.ok(!has(h.screen(), "Close Kumi"), "esc closes the menu and keeps the text");
   await h.type("\u0015/nope\r");
   assert.ok(has(h.screen(), "There's no /nope command. Type / to see them."));
+  // A file dragged into the terminal pastes its path: that's a message for the model, not a command.
+  await h.type("\u0015/Users/me/ref.wav\r");
+  assert.ok(h.calls.includes("submit:/Users/me/ref.wav"));
   await h.app.close();
 });
 

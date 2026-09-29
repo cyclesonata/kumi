@@ -1889,6 +1889,16 @@ test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clear
   assert.equal(other.chains.length, 0, "no other pad changed");
 });
 
+test("a Drum Rack inside another rack has its pads found for apply and undo, as preview finds them", () => {
+  const host = new McpHost(new DeterministicLiveSimulator());
+  const pad = { ref: "drum_pad:inner-38", objectIdentity: "live:pad:38", note: 38, chains: [] };
+  const drums = { ref: "device:drums", objectIdentity: "live:drums", name: "Drum Rack", drumPads: [pad], chains: [] };
+  const snapshot = { tracks: [{ ref: "track:1", objectIdentity: "live:track:1", devices: [{ ref: "device:outer", objectIdentity: "live:outer", name: "Instrument Rack", chains: [{ ref: "chain:1", objectIdentity: "live:chain:1", devices: [drums] }] }] }] };
+  assert.equal((host as any).drumRackPad(snapshot, "device:drums", 38), pad);
+  assert.equal((host as any).drumPadRow(snapshot, "drum_pad:inner-38"), pad);
+  assert.throws(() => (host as any).drumPadRow(snapshot, "drum_pad:gone"), /not authoritative/);
+});
+
 test("several parameters of one device change as one transaction: one Live request, one undo", async () => {
   const simulator = new DeterministicLiveSimulator();
   const device = (simulator as any).state.tracks[0].devices[0];

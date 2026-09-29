@@ -7,7 +7,7 @@ import { createAbletonIntegration } from "../../src/integrations/ableton/index.j
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
-type Options = { padBatches?: boolean; parameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
+type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
   /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
   /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string };
 export function bridge(options: Options = {}) {
@@ -58,6 +58,12 @@ export function bridge(options: Options = {}) {
       if (name === "live_discover" && args.kind === "session-playback") return wrap({ epoch, kind: args.kind, revision: "r1", truncated: false, items: [{ ref: "7:session_playback:0",
         transport: { playing: transport.playing, sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, firedTargets: [],
         playingTargets: transport.playing ? [{ trackRef: "7:track:0", clipSlotRef: "7:clip_slot:0:0", sceneRef: "7:scene:0" }] : [] }] });
+      if (name === "live_discover" && args.kind === "parameter" && options.manyParameters) {
+        const rows = Array.from({ length: 150 }, (_, index) => ({ ref: `7:parameter:${index}`, parentRef: "7:device:0:0", name: index === 149 ? "Feedback" : `Knob ${index}`, value: 0, min: 0, max: 1 }));
+        const from = typeof args.cursor === "string" ? Number(args.cursor.slice(5)) : 0; const limit = typeof args.limit === "number" ? args.limit : 100;
+        const next = from + limit < rows.length ? `page:${from + limit}` : undefined;
+        return wrap({ epoch: 7, kind: args.kind, items: rows.slice(from, from + limit), revision: "r1", truncated: Boolean(next), ...(next ? { nextCursor: next } : {}) });
+      }
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"

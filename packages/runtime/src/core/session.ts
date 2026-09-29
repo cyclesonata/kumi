@@ -69,10 +69,12 @@ export function createSession(options: Options): SessionController {
   let away = false;
   /** The saved Set the conversation is about, when known. */
   let currentProject: string | undefined;
+  /** Which Set is open, saved or not: notes about an unsaved Set are kept only if that Set is saved. */
+  let currentSet: string | undefined;
   /** The open Set's name, for /memory. */
   let currentSetName: string | undefined;
   // Notes are kept by the model's own calls; each write is quiet, so it costs no model reply.
-  const notes = options.memory ? memoryTools({ store: options.memory, project: () => currentProject, onEvent: (event) => emit(event) }) : undefined;
+  const notes = options.memory ? memoryTools({ store: options.memory, project: () => currentProject, set: () => currentSet, onEvent: (event) => emit(event) }) : undefined;
   // Recipes run through the open Set's plan tool, with its checks, HISTORY and undo.
   let planTool: KernelTool | undefined;
   const recipes = options.recipes ? recipeTools({ store: options.recipes, plan: () => planTool, onEvent: (event) => emit(event) }) : [];
@@ -201,7 +203,7 @@ export function createSession(options: Options): SessionController {
     observationLabel = undefined;
     const snapshot = await integration.observe(op.controller.signal);
     assertCurrent(op);
-    currentProject = snapshot.project?.id; currentSetName = snapshot.project?.name;
+    currentProject = snapshot.project?.id; currentSetName = snapshot.project?.name; currentSet = snapshot.key;
     planTool = snapshot.tools.find((tool) => tool.name === "make_changes");
     // Notes about a Set made before its first save are kept now that it has a file.
     if (currentProject) void notes?.flush().catch(() => {});

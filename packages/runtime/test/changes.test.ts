@@ -626,3 +626,14 @@ test("a parameter can be named rather than referenced, found on the device when 
     assert.match(unknown.text, /no parameter called "Wobble"; its parameters include Osc-A Level, Filter Freq, Ae Release/);
   } finally { await b.integration.close(); }
 });
+
+test("a parameter named past the device's first page of parameters is found", async () => {
+  const b = await opened({ parameters: true, manyParameters: true });
+  try {
+    const context = JSON.parse(b.observation.context) as { tracks: { devices?: { ref: string; name: string }[] }[] };
+    const operator = context.tracks[0]!.devices!.find((device) => device.name === "Operator")!.ref;
+    const set = await tool(b.tools, "set_device_parameter").execute({ deviceRef: operator, parameter: "Feedback", value: 0.4 }, signal());
+    assert.equal(set.isError, false, set.text);
+    assert.equal(b.requests.filter((request) => request.name === "live_device_parameter_preview").at(-1)!.args.parameterRef, "7:parameter:149");
+  } finally { await b.integration.close(); }
+});

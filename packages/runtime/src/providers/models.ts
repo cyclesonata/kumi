@@ -61,6 +61,9 @@ function fromId(provider: ProviderId, model: string, name = model): ModelInfo {
   return { id: `${provider}/${model}`, provider, model, name, efforts };
 }
 
+/** ChatGPT's order for a model: 0 is first, not missing; no priority goes last. */
+const rank = (priority: unknown) => { const value = typeof priority === "number" ? priority : typeof priority === "string" && priority.trim() ? Number(priority) : NaN; return Number.isFinite(value) ? value : 999; };
+
 /** The models this producer can use from `provider`, best first. Throws KumiError("auth") when not signed in. */
 export async function listModels(provider: ProviderId, options: ListOptions): Promise<ModelInfo[]> {
   if (provider === "openai-codex") {
@@ -68,7 +71,7 @@ export async function listModels(provider: ProviderId, options: ListOptions): Pr
     const body = record(await getJson(CODEX_MODELS, { authorization: `Bearer ${access}`, "chatgpt-account-id": accountId, originator: "kumi" }, options, provider));
     const rows = (Array.isArray(body.models) ? body.models : []).map(record)
       .filter((row) => typeof row.slug === "string" && row.visibility !== "hide")
-      .sort((a, b) => (Number(a.priority) || 999) - (Number(b.priority) || 999));
+      .sort((a, b) => rank(a.priority) - rank(b.priority));
     return rows.map((row) => {
       const model = String(row.slug);
       const efforts = (Array.isArray(row.supported_reasoning_levels) ? row.supported_reasoning_levels : []).map(record)

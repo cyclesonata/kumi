@@ -4726,6 +4726,20 @@ class RackStateAgreementTests(unittest.TestCase):
         instrument = FakeRackDevice(); song.tracks[0].devices = [instrument]; row = mapper.snapshot()["tracks"][0]["devices"][0]
         self.assertTrue(mapper.invoke("rack.set", {"ref": row["ref"], "selectedVariationIndex": 0, "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": host_rack_state_revision(row)})["changed"])
 
+    def test_a_loaded_kits_fingerprint_is_the_rack_as_the_host_expands_it(self):
+        # Pads name the rack's chains (listedOnRack) on the wire; the host expands them before it
+        # fingerprints, so the bridge's fingerprint must hash the same expanded row or a loaded kit never settles.
+        song = FakeSong(); rack = FakeRackDevice(); rack.name = "808 Core Kit"; rack.can_have_drum_pads = True
+        chain = type("Chain", (), {"name": "Kick", "devices": [FakeDevice()], "in_note": 36})(); rack.chains = [chain]
+        rack.drum_pads = [type("Pad", (), {"name": "Kick", "note": 36, "chains": [chain], "mute": False, "solo": False})()]
+        song.tracks[0].devices = [rack]; mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertTrue(row["drumPads"][0]["chains"][0].get("listedOnRack"))
+        expanded = remote_module._expanded_pad_chains(row)
+        self.assertEqual(expanded["drumPads"][0]["chains"][0], expanded["chains"][0])
+        host = hashlib.sha256(mapper._bounded_canonical(_owned_device_row(expanded)).encode("utf-8")).hexdigest()
+        self.assertEqual(mapper._mapped_fingerprint(row["ref"]), host)
+
 
 class BrowserChainLoadTests(unittest.TestCase):
     """Browser loads into a rack's chain: a native device by name, anything else hot-swapped onto a placeholder."""
@@ -5759,6 +5773,25 @@ class MainThreadTransportTests(unittest.TestCase):
             time.sleep(0.01)
         worker.join(1)
         self.assertEqual(worker_result, ["queued"])
+
+    def test_a_slow_connection_does_not_starve_the_others(self):
+        # One client's reads use the whole tick's budget: the next client is still answered that tick or the next.
+        client, reader = self.connect(); self.pump_until_readable(client); hello = json.loads(reader.readline())
+        other, other_reader = self.connect(); self.pump_until_readable(other); other_hello = json.loads(other_reader.readline())
+        busy = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, hello["bridgeEpoch"], hello["connectionChallenge"])
+        quiet = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, other_hello["bridgeEpoch"], other_hello["connectionChallenge"])
+        slow = self.bridge.mapper.status
+        def status():
+            time.sleep(remote_module.PUMP_BUDGET_SECONDS * 1.5); return slow()
+        self.bridge.mapper.status = status
+        client.sendall(b"".join(self.request(busy, sequence) for sequence in range(1, 9)))
+        other.sendall(self.request(quiet, 1))
+        import select
+        for _ in range(2):
+            self.bridge.update_display()
+            if select.select([other], [], [], 0.02)[0]: break
+        else: self.fail("the quiet connection waited behind the busy one")
+        self.assertTrue(json.loads(other_reader.readline())["ok"])
 
     def test_disconnect_closes_every_connection(self):
         client, _ = self.connect(); self.pump_until_readable(client)

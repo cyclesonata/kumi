@@ -85,6 +85,8 @@ const COMMANDS = [
 const ACTION_TOOLS: ReadonlySet<string> = new Set(["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"]);
 /** Offered only with a ModelControl to answer them. */
 const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logout"];
+/** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
+export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
 const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
@@ -579,7 +581,7 @@ export class TuiApp {
       return;
     }
     // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
-    if (this.busy && !this.current && !this.pendingTurn && !command.startsWith("/") && this.queued === undefined) {
+    if (this.busy && !this.current && !this.pendingTurn && !isCommand(command) && this.queued === undefined) {
       this.editor.clear();
       this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
       this.queued = raw; this.lastSent = raw;
@@ -605,7 +607,7 @@ export class TuiApp {
         // A fresh start is a new bridge connection: earlier changes stay listed, without their undo.
         this.changes = this.changes.map((change) => change.state === "applied" || change.state === "unsure"
           ? { ...change, state: "expired", note: "Kumi started fresh (/new), so it can't undo this; Live's own undo still can." } : change);
-      } else if (command.startsWith("/")) this.notice(`There's no ${command.split(/\s/)[0]} command. Type / to see them.`, "info");
+      } else if (isCommand(command)) this.notice(`There's no ${command.split(/\s/)[0]} command. Type / to see them.`, "info");
       else {
         this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
         this.lastSent = raw;

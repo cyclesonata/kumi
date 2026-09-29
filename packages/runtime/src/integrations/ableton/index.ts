@@ -536,13 +536,23 @@ export function createAbletonIntegration(options: Options): Integration {
     const tracks = Array.isArray(prior.tracks) ? prior.tracks.length : 0; const scenes = Array.isArray(prior.scenes) ? prior.scenes.length : 0;
     return { ...input, ...(input.tracks !== undefined ? { tracks: place(input.tracks, tracks) } : {}), ...(input.scenes !== undefined ? { scenes: place(input.scenes, scenes) } : {}) };
   }
+  /** Every parameter of a device, page by page: an instrument such as Operator has more than one page's worth. */
+  async function deviceParameters(deviceRef: unknown, fields: string[], signal: AbortSignal): Promise<JsonObject[]> {
+    const rows: JsonObject[] = []; let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const read = payload(await tools!.call("live_discover", { kind: "parameter", parent: deviceRef, fields, limit: 100, ...(cursor ? { cursor } : {}) }, signal, { host: true }));
+      rows.push(...(Array.isArray(read.items) ? read.items : []).map((item) => object(item)));
+      cursor = typeof read.nextCursor === "string" && read.nextCursor !== cursor ? read.nextCursor : undefined;
+      if (!cursor) break;
+    }
+    return rows;
+  }
   /** Preview and apply one change as a single step, then record it for HISTORY. */
   function changeContext(signal: AbortSignal): ChangeContext {
     return {
       sample: (path) => samples.get(path),
       async parameters(deviceRef) {
-        const read = payload(await tools!.call("live_discover", { kind: "parameter", parent: deviceRef, fields: ["ref", "name"], limit: 100 }, signal, { host: true }));
-        return (Array.isArray(read.items) ? read.items : []).map((item) => object(item))
+        return (await deviceParameters(deviceRef, ["ref", "name"], signal))
           .filter((row): row is JsonObject & { ref: string; name: string } => typeof row.ref === "string" && typeof row.name === "string").map((row) => ({ ref: row.ref, name: row.name }));
       },
       async pick(selector: SampleSelector) {
@@ -1011,8 +1021,7 @@ export function createAbletonIntegration(options: Options): Integration {
       // What the producer set on each device they added: the knobs away from Live's defaults.
       const added = devices.filter((device) => !before.devices.has(String(device.objectIdentity))).slice(0, WATCH_DEVICES);
       const settings = await Promise.all(added.map(async (device) => {
-        const read = payload(await tools!.call("live_discover", { kind: "parameter", parent: device.ref, fields: ["name", "value", "defaultValue", "displayValue"], limit: 100 }, signal, { host: true }));
-        const moved = (Array.isArray(read.items) ? read.items : []).map((item) => object(item))
+        const moved = (await deviceParameters(device.ref, ["name", "value", "defaultValue", "displayValue"], signal))
           .filter((parameter) => typeof parameter.defaultValue === "number" && typeof parameter.value === "number" && Math.abs(parameter.value - parameter.defaultValue) > 1e-6)
           .map((parameter) => ({ name: parameter.name ?? null, value: parameter.value, ...(typeof parameter.displayValue === "string" ? { shows: parameter.displayValue } : {}) }));
         const owner = trackName.get(String(device.parentRef));
