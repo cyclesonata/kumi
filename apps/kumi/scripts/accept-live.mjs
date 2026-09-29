@@ -218,7 +218,8 @@ try {
       try {
         const after = await integration.undo(record.id, signal());
         // A bounce that recorded keeps its track, and the track it recorded from, as a producer would want.
-        const keeps = after.state === "kept" && [`Added audio track “${BOUNCE}”`, `Added MIDI track “${PAD}”`].includes(record.title);
+        // Its input can't go back to Ext. In when Live has no audio input to offer.
+        const keeps = after.state === "kept" && ([`Added audio track “${BOUNCE}”`, `Added MIDI track “${PAD}”`].includes(record.title) || (record.title.startsWith(`${BOUNCE}: input from`) && /^Live doesn't offer/.test(after.note ?? "")));
         say(after.state === "undone" || keeps, performance.now() - t1, `${after.state} · ${record.title}${after.note ? ` (${after.note})` : ""}`);
       } catch (error) { say(false, performance.now() - t1, `${record.title}: ${String(error?.message ?? error).slice(0, 200)}`); }
     }

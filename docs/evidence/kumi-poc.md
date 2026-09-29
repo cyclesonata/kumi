@@ -979,3 +979,25 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `3
 - The eval (`npm run eval:changes`, gpt-6-astra): "technique: used" and "gap noted" pass. In
   "technique: learned" the model wrote the technique into the plan in 4 of 6 runs, and 3 were
   kept; the traced runs show a written draft armed at the end of the turn and kept by "I love it".
+
+## accept:live on bridges 1.0.35 to 1.0.39
+
+`npm run accept:live --workspace @kumi/app -- --set "Kumi Focus Demo"` on real Live 12.4.15b4.
+
+- **1.0.35: 37 of 49.** Live refuses a playhead, loop or locator past the end of the Set's
+  arrangement (this Set ends between beats 1024 and 2048; the script used 4096). The bridge
+  called that uncertain, so Kumi kept the change as "unsure" and dropped its references, and the
+  clip edits, the bounce and the undo that followed failed with it.
+- **1.0.36** says where the Set ends and that nothing changed. With the script at beat 16 and
+  tracks named per run, 47 of 55: reading notes by guessed ids 0–3 failed (this clip's are 1, 3,
+  4; `live_discover` kind note lists them), and three bounce tracks from earlier runs read as
+  armed. Their input had become No Input when their source track was deleted, and Live then
+  can't arm or disarm them, so recording elsewhere was refused.
+- **1.0.37** doesn't count such a track as armed. The bounce ran (9 steps, recorded, heard at
+  −19.9 LUFS); 50 of 56. Undo refused a loop change after playback (fenced on the playback
+  revision) and a routing change on a No Input track (a null sub-routing was written back).
+- **1.0.38** fixed both; 55 of 57. Undoing the bounce's routing asks for "Ext. In", which Live
+  offers only while there's an audio input (none on this Mac), and was called uncertain.
+- **1.0.39** refuses that with the reason and nothing changed. **56 of 56**: every change undone,
+  except the recorded bounce track, the track it recorded from, and its routing, which Kumi keeps
+  with the reason in HISTORY; the Set otherwise as it was.
