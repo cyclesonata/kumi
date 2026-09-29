@@ -783,7 +783,7 @@ export class TuiApp {
   private readTree(again = false): void {
     const ref = this.focus?.trackRef; const read = this.options.controller.deviceTree;
     if (!ref || !read || this.connection !== "connected") return;
-    const key = `${ref}\u0000${this.focus?.device ?? ""}\u0000${this.focus?.chain ?? ""}`;
+    const key = `${ref}\u0000${this.focus?.device ?? ""}\u0000${this.focus?.chain ?? ""}\u0000${this.focus?.deviceRef ?? ""}`;
     if (!again && key === this.treeKey) return;
     this.treeKey = key;
     if (this.treeReading) { this.treeAgain = true; return; }
@@ -860,7 +860,7 @@ export class TuiApp {
     const focus = this.focus; const tree = this.tree;
     if (this.connection !== "connected" || !focus?.track || !tree || tree.trackRef !== focus.trackRef) return undefined;
     if ((focus.detail !== "Device" || this.touched !== "device") && this.treeCursor === undefined) return undefined;
-    const rows = treeRows(tree, { ...(focus.device ? { device: focus.device } : {}), ...(focus.chain ? { chain: focus.chain } : {}) });
+    const rows = treeRows(tree, { ...(focus.device ? { device: focus.device } : {}), ...(focus.chain ? { chain: focus.chain } : {}), ...(focus.deviceRef ? { deviceRef: focus.deviceRef } : {}) });
     return rows.length ? rows : undefined;
   }
 
@@ -869,6 +869,8 @@ export class TuiApp {
     const focus = this.focus;
     if (!focus?.trackRef) return;
     this.pinned = { trackRef: focus.trackRef, ref: row.ref, node: row.node, name: row.name, trail: row.trail, siblings: row.siblings, kind: row.kind, ...(focus.track ? { track: focus.track.name } : {}) };
+    // Live shows it too, where it can (a device from bridge 1.0.42, a chain always).
+    void this.options.controller.selectInLive?.(row.ref).catch(() => false);
     this.scheduler.request();
   }
 

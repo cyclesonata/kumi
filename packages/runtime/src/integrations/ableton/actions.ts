@@ -6,7 +6,7 @@
  */
 import type { JsonObject } from "../../core/contracts.js";
 import type { KnownTrack } from "./changes.js";
-import { ARRANGEMENT_BRIDGE, FIXED_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, DEVICE_SELECT_BRIDGE, FIXED_BRIDGE } from "./bridge-version.js";
 import { bars } from "./more-changes.js";
 
 export interface ActionKind {
@@ -20,6 +20,8 @@ export interface ActionKind {
   since?: string;
   /** Actions (by their `action` value) that need a later bridge than the tool does. */
   newer?: Record<string, string>;
+  /** Input fields that need a newer bridge than the tool does: the bridge version for each. */
+  fieldsSince?: Record<string, string>;
   prepare?(input: JsonObject): JsonObject | string;
   /** What happened, for NOW and the answer; `playing` when the transport is now running, false when stopped. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined): { title: string; playing?: boolean; recording?: boolean };
@@ -88,12 +90,13 @@ export const ACTIONS: readonly ActionKind[] = [
   },
   {
     tool: "select", since: FIXED_BRIDGE, preview: "live_selection_preview", apply: "live_selection_apply",
-    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view) or chainRef. Use it when they ask where something is, or ask to see it. (Live's scripting can't select a device or a parameter: select its track, or its chain, instead.)",
-    // What Live's scripting really selects: the bridge's device and parameter fields don't work on real Live.
-    inputSchema: { type: "object", additionalProperties: false, properties: { trackRef: REF, sceneRef: REF, slotRef: REF, detailClipRef: REF, chainRef: REF } },
+    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view), chainRef, or deviceRef (the device, with its track and its rack's chain shown). Use it when they ask where something is, or ask to see it. (Live's scripting can't select a parameter: select its device.)",
+    // What Live's scripting really selects: a device through Song.View.select_device (bridge 1.0.42); never a parameter.
+    inputSchema: { type: "object", additionalProperties: false, properties: { trackRef: REF, sceneRef: REF, slotRef: REF, detailClipRef: REF, chainRef: REF, deviceRef: REF } },
+    fieldsSince: { deviceRef: DEVICE_SELECT_BRIDGE },
     summarize(_preview, input, track) {
       const known = track(input.trackRef);
-      return { title: known ? `Selected ${known.name}` : input.detailClipRef ? "Showing the clip" : input.chainRef ? "Showing the chain" : "Selected it in Live" };
+      return { title: known ? `Selected ${known.name}` : input.detailClipRef ? "Showing the clip" : input.deviceRef ? "Showing the device" : input.chainRef ? "Showing the chain" : "Selected it in Live" };
     },
   },
   {

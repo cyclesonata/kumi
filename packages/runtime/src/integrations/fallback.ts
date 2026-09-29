@@ -32,5 +32,6 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
     clipView: async (slotRef, signal) => current.clipView?.(slotRef, signal),
     sessionStrip: async (trackRef, scene, signal) => current.sessionStrip?.(trackRef, scene, signal),
     arrangementStrip: async (signal) => current.arrangementStrip?.(signal),
+    selectInLive: async (ref, signal) => Boolean(await current.selectInLive?.(ref, signal)),
   };
 }

@@ -1353,6 +1353,19 @@ class LiveObjectMapper:
             rows.append(self._device_row(device, device_ref, track_ref, track_index, f"{track_index}:{index}", index, traversal, 0))
         return rows
 
+    def _device_type(self, device: Any) -> str | None:
+        """Live's device type (Device.type): an instrument, an audio effect or a MIDI effect."""
+        value = self._read_attr(device, "type")
+        try: number = int(value) if value is not None and not isinstance(value, bool) else None
+        except (TypeError, ValueError): number = None
+        return {1: "instrument", 2: "audio_effect", 4: "midi_effect"}.get(number) if number is not None else None
+
+    def _selected_device(self, view: Any) -> Any:
+        """The selected device: the Song's view has none of its own; it's the selected track's."""
+        track = self._read_attr(view, "selected_track") if view is not None else None
+        track_view = getattr(track, "view", None) if track is not None else None
+        return self._read_attr(track_view, "selected_device") if track_view is not None else None
+
     def _flatten_device_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         flattened: list[dict[str, Any]] = []; seen: dict[str, int] = {}
         def visit(device: dict[str, Any], depth: int = 0) -> None:
@@ -1421,6 +1434,7 @@ class LiveObjectMapper:
             "className": str(self._read_attr(device, "class_name") or device.__class__.__name__),
             "name": str(self._read_attr(device, "name") or "Device"),
             "kind": "rack" if self._read_attr(device, "can_have_chains") is True else "device",
+            "deviceType": self._device_type(device),
             "enabled": bool(enabled) if isinstance(enabled, bool) else None,
             "canHaveChains": self._read_attr(device, "can_have_chains") if isinstance(self._read_attr(device, "can_have_chains"), bool) else None,
             "canHaveDrumPads": self._read_attr(device, "can_have_drum_pads") if isinstance(self._read_attr(device, "can_have_drum_pads"), bool) else None,
@@ -1890,7 +1904,7 @@ class LiveObjectMapper:
             track_index = self._capture_index(track_objects, selected_track); track_ref = snapshot["tracks"][track_index]["ref"] if track_index is not None and track_index < len(snapshot["tracks"]) else None
             scene_objects = self._items(getattr(self.song, "scenes", [])); scene_index = self._capture_index(scene_objects, selected_scene); scene_ref = snapshot["scenes"][scene_index]["ref"] if scene_index is not None and scene_index < len(snapshot["scenes"]) else None
             highlighted_identity = self._capture_object_identity(highlighted_slot) if highlighted_slot is not None else None; slot_matches = [slot["ref"] for track in snapshot["tracks"] for slot in track.get("clipSlots", []) if highlighted_identity is not None and self._capture_same_object(self.refs.get(slot["ref"]), highlighted_slot, highlighted_identity)]; slot_ref = slot_matches[0] if len(slot_matches) == 1 else None
-            items = [{"ref": f"{self.refs.epoch}:selection:current", "parentRef": set_row["ref"], "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref, **self._focus_fields()}]
+            items = [{"ref": f"{self.refs.epoch}:selection:current", "parentRef": set_row["ref"], "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref, "selectedDeviceRef": (snapshot.get("selection") or {}).get("deviceRef"), **self._focus_fields()}]
         else:
             # Routing choices are track-scoped Live objects. Enumerating a
             # non-existent Song.routing_choices collection made parent-scoped
@@ -5345,7 +5359,7 @@ class LiveObjectMapper:
             devices(track.get("devices"))
         for scene in scene_rows: note("scene", scene)
         def selected(kind: str, attribute: str) -> str | None:
-            value = self._read_attr(view, attribute) if view is not None else None
+            value = self._selected_device(view) if attribute == "selected_device" else self._read_attr(view, attribute) if view is not None else None
             return known.get((kind, self._capture_object_identity(value))) if value is not None else None
         return {"trackRef": selected("track", "selected_track"), "sceneRef": selected("scene", "selected_scene"), "slotRef": selected("clip_slot", "highlighted_clip_slot"),
                 "detailClipRef": selected("clip", "detail_clip"), "deviceRef": selected("device", "selected_device"), "parameterRef": selected("parameter", "selected_parameter"), "chainRef": selected("chain", "selected_chain")}
@@ -5376,19 +5390,28 @@ class LiveObjectMapper:
         if not proposals: raise ValueError("selection mutation has no fields")
         def identity_of(value: Any) -> str | None:
             return None if value is None else self._capture_object_identity(value)
+        # A device is selected through Song.View.select_device (Live has no settable selected_device), which
+        # also selects its track and shows its chain; it's read back from the selected track's view.
+        def read(attribute: str) -> Any:
+            return self._selected_device(view) if attribute == "selected_device" else self._read_attr(view, attribute)
+        def write(attribute: str, value: Any) -> None:
+            if attribute != "selected_device": setattr(view, attribute, value); return
+            select = getattr(view, "select_device", None)
+            if not callable(select): raise ValueError("device selection is unavailable")
+            if value is not None: select(value)
         assignments = []
         try:
             for attribute, value in proposals:
-                prior = self._read_attr(view, attribute)
-                setattr(view, attribute, value)
+                prior = read(attribute)
+                write(attribute, value)
                 assignments.append((attribute, prior))
             for attribute, value in proposals:
-                observed = self._read_attr(view, attribute)
+                observed = read(attribute)
                 if identity_of(observed) != identity_of(value): raise ValueError("selection change was not confirmed")
         except BaseException as error:
             rollback_failed = False
             for attribute, prior in reversed(assignments):
-                try: setattr(view, attribute, prior)
+                try: write(attribute, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._bounded_canonical(self._selection_state()) != self._bounded_canonical(before_state): raise ValueError("selection change failed and exact rollback failed") from error
             raise

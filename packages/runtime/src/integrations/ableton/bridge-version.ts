@@ -6,6 +6,9 @@ export const FIXED_BRIDGE = "1.0.34";
 /** The bridge release that can press Live's Back to Arrangement (play's back-to-arrangement). */
 export const ARRANGEMENT_BRIDGE = "1.0.35";
 
+/** The bridge release that selects a device in Live (Song.View.select_device), and names the selected one. */
+export const DEVICE_SELECT_BRIDGE = "1.0.42";
+
 /** Whether `version` ("1.0.34", "1.0.34-beta.1") is `minimum` or later; an unknown version counts as later. */
 export function atLeast(version: string | undefined, minimum: string): boolean {
   if (!version) return true;

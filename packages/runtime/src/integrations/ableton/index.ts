@@ -16,7 +16,7 @@ import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { setMeter } from "./more-changes.js";
-import { atLeast } from "./bridge-version.js";
+import { atLeast, DEVICE_SELECT_BRIDGE } from "./bridge-version.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
@@ -1114,6 +1114,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!supported(kind) && !cleanup) throw new ObservationError(tooOld(kind));
       const newer = kind.newer?.[String(input.action)];
       if (newer && !cleanup && !supported({ since: newer })) throw new ObservationError(tooOld({ since: newer }));
+      for (const [field, since] of Object.entries(kind.fieldsSince ?? {})) if (input[field] !== undefined && !cleanup && !supported({ since })) throw new ObservationError(tooOld({ since }));
       if (!cleanup) requireFreshReferences(input);
       const prepared = kind.prepare ? kind.prepare(input) : input;
       if (typeof prepared === "string") return { text: prepared, isError: true };
@@ -1333,6 +1334,24 @@ export function createAbletonIntegration(options: Options): Integration {
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
     /** A track's devices, racks' chains and what's in them, for FOCUS. */
     deviceTree: (trackRef, signal) => readDeviceTree(trackRef, AbortSignal.any([signal, lifetime.signal])),
+    /**
+     * Select a device (bridge 1.0.42) or a chain in Live, for what the producer pointed at in Kumi. It's
+     * Kumi's own selection, not the model's: no HISTORY entry, and no reference from this turn needed.
+     */
+    async selectInLive(ref, originalSignal) {
+      const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+      const field = /^\d+:device:/.test(ref) ? "deviceRef" : /^\d+:chain:/.test(ref) ? "chainRef" : undefined;
+      if (!field || !available || lost || !tools?.has("live_selection_preview") || !tools.has("live_selection_apply")) return false;
+      if (field === "deviceRef" && !supported({ since: DEVICE_SELECT_BRIDGE })) return false;
+      try {
+        const previewed = await tools.call("live_selection_preview", { [field]: ref }, signal, { host: true });
+        if (previewed.isError) return false;
+        const { transactionId, confirmation } = payload(previewed);
+        if (typeof transactionId !== "string" || typeof confirmation !== "string") return false;
+        const applied = await tools.call("live_selection_apply", { transactionId, confirmation, idempotencyKey: randomUUID() }, signal, { host: true });
+        return !applied.isError;
+      } catch { signal.throwIfAborted(); return false; }
+    },
     /** A track's Session slots around a scene (seven), and their clips' names read together, for FOCUS. */
     async sessionStrip(trackRef, scene, originalSignal) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);

@@ -35,3 +35,11 @@ test("what the producer pointed at goes to the model with a reference it can use
     assert.equal(JSON.parse((await b.integration.observe(signal())).context).pinned, undefined, "only when pointing at something");
   } finally { await b.integration.close(); }
 });
+
+test("pointing at a device selects it in Live from bridge 1.0.42, a chain always; an older bridge isn't asked for a device", async () => {
+  const old = await opened({ racks: true });
+  try {
+    assert.equal(await old.integration.selectInLive!("7:device:0:0:0:0", signal()), false);
+    assert.equal(old.requests.some((request) => request.name === "live_selection_preview"), false);
+  } finally { await old.integration.close(); }
+});

@@ -26,7 +26,10 @@ export interface TreeRow {
  * Where Live's selection is: the path of racks and chains to the selected device, by reference, or,
  * when that isn't on this track, to the selected chain; undefined when neither is found.
  */
-export function focusPathRefs(tree: DeviceTree, device: string | undefined, chain: string | undefined): string[] | undefined {
+export function focusPathRefs(tree: DeviceTree, device: string | undefined, chain: string | undefined, deviceRef?: string): string[] | undefined {
+  // The bridge names the selected device exactly (1.0.42): its path, whatever the names.
+  const exact = deviceRef ? refPath(tree.devices, deviceRef, []) : undefined;
+  if (exact) return exact;
   const onDevice = device ? devicePath(tree, device, chain) : undefined;
   if (onDevice || !chain) return onDevice;
   const walk = (devices: readonly DeviceNode[], trail: string[]): string[] | undefined => {
@@ -38,6 +41,17 @@ export function focusPathRefs(tree: DeviceTree, device: string | undefined, chai
     return undefined;
   };
   return walk(tree.devices, []);
+}
+
+function refPath(devices: readonly DeviceNode[], ref: string, trail: string[]): string[] | undefined {
+  for (const item of devices) {
+    if (item.ref === ref) return [...trail, item.ref];
+    for (const child of item.chains ?? []) {
+      const found = refPath(child.devices ?? [], ref, [...trail, item.ref, child.ref]);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 function devicePath(tree: DeviceTree, device: string, chain: string | undefined): string[] | undefined {
@@ -55,8 +69,8 @@ function devicePath(tree: DeviceTree, device: string, chain: string | undefined)
 }
 
 /** The tree as rows: every device on the track, racks and chains on the path open, the rest folded with a count. */
-export function treeRows(tree: DeviceTree, focus: { device?: string; chain?: string } = {}): TreeRow[] {
-  const path = focusPathRefs(tree, focus.device, focus.chain);
+export function treeRows(tree: DeviceTree, focus: { device?: string; chain?: string; deviceRef?: string } = {}): TreeRow[] {
+  const path = focusPathRefs(tree, focus.device, focus.chain, focus.deviceRef);
   const open = new Set(path ?? []);
   const focused = path?.at(-1);
   const rows: TreeRow[] = [];

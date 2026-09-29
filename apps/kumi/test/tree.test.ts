@@ -72,3 +72,8 @@ test("a Drum Rack's pads fold to a count, nested racks open along the path, and 
   assert.ok(window.rows.includes(long[12]!), "the kept row is in view");
   assert.deepEqual(treeWindow(long.slice(0, 5), 12, 0), { rows: long.slice(0, 5), above: 0, below: 0 });
 });
+
+test("the bridge's reference for the selected device marks exactly that one, whatever the names", () => {
+  assert.deepEqual(focusPathRefs(audio, "Saturator", "Chain 1", "d2c"), ["d2", "c1", "d2c"], "the second Saturator, though Chain 1 is selected");
+  assert.deepEqual(focusPathRefs(audio, "Saturator", undefined, "gone"), ["d2", "c0", "d2a"], "an unknown reference: by name");
+});
