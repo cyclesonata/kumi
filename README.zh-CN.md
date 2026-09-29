@@ -2,11 +2,15 @@
 
 [English](README.md) · 简体中文 · [日本語](README.ja.md)
 
-以一只猫命名的个人音乐制作助手。此概念验证提供全屏终端对话：回答关于当前
-打开的 Ableton Live 工程的问题，并执行你要求的修改（速度、调音台、名称、新轨道
-和场景、MIDI 片段、加载设备、设备参数、定位点、轨道颜色）。每项修改都显示在
-HISTORY 中，并可单独撤销。它会记住每个已保存的工程，下次打开时告诉你 Kumi 关闭期间
-发生了哪些变化，并接着之前的对话继续。播放控制、录音、聆听音频和偏好学习尚未实现。
+以一只猫命名的个人音乐制作助手：在终端中全屏运行，围绕当前打开的 Ableton Live
+工程对话。它回答关于工程的问题，并执行你要求的几乎所有 Live 脚本接口允许的修改：
+速度、拍号、律动与音阶，调音台、路由与侧链，轨道、返回轨与场景，片段、音符与
+MIDI 变换，设备、机架及其参数，以及它在你电脑上找到的采样。每项修改都显示在
+HISTORY 中，并可单独撤销。在你要求时，它还能播放、录音，并通过重采样把声音转成
+音频。它可以聆听音频（参考曲、采样或它自己的录音），并把你的混音与参考曲对比。
+它会把你的工作流程存为可重放的配方，也能通过观察你的操作学会流程。它会记下你告诉
+它的简短笔记。它会记住每个已保存的工程，下次打开时接着之前的对话，并告诉你 Kumi
+关闭期间发生了哪些变化。
 
 ## 开始使用
 
@@ -16,6 +20,7 @@ HISTORY 中，并可单独撤销。它会记住每个已保存的工程，下次
 ```sh
 npm run setup                          # 安装并构建全部组件，约一分钟
 npm run kumi -- login openai-codex     # 使用 ChatGPT 套餐登录（无浏览器环境用 --device）
+npm run kumi -- bridge                 # 先关闭 Live：把桥接装入 Live（或更新它）
 npm run kumi                           # 讨论当前打开的 Live 工程
 npm run kumi -- doctor                 # 遇到问题时：检查所有环节并告诉你该运行什么
 ```
@@ -25,16 +30,18 @@ npm run kumi -- doctor                 # 遇到问题时：检查所有环节并
 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENCODE_API_KEY`，运行
 `npm run kumi -- auth` 可查看可用的提供方。关于未保存工程的对话会在关闭 Kumi 后结束。
 
-安装桥接的 Remote Script 并在 Live 中将其选为控制界面（Control Surface）后，
-Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示尚未连接 Live。
-首次安装桥接：[连接 Live（英文）](docs/en/KUMI_POC.md#connect-to-live)。
+要连接 Live，请先关闭 Live，再运行 `npm run kumi -- bridge`：它会安装（或更新）桥接的
+Remote Script，然后等待你打开 Live。首次安装时，请在 Live 的
+**Settings → Link, Tempo & MIDI** 中将 `AbletonMcpBridge` 选为控制界面（Control Surface）。
+之后 Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示尚未连接 Live
+（[连接 Live（英文）](docs/en/KUMI_POC.md#connect-to-live)）。
 
 - [Kumi 设置、命令与限制（英文）](docs/en/KUMI_POC.md)
 - [桥接配置](docs/zh-CN/USER_GUIDE.md) · [安全边界](docs/zh-CN/LIVE_SAFETY.md)
 - [包含真实 Live 验收的验证记录（英文）](docs/evidence/kumi-poc.md)
 
 在终端中全屏运行（对话、Live 面板和输入框）。输入 `/` 查看命令，Esc 停止当前
-工作，Ctrl-C 先清空输入框，空时退出。
+工作，`/stop` 停止 Live，Ctrl-C 先清空输入框，空时退出。[更新日志（英文）](CHANGELOG.md)。
 使用 `npm run typecheck` 和 `npm test` 进行测试，无需凭据或 Live。
 
 ## Ableton MCP Beyond — 独立桥接组件
@@ -42,7 +49,7 @@ Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示
 [![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
 
 `@ableton-mcp/mcp-server` 仍可由其他 MCP 客户端独立使用，保留自己的锁文件、
-Node 支持策略、安全契约和 CI。Kumi 目前使用桥接的 Live 读取与编辑工具（带经过验证的撤销），分析工具是下一步。
+Node 支持策略、安全契约和 CI。Kumi 使用桥接的 Live 读取、编辑、走带与录音工具（带经过验证的撤销），并自行分析音频。
 
 [桥接入口（英文）](apps/mcp-server/README.md) ·
 [能力列表](docs/zh-CN/CAPABILITY_MATRIX.md) · [支持矩阵](docs/zh-CN/SUPPORT_MATRIX.md) ·
