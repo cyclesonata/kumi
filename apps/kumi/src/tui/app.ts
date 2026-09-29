@@ -908,7 +908,7 @@ export class TuiApp {
     const items: PickerItem[] = kept.length ? kept.map((row) => ({ label: sanitizeText(row.first, this.secrets).replaceAll("\n", " ").slice(0, 120) || "(nothing asked yet)", value: row.id,
       note: `${row.current ? "this one" : since(row.savedAt, now)} · ${requests(row.turns)}`, noteTone: "faint" as const }))
       : [{ label: "None kept yet: a conversation is kept once you've asked something", inert: true }];
-    const picker = new Picker(`Conversations about ${this.setName ?? "this Set"} · choose one to carry on with it`, items, { filterable: true });
+    const picker = new Picker(`Conversations about ${this.setName ?? "this Set"}`, items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: async (item) => {
       this.closePanel();
       const row = kept.find((candidate) => candidate.id === item.value);

@@ -930,3 +930,33 @@ was quit on the testbed and reopened, and the producer answered its recovery pro
   Pan-Tremolo".
 - Recording one MIDI track's output onto another armed MIDI track captured no notes on real Live,
   with no device as well, so device behaviour is checked by ear (resampling) for now.
+
+## Reconnecting without losing the conversation, on real Live
+
+Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `83e1ff4`.
+
+- **The cause of the bug report**, reproduced in `mcp.test.ts`: when an answer from the bridge
+  crossed Kumi's cancel of that request, the MCP SDK reported "a response for an unknown message
+  ID", and Kumi closed the bridge for good. Live quitting mid-request does exactly this.
+- **Kumi's bridge dropped mid-request** (its process killed; Live stayed open): "Kumi's link to
+  Live dropped. It's reconnecting, and will pick up where you left off." About 3 s later a fresh
+  bridge was up: "Live is back. Your last request was stopped; press enter to send it again."
+  The request was in the input box. HISTORY's earlier changes showed "no undo". Enter sent it,
+  and it finished (12 steps, a new track and a bassline).
+- **Live quit mid-request** (`kill -TERM`; reopened with `open -a`; the producer answered the
+  recovery prompt): "Live closed. Kumi will pick up where you left off when it's back." 30 s later:
+  "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface…?" Once
+  Live had loaded, Kumi reconnected on its own with the stopped request in the box. Sent again,
+  it finished (8 notes changed).
+- **The conversation survived both:** asked "What was my very first question in this
+  conversation?", Kumi answered "What is on the Reese Bass track?".
+- **Input history:** ↑ recalled the last message, then earlier ones. `~/.kumi/input-history` is
+  mode 600.
+- **After a restart** Kumi said "Continuing your conversation from just now", with the exchanges
+  and HISTORY (without undo), and ↑ recalled the last session's input.
+- **`/new`** drew "── New conversation. Kumi won't use what's above ──" and kept the old one.
+  `/conversations` listed it ("just now · 7 requests"), and choosing it brought it back ("Back to
+  your conversation from just now").
+- Seen on the way: after the reconnect the model's first reads used references from before it
+  and failed, then it discovered again. Firing the new scene once reported that playback wasn't
+  confirmed.
