@@ -107,7 +107,19 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
 ### Memory
 
 - Kumi keeps short notes of what you tell it that Live can't show, about you and
-  about each saved Set. `/memory` shows and forgets them.
+  about each saved Set.
+- Techniques: when Kumi builds a sound or a chain (from a tutorial, or a request
+  of several steps), it drafts what made it work, and keeps it only if your next
+  moves say you liked the result (you played it, kept working on it, saved the
+  Set, said so, or moved on and left it). It's dropped quietly if you undid it,
+  deleted it or said no. Kept techniques are named in the model's instructions,
+  read whole when a request fits, adapted, and Kumi says it's using one.
+- Every save shows: a line of its own kind in the conversation (`✎` notes, `◆`
+  techniques, `↻` recipes), a moment in NOW, and a MEMORY group in the pane with a
+  forget click on each. `/memory` lists and forgets all three kinds.
+- What Kumi couldn't do for lack of a tool or Live's scripting is logged on your
+  computer for Kumi's developers (`~/.kumi/gaps.jsonl`), never read back and not
+  part of what Kumi remembers.
 
 ### Conversations and reconnecting
 

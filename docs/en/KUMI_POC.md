@@ -86,6 +86,8 @@ yet.
 | `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
 | `KUMI_INPUT_HISTORY_FILE` | What you sent, for the up arrow (keys and tokens left out); default `~/.kumi/input-history` |
+| `KUMI_TECHNIQUES_FILE` | Techniques Kumi learned from what it built that you liked; default `~/.kumi/techniques.json` |
+| `KUMI_GAPS_FILE` | What Kumi couldn't do for lack of a tool, logged for Kumi's developers (not a memory); default `~/.kumi/gaps.jsonl` |
 | `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
 | `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
 | `KUMI_VIDEOS_DIR` | Videos Kumi watched (their words, frames and sound); default `~/.kumi/videos` |
@@ -360,8 +362,10 @@ Kumi keeps short notes of what you tell it that Live can't show, and uses them i
 later conversations: what a track or sound is for ("the Reese is the main bass"),
 what you're going for in a song or a section, your habits (naming, colours,
 routing), and what you like or dislike, in sounds and in how Kumi works. It
-decides for itself, as it answers, with no extra wait. When it keeps a note, one
-faint line says so ("Kumi will remember: The Reese is the main bass").
+decides for itself, as it answers, with no extra wait. Everything it keeps shows
+as it happens: a line of its own in the conversation (`✎ Noted about you: …`,
+`◆ Kept a technique: Neuro from a Reese`, `↻ Saved a recipe: Drum bus`), a moment
+in NOW, and a row in the pane's MEMORY group with a **forget** click.
 
 - **Two places.** Notes about you, true in any project, are in `~/.kumi/memory.json`.
   Notes about a saved Set are in its folder in `~/.kumi/projects`, next to its
@@ -375,14 +379,53 @@ faint line says so ("Kumi will remember: The Reese is the main bass").
   instructions to the assistant, or holds something like a key, isn't kept, and
   one found in the files isn't read back, so text inside a Set (a track name
   written as an instruction, say) can't become a standing order.
-- **`/memory`** shows what Kumi remembers, about you and this Set; choosing a note
-  offers to forget it. You can also tell Kumi a note is wrong, or to forget it.
+- **`/memory`** shows everything Kumi keeps: notes about you and this Set,
+  techniques and recipes. Choosing a note or a technique offers to forget it, and a
+  recipe to run or forget it. You can also tell Kumi one is wrong, or to forget it.
 - **Cost.** Notes are loaded when a conversation starts, as part of the model's
   instructions, so they stay in the provider's prompt cache. A note kept
   alongside the answer costs no second model reply and no request to Live
   (`npm test` holds it to that); one kept before the answer is written still
   lets the model answer.
 - `KUMI_MEMORY_FILE` moves the notes about you elsewhere.
+
+### Techniques
+
+A technique is what made something Kumi built work, kept to adapt to similar
+sounds later: the idea (the chain and why each part), the settings that mattered,
+what to use when a part isn't there, what it fits, and where it came from (a
+tutorial or your conversation). A recipe replays exact steps; a technique is
+adapted. For example, the Reese-to-neuro chain from a tutorial becomes a neuro bass
+on another track, with Auto Filter standing in for a plugin you don't have.
+
+- **Learned quietly.** When a plan builds a sound or a chain, the model writes a
+  draft of it into that plan, without a word about it. Kumi keeps the draft only
+  if your next moves say you liked the result: you played it, kept working on it
+  or around it (knobs included), saved the Set, said so, or moved on to other
+  things and left it in place (after a couple of requests, or ten minutes). It's
+  dropped, without a word, if you undid most of it, deleted its track, said no
+  ("not like that", "start over"), or stopped the answer that built it. No extra
+  model call decides this.
+- **Shown when kept.** `◆ Kept a technique: …` in the conversation, a moment in
+  NOW, and a MEMORY row with its forget. A technique that refines one already kept
+  (the same name, or one the model read) updates it rather than adding another.
+- **Used by name.** Only each technique's name and what it fits are in the model's
+  instructions; it reads one whole when a request fits, adapts it, and says so
+  ("using your parallel-filter technique from the Apollo tutorial, adapted").
+  Kumi's line says `◆ Using your technique: …`.
+- **Kept like notes:** in `~/.kumi/techniques.json`, readable only by you, up to 40
+  (the one used least lately makes room). The same filter keeps out anything that
+  reads as instructions or holds something like a key. Asked in so many words
+  ("remember how we did that"), Kumi keeps one at once.
+
+### What Kumi couldn't do
+
+When a request needs something Kumi's tools or Live's scripting don't offer
+(freezing a track, say), Kumi tells you and offers the way round, and notes the
+missing capability in `~/.kumi/gaps.jsonl` (readable only by you, the latest 500
+kept) for Kumi's developers. It's never read back into a conversation and isn't
+part of what Kumi remembers about you; a later `kumi report` will bundle it for
+sending, when you choose.
 
 ## Limits and failure behavior
 

@@ -199,6 +199,10 @@ export function createTerminal(options: Options): Terminal {
         const list = (notes: { id: string; text: string }[]) => notes.map((note) => `${note.id} ${note.text}`).join(" · ") || "none";
         notice(`[memory] About you: ${list(memory.producer)}`);
         notice(memory.saved ? `[memory] About ${memory.setName ?? "this Set"}: ${list(memory.set)}` : "[memory] This Set isn't saved yet; notes about it are kept once it is.");
+        if (controller.techniques) {
+          const techniques = await controller.techniques();
+          notice(`[memory] Techniques: ${techniques.map((technique) => `${technique.id} ${technique.name} (for ${technique.fits})`).join(" · ") || "none yet"}`);
+        }
         return;
       }
       if (verb === "/recipes") {
@@ -221,8 +225,13 @@ export function createTerminal(options: Options): Terminal {
         return;
       }
       if (verb === "/forget") {
+        // A technique's id starts with t; a note's with p or s.
+        if (argument?.startsWith("t") && controller.forgetTechnique) {
+          if (!await controller.forgetTechnique(argument)) notice("[memory] Use: /forget <id>, with an id from /memory.");
+          return;
+        }
         const note = argument ? await controller.forget?.(argument) : undefined;
-        notice(note ? `[memory] Forgot: ${note.text}` : "[memory] Use: /forget <id>, with an id from /memory.");
+        if (!note) notice("[memory] Use: /forget <id>, with an id from /memory.");
         return;
       }
       if (verb === "/login") { notice("[login] Sign in from a shell: npm run kumi -- login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here."); return; }
@@ -307,11 +316,12 @@ export function createTerminal(options: Options): Terminal {
       }
       case "tool-start": if (!suppressOutput) notice(`[tool] ${event.name} started`); break;
       case "tool-end": if (!suppressOutput) notice(`[tool] ${event.name} ${event.isError ? "error" : "success"} · ${event.elapsedMs} ms`); break;
-      case "remembered": notice(`[memory] ${event.replaced ? "Updated" : "Will remember"}${event.scope === "producer" ? " about you" : ""}: ${event.note.text}${event.pending ? " (once the Set is saved)" : ""}`); break;
+      case "remembered": notice(`[memory] ${event.replaced ? "Updated a note" : "Noted"} ${event.scope === "producer" ? "about you" : "about this Set"}: ${event.note.text}${event.pending ? " (kept once the Set is saved)" : ""}`); break;
       case "forgot": notice(`[memory] Forgot: ${event.note.text}`); break;
       case "action": notice(`[live] ${event.title}`); break;
       case "watching": notice(event.on ? "[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done." : "[live] Kumi stopped watching."); break;
       case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
+      case "technique": notice(`[technique] ${{ kept: "Kept", updated: "Updated", used: "Using", forgot: "Forgot" }[event.action]} “${event.technique.name}”${event.action === "kept" || event.action === "updated" ? ` (for ${event.technique.fits}; /forget ${event.technique.id} drops it)` : ""}`); break;
       case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
       case "watched": {
         const at = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;

@@ -15,6 +15,10 @@ export interface Step {
   doing?: string;
 }
 
+/** What Kumi keeps: notes (✎), techniques (◆) and recipes (↻). */
+export type MemoryKind = "note" | "technique" | "recipe";
+export const MEMORY_GLYPHS: Record<MemoryKind, string> = { note: "✎", technique: "◆", recipe: "↻" };
+
 /** A frame's small picture: RGB, three bytes a pixel, row by row. */
 export interface Picture { width: number; height: number; rgb: Uint8Array }
 
@@ -24,6 +28,8 @@ export type Entry =
   | { kind: "notice"; text: string; tone: "info" | "warn" }
   /** A line across the conversation: what's above it is a conversation Kumi no longer uses, say. */
   | { kind: "divider"; text: string }
+  /** Something Kumi kept, used or forgot: a note, a technique or a recipe, each with its glyph and colour. */
+  | { kind: "memory"; what: MemoryKind; text: string }
   /** Audio Kumi listened to: its tonal balance, or its differences from a reference. */
   | { kind: "heard"; file: string; summary: string; bands: number[]; compared?: { reference: string; summary: string; differences: number[] } }
   /** A video Kumi watched: what it is, where its words came from, and the frames it looked at (pictured when `pictures`). */
@@ -174,6 +180,10 @@ function entryRows(entry: Entry, width: number): Row[] {
   if (entry.kind === "notice") {
     const style = entry.tone === "warn" ? S.warn : S.faint;
     return wrap([{ text: entry.text, style }], inner).map((spans) => ({ spans }));
+  }
+  if (entry.kind === "memory") {
+    const lines = wrap([{ text: entry.text, style: S.dim }], Math.max(1, inner - 2));
+    return lines.map((spans, index) => ({ spans: [index === 0 ? { text: `${MEMORY_GLYPHS[entry.what]} `, style: { fg: palette[entry.what] } as Style } : { text: "  ", style: S.dim }, ...spans] }));
   }
   if (entry.kind === "divider") {
     const rest = Math.max(2, inner - textWidth(entry.text) - 4);

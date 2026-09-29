@@ -791,10 +791,10 @@ test("a note Kumi keeps is one quiet line, and its call isn't a step", async () 
   h.emit({ type: "remembered", scope: "producer", note: { id: "p1", text: "Prefers short, dark reverbs", at: 3 }, replaced: { id: "p1", text: "Prefers short reverbs", at: 2 } });
   h.emit({ type: "forgot", scope: "set", note: { id: "s1", text: "The Reese is the main bass", at: 1 } });
   const lines = h.screen();
-  assert.ok(has(lines, "Kumi will remember: The Reese is the main bass"));
-  assert.ok(has(lines, "Kumi will remember about you: Prefers short reverbs"));
-  assert.ok(has(lines, "Kumi updated a note about you: Prefers short, dark reverbs"));
-  assert.ok(has(lines, "Kumi forgot: The Reese is the main bass"));
+  assert.ok(has(lines, "✎ Noted about Night Drive: The Reese is the main bass"));
+  assert.ok(has(lines, "✎ Noted about you: Prefers short reverbs"));
+  assert.ok(has(lines, "✎ Updated a note about you: Prefers short, dark reverbs"));
+  assert.ok(has(lines, "✎ Forgot: The Reese is the main bass"));
   assert.ok(!has(lines, "step"), "keeping a note isn't a step");
   await h.app.close();
 });
@@ -966,7 +966,7 @@ test("/recipes lists saved ways of working; one without blanks runs straight awa
   await delay(5);
   assert.ok(has(h.screen(), "Run my recipe “Resample twice” on"), "the box says it, for the producer to finish");
   h.emit({ type: "recipe", action: "saved", name: "Vocal chain", steps: 4 });
-  assert.ok(has(h.screen(), "Kumi saved the recipe “Vocal chain” (4 steps)"));
+  assert.ok(has(h.screen(), "↻ Saved a recipe: Vocal chain (4 steps)"));
   await h.app.close();
 });
 
@@ -1057,5 +1057,68 @@ test("when Live is back after stopping a request, it's in the box, one enter fro
   assert.ok(has(lines, "record the chorus into a new track"));
   await h.type("\r");
   assert.ok(h.calls.includes("submit:record the chorus into a new track"));
+  await h.app.close();
+});
+
+test("every memory save is a line of its own kind, a moment in NOW, and a MEMORY row with its forget", async () => {
+  const forgotten: string[] = [];
+  const h = harness(120, 36, undefined, {
+    async forgetTechnique(id) { forgotten.push(`technique:${id}`); h.emit({ type: "technique", action: "forgot", technique: { id, name: "Neuro from a Reese", fits: "gritty neuro basses" } }); return true; },
+    async forget(id) { forgotten.push(`note:${id}`); return undefined; },
+    async forgetRecipe(name) { forgotten.push(`recipe:${name}`); return true; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "technique", action: "kept", technique: { id: "t1", name: "Neuro from a Reese", fits: "gritty neuro basses", source: "Au5 · Neuro bass" } });
+  let lines = h.screen();
+  assert.ok(has(lines, "◆ Kept a technique: Neuro from a Reese"), "a line in the conversation");
+  const now = lines.findIndex((line) => line.includes("NOW"));
+  assert.ok(lines[now + 1]!.includes("◆ Kept a technique: Neuro"), "and NOW shows it for a moment");
+  h.emit({ type: "remembered", scope: "producer", note: { id: "p1", text: "Prefers short reverbs", at: 1 } });
+  h.emit({ type: "recipe", action: "saved", name: "Drum bus", steps: 3 });
+  lines = h.screen();
+  assert.ok(has(lines, "✎ Noted about you: Prefers short reverbs") && has(lines, "↻ Saved a recipe: Drum bus (3 steps)"));
+  const memory = lines.findIndex((line) => /MEMORY\s*$/.test(line));
+  assert.ok(memory > 0, "MEMORY sits in the pane");
+  assert.ok(lines[memory + 1]!.includes("↻ Drum bus") && lines[memory + 1]!.includes("forget"), "newest first, each with its forget");
+  assert.ok(lines[memory + 2]!.includes("✎ Prefers short reverbs"));
+  assert.ok(lines[memory + 3]!.includes("◆ Neuro from a Reese"));
+  await h.type(click(lines, memory + 3, "forget"));
+  await delay(5);
+  assert.deepEqual(forgotten, ["technique:t1"]);
+  lines = h.screen();
+  assert.ok(lines[memory + 3]!.includes("forgotten"), "the row says so");
+  assert.ok(has(lines, "◆ Forgot the technique: Neuro from a Reese"));
+  // A note that was already gone says so.
+  await h.type(click(lines, memory + 2, "forget"));
+  await delay(5);
+  assert.ok(has(h.screen(), "That was already gone."));
+  h.emit({ type: "technique", action: "used", technique: { id: "t2", name: "Parallel drum crush", fits: "punchy drums" } });
+  assert.ok(has(h.screen(), "◆ Using your technique: Parallel drum crush"), "using one says so, without a MEMORY row");
+  await h.app.close();
+});
+
+test("/memory lists notes, techniques and recipes; choosing a technique offers to forget it", async () => {
+  const forgotten: string[] = [];
+  const h = harness(120, 36, undefined, {
+    async memory() { return { producer: [{ id: "p1", text: "Prefers short reverbs", at: Date.now() }], set: [], saved: true, setName: "Night Drive" }; },
+    async techniques() { return [{ id: "t1", name: "Neuro from a Reese", fits: "gritty, moving neuro basses", source: "Au5 · Neuro bass" }]; },
+    async forgetTechnique(id) { forgotten.push(id); return true; },
+    async recipes() { return [{ name: "Drum bus", about: "a return with glue compression", params: [], steps: 3, used: 0, created: 1 }]; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/memory\r");
+  let lines = h.screen();
+  for (const text of ["What Kumi remembers · notes, techniques and recipes", "About you", "Prefers short reverbs", "Techniques", "Neuro from a Reese", "Recipes", "Drum bus"]) assert.ok(has(lines, text), text);
+  await h.type("techn");
+  await h.type("\r");
+  lines = h.screen();
+  assert.ok(has(lines, "Forget this technique?"));
+  await h.type("\r");
+  await delay(5);
+  assert.deepEqual(forgotten, ["t1"]);
   await h.app.close();
 });

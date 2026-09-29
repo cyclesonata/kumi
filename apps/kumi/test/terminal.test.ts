@@ -182,7 +182,8 @@ test("plain mode lists what Kumi remembers and forgets a note by its id", async 
     async start() {}, async submit() {}, async refresh() {}, async newConversation() {}, async cancel() {}, async close() {},
     status() { return { state: "idle", connection: "disconnected", turns: 0 }; }, async undo() { return undefined; },
     async memory() { return { ...notes, setName: "Night Drive", saved: true }; },
-    async forget(id) { const note = notes.set.find((item) => item.id === id); notes.set = notes.set.filter((item) => item.id !== id); return note; },
+    // As the session does, a forgotten note is announced by its event.
+    async forget(id) { const note = notes.set.find((item) => item.id === id); notes.set = notes.set.filter((item) => item.id !== id); if (note) terminal.handleEvent({ type: "forgot", scope: "set", note }); return note; },
   };
   const terminal = createTerminal({ controller, input, output: sink, models: fakeModels().control, mode: "inference-only", closeTimeoutMs: 25 });
   const done = terminal.run();
@@ -195,7 +196,7 @@ test("plain mode lists what Kumi remembers and forgets a note by its id", async 
   assert.match(text, /\[memory\] About Night Drive: s1 The Reese is the main bass/);
   assert.match(text, /\[memory\] Forgot: The Reese is the main bass/);
   assert.match(text, /\[memory\] Use: \/forget <id>/);
-  assert.match(text, /\[memory\] Will remember about you: Names buses BUS - <what>/);
+  assert.match(text, /\[memory\] Noted about you: Names buses BUS - <what>/);
 });
 
 test("a watched video is one line: what it is, where its words came from, the frames and the sound", async () => {

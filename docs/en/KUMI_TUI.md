@@ -104,12 +104,15 @@ old line-by-line interface (`terminal.ts`).
    undo). `/new` starts afresh under a line ("New conversation. Kumi won't use
    what's above"), `/conversations` goes back to an earlier one, and ↑ and ↓ go
    through what you sent, across `/new` and restarts.
-5. ~~**Listening, notes and recipes**~~: done. What Kumi heard is a line in the
-   conversation with a small spectrum (ten bands, sub to air, `▁▂▃▄▅▆▇█`), and a
-   comparison shows each band as dB over or under the reference, coloured when
-   it matters (±1.5 dB). A note Kumi keeps, a recipe it saves or runs, is one
-   faint line; `/memory` and `/recipes` open them in the panel above the input
-   box.
+5. ~~**Listening, notes, techniques and recipes**~~: done. What Kumi heard is a
+   line in the conversation with a small spectrum (ten bands, sub to air,
+   `▁▂▃▄▅▆▇█`), and a comparison shows each band as dB over or under the
+   reference, coloured when it matters (±1.5 dB). Everything Kumi keeps is a line
+   of its own kind, with its glyph and colour: `✎` notes, `◆` techniques, `↻`
+   recipes. NOW shows it for a moment, and the pane's MEMORY group (under HISTORY,
+   once something is kept) lists the latest three with a **forget** click each.
+   `/memory` opens all of it in the panel above the input box; `/recipes` the
+   recipes.
 
 Done alongside: the welcome screen catches you up on a saved Set ("Since you were
 last here · 3 days ago", a few plain-words lines); once the conversation has

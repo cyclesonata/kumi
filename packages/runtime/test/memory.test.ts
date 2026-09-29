@@ -112,3 +112,18 @@ test("text that reads as orders to the assistant, or a secret, isn't kept, and a
     assert.equal((await f.remember({ note: "Wants the drop to hit harder than the intro", about: "set" })).isError, undefined, "ordinary notes are fine");
   } finally { f.done(); }
 });
+
+test("a note waiting for its Set's first save can be forgotten, and isn't kept on the save", async () => {
+  const f = fixture({ saved: false });
+  try {
+    await f.remember({ note: "Verse two drops the hats", about: "set" });
+    await f.remember({ note: "The chorus doubles the pad", about: "set" });
+    const gone = await f.notes.forget("s1");
+    assert.equal(gone?.text, "Verse two drops the hats");
+    assert.deepEqual(f.events.at(-1), { type: "forgot", scope: "set", note: gone });
+    assert.equal(await f.notes.forget("s1"), undefined, "already gone");
+    f.open(PROJECT);
+    await f.notes.flush();
+    assert.deepEqual((await f.store.load(PROJECT)).set.map((note) => note.text), ["The chorus doubles the pad"]);
+  } finally { f.done(); }
+});

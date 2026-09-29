@@ -4,7 +4,7 @@
  */
 import {
   FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type SessionController, type SessionEvent,
+  type RecipeSummary, type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -18,7 +18,7 @@ import { Renderer, type Cursor } from "./render.js";
 import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
-import { doingLabel, stepLabel, Transcript, type Entry, type Row } from "./transcript.js";
+import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { textWidth, truncate } from "./width.js";
 import { wrap } from "./wrap.js";
@@ -95,7 +95,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
@@ -193,7 +193,10 @@ export class TuiApp {
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
   /** The latest thing Kumi did in Live that isn't a change (playing, recording), for NOW. */
-  private lastAction: { title: string; at: number; glyph: string } | undefined;
+  /** What NOW shows for a moment: something Kumi did in Live, or kept (`memory`: shown whatever tool is running). */
+  private lastAction: { title: string; at: number; glyph: string; memory?: boolean } | undefined;
+  /** What Kumi kept this session (notes, techniques, recipes), oldest first, for MEMORY: each with its forget. */
+  private kept: { key: string; what: MemoryKind; title: string; forgotten?: boolean; forget: () => Promise<boolean> }[] = [];
   /** Kumi is watching the producer work in Live (watch_me), until they say they're done. */
   private watching = false;
   private undoing = false;
@@ -369,13 +372,25 @@ export class TuiApp {
         this.transcript.touch(this.current);
         break;
       case "remembered": {
-        const where = event.scope === "producer" ? "about you" : event.pending ? `once ${this.setName ?? "this Set"} is saved` : "";
-        this.notice(`${event.replaced ? "Kumi updated a note" : "Kumi will remember"}${where ? ` ${where}` : ""}: ${event.note.text}`, "info");
+        const set = this.setName ?? "this Set";
+        const about = event.scope === "producer" ? "about you" : event.pending ? `about ${set}, kept once it's saved` : `about ${set}`;
+        this.memoryLine("note", `${event.replaced ? "Updated a note" : "Noted"} ${about}: ${event.note.text}`);
+        const id = event.note.id;
+        this.keep(`note:${event.scope}:${event.pending ? "pending:" : ""}${id}`, "note", event.note.text, async () => Boolean(await this.options.controller.forget?.(id)));
         break;
       }
       case "forgot":
-        this.notice(`Kumi forgot: ${event.note.text}`, "info");
+        this.memoryLine("note", `Forgot: ${event.note.text}`);
+        this.forgotten(`note:${event.scope}:${event.note.id}`); this.forgotten(`note:${event.scope}:pending:${event.note.id}`);
         break;
+      case "technique": {
+        const { technique } = event;
+        this.memoryLine("technique", `${{ kept: "Kept a technique", updated: "Updated a technique", used: "Using your technique", forgot: "Forgot the technique" }[event.action]}: ${technique.name}`);
+        const key = `technique:${technique.id}`;
+        if (event.action === "kept" || event.action === "updated") this.keep(key, "technique", technique.name, async () => Boolean(await this.options.controller.forgetTechnique?.(technique.id)));
+        else if (event.action === "forgot") this.forgotten(key);
+        break;
+      }
       case "action": {
         const glyph = event.recording === true ? "●" : event.playing === true ? "▶" : event.playing === false || event.recording === false ? "■" : "›";
         this.lastAction = { title: sanitizeText(event.title, this.secrets).slice(0, 120), at: performance.now(), glyph };
@@ -388,9 +403,11 @@ export class TuiApp {
         break;
       case "recipe": {
         const steps = `${event.steps} ${event.steps === 1 ? "step" : "steps"}`;
-        const text = event.action === "saved" ? `Kumi saved the recipe “${event.name}” (${steps})` : event.action === "updated" ? `Kumi updated the recipe “${event.name}” (${steps})`
-          : event.action === "running" ? `Running your recipe “${event.name}” (${steps})` : `Kumi forgot the recipe “${event.name}”`;
-        this.notice(text, "info");
+        this.memoryLine("recipe", event.action === "saved" ? `Saved a recipe: ${event.name} (${steps})` : event.action === "updated" ? `Updated a recipe: ${event.name} (${steps})`
+          : event.action === "running" ? `Running your recipe: ${event.name} (${steps})` : `Forgot the recipe: ${event.name}`);
+        const key = `recipe:${event.name.toLowerCase()}`; const name = event.name;
+        if (event.action === "saved" || event.action === "updated") this.keep(key, "recipe", name, async () => Boolean(await this.options.controller.forgetRecipe?.(name)));
+        else if (event.action === "forgotten") this.forgotten(key);
         break;
       }
       case "heard":
@@ -847,30 +864,43 @@ export class TuiApp {
     this.scheduler.request();
   }
 
-  /** /memory: the notes Kumi keeps, about the producer and this Set; choosing one offers to forget it. */
+  /**
+   * /memory: all Kumi keeps: notes about the producer and this Set, techniques and recipes. Choosing a
+   * note or a technique offers to forget it; a recipe, to run or forget it.
+   */
   private async openMemory(): Promise<void> {
     const { controller } = this.options;
-    const memory = await controller.memory?.();
+    const [memory, techniques, recipes] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([])]);
     if (!memory) return;
     const now = Date.now();
-    const rows = (notes: typeof memory.producer): PickerItem[] => notes.slice().reverse().map((note) => ({ label: note.text, value: note.id, note: since(note.at, now), noteTone: "faint" }));
+    const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
+    const rows = (notes: typeof memory.producer): PickerItem[] => notes.slice().reverse().map((note) => ({ label: note.text, value: `note:${note.id}`, note: since(note.at, now), noteTone: "faint" }));
     const setName = memory.setName ?? "this Set";
     const items: PickerItem[] = [
       { heading: true, label: "About you" },
       ...(memory.producer.length ? rows(memory.producer) : [{ label: "Nothing yet", inert: true }]),
       { heading: true, label: `About ${setName}` },
       ...(!memory.saved ? [{ label: "Kept once the Set is saved", inert: true }] : memory.set.length ? rows(memory.set) : [{ label: "Nothing yet", inert: true }]),
+      ...(controller.techniques ? [{ heading: true, label: "Techniques" }, ...(techniques.length
+        ? techniques.map((technique): PickerItem => ({ label: clean(technique.name, 60), detail: clean(technique.fits, 160), value: `technique:${technique.id}`, ...(technique.source ? { note: clean(technique.source, 40), noteTone: "faint" as const } : {}) }))
+        : [{ label: "None yet: what worked in things Kumi built that you liked", inert: true }])] : []),
+      ...(controller.recipes ? [{ heading: true, label: "Recipes" }, ...(recipes.length
+        ? recipes.map((recipe): PickerItem => ({ label: recipe.name, detail: recipe.about, value: `recipe:${recipe.name}`, note: `${recipe.steps} steps`, noteTone: "faint" }))
+        : [{ label: "None yet", inert: true }])] : []),
     ];
-    const picker = new Picker("What Kumi remembers · what you tell it that Live can't show", items, { filterable: true });
+    const picker = new Picker("What Kumi remembers · notes, techniques and recipes", items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => {
-      const confirm = new Picker("Forget this note?", [
+      const [kind, ...rest] = item.value!.split(":"); const id = rest.join(":");
+      if (kind === "recipe") { const recipe = recipes.find((candidate) => candidate.name === id); if (recipe) this.recipeActions(recipe); return; }
+      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : "Forget this note?", [
         { label: "Forget it", detail: item.label, value: "yes" },
         { label: "Keep it", value: "no" },
       ]);
       this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
         this.closePanel();
         if (answer.value !== "yes") return;
-        if (!await controller.forget?.(item.value!)) this.notice("That note was already gone.", "info");
+        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : await controller.forget?.(id);
+        if (!gone) this.notice(`That ${kind === "technique" ? "technique" : "note"} was already gone.`, "info");
       } };
       this.scheduler.request();
     } };
@@ -933,26 +963,29 @@ export class TuiApp {
       note: recipe.used ? `used ${since(recipe.lastUsed ?? recipe.created, now)}` : `${recipe.steps} steps`, noteTone: "faint" as const }))
       : [{ label: "None yet: ask Kumi to save a way of working, or say “watch me” and do it in Live", inert: true }];
     const picker = new Picker("Your recipes · ways of working Kumi replays without planning again", items, { filterable: true });
-    this.panel = { kind: "pick", picker, choose: (item) => {
-      const recipe = recipes.find((candidate) => candidate.name === item.value)!;
-      const blanks = recipe.params.map((param) => param.about || param.name).join(", ");
-      const actions = new Picker(`“${recipe.name}” · ${recipe.steps} steps`, [
-        { label: recipe.params.length ? "Run it on…" : "Run it now", detail: recipe.params.length ? `Kumi needs: ${blanks}` : recipe.about, value: "run" },
-        { label: "Forget it", value: "forget" },
-        { label: "Keep it", value: "keep" },
-      ]);
-      this.panel = { kind: "pick", picker: actions, choose: async (answer) => {
-        this.closePanel();
-        if (answer.value === "forget") { if (!await controller.forgetRecipe?.(recipe.name)) this.notice("That recipe was already gone.", "info"); return; }
-        if (answer.value !== "run") return;
-        // With blanks, the producer says what to run it on, in their own words.
-        if (recipe.params.length) { this.editor.set(`Run my recipe “${recipe.name}” on `); this.scheduler.request(); return; }
-        if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
-        this.activity = `running “${recipe.name}”`;
-        const outcome = await controller.runRecipe?.(recipe.name).catch((error: unknown) => ({ text: safeError(error, this.secrets), isError: true }));
-        if (outcome) this.notice(outcome.isError ? `The recipe stopped: ${outcome.text}` : outcome.text, outcome.isError ? "warn" : "info");
-      } };
-      this.scheduler.request();
+    this.panel = { kind: "pick", picker, choose: (item) => { this.recipeActions(recipes.find((candidate) => candidate.name === item.value)!); } };
+    this.scheduler.request();
+  }
+
+  /** A recipe chosen in /recipes or /memory: run it (straight away when it has no blanks), forget it, or keep it. */
+  private recipeActions(recipe: RecipeSummary): void {
+    const { controller } = this.options;
+    const blanks = recipe.params.map((param) => param.about || param.name).join(", ");
+    const actions = new Picker(`“${recipe.name}” · ${recipe.steps} steps`, [
+      { label: recipe.params.length ? "Run it on…" : "Run it now", detail: recipe.params.length ? `Kumi needs: ${blanks}` : recipe.about, value: "run" },
+      { label: "Forget it", value: "forget" },
+      { label: "Keep it", value: "keep" },
+    ]);
+    this.panel = { kind: "pick", picker: actions, choose: async (answer) => {
+      this.closePanel();
+      if (answer.value === "forget") { if (!await controller.forgetRecipe?.(recipe.name)) this.notice("That recipe was already gone.", "info"); return; }
+      if (answer.value !== "run") return;
+      // With blanks, the producer says what to run it on, in their own words.
+      if (recipe.params.length) { this.editor.set(`Run my recipe “${recipe.name}” on `); this.scheduler.request(); return; }
+      if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+      this.activity = `running “${recipe.name}”`;
+      const outcome = await controller.runRecipe?.(recipe.name).catch((error: unknown) => ({ text: safeError(error, this.secrets), isError: true }));
+      if (outcome) this.notice(outcome.isError ? `The recipe stopped: ${outcome.text}` : outcome.text, outcome.isError ? "warn" : "info");
     } };
     this.scheduler.request();
   }
@@ -1258,14 +1291,15 @@ export class TuiApp {
       // How many changes this answer has made so far; a plan's show one by one as they land.
       const label = this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
-      if (action && (!flash || action.at > this.lastChange!.at) && (!running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
+      if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `✓ ${flash.title}`, detailStyle: st.bright };
       if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
       return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }
-    if (flash) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
     const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
+    // The newer of the two shows: a change Kumi made, or what it did or kept.
+    if (flash && !(action && action.at > this.lastChange!.at)) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
     if (action) return { label: "", detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
     // Between "watch me" and "done", NOW says so: the producer is working in Live meanwhile.
     if (this.watching) return { dot: st.accent, label: "watching", detail: "Watching your changes in Live; tell Kumi when you're done", detailStyle: st.text };
@@ -1319,8 +1353,58 @@ export class TuiApp {
       let column = x;
       for (const part of line) column = screen.put(column, area.y + 8 + row, part.text, part.style);
     });
+    // MEMORY, under HISTORY, once Kumi has kept something this session: its latest three, each with its forget.
+    const shown = Math.min(3, this.kept.length);
+    const memoryRows = shown ? shown + 2 + (this.kept.length > shown ? 1 : 0) : 0;
+    const historyRows = Math.max(0, area.height - 12 - memoryRows);
     put(10, "HISTORY", st.label);
-    this.drawHistory(screen, { x, y: area.y + 11, width, height: Math.max(0, area.height - 12) });
+    this.drawHistory(screen, { x, y: area.y + 11, width, height: historyRows });
+    if (shown && historyRows >= 2) this.drawMemory(screen, { x, y: area.y + 11 + historyRows + 1, width, height: memoryRows - 1 });
+  }
+
+  /** What Kumi kept this session, newest first, each with its forget (or "forgotten"). */
+  private drawMemory(screen: Screen, area: Rect): void {
+    screen.put(area.x, area.y, "MEMORY", st.label);
+    const newest = [...this.kept].reverse();
+    let y = area.y + 1;
+    for (const entry of newest.slice(0, 3)) {
+      const action = entry.forgotten ? "forgotten" : "forget";
+      const actionX = area.x + area.width - textWidth(action);
+      screen.put(area.x, y, MEMORY_GLYPHS[entry.what], { fg: palette[entry.what] });
+      screen.put(area.x + 2, y, truncate(entry.title, Math.max(1, actionX - area.x - 3)), entry.forgotten ? st.faint : st.text);
+      screen.put(actionX, y, action, entry.forgotten ? st.faint : st.accent);
+      if (!entry.forgotten) this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.forgetKept(entry); } });
+      y++;
+    }
+    if (newest.length > 3) screen.put(area.x, y, truncate(`${newest.length - 3} more · /memory`, area.width), st.faint);
+  }
+
+  /** MEMORY's forget: gone from Kumi's memory (its event marks the row), or already gone. */
+  private async forgetKept(entry: { forgotten?: boolean; forget: () => Promise<boolean> }): Promise<void> {
+    const gone = await entry.forget().catch(() => false);
+    if (!gone && !entry.forgotten) { entry.forgotten = true; this.notice("That was already gone.", "info"); }
+    this.scheduler.request();
+  }
+
+  /** Something Kumi kept, used or forgot: a line in the conversation, and a moment in NOW. */
+  private memoryLine(what: MemoryKind, text: string): void {
+    const clean = sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, 300);
+    this.transcript.add({ kind: "memory", what, text: clean });
+    this.lastAction = { title: clean.slice(0, 120), at: performance.now(), glyph: MEMORY_GLYPHS[what], memory: true };
+    setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
+  }
+
+  /** A save for MEMORY; an update replaces its row. */
+  private keep(key: string, what: MemoryKind, title: string, forget: () => Promise<boolean>): void {
+    const index = this.kept.findIndex((entry) => entry.key === key);
+    if (index >= 0) this.kept.splice(index, 1);
+    this.kept.push({ key, what, title: sanitizeText(title, this.secrets).replaceAll("\n", " ").slice(0, 200), forget });
+    if (this.kept.length > 50) this.kept.shift();
+  }
+
+  private forgotten(key: string): void {
+    const entry = this.kept.find((candidate) => candidate.key === key);
+    if (entry) entry.forgotten = true;
   }
 
   /** Kumi's changes, newest first, each with its own undo. */

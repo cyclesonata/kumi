@@ -100,7 +100,8 @@ const FORGET_DESCRIPTION = "Remove a note, by its id, when the producer says it'
  * quiet: the turn needs no model reply for it.
  */
 export function memoryTools(options: { store: MemoryStore; project: () => string | undefined; set?: () => string | undefined; onEvent: (event: MemoryEvent) => void }) {
-  const pending: Array<{ text: string; set: string | undefined }> = [];
+  // Forgotten ones stay as holes, so the ids of the others (their places) don't move.
+  const pending: Array<{ text: string; set: string | undefined; at: number } | undefined> = [];
   let queue: Promise<unknown> = Promise.resolve();
   // Writes go one at a time, so two notes in one reply don't race for the same id.
   const serial = <T>(work: () => Promise<T>): Promise<T> => { const next = queue.then(work, work); queue = next.catch(() => undefined); return next; };
@@ -110,8 +111,9 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
     const project = scope === "set" ? options.project() : undefined;
     if (scope === "set" && !project) {
       // An unsaved Set has nowhere to keep notes yet; they're kept once it's saved.
-      if (pending.length < MAX_NOTES) pending.push({ text, set: options.set?.() });
-      const note: MemoryNote = { id: `s${pending.length}`, text, at: Date.now() };
+      const at = Date.now();
+      if (pending.length < MAX_NOTES) pending.push({ text, set: options.set?.(), at });
+      const note: MemoryNote = { id: `s${pending.length}`, text, at };
       options.onEvent({ type: "remembered", scope, note, pending: true });
       return quiet({ kept: "once the Set is saved" });
     }
@@ -156,7 +158,16 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
   async function forget(id: string): Promise<MemoryNote | undefined> {
     const scope: MemoryScope = id.startsWith("p") ? "producer" : "set";
     const project = scope === "set" ? options.project() : undefined;
-    if (scope === "set" && !project) return undefined;
+    if (scope === "set" && !project) {
+      // A note about a Set that isn't saved yet is still waiting here.
+      const place = Number(id.slice(1)) - 1;
+      const waiting = pending[place];
+      if (!waiting) return undefined;
+      pending[place] = undefined;
+      const note: MemoryNote = { id, text: waiting.text, at: waiting.at };
+      options.onEvent({ type: "forgot", scope, note });
+      return note;
+    }
     const memory = await options.store.load(project);
     const notes = scope === "set" ? memory.set : memory.producer;
     const note = notes.find((candidate) => candidate.id === id);
@@ -173,7 +184,7 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
       const project = options.project();
       if (!project || !pending.length) return;
       const open = options.set?.();
-      const texts = pending.splice(0).filter((note) => note.set === open).map((note) => note.text);
+      const texts = pending.splice(0).filter((note) => note !== undefined && note.set === open).map((note) => note!.text);
       if (!texts.length) return;
       await serial(async () => {
         const memory = await options.store.load(project);
