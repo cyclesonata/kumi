@@ -4968,7 +4968,8 @@ export class McpHost {
       // Accept the queued flag or durable playing evidence over a bounded
       // window before declaring the outcome uncertain.
       let confirmed = false;
-      for (let attempt = 0; attempt < 4 && !confirmed; attempt += 1) {
+      // Live applies the launch on its next tick (about 100 ms), after the bridge has answered.
+      for (let attempt = 0; attempt < 8 && !confirmed; attempt += 1) {
         if (attempt > 0) await this.waitFor(200);
         const verified = await adapter.snapshotAsync(context);
         const scene = (verified.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);

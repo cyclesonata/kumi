@@ -4883,11 +4883,10 @@ class LiveObjectMapper:
         fire = getattr(scene, "fire_as_selected", None)
         if not callable(fire): raise ValueError("scene fire-as-selected is unavailable")
         fire()
-        # Scene.is_triggered means queued for launch and flips false once the
-        # scene starts; accepted durable evidence is the queued flag or an
-        # actually playing song.
-        observed = self._read_attr(scene, "is_triggered")
-        if observed is not True and self._read_attr(self.song, "is_playing") is not True: raise ValueError("scene fire was not confirmed")
+        # Live 12.4 launches a scene on its next tick, so right after the call it
+        # isn't queued or playing yet: that is pending, not refused. The host
+        # confirms the launch in fresh state (the queued flag, the song playing,
+        # or the scene's clips queued or playing) once Live has applied it.
         return {"fired": True}
 
     def _enum_wire(self, value: Any) -> dict[str, Any] | None:

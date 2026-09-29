@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.39.
+The first release for producers to use day to day. Ships with bridge 1.0.40.
 
 ### Changes to the Set
 
@@ -63,6 +63,8 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
   audio device, a track that no longer makes sound), its undo is refused with
   that reason and nothing changed, instead of an undo Kumi couldn't confirm
   (bridge 1.0.39).
+- Firing a scene is confirmed: Live 12.4 launches it on its next tick, and the
+  bridge used to refuse it as unconfirmed right after the call (bridge 1.0.40).
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 

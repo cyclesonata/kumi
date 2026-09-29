@@ -54,7 +54,7 @@ function applyingOnNextTick(simulator: DeterministicLiveSimulator, operations: r
     if (!operations.includes(invocation.operation)) return invoke(invocation);
     const before = await snapshot();
     pending.push({ reads: 0, apply: () => invoke(invocation) });
-    return invocation.operation === "transport.set" ? { changed: true, revision: before.playback.revision } : { changed: true, revision: 1 };
+    return invocation.operation === "transport.set" ? { changed: true, revision: before.playback.revision } : invocation.operation === "scene.fire-selected" ? { fired: true } : { changed: true, revision: 1 };
   };
   simulator.snapshotAsync = async (): Promise<LiveSnapshot> => {
     for (const entry of [...pending]) if (entry.reads++ >= 1) { pending.splice(pending.indexOf(entry), 1); await entry.apply(); }
@@ -125,6 +125,16 @@ test("an undo Live can't carry out because it no longer offers the old routing i
   assert.match(refused.body.reason, /^Undo refused before anything changed in Live: request failed: Live doesn't offer Ext. In/);
   refuse = false;
   assert.equal((await undo(routed, "route-resampling-undo-again")).body.state, "undone");
+});
+
+test("a scene Live launches on its next tick is confirmed in fresh state", async () => {
+  const simulator = applyingOnNextTick(new DeterministicLiveSimulator(), ["scene.fire-selected"]);
+  const { call } = hostFor(simulator);
+  const preview = await call("live_scene_fire_preview", { ref: "scene:scene-1" });
+  assert.equal(preview.isError, false, JSON.stringify(preview.body));
+  const applied = await call("live_scene_fire_apply", { transactionId: preview.body.transactionId, confirmation: "apply", idempotencyKey: "scene-next-tick" });
+  assert.equal(applied.body.state, "applied", JSON.stringify(applied.body));
+  assert.equal((simulator as any).state.playback.transport.playing, true);
 });
 
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {
