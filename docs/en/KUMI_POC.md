@@ -44,8 +44,15 @@ npm run kumi -- model                         # show the model
 npm run kumi -- model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
 npm run kumi -- auth                          # which providers are usable; never prints secrets
 npm run kumi -- doctor                        # check Node, sign-in, the bridge, Live and the terminal
+npm run kumi -- report                        # a file to send when something goes wrong
 npm run kumi -- --inference-only              # chat without Live
 ```
+
+`report` writes `~/kumi-report-<date>.txt`: Kumi's and the bridge's versions,
+the doctor's checks, what Kumi did in your last conversation (your requests, its
+tool calls and what they answered, HISTORY), the gap log, and the bridge's lines
+and Python errors from Live's own log. Keys and tokens are taken out, your home
+folder shows as `~` and your account name as `<user>`; read it before sending.
 
 `login openai-codex --from-pi` imports the ChatGPT session from the earlier
 Pi-based POC (`~/.pi/agent/auth.json`) once. Kumi and Pi then share that session;

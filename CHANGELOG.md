@@ -178,6 +178,10 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
   command. It runs the bridge's own lifecycle (plan, apply, rollback), refuses
   while Live is open, and waits for Live afterwards. `kumi doctor` and a failed
   start say when it's needed.
+- `kumi report` writes one file to send when something goes wrong: versions,
+  the doctor, the last conversation's requests and tool calls, the gap log and
+  the bridge's lines from Live's log, with keys, tokens, the home folder and the
+  account name taken out.
 
 ### Also
 

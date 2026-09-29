@@ -26,6 +26,7 @@ export type AppConfig =
   | { mode: "logout"; provider: ProviderId; authFile: string }
   | { mode: "model"; settingsFile: string; model?: string }
   | { mode: "doctor" }
+  | { mode: "report" }
   | (InferenceConfig & { mode: "inference-only"; bridgeMissing?: true })
   | (InferenceConfig & { mode: "live"; bridgeConfig: string });
 
@@ -135,6 +136,7 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
   if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) return { mode: "version" };
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
   if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
+  if (args.length === 1 && args[0] === "report") return { mode: "report" };
   if (args[0] === "bridge") {
     const flags = args.slice(1);
     if (flags.some((flag) => flag !== "--yes" && flag !== "--allow-dirty")) throw new Error("Use: bridge [--yes] [--allow-dirty].");

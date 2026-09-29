@@ -172,6 +172,12 @@ function nodeVersion(command: string): Promise<string | undefined> {
 
 export async function runDoctor(io: DoctorIo): Promise<number> {
   const checks = await doctorChecks(io);
+  io.out.write(formatDoctor(checks));
+  return checks.some((check) => check.status === "fix") ? 1 : 0;
+}
+
+/** The doctor's lines, as it prints them. */
+export function formatDoctor(checks: readonly Check[]): string {
   const lines = ["Kumi doctor", ""];
   for (const check of checks) {
     lines.push(`  ${check.status.padEnd(5)} ${check.text}`);
@@ -179,6 +185,5 @@ export async function runDoctor(io: DoctorIo): Promise<number> {
   }
   const fixes = checks.filter((check) => check.status === "fix").length;
   lines.push("", fixes ? `${fixes} ${fixes === 1 ? "thing" : "things"} to fix (see →).` : "Everything Kumi needs is in place.");
-  io.out.write(`${lines.join("\n")}\n`);
-  return fixes ? 1 : 0;
+  return `${lines.join("\n")}\n`;
 }

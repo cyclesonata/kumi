@@ -8,6 +8,7 @@ import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadMe
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
+import { writeReport } from "./report.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
@@ -30,6 +31,7 @@ More:
   npm run kumi -- model [<provider>/<model>]   Show or choose the model
   npm run kumi -- auth                   Show which providers are usable (no secrets)
   npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
+  npm run kumi -- report                 Write a file to send when something goes wrong (no keys in it)
   npm run kumi -- --version              Show Kumi's version
 
 Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
@@ -74,13 +76,14 @@ const bundledBridgeVersion = (() => {
 })();
 
 try {
-  // The doctor runs on any Node, so it can report that along with everything else.
-  const doctor = process.argv.length === 3 && process.argv[2] === "doctor";
+  // The doctor and the report run on any Node, so they can say that along with everything else.
+  const doctor = process.argv.length === 3 && (process.argv[2] === "doctor" || process.argv[2] === "report");
   if (!doctor && !SUPPORTED_NODE_MAJORS.includes(Number(process.versions.node.split(".")[0]))) {
     throw new Error(`Kumi needs Node.js 22 or 24 (this is ${process.version}); install Node 24 LTS from https://nodejs.org.`);
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
+  else if (config.mode === "report") process.exitCode = await writeReport({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
   else if (config.mode === "bridge") process.exitCode = await setupBridge({ out: process.stdout, env: process.env, input: process.stdin, yes: config.yes, allowDirty: config.allowDirty });
