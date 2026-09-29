@@ -68,8 +68,13 @@ test("after Live restarts, Kumi starts a fresh bridge, keeps the conversation an
     assert(!states.slice(states.lastIndexOf("disconnected") + 1).includes("disconnected"), "closing the old bridge isn't mistaken for losing Live");
     const after = await integration.observe(AbortSignal.timeout(5_000));
     assert.equal(after.key, before.key, "the same Set continues the conversation");
-    assert.equal((await integration.observe(AbortSignal.timeout(5_000))).key, before.key, "on every later turn too");
+    const later = await integration.observe(AbortSignal.timeout(5_000));
+    assert.equal(later.key, before.key, "on every later turn too");
     assert.equal(JSON.parse(after.context).epoch, 2);
+    // The model is told its references from before are gone, once.
+    assert.equal(JSON.parse(before.context).reconnected, undefined);
+    assert.match(JSON.parse(after.context).reconnected, /reconnected to Live since your last answer, so every reference from earlier answers .* is gone\. Use the ones listed here, or discover again\./);
+    assert.equal(JSON.parse(later.context).reconnected, undefined);
   } finally { await integration.close(); server.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -94,6 +99,7 @@ test("when the bridge's own connection drops, Kumi starts a fresh one and carrie
     const after = await integration.observe(AbortSignal.timeout(5_000));
     assert.equal(after.key, before.key, "the conversation carries on");
     assert.equal(JSON.parse(after.context).epoch, 1, "Live itself never went away");
+    assert.ok(JSON.parse(after.context).reconnected, "a fresh bridge has fresh references too");
   } finally { await integration.close(); server.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

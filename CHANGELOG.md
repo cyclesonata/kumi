@@ -150,7 +150,8 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
   request Live's going away stopped is back in the input box, one Enter from sent
   again. After 30 seconds without Live, Kumi asks whether it's open with the
   bridge on. `/reconnect` tries again at once, and nothing about a connection
-  problem suggests `/new` any more.
+  problem suggests `/new` any more. The first answer after a reconnect is told
+  that references from before are gone, so it doesn't try them first.
 - Each Set's conversations are kept, the latest 20, an unsaved Set's too (they
   move with the Set when it's first saved), with the HISTORY of each. `/new`
   forgets this conversation and starts fresh, keeping the old one on screen

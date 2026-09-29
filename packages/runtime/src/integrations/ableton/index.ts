@@ -1404,6 +1404,8 @@ export function createAbletonIntegration(options: Options): Integration {
               ...(songState ? { recording: { session: songState.sessionRecord === true, arrangement: row.recording ?? null }, swing: songState.swingAmount ?? null } : {}) },
             ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
+            // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
+            ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
             ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
             truncated: page.truncated, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
