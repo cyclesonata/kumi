@@ -25,6 +25,8 @@ const say = (ok, ms, what) => { rows.push(ok); process.stdout.write(`  ${ok ? "o
 const seconds = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
 const records = new Map();
 const signal = () => AbortSignal.timeout(120_000);
+/** Where the Arrangement changes go (beat 16, bar 5): inside any Set, since Live refuses a spot past its end. */
+const SPOT = 16;
 let stopping = false;
 process.once("SIGINT", () => { stopping = true; process.stdout.write("\nStopping: undoing what was changed so far…\n"); });
 
@@ -67,7 +69,7 @@ async function state() {
   const tracks = await all("track", { fields: ["name"] });
   const scenes = await all("scene", { fields: ["name"] });
   const locators = await all("locator", { fields: ["name", "position"] });
-  return { tempo: set.items[0]?.tempo, tracks: tracks.items.map((row) => row.name), scenes: scenes.items.length, locators: locators.items.map((row) => `${row.name}@${row.position}`), reads: { tracks } };
+  return { tempo: set.items[0]?.tempo, tracks: tracks.items.map((row) => row.name), scenes: scenes.items.length, locators: locators.items.map((row) => `${row.name}@${row.position}`), locatorPositions: locators.items.map((row) => row.position), reads: { tracks } };
 }
 
 /** Kumi 1.0: the song and scenes, clips and notes, a device off and on, a bounce heard back, playing and showing, watching. */
@@ -77,7 +79,7 @@ async function acceptOneDotZero(change, target) {
   const fresh = async () => { observation = await integration.observe(signal()); return (await all("track", { fields: ["name"] })).items; };
   process.stdout.write("\n1.0: the song, clips, notes and devices\n");
   let tracks = await fresh();
-  await maybe("set_transport", { loopEnabled: true, loopStart: 4096, loopLength: 16 });
+  await maybe("set_transport", { loopEnabled: true, loopStart: SPOT, loopLength: 16 });
   await maybe("set_song", { swingAmount: 0.2 });
   const scene = (await all("scene", { fields: ["name"] })).items[0];
   if (scene) await maybe("set_scene", { ref: scene.ref, tempo: 121, tempoEnabled: true });
@@ -89,7 +91,7 @@ async function acceptOneDotZero(change, target) {
     if (notes[0]) await maybe("change_notes", { clipRef: slot.clipRef, notes: [{ id: notes[0].id, velocity: 80 }] });
     await maybe("transform_midi", { clipRef: slot.clipRef, transform: "transpose", params: { semitones: 2 }, scope: "in-place" });
     // The chord goes into the Arrangement too, where the bounce below records it from.
-    await maybe("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: 4096 });
+    await maybe("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: SPOT });
   }
   tracks = await fresh();
   const padNow = tracks.filter((row) => row.name === "Kumi Pad").at(-1);
@@ -103,7 +105,7 @@ async function acceptOneDotZero(change, target) {
     const plan = await run("make_changes", { steps: [
       { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kumi Bounce", kind: "audio" }], scenes: [] }, as: "bounce" },
       { tool: "set_routing", input: { trackRef: "@bounce", inputType: "Kumi Pad", inputSubRouting: "Post FX", arm: true, monitoring: "off" } },
-      { tool: "set_transport", input: { position: 4096, loopEnabled: false } },
+      { tool: "set_transport", input: { position: SPOT, loopEnabled: false } },
       { tool: "record", input: { action: "start", lane: "arrangement", destinationTrackRef: "@bounce" } },
       { tool: "play", input: { action: "continue" } },
       { tool: "wait", input: { beats: 4 } },
@@ -181,7 +183,9 @@ try {
         await change("set_mixer", { trackRef: target.ref, volume: 0.7, pan: -0.25 });
         await change("rename", { kind: "track", ref: target.ref, name: `${String(target.name).slice(0, 110)} (Kumi)` });
         await change("set_track_color", { ref: target.ref, colorIndex: 12 });
-        await change("set_locators", { start: 4096, end: 4112, startName: "Kumi Start", endName: "Kumi End" });
+        // Live keeps the playhead, loop and locators inside the Set's arrangement, so they go near its start, clear of the Set's own locators.
+        const taken = new Set(before.locatorPositions); let start = SPOT; while (taken.has(start) || taken.has(start + 16)) start += 1;
+        await change("set_locators", { start, end: start + 16, startName: "Kumi Start", endName: "Kumi End" });
         const added = await change("add_tracks_and_scenes", { tracks: [{ name: "Kumi Pad", kind: "midi" }], scenes: [] });
         const pad = added?.body?.live?.created?.find((item) => item.kind === "track");
         if (pad && !stopping) {
@@ -224,7 +228,7 @@ try {
       const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
       const restored = same(before.tempo, after.tempo) && same(before.tracks, after.tracks) && before.scenes === after.scenes && same(before.locators, after.locators);
       say(restored, undefined, restored ? `Set as it was: tempo ${after.tempo}, ${after.tracks.length} tracks, ${after.scenes} scenes, ${after.locators.length} locators`
-        : `Set differs from before: ${JSON.stringify({ before: { ...before, reads: undefined }, after: { ...after, reads: undefined } }).slice(0, 600)}`);
+        : `Set differs from before: ${JSON.stringify({ before: { ...before, reads: undefined, locatorPositions: undefined }, after: { ...after, reads: undefined, locatorPositions: undefined } }).slice(0, 600)}`);
     } catch (error) { say(false, undefined, `couldn't read the Set afterwards to check it: ${String(error?.message ?? error).slice(0, 200)}`); }
     const passed = rows.filter(Boolean).length;
     process.stdout.write(`\n${passed} of ${rows.length} passed${stopping ? " (stopped early)" : ""}.\n`);

@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.35.
+The first release for producers to use day to day. Ships with bridge 1.0.36.
 
 ### Changes to the Set
 
@@ -47,6 +47,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
   track that followed its Session clips plays the Arrangement again.
 - The bridge says why it refused ("recording start requires the exact
   destination to be the only armed track") instead of "adapter request failed".
+- A playhead, loop or locator past the end of the Set says where the Set ends
+  and that nothing changed (bridge 1.0.36), instead of a change Kumi couldn't
+  confirm.
 
 ### Listening
 

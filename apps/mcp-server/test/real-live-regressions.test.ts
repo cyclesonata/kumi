@@ -25,7 +25,7 @@ function hostFor(simulator: DeterministicLiveSimulator) {
 }
 
 function applyToolFor(transactionId: string): string {
-  const prefixes: Record<string, string> = { clipaction_: "live_clip_action_apply", routing_: "live_routing_apply", sceneset_: "live_scene_apply", songset_: "live_song_settings_apply", trackstruct_: "live_track_structure_apply", devadv_: "live_device_advanced_apply", devdel_: "live_device_delete_apply", scenecapture_: "live_scene_capture_apply", capturemidi_: "live_capture_midi_apply" };
+  const prefixes: Record<string, string> = { clipaction_: "live_clip_action_apply", routing_: "live_routing_apply", sceneset_: "live_scene_apply", songset_: "live_song_settings_apply", trackstruct_: "live_track_structure_apply", devadv_: "live_device_advanced_apply", devdel_: "live_device_delete_apply", scenecapture_: "live_scene_capture_apply", capturemidi_: "live_capture_midi_apply", arrangement_: "live_arrangement_section_apply" };
   const prefix = Object.keys(prefixes).find((candidate) => transactionId.startsWith(candidate));
   if (!prefix) throw new Error(`no apply tool for ${transactionId}`);
   return prefixes[prefix]!;
@@ -79,6 +79,26 @@ test("loop, metronome and arm that Live applies on its next tick are confirmed i
   assert.equal((simulator as any).state.tracks[0].armed, true);
   assert.equal((await undo(routing, "arm-next-tick-undo")).body.state, "undone");
   assert.equal((simulator as any).state.tracks[0].armed, false);
+});
+
+test("a playhead, loop or locators past the end of the Set are refused with where it ends, and nothing is uncertain", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { call, apply } = hostFor(simulator);
+  const pastEnd = "request failed: past the end of the Set: its arrangement ends at beat 1536, and Live can't go further; nothing changed. Pick an earlier spot, or make the arrangement longer first";
+  const invoke = simulator.invokeAsync.bind(simulator);
+  simulator.invokeAsync = async (invocation: LiveInvocation) => {
+    if (invocation.operation === "transport.set" || (invocation.operation === "locator.add" && (invocation.args as any).position > 1536)) throw new Error(pastEnd);
+    return invoke(invocation);
+  };
+  const transport = await call("live_transport_preview", { loopEnabled: true, loopStart: 4096, loopLength: 16 });
+  const refused = await apply(transport, "past-end-loop");
+  assert.equal(refused.isError, true);
+  assert.deepEqual(refused.body, { reason: pastEnd, remediation: "Nothing changed in Live." });
+  const locators = await call("live_arrangement_section_preview", { start: 1024, end: 4112, startName: "Kumi Start", endName: "Kumi End" });
+  const locatorsRefused = await apply(locators, "past-end-locators");
+  assert.equal(locatorsRefused.isError, true);
+  assert.deepEqual(locatorsRefused.body, { reason: pastEnd, remediation: "Nothing changed in Live." });
+  // The start locator it had made first was taken away again.
+  assert.equal((await simulator.snapshotAsync()).arrangement.locators.some((locator) => locator.name === "Kumi Start"), false);
 });
 
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {

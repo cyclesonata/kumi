@@ -423,6 +423,12 @@ function adapterReason(raw: string): string {
   return known || hostSentence ? raw : "adapter request failed";
 }
 
+/** The Remote Script refused before anything changed in Live (a position past the end of the Set):
+ * a definite answer, so the change didn't happen rather than being uncertain. */
+function nothingChanged(cause: unknown): boolean {
+  return cause instanceof Error && /^request failed: .*; nothing changed\b/.test(cause.message);
+}
+
 /** Live reads a switched-off scene tempo or time signature as -1 (outside what can be written): such a
  * prior is restored by switching it off again, not by writing -1. Undefined when it can't be exact. */
 function sceneRestoreFields(prior: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -1786,7 +1792,10 @@ export class McpHost {
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
-    } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport state is uncertain; perform fresh discovery before retrying."); }
+    } catch (cause) {
+      if (nothingChanged(cause)) { transaction.state = "undone"; return this.adapterToolError(id, cause, "Nothing changed in Live."); }
+      transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport state is uncertain; perform fresh discovery before retrying.");
+    }
   }
 
   private async liveTransportUndoAsync(id: RequestId, transaction: TransportTransaction, params: Record<string, unknown>, signal?: AbortSignal): Promise<JsonObject> {
@@ -7548,7 +7557,7 @@ export class McpHost {
           step.result = result; if (!created.some((item) => item.ref === result!.ref)) created.push({ ...result, fingerprint: result.createdFingerprint }); transaction.created = created; currentSnapshot = await adapter.snapshotAsync(context); const owned = created.find((item) => item.ref === result!.ref)!; const row = currentSnapshot.arrangement.locators.find((item) => item.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.captureObjectFingerprint(row) !== owned.fingerprint) throw new Error("created locator changed after atomic creation"); if (result.name !== proposed.name || result.position !== proposed.position) throw new Error("Live did not confirm exact created locator state");
         }
       } catch (cause) {
-        if (dispatchAmbiguous) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
+        if (dispatchAmbiguous && !nothingChanged(cause)) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
         transaction.created = created;
         try { await this.compensateArrangementAsync(transaction, adapter, context); transaction.state = "undone"; }
         catch { transaction.state = "uncertain"; transaction.recoveryMode = "compensate"; throw new Error("Arrangement apply compensation failed; retry the exact key to reconcile cleanup"); }
@@ -7560,6 +7569,8 @@ export class McpHost {
       return this.successText(id, { transactionId: transaction.id, state: "applied", locators: created, epoch: transaction.epoch, idempotent: false });
     } catch (cause) {
       if (transaction.state === "applying") transaction.state = "uncertain";
+      // Refused, and anything it had added removed again: nothing changed.
+      if (transaction.state === "undone") return this.adapterToolError(id, cause, "Nothing changed in Live.");
       return this.adapterToolError(id, cause, "Arrangement apply uncertain; read authoritative locators before retrying.");
     }
   }

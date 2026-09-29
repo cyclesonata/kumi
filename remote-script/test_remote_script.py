@@ -5522,6 +5522,17 @@ class LazyPlayheadTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in mapper.discover("locator")["items"]], ["Drop"])
 
 
+class LocatorPastTheEndTests(unittest.TestCase):
+    def test_a_locator_past_the_end_of_the_set_says_where_it_ends_and_creates_nothing(self):
+        song = FakeArrangementSong(); song.song_length = 256.0
+        cls = type("EndedArrangementSong", (type(song),), {"current_song_time": property(lambda self: self.__dict__.get("_time", 0.0), lambda self, value: (_ for _ in ()).throw(RuntimeError("Invalid position")) if float(value) > 256.0 else self.__dict__.__setitem__("_time", float(value)))})
+        song.__class__ = cls; mapper = LiveObjectMapper(song)
+        before = [item["name"] for item in mapper.discover("locator")["items"]]
+        create_args = {"name": "Far", "position": 4096, "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"]}
+        with self.assertRaisesRegex(ValueError, "past the end of the Set: its arrangement ends at beat 256"): mapper.invoke("arrangement.locator.create", create_args)
+        self.assertEqual([item["name"] for item in mapper.discover("locator")["items"]], before)
+
+
 class ArgumentError(TypeError):
     """Boost.Python's error when a call's Python arguments don't match Live's C++ signature."""
 
@@ -5689,6 +5700,25 @@ class DeferredLiveWriteTests(unittest.TestCase):
         mapper = LiveObjectMapper(song)
         with self.assertRaisesRegex(ValueError, "transport change was not confirmed by fresh state"): mapper.invoke("transport.set", self.transport_request(mapper, loopStart=16.0, metronome=True))
         self.assertEqual((song.loop_start, song.metronome), (8.0, False))
+
+    def test_a_loop_or_playhead_past_the_end_of_the_set_says_where_it_ends_and_changes_nothing(self):
+        class EndedSong(FakeSong):
+            song_length = 1536.0
+            def _guard(self, name, value):
+                if float(value) > self.song_length: raise RuntimeError("Invalid position")
+                self.__dict__[name] = float(value)
+            loop_start = property(lambda self: self.__dict__.get("_loop_start", 0.0), lambda self, value: self._guard("_loop_start", value))
+            current_song_time = property(lambda self: self.__dict__.get("_time", 0.0), lambda self, value: self._guard("_time", value))
+        song = EndedSong(); song.loop = False; song.loop_start = 8.0; song.loop_length = 16.0; song.metronome = False; song.punch_in = False; song.punch_out = False; song.current_song_time = 0.0
+        mapper = LiveObjectMapper(song)
+        with self.assertRaisesRegex(ValueError, "past the end of the Set: its arrangement ends at beat 1536.*nothing changed"): mapper.invoke("transport.set", self.transport_request(mapper, loopEnabled=True, loopStart=4096.0, loopLength=16.0))
+        self.assertEqual((song.loop, song.loop_start, song.loop_length), (False, 8.0, 16.0))
+        with self.assertRaisesRegex(ValueError, "past the end of the Set"): mapper.invoke("transport.set", self.transport_request(mapper, position=4096.0))
+        self.assertEqual(song.current_song_time, 0.0)
+        # Another refusal from Live, inside the Set, stays as it was.
+        def refuse(value): raise RuntimeError("other")
+        EndedSong.loop_length = property(lambda self: 16.0, lambda self, value: refuse(value))
+        with self.assertRaisesRegex(RuntimeError, "other"): mapper.invoke("transport.set", self.transport_request(mapper, loopLength=8.0))
 
     def test_arming_a_track_that_live_applies_on_its_next_tick_is_accepted(self):
         song = FakeSong(); track = song.tracks[0]; track.can_be_armed = True; track.arm = False; track.current_monitoring_state = 2

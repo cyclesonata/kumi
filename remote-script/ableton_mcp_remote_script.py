@@ -2332,8 +2332,19 @@ class LiveObjectMapper:
                 if isinstance(prior, bool): rollback_failed = rollback_failed or restored is not prior
                 elif not isinstance(restored, (int, float)) or not _same_number(restored, prior): rollback_failed = True
             if rollback_failed: raise ValueError("transport mutation failed and exact rollback failed") from error
+            if isinstance(error, RuntimeError):
+                past = self._past_end(position, loop_start, loop_start + loop_length if loop_start is not None and loop_length is not None else None)
+                if past is not None: raise past from error
             raise
         return {"changed": True, "revision": after_revision}
+
+    def _past_end(self, *beats: float | None) -> ValueError | None:
+        """Live refuses (with a RuntimeError) a playhead or loop past the end of the Set's arrangement.
+        When a requested beat is past it, the refusal says where the Set ends, so the producer can choose."""
+        end = self._read_attr(self.song, "song_length")
+        if not isinstance(end, (int, float)) or isinstance(end, bool) or not math.isfinite(float(end)): return None
+        if not any(beat is not None and beat > float(end) + 1e-6 for beat in beats): return None
+        return ValueError(f"past the end of the Set: its arrangement ends at beat {float(end):g}, and Live can't go further; nothing changed. Pick an earlier spot, or make the arrangement longer first")
 
     def _guarded_session_target(self, args: dict[str, Any], operation: str) -> tuple[str, str, str, str, int]:
         slot_ref, track_ref, scene_ref, clip_ref = (args.get(name) for name in ("slotRef", "trackRef", "sceneRef", "clipRef"))
@@ -3168,7 +3179,11 @@ class LiveObjectMapper:
         if self._read_attr(self.song, "is_playing") is True: raise ValueError("stop playback before adding or removing a locator")
         current = self._read_attr(self.song, "current_song_time")
         if not isinstance(current, (int, float)) or isinstance(current, bool) or not _same_number(current, position):
-            self.song.current_song_time = float(position)
+            try: self.song.current_song_time = float(position)
+            except RuntimeError as error:
+                past = self._past_end(position)
+                if past is not None: raise past from error
+                raise
             raise ValueError(PLAYHEAD_PENDING)
         self.song.set_or_delete_cue()
 
