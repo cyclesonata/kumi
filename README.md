@@ -34,6 +34,7 @@ repository root:
 ```sh
 npm run setup                          # install and build everything, about a minute
 npm run kumi -- login openai-codex     # sign in with your ChatGPT plan (--device without a browser)
+npm run kumi -- bridge                 # with Live closed: put the bridge into Live (or update it)
 npm run kumi                           # talk about the open Live Set
 npm run kumi -- doctor                 # if anything's off: checks everything and says what to run
 ```
@@ -43,10 +44,12 @@ Signing in also picks a default model; change it any time with
 `anthropic/` and `opencode/` models use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or
 `OPENCODE_API_KEY`, and `npm run kumi -- auth` shows what is usable.
 
-Kumi finds the Ableton bridge by itself once its Remote Script is installed and
-selected as a Control Surface in Live. Until then Kumi still starts and chats,
-and tells you Live isn't connected. First-time bridge install:
-[Connect to Live](docs/en/KUMI_POC.md#connect-to-live).
+To connect Live, quit it and run `npm run kumi -- bridge`: it installs the
+bridge's Remote Script (or updates it), then waits while you open Live. The
+first time, choose `AbletonMcpBridge` as a Control Surface in Live's
+**Settings → Link, Tempo & MIDI**. Kumi then finds the bridge by itself. Until
+then it still starts and chats, and tells you Live isn't connected
+([Connect to Live](docs/en/KUMI_POC.md#connect-to-live)).
 
 - [Kumi setup, commands, privacy and limitations](docs/en/KUMI_POC.md)
 - [Bridge setup and safety](docs/en/USER_GUIDE.md)

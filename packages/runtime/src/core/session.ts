@@ -267,7 +267,7 @@ export function createSession(options: Options): SessionController {
         } else {
           // Sign-in, billing and model problems say so wherever they happen (building the model's
           // kernel is part of reading the Set), with where they happened, so the fix can be offered.
-          const actionable = error instanceof KumiError && (error.kind === "auth" || error.kind === "billing" || error.kind === "model" || error.kind === "config");
+          const actionable = error instanceof KumiError && (error.kind === "auth" || error.kind === "billing" || error.kind === "model" || error.kind === "config" || error.kind === "live");
           const message = actionable ? error.message
             : op.phase === "undo" ? (error instanceof KumiError ? error.message : "The undo didn't finish; check Live.")
             : op.phase !== "inference" ? "Context refresh failed; no answer was generated from old observations."

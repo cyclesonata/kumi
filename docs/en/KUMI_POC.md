@@ -100,31 +100,32 @@ ambient instructions, skills, extensions, shell, filesystem, coding, or web tool
 ## Connect to Live
 
 Kumi reaches Live through the Ableton MCP Beyond bridge: a Remote Script inside
-Live plus a local MCP server that Kumi starts. `npm run setup` builds it. Once the
-bridge is installed and selected in Live, a plain `npm run kumi` finds it through
-the installed Remote Script (`AbletonMcpBridge/bridge-reference.json`) and
-connects; there is nothing to configure. Without it, Kumi starts anyway, chats
-without Live and says how to connect.
+Live plus a local MCP server that Kumi starts. `npm run setup` builds it, and one
+command puts it into Live:
 
-First-time install on macOS (the [delivery guide](DELIVERY.md) is the full
-reference, including Windows, upgrades and removal):
+1. Quit Live, saving your work.
+2. Run `npm run kumi -- bridge`.
+3. Open Live. The first time, open **Settings → Link, Tempo & MIDI** and choose
+   `AbletonMcpBridge` as a Control Surface.
+4. Run `npm run kumi`.
 
-1. Quit Live normally, saving your work.
-2. Package the bridge, then run the [macOS setup](DELIVERY.md#macos-15-bashzsh)
-   and [install](DELIVERY.md#install) steps with that tarball:
+`bridge` packs the bridge from this checkout and runs its own lifecycle: a plan
+that changes nothing, then the install or update, with the lifecycle's checks,
+receipts and rollback. Live's Remote Script and the bridge's settings go where
+the bridge keeps them, and an update keeps the installed bridge's settings and
+secret. It never quits or starts Live. It refuses while Live is open, and asks
+you to confirm Live is closed (`--yes` confirms beforehand). Afterwards it waits
+for Live and records that the bridge reaches it. Run it again whenever Kumi
+updates its bridge. `kumi doctor` and a failing start both say when to. From a
+checkout with uncommitted changes, add `--allow-dirty` (developers only). The
+[delivery guide](DELIVERY.md) has the lifecycle in full, for Windows, repair,
+rollback and removal.
 
-   ```sh
-   (cd apps/mcp-server && npm pack)
-   ```
-
-   From a checkout with local changes, add `--allow-dirty-private-build` to each
-   lifecycle command.
-3. Start Live, open **Settings → Link, Tempo & MIDI** and choose `AbletonMcpBridge`
-   as a Control Surface.
-4. Run the lifecycle [activation](DELIVERY.md#activation) check, then `npm run kumi`.
-
-This is the one part of setup that still takes several steps. To use a specific
-bridge configuration instead, pass it explicitly:
+Once installed and selected in Live, a plain `npm run kumi` finds the bridge
+through the installed Remote Script (`AbletonMcpBridge/bridge-reference.json`)
+and connects; there is nothing to configure. Without it, Kumi starts anyway,
+chats without Live and says how to connect. To use a specific bridge
+configuration instead, pass it explicitly:
 
 ```sh
 npm run diagnostics --prefix apps/mcp-server -- --config /absolute/path/bridge-config.json

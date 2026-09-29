@@ -1089,7 +1089,8 @@ export function createAbletonIntegration(options: Options): Integration {
         available = true;
       } catch {
         options.onConnection("error");
-        throw new ObservationError("MCP startup failed; verify the standalone bridge and explicit configuration");
+        // The usual cause after updating Kumi: Live's Remote Script is from an older bridge than Kumi's.
+        throw new KumiError("live", "Kumi couldn't start its bridge to Live. After updating Kumi, Live's part needs updating too: quit Live, then run npm run kumi -- bridge. Otherwise: npm run kumi -- doctor");
       }
     },
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),

@@ -79,6 +79,13 @@ The first release for producers to use day to day. Ships with bridge 1.0.34.
 - The observation before each answer is one round trip to Live.
   `npm test` holds these to counted latency budgets.
 
+### Setup
+
+- `npm run kumi -- bridge` installs the bridge into Live, or updates it, in one
+  command. It runs the bridge's own lifecycle (plan, apply, rollback), refuses
+  while Live is open, and waits for Live afterwards. `kumi doctor` and a failed
+  start say when it's needed.
+
 ### Also
 
 - `kumi --version`. Kumi identifies itself as `kumi/1.0.0` to providers and the

@@ -5,6 +5,7 @@ import {
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
 import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { setupBridge } from "./bridge-setup.js";
 import { runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
@@ -15,6 +16,7 @@ const HELP = `Kumi ${KUMI_VERSION} — producer assistant for Ableton Live
 
 First run (Node.js 22 or 24):
   npm run setup                          Install and build Kumi and the Ableton bridge
+  npm run kumi -- bridge                 With Live closed: put the bridge into Live, or bring it up to date
   npm run kumi                           Talk about the open Live Set; the installed bridge is found automatically.
                                          Sign in there with /login, and choose a model with /model.
 
@@ -39,7 +41,7 @@ learns by watching you.
 In a session: /help /status /model /effort /login /logout /memory /recipes /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
-const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, see docs/en/KUMI_POC.md (Connect to Live).";
+const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: npm run kumi -- bridge";
 const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY]
   .filter((value): value is string => Boolean(value));
 
@@ -80,6 +82,7 @@ try {
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
+  else if (config.mode === "bridge") process.exitCode = await setupBridge({ out: process.stdout, env: process.env, input: process.stdin, yes: config.yes, allowDirty: config.allowDirty });
   else if (config.mode === "auth") await authStatus(config, { out: process.stdout, env: process.env });
   else if (config.mode === "logout") await logout(config, { out: process.stdout, env: process.env });
   else if (config.mode === "model") {

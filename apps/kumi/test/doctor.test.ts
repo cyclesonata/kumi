@@ -48,7 +48,7 @@ test("the doctor explains Live, the bridge and the terminal in plain words", asy
     const small = await doctorChecks(io(s.env, { terminal: { isTTY: true, columns: 50, rows: 12 } }));
     assert.match(small.find((check) => /Terminal/.test(check.text))?.text ?? "", /small/);
     const missing = await doctorChecks(io({ ...s.env, KUMI_REMOTE_SCRIPTS_DIR: join(s.root, "nowhere") }));
-    assert.match(missing.find((check) => /bridge isn't installed/.test(check.text))?.next ?? "", /Connect to Live/);
+    assert.match(missing.find((check) => /bridge isn't installed/.test(check.text))?.next ?? "", /npm run kumi -- bridge/);
     const unsigned = await doctorChecks(io({ ...s.env, KUMI_MODEL: "openai-codex/gpt-fixture" }));
     assert.equal(unsigned.find((check) => /ChatGPT/.test(check.text))?.next, "npm run kumi -- login openai-codex");
   } finally { s.cleanup(); }

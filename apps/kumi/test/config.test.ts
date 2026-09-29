@@ -69,6 +69,9 @@ test("without arguments, uses the bridge configuration named by the installed Re
   assert.deepEqual(loadConfig(["--help"], {}), { mode: "help" });
   assert.deepEqual(loadConfig(["--version"], {}), { mode: "version" });
   assert.deepEqual(loadConfig(["-v"], {}), { mode: "version" });
+  assert.deepEqual(loadConfig(["bridge"], {}), { mode: "bridge", yes: false, allowDirty: false });
+  assert.deepEqual(loadConfig(["bridge", "--yes", "--allow-dirty"], {}), { mode: "bridge", yes: true, allowDirty: true });
+  assert.throws(() => loadConfig(["bridge", "--force"], {}), /Use: bridge \[--yes\] \[--allow-dirty\]/);
 });
 
 test("the chosen model persists in an owner-only settings file; KUMI_MODEL overrides it", () => {

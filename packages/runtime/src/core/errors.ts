@@ -1,4 +1,4 @@
-export type FailureKind = "auth" | "billing" | "model" | "config" | "rate-limit" | "request" | "provider" | "network" | "protocol" | "output";
+export type FailureKind = "auth" | "billing" | "model" | "config" | "live" | "rate-limit" | "request" | "provider" | "network" | "protocol" | "output";
 
 /**
  * A failure whose message Kumi wrote itself: safe to display, never a credential or raw provider

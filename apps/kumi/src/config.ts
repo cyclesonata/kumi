@@ -20,6 +20,7 @@ export type LoginMethod = "browser" | "device" | "import-pi" | "key";
 export type AppConfig =
   | { mode: "help" }
   | { mode: "version" }
+  | { mode: "bridge"; yes: boolean; allowDirty: boolean }
   | { mode: "auth"; authFile: string; settingsFile: string }
   | { mode: "login"; provider: ProviderId; method: LoginMethod; authFile: string; piAuthFile: string; settingsFile: string }
   | { mode: "logout"; provider: ProviderId; authFile: string }
@@ -76,10 +77,14 @@ export function loadInferenceConfig(env: Env = process.env): InferenceConfig {
   return { ...(model ? { model } : {}), authFile: loadAuthFile(env) };
 }
 
+/** Live's Remote Scripts folder: KUMI_REMOTE_SCRIPTS_DIR, or where Live keeps the User Library's. */
+export function remoteScriptsDir(env: Env = process.env): string {
+  return env.KUMI_REMOTE_SCRIPTS_DIR ?? join(homedir(), process.platform === "win32" ? "Documents" : "Music", "Ableton", "User Library", "Remote Scripts");
+}
+
 /** The bridge configuration Live itself uses, named by the installed Remote Script's reference file. */
 export function findBridgeConfig(env: Env = process.env): string | undefined {
-  const scripts = env.KUMI_REMOTE_SCRIPTS_DIR
-    ?? join(homedir(), process.platform === "win32" ? "Documents" : "Music", "Ableton", "User Library", "Remote Scripts");
+  const scripts = remoteScriptsDir(env);
   try {
     const { config } = JSON.parse(readFileSync(join(scripts, "AbletonMcpBridge", "bridge-reference.json"), "utf8")) as { config?: unknown };
     return typeof config === "string" && isAbsolute(config) && statSync(config).isFile() ? config : undefined;
@@ -93,6 +98,11 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
   if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) return { mode: "version" };
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
   if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
+  if (args[0] === "bridge") {
+    const flags = args.slice(1);
+    if (flags.some((flag) => flag !== "--yes" && flag !== "--allow-dirty")) throw new Error("Use: bridge [--yes] [--allow-dirty].");
+    return { mode: "bridge", yes: flags.includes("--yes"), allowDirty: flags.includes("--allow-dirty") };
+  }
   if (args[0] === "model" && args.length <= 2) {
     if (args[1] !== undefined && !validModel(args[1])) throw new Error(`Use: model <provider>/<model>, with provider one of ${PROVIDERS.join(", ")}.`);
     return { mode: "model", settingsFile: loadSettingsFile(env), ...(args[1] ? { model: args[1] } : {}) };

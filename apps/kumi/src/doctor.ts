@@ -78,8 +78,9 @@ async function signInCheck(env: Env): Promise<Check> {
   return { status: "ok", text: `${parsed.provider} API key ${key?.source === "env" ? `from ${info.keyEnv}` : "saved in Kumi"} · model ${model}` };
 }
 
-interface BridgeServer { command?: string; entry?: string; version?: string }
-function readBridgeServer(configPath: string): BridgeServer {
+export interface BridgeServer { command?: string; entry?: string; version?: string }
+/** The installed bridge's server: its Node, its entry, and the package's version. */
+export function readBridgeServer(configPath: string): BridgeServer {
   const config = JSON.parse(readFileSync(configPath, "utf8")) as { server?: { command?: unknown; args?: unknown } };
   const command = typeof config.server?.command === "string" ? config.server.command : undefined;
   const entry = Array.isArray(config.server?.args) && typeof config.server.args[0] === "string" ? config.server.args[0] : undefined;
@@ -95,19 +96,19 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const checks: Check[] = [node, await signInCheck(env)];
   const configPath = findBridgeConfig(env);
   if (!configPath) {
-    checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: "See docs/en/KUMI_POC.md, Connect to Live" });
+    checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: "Quit Live, then run: npm run kumi -- bridge" });
   } else {
     let server: BridgeServer = {};
     try { server = readBridgeServer(configPath); } catch { /* reported below */ }
     const version = server.version ? ` ${server.version}` : "";
     checks.push({ status: "ok", text: `Ableton bridge${version} (${tilde(configPath)})` });
     if (server.version && io.bundledBridgeVersion && newer(io.bundledBridgeVersion, server.version)) {
-      checks.push({ status: "fix", text: `The installed bridge (${server.version}) is older than this Kumi's (${io.bundledBridgeVersion})`, next: "Upgrade it: docs/en/DELIVERY.md, Upgrade" });
+      checks.push({ status: "fix", text: `The installed bridge (${server.version}) is older than this Kumi's (${io.bundledBridgeVersion})`, next: "Quit Live, then run: npm run kumi -- bridge" });
     }
     // Kumi starts this repository's bridge with its own Node; the configuration's command is how
     // other MCP apps start it, so problems there are notes. Only an install or an upgrade to a
     // newer bridge rewrites it (repair and activation keep it), hence "the next upgrade".
-    const later = "Kumi isn't affected. Run the next bridge upgrade with Node 24 LTS: docs/en/DELIVERY.md, Upgrade";
+    const later = "Kumi isn't affected. Install Node 24 LTS (nodejs.org); the next npm run kumi -- bridge records it";
     if (!server.command) checks.push({ status: "note", text: "The bridge configuration names no Node for other MCP apps", next: later });
     else {
       let runnable = true;
@@ -126,7 +127,7 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     const live = await (io.probeLive ?? (async () => ({ started: false })))(configPath).catch(() => ({ started: false } as LiveProbe));
     if (!live.started) {
       checks.push(node.status === "fix" ? { status: "note", text: "The bridge didn't start; it needs Node 22 or 24 too" }
-        : { status: "fix", text: "The bridge didn't start", next: "Make sure it's built and up to date (npm run setup; docs/en/DELIVERY.md, Upgrade), then run: npm run kumi -- doctor" });
+        : { status: "fix", text: "The bridge didn't start", next: "Build it (npm run setup), and bring Live's part up to date: quit Live, then run npm run kumi -- bridge. Then: npm run kumi -- doctor" });
     }
     else if (!live.connected) checks.push({ status: "fix", text: "Live isn't connected", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI)" });
     else {
