@@ -1001,3 +1001,21 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `3
 - **1.0.39** refuses that with the reason and nothing changed. **56 of 56**: every change undone,
   except the recorded bounce track, the track it recorded from, and its routing, which Kumi keeps
   with the reason in HISTORY; the Set otherwise as it was.
+
+## Firing scenes on real Live (bridge 1.0.40 and 1.0.41)
+
+- Firing a scene always came back "wasn't confirmed": the Remote Script read `is_triggered` and
+  `is_playing` right after `fire_as_selected()`, and Live 12.4 launches on its next tick. 1.0.40
+  accepts the fire as pending and the host confirms it in fresh state: scene 1 (with clips) now
+  reads "Launched a scene".
+- An empty scene plays nothing, so its fire could never be confirmed; 1.0.41 refuses it at preview
+  ("that scene has no clips to play, so launching it would only stop what's playing").
+- accept:live on 1.0.41 after a fresh Live start: 56 of 56. After firing scene 1 and stopping: 56 of 56.
+
+**Open:** after adding a scene through Kumi and undoing it (`add_tracks_and_scenes` with one scene,
+then its undo), every later arrangement bounce in that Live session records silence (peak 0.0; the
+last good one peaked at 0.53), so accept:live is 55 of 56 ("heard the bounce: … at null LUFS").
+Live reads `back_to_arranger` true after it; pressing Back to Arrangement (and Stop All Clips) sets
+it false but the bounce stays silent, and nothing else in the song state or the tracks' playing
+slots differs from a fresh start. A Live restart clears it. Repro: `scene-add-undo.mjs`, then
+accept:live, in `.pi/kumi-evidence/kernel`.
