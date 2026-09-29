@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, createTechniqueStore, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { liveUserLibrary, loadConfig, loadInputHistoryFile, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadMemoryFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
@@ -140,6 +140,8 @@ try {
       memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),
       listen: true,
       recipes: createRecipeStore(loadRecipesDir()),
+      techniques: createTechniqueStore(loadTechniquesFile()),
+      gaps: loadGapsFile(),
       watch: { videosDir: loadVideosDir(), toolsDir: loadToolsDir() },
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.

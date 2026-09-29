@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, ChangeRecord, ConnectionState, DisconnectCause, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
@@ -1352,6 +1352,8 @@ export function createAbletonIntegration(options: Options): Integration {
           label: `Current open Set: ${name} — ${source}`,
           instructions: INSTRUCTIONS, tools: definitions(),
           ...(project?.identity === identity && project.path ? { project: { id: projectIdOf(project.path), name } } : {}),
+          ...(trackList && !moreTracks ? { tracks: trackList.flatMap((track) => (typeof track.name === "string" ? [track.name] : [])) } : {}),
+          ...(project?.identity === identity && project.path ? (() => { try { return { savedAt: statSync(project.path).mtimeMs }; } catch { return {}; } })() : {}),
           context: JSON.stringify({ observedAt: now().toISOString(), connectionGeneration: generation, epoch,
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: typeof row.ref === "string" ? shortRef(row.ref) : row.ref, name, tempo: row.tempo ?? null, timeSignature: `${numerator}/${denominator}`, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null,

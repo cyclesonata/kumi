@@ -111,6 +111,10 @@ export interface Observation {
   tools: readonly KernelTool[];
   /** The saved Set this is about (an opaque id), so its conversation can be kept between sessions. */
   project?: { id: string; name: string };
+  /** The Set's track names, when all of them were read (names are data). */
+  tracks?: string[];
+  /** When the saved Set's file was last written: a later time means the producer saved it. */
+  savedAt?: number;
 }
 
 /**
@@ -253,6 +257,7 @@ export type SessionEvent = KernelEvent
   | HeardEvent
   | WatchedEvent
   | RecipeEvent
+  | TechniqueEvent
   /** What a tool at work is doing now ("looking at 2:05"), for NOW; it ends with the tool. */
   | { type: "doing"; text: string }
   /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
@@ -309,6 +314,10 @@ export interface WatchedEvent {
 }
 /** A recipe saved, run or removed, for the app to show. */
 export interface RecipeEvent { type: "recipe"; action: "saved" | "updated" | "running" | "forgotten"; name: string; steps: number }
+/** A technique kept (from a draft the producer's moves approved), updated, read for use, or forgotten. Names are data. */
+export interface TechniqueEvent { type: "technique"; action: "kept" | "updated" | "used" | "forgot"; technique: TechniqueSummary }
+/** A technique as the app lists it. */
+export interface TechniqueSummary { id: string; name: string; fits: string; source?: string }
 /** A recipe as the app lists it. */
 export interface RecipeSummary { name: string; about: string; params: { name: string; about: string }[]; steps: number; used: number; lastUsed?: number; created: number }
 
@@ -337,7 +346,11 @@ export interface SessionController {
   conversations?(): Promise<ConversationSummary[]>;
   /** Continue a kept conversation instead of this one (which stays kept); false when it's gone. */
   resumeConversation?(id: string): Promise<boolean>;
-  /** Something the app saw that the session keeps with the conversation: a change Kumi made (HISTORY). */
+  /**
+   * What the integration reports outside a turn's own events: a change Kumi made (kept with the
+   * conversation, for HISTORY), or an action in Live. A technique drafted from a build is kept or
+   * dropped by what happens next.
+   */
   watch?(event: { type: "change"; change: ChangeRecord } | { type: "action"; title: string; playing?: boolean; recording?: boolean }): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
@@ -357,6 +370,9 @@ export interface SessionController {
   /** Run a recipe that has no blanks, straight away (no model involved); what it did, in words. */
   runRecipe?(name: string): Promise<{ text: string; isError: boolean }>;
   forgetRecipe?(name: string): Promise<boolean>;
+  /** The techniques Kumi learned, and forgetting one by id. */
+  techniques?(): Promise<TechniqueSummary[]>;
+  forgetTechnique?(id: string): Promise<boolean>;
   /** Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't. */
   stopLive?(): Promise<boolean>;
   /**

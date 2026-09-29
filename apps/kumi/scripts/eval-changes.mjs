@@ -6,10 +6,10 @@
 // instruction. Notes, recipes and audio go to a throwaway folder, never ~/.kumi.
 // npm run eval:changes --workspace @kumi/app [-- <part of a case name>]
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAbletonIntegration, createAgentKernel, createMemoryStore, createRecipeStore, createSession, findFfmpeg, openCredentialStore, resolveModel } from "@kumi/runtime";
+import { createAbletonIntegration, createAgentKernel, createMemoryStore, createRecipeStore, createSession, createTechniqueStore, findFfmpeg, openCredentialStore, resolveModel } from "@kumi/runtime";
 import { loadInferenceConfig, safeError } from "../dist/src/config.js";
 
 const schemas = JSON.parse(readFileSync(new URL("./bridge-tools.json", import.meta.url), "utf8"));
@@ -184,6 +184,17 @@ const CASES = [
     check: ({ notes, changes }) => changes.length === 0 && notes.some((note) => /car ad|punchy/i.test(note.text)) },
   { name: "memory: used next time", seed: { producer: ["Names new tracks in capital letters"] }, prompts: ["Add a new MIDI track called strings."],
     check: ({ state, notes }) => state.tracks.at(-1).name === "STRINGS" && !notes.length },
+  // Techniques: drafted while building, kept when the producer likes it; read when a request fits one.
+  { name: "technique: learned", prompts: ["Build me a gritty Reese bass on a new MIDI track: Operator with two detuned oscillators and glide, then a Saturator and an EQ Eight after it, and set them up.",
+    "That sounds great, I love it. Now make the Keys a bit quieter."],
+    check: ({ techniques }) => techniques.some((event) => event.action === "kept") },
+  { name: "technique: used", seed: { techniques: [{ id: "t1", name: "Neuro from a Reese", fits: "gritty, moving neuro basses", at: 1, used: 0,
+    idea: "Operator with two detuned saws and glide, into two Auto Filters in parallel (band-pass, each on its own LFO rate), then a Saturator and a Multiband Dynamics for OTT-style squash.",
+    settings: "Auto Filter band-pass at 400 Hz and 1.2 kHz, LFOs at 1/8 and 3/16; Saturator drive 12 dB", source: { title: "Neuro bass tutorial" } }] },
+    prompts: ["Make me a neuro bass on a new MIDI track."],
+    check: ({ techniques, last }) => techniques.some((event) => event.action === "used") && /technique|neuro from a reese/i.test(last) },
+  { name: "gap noted", prompts: ["Freeze the Bass track for me."],
+    check: ({ gaps, changes }) => gaps.length >= 1 && /freez/i.test(JSON.stringify(gaps)) && changes.length === 0 },
   // A tiny context budget, so earlier reads are cleared and the earliest exchanges dropped along the way.
   { name: "long conversation", budget: { clearAt: 4 * 1024, limit: 8 * 1024 },
     prompts: ["List the tracks with their volumes.", "Make the bass a bit quieter.", "Rename Keys to Rhodes.", "Set the tempo to 126.", "List the tracks with their volumes again.", "What's the tempo now, and what's the third track called?"],
@@ -231,11 +242,15 @@ async function runCase(binding, testCase) {
   if (video) writeTutorial(ffmpeg, video);
   const prompts = typeof testCase.prompts === "function" ? testCase.prompts({ ...audio, video }) : testCase.prompts;
   const producerFile = join(folder, "memory.json");
+  const techniquesFile = join(folder, "techniques.json"); const gapsFile = join(folder, "gaps.jsonl");
+  if (testCase.seed?.techniques) writeFileSync(techniquesFile, JSON.stringify({ version: 1, techniques: testCase.seed.techniques }), { mode: 0o600 });
+  const techniques = [];
   if (testCase.seed?.producer) writeFileSync(producerFile, JSON.stringify({ version: 1, notes: testCase.seed.producer.map((text, index) => ({ id: `p${index + 1}`, text, at: Date.now() })) }), { mode: 0o600 });
   let text = ""; let last = ""; let kernel;
   const session = createSession({
     timeoutMs: 150_000,
     memory: createMemoryStore({ projectsDir: join(folder, "projects"), producerFile }), recipes, listen: true,
+    techniques: createTechniqueStore(techniquesFile), gaps: gapsFile,
     watch: { videosDir: join(folder, "videos"), toolsDir: join(folder, "tools") },
     kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
     integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change), userLibrary: join(folder, "User Library") }),
@@ -244,6 +259,7 @@ async function runCase(binding, testCase) {
       if (event.type === "text") { text += event.text; last += event.text; }
       if (event.type === "remembered") notes.push({ scope: event.scope, text: event.note.text });
       if (event.type === "heard") heard.push(event);
+      if (event.type === "technique") techniques.push({ action: event.action, name: event.technique.name });
     },
   });
   const started = performance.now();
@@ -259,13 +275,15 @@ async function runCase(binding, testCase) {
     }
   } finally { await session.close(); }
   const saved = await Promise.all((await recipes.list()).map((summary) => recipes.get(summary.name)));
+  const gaps = existsSync(gapsFile) ? readFileSync(gapsFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
   rmSync(folder, { recursive: true, force: true });
-  const result = { state: bridge.state, requests: bridge.requests, changes: [...changes.values()], last, conversation, notes, tools, heard, recipes: saved.filter(Boolean) };
+  const result = { state: bridge.state, requests: bridge.requests, changes: [...changes.values()], last, conversation, notes, tools, heard, recipes: saved.filter(Boolean), techniques, gaps };
   const budget = [/Kumi cleared/.test(conversation) ? "earlier reads cleared" : "", /Kumi removed/.test(conversation) ? "earliest exchanges dropped" : ""].filter(Boolean);
   const live = bridge.requests.filter((request) => /_preview$|emergency/.test(request.name)).map((request) => `${request.name.replace(/^live_|_preview$/g, "")}${request.args.action ? ` ${request.args.action}` : ""}`);
   return { name: testCase.name, passed: Boolean(testCase.check(result)), ms: Math.round(performance.now() - started), tools, live, changes: result.changes.map((change) => `${change.state} · ${change.title}`),
     ...(result.recipes.length ? { recipes: result.recipes.map((recipe) => `${recipe.name}: ${recipe.steps.map((step) => step.tool).join(" → ")}`) } : {}),
     notes: notes.map((note) => `${note.scope === "producer" ? "about you" : "about the Set"}: ${note.text}`),
+    ...(techniques.length ? { techniques: techniques.map((event) => `${event.action}: ${event.name}`) } : {}), ...(gaps.length ? { gaps: gaps.map((gap) => gap.missing) } : {}),
     answer: text.replace(/\s+/g, " ").trim().slice(0, 240), ...(prompts.length > 1 ? { last: last.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
     ...(budget.length ? { budget: budget.join(", ") } : {}) };
 }

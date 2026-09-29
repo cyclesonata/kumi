@@ -40,6 +40,10 @@ export const loadAuthFile = (env: Env = process.env) => absoluteFile(env, "KUMI_
 export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_SETTINGS_FILE", join(homedir(), ".kumi", "settings.json"));
 /** What Kumi remembers about the producer, in any project (each Set's notes are in its project folder). */
 export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(homedir(), ".kumi", "memory.json"));
+/** What Kumi learned building things the producer liked (techniques), in any project. */
+export const loadTechniquesFile = (env: Env = process.env) => absoluteFile(env, "KUMI_TECHNIQUES_FILE", join(homedir(), ".kumi", "techniques.json"));
+/** What Kumi couldn't do for lack of a tool, logged on this computer for Kumi's developers (not a memory). */
+export const loadGapsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_GAPS_FILE", join(homedir(), ".kumi", "gaps.jsonl"));
 /** The producer's recipes, one file each. */
 export const loadRecipesDir = (env: Env = process.env) => absoluteFile(env, "KUMI_RECIPES_DIR", join(homedir(), ".kumi", "recipes"));
 /** Videos Kumi watched (their words, frames and sound), kept so watching again is quick. */

@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import type {
-  ChangeRecord, ConnectionState, ConversationStore, DisconnectCause, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
-  SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
+  ChangeRecord, ConnectionState, ConversationStore, DisconnectCause, Integration, IntegrationFactory, JsonObject, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
+  SessionController, SessionEvent, SessionStatus, ToolResult, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
 import { memoryInstructions, memoryTools } from "./memory.js";
 import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
 import { listeningTools } from "../audio/tools.js";
 import { videoTools } from "../video/tool.js";
+import { asksForTechnique, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE, TECHNIQUE_NUDGE, techniqueInstructions, techniqueTools, type TechniqueStore } from "./techniques.js";
+import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
 
 interface Options {
@@ -36,6 +38,12 @@ interface Options {
   recipes?: RecipeStore;
   /** Let the model watch videos (tutorials): where videos are kept, and the programs Kumi fetches. */
   watch?: { videosDir: string; toolsDir: string };
+  /** What Kumi learned building things the producer liked; without it none are kept. */
+  techniques?: TechniqueStore;
+  /** How long a drafted technique waits for a sign before it's kept anyway. */
+  techniqueSettleMs?: number;
+  /** Where missing capabilities are logged for Kumi's developers (JSON lines); without it they aren't. */
+  gaps?: string;
 }
 interface Operation {
   id: number;
@@ -110,6 +118,8 @@ export function createSession(options: Options): SessionController {
   let currentProject: string | undefined;
   /** Which Set is open, saved or not: notes about an unsaved Set are kept only if that Set is saved. */
   let currentSet: string | undefined;
+  /** When the open Set's file was last written, as last seen. */
+  let setSavedAt: number | undefined;
   /** The open Set's name, for /memory. */
   let currentSetName: string | undefined;
   // Notes are kept by the model's own calls; each write is quiet, so it costs no model reply.
@@ -121,6 +131,35 @@ export function createSession(options: Options): SessionController {
   const listening = options.listen ? listeningTools({ onEvent: (event) => emit(event),
     resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
   const watching = options.watch ? videoTools({ ...options.watch, onEvent: (event) => emit(event) }) : [];
+  // Techniques are drafted by the model and kept by what the producer does next.
+  const learned = options.techniques ? techniqueTools({ store: options.techniques, onEvent: (event) => emit(event), ...(options.techniqueSettleMs !== undefined ? { settleMs: options.techniqueSettleMs } : {}) }) : undefined;
+  const gaps = options.gaps ? gapTools({ file: options.gaps }) : [];
+  /**
+   * make_changes also carries a technique: the model writes what makes a build work in the call that
+   * builds it (a final plan ends the answer, so there's no later moment). It's taken out before the
+   * plan runs, streamed or not.
+   */
+  function withTechnique(tool: KernelTool): KernelTool {
+    if (!learned || tool.name !== "make_changes") return tool;
+    const take = (input: JsonObject): JsonObject => {
+      const { technique, ...rest } = input;
+      if (technique && typeof technique === "object" && !Array.isArray(technique)) learned.draftFrom(technique as Record<string, unknown>);
+      return rest;
+    };
+    // A build without its technique: the result asks for one, while the answer goes on.
+    const nudge = (input: JsonObject | undefined) => async (result: Promise<ToolResult>): Promise<ToolResult> => {
+      const outcome = await result;
+      return input && !outcome.isError && outcome.reply === undefined && asksForTechnique(input) ? { ...outcome, text: `${outcome.text}\n${TECHNIQUE_NUDGE}` } : outcome;
+    };
+    const properties = (tool.inputSchema as { properties?: JsonObject }).properties ?? {};
+    const stream = tool.stream;
+    return { ...tool, description: `${tool.description} ${PLAN_TECHNIQUE.description}`, inputSchema: { ...tool.inputSchema, properties: { ...properties, technique: PLAN_TECHNIQUE.schema } },
+      execute: (input, signal) => nudge(input)(tool.execute(take(input), signal)),
+      ...(stream ? { stream: (signal: AbortSignal, onStart: () => void) => {
+        const call = stream.call(tool, signal, onStart);
+        return { push: (delta: string) => call.push(delta), finish: (input: JsonObject | undefined) => nudge(input)(call.finish(input ? take(input) : input)), abandon: () => call.abandon(), get started() { return call.started; } };
+      } } : {}) };
+  }
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -244,9 +283,13 @@ export function createSession(options: Options): SessionController {
           assertCurrent(op);
           const saved = options.recipes ? await options.recipes.list().catch(() => []) : [];
           assertCurrent(op);
-          const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved)].filter(Boolean).join("\n\n");
+          // Techniques by name and what each fits; the model reads one whole when a request fits it.
+          const known = learned ? await learned.list().catch(() => []) : [];
+          assertCurrent(op);
+          const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved),
+            learned ? TECHNIQUE_GUIDANCE : "", techniqueInstructions(known), gaps.length ? GAP_GUIDANCE : ""].filter(Boolean).join("\n\n");
           const value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-            tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...watching, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+            tools: [...observation.tools.map(withTechnique), ...(notes?.tools ?? []), ...listening, ...watching, ...recipes, ...(learned?.tools ?? []), ...gaps], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
           if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
           return { value, lifetime };
         } catch (error) { lifetime.abort(); throw error; }
@@ -303,11 +346,17 @@ export function createSession(options: Options): SessionController {
     observationLabel = undefined;
     const snapshot = await integration.observe(op.controller.signal);
     assertCurrent(op);
+    // The Set was saved since the last look (its first save, or its file written again): a technique
+    // drafted from work in it is kept.
+    if (currentSet === snapshot.key && ((!currentProject && snapshot.project?.id) || (setSavedAt !== undefined && snapshot.savedAt !== undefined && snapshot.savedAt > setSavedAt))) learned?.drafts.saved();
+    setSavedAt = snapshot.savedAt;
     currentProject = snapshot.project?.id; currentSetName = snapshot.project?.name; currentSet = snapshot.key;
     planTool = snapshot.tools.find((tool) => tool.name === "make_changes");
     // Notes about a Set made before its first save are kept now that it has a file.
     if (currentProject) void notes?.flush().catch(() => {});
     await ensureKernel(op, snapshot); assertCurrent(op);
+    // A drafted technique whose build's tracks are all gone was thrown away.
+    if (snapshot.tracks) learned?.drafts.observed(snapshot.tracks);
     // An unsaved Set's conversation goes with it to its folder when the Set is first saved.
     if (place === UNSAVED && snapshot.project && options.conversations) {
       const store = options.conversations; const id = conversationId; const to = snapshot.project.id;
@@ -364,6 +413,7 @@ export function createSession(options: Options): SessionController {
         settledResult = result;
         if (op.controller.signal.aborted) throw new Error("Operation cancelled");
         if (isTurn && result) {
+          if (result.stopReason === "cancelled") learned?.drafts.abandon(); else learned?.drafts.turnEnded();
           emit({ type: "turn-complete", result, elapsedMs: Math.round(performance.now() - startedAt) });
           if (result.stopReason !== "cancelled") saveConversation(true);
         }
@@ -380,6 +430,7 @@ export function createSession(options: Options): SessionController {
               : `Kumi stopped after ${span(idleMs)} without progress. Anything it changed is in HISTORY; ask it to carry on.` });
           } else if (timedOut) emit({ type: "error", message: `Kumi stopped waiting after ${span(limitMs)}.` });
           if (isTurn) {
+            learned?.drafts.abandon();
             emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
             if (workSettled) saveConversation(true);
           }
@@ -423,6 +474,9 @@ export function createSession(options: Options): SessionController {
       interrupted = undefined;
       return perform(true, "refresh", async (op) => {
         const snapshot = await observe(op); assertCurrent(op);
+        // The Set as it is now (read first: a deleted build's gone), then the producer's words, may say
+        // what they thought of the last build; and a new turn begins.
+        learned?.drafts.said(input); learned?.drafts.turnStarted();
         op.phase = "inference";
         return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) { op.progress?.(event); emit(event); } });
@@ -479,7 +533,9 @@ export function createSession(options: Options): SessionController {
       return true;
     },
     watch(event) {
-      if (event.type !== "change") return;
+      // What happens after a drafted technique's build says whether the producer liked it: playing it, say.
+      if (event.type === "action") { if (event.playing === true) learned?.drafts.played(); return; }
+      learned?.drafts.change(event.change);
       const record = lean(event.change);
       seen.set(record.id, record);
       if (seen.size > 500) seen.delete(seen.keys().next().value!);
@@ -523,6 +579,10 @@ export function createSession(options: Options): SessionController {
       }, turnLimitMs);
       return outcome.text ? outcome : { text: "it didn't finish; anything it changed is in HISTORY.", isError: true };
     },
+    async techniques() {
+      return learned ? (await learned.list()).map((technique) => ({ id: technique.id, name: technique.name, fits: technique.fits, ...(technique.source?.title ? { source: technique.source.title } : {}) })).reverse() : [];
+    },
+    async forgetTechnique(id) { return Boolean(await learned?.forget(id)); },
     async forgetRecipe(name) {
       const recipe = await options.recipes?.get(name);
       if (!recipe || !await options.recipes!.remove(recipe.name)) return false;
@@ -551,7 +611,8 @@ export function createSession(options: Options): SessionController {
       closing = (async () => {
         try { if (op) await boundedClose(op.done).catch(() => {}); }
         finally {
-          // The last turn's save lands before Kumi goes.
+          // A technique the producer left in place is kept, and the last turn's save lands, before Kumi goes.
+          await learned?.drafts.close().catch(() => {});
           await boundedClose(saving).catch(() => {});
           await dropResources();
         }
