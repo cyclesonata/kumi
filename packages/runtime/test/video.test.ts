@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionEvent } from "../src/core/contracts.js";
 import { chooseMoments, formatTime, parseCaptions, parseTime, transcriptLines } from "../src/video/index.js";
 import { saidAround } from "../src/video/captions.js";
-import { findFfmpeg, findYtDlp, whisperAsset, whisperModel, ytDlpAsset } from "../src/video/programs.js";
+import { ffmpegAsset, findFfmpeg, findYtDlp, whisperAsset, whisperModel, ytDlpAsset } from "../src/video/programs.js";
 import { cuesFromWhisper, speechModelFor } from "../src/video/speech.js";
 import { publicAddress, watchVideo, youtubeId } from "../src/video/index.js";
 import { videoTools, WATCH_VIDEO_TOOL } from "../src/video/tool.js";
@@ -221,4 +221,49 @@ test("a video file without captions says so, and how Kumi could transcribe it", 
   assert.match(watched.notes.join(" "), /no captions beside it/);
   assert.match(watched.notes.join(" "), /whisper\.cpp/);
   mkdirSync(join(folder, "silent-videos"), { recursive: true });
+});
+
+test("ffmpeg's build for this computer is the newest numbered LGPL one; a Mac and unknown machines get none", () => {
+  const names = ["ffmpeg-master-latest-win64-lgpl.zip", "ffmpeg-n8.1-latest-win64-lgpl-8.1.zip", "ffmpeg-n9.0-latest-win64-lgpl-9.0.zip", "ffmpeg-n9.0-latest-win64-gpl-9.0.zip",
+    "ffmpeg-n9.0-latest-winarm64-lgpl-9.0.zip", "ffmpeg-n10.0-latest-linux64-lgpl-10.0.tar.xz", "ffmpeg-n9.0-latest-linuxarm64-lgpl-9.0.tar.xz", "ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip"];
+  assert.equal(ffmpegAsset(names, "win32", "x64"), "ffmpeg-n9.0-latest-win64-lgpl-9.0.zip");
+  assert.equal(ffmpegAsset(names, "win32", "arm64"), "ffmpeg-n9.0-latest-winarm64-lgpl-9.0.zip");
+  assert.equal(ffmpegAsset(names, "linux", "x64"), "ffmpeg-n10.0-latest-linux64-lgpl-10.0.tar.xz");
+  assert.equal(ffmpegAsset(names, "linux", "arm64"), "ffmpeg-n9.0-latest-linuxarm64-lgpl-9.0.tar.xz");
+  assert.equal(ffmpegAsset(names, "darwin", "arm64"), undefined);
+  assert.equal(ffmpegAsset(names, "win32", "ia32"), undefined);
+});
+
+test("off a Mac, ffmpeg is fetched once into Kumi's folder, checked against its release's checksum, only the program kept", async () => {
+  const root = mkdtempSync(join(tmpdir(), "kumi-ffmpeg-"));
+  try {
+    const build = join(root, "build", "ffmpeg-n9.0-latest-linux64-lgpl-9.0");
+    mkdirSync(join(build, "bin"), { recursive: true });
+    writeFileSync(join(build, "bin", "ffmpeg"), "#!/bin/sh\necho ffmpeg version fixture\n"); writeFileSync(join(build, "bin", "ffprobe"), "x"); writeFileSync(join(build, "LICENSE.txt"), "LGPL");
+    const archive = join(root, "build.tar.gz");
+    execFileSync("tar", ["-czf", archive, "-C", join(root, "build"), "ffmpeg-n9.0-latest-linux64-lgpl-9.0"]);
+    const data = readFileSync(archive);
+    const asset = "ffmpeg-n9.0-latest-linux64-lgpl-9.0.tar.xz";
+    const release = (digest: string) => new TextEncoder().encode(JSON.stringify({ assets: [{ name: asset, size: 141_000_000, digest, browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${asset}` }] }));
+    const sha = `sha256:${createHash("sha256").update(data).digest("hex")}`;
+    const asked: string[] = []; const said: string[] = [];
+    const download = async (url: string) => { asked.push(url); return url.startsWith("https://api.github.com/") ? release(sha) : new Uint8Array(data); };
+    const toolsDir = join(root, "tools");
+    const options = { env: {}, toolsDir, platform: "linux", arch: "x64", download, onFetch: (message: string) => said.push(message) };
+    assert.equal(await findFfmpeg({ ...options, installedOnly: true }), undefined, "the doctor fetches nothing");
+    assert.equal(asked.length, 0);
+    const found = await findFfmpeg(options);
+    assert.equal(found, join(toolsDir, "ffmpeg", "ffmpeg"));
+    assert.deepEqual(readdirSync(join(toolsDir, "ffmpeg")), ["ffmpeg"], "only the program");
+    if (process.platform !== "win32") assert.equal(statSync(found!).mode & 0o111, 0o111);
+    assert.deepEqual(said, ["Kumi is fetching ffmpeg, which it reads audio formats and videos with (once, about 141 MB)."]);
+    assert.equal(asked.length, 2);
+    assert.equal(await findFfmpeg(options), found, "fetched once");
+    assert.equal(asked.length, 2);
+    // A download that doesn't match what the release lists isn't kept.
+    const other = join(root, "other");
+    await assert.rejects(findFfmpeg({ ...options, toolsDir: other, download: async (url: string) => (url.startsWith("https://api.github.com/") ? release(`sha256:${"0".repeat(64)}`) : new Uint8Array(data)) }), /didn't match its release's checksum/);
+    assert.equal(existsSync(join(other, "ffmpeg")), false);
+    assert.deepEqual(readdirSync(other), [], "nothing left behind");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -148,7 +148,7 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     checks.push(writable ? { status: "ok", text: `Remembers Sets in ${tilde(projects)}` } : { status: "note", text: `Can't write ${tilde(projects)}, so Kumi won't catch you up on Sets`, next: "Check that folder's permissions, or set KUMI_PROJECTS_DIR" });
   } catch { /* an invalid KUMI_PROJECTS_DIR is reported when Kumi starts */ }
   // Watching videos: yt-dlp comes by itself when first needed; ffmpeg and whisper.cpp are the producer's.
-  const programs = await (io.videoPrograms ?? (async () => ({ ffmpeg: await findFfmpeg({ env }), whisper: await findWhisper({ env, toolsDir: loadToolsDir(env), installedOnly: true }) })))().catch(() => ({ ffmpeg: undefined, whisper: undefined }));
+  const programs = await (io.videoPrograms ?? (async () => ({ ffmpeg: await findFfmpeg({ env, toolsDir: loadToolsDir(env), installedOnly: true }), whisper: await findWhisper({ env, toolsDir: loadToolsDir(env), installedOnly: true }) })))().catch(() => ({ ffmpeg: undefined, whisper: undefined }));
   if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });
   else if (!programs.whisper) checks.push({ status: "note", text: "Watches videos; one without captions needs whisper.cpp for its words", next: `Install it: ${whisperHint()}` });
   else checks.push({ status: "ok", text: "Watches videos: frames with ffmpeg, speech with whisper.cpp" });

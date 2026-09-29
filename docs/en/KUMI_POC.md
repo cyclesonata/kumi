@@ -245,7 +245,8 @@ match a mix's EQ and compression or rebuild a sound. The conversation shows what
 it heard as a small spectrum, and a comparison as dB over or under the
 reference. To hear a track or the mix, Kumi records it first (resampling), then
 listens to the recording. It reads WAV and AIFF itself, and MP3, M4A, FLAC and
-the like through macOS's `afconvert` or `ffmpeg`. The analysis runs on your
+the like through macOS's `afconvert`, or elsewhere `ffmpeg`, which Kumi fetches
+on Windows and Linux the first time it's needed. The analysis runs on your
 computer: only the numbers go to the model, never the audio.
 
 ## Recipes and watching you work
@@ -337,8 +338,11 @@ What it needs:
 - **yt-dlp**, which reads video pages. Kumi fetches it by itself the first time
   (about 35 MB, checked against its release's checksums) into `~/.kumi/tools`,
   and again each month, since YouTube changes often.
-- **ffmpeg**, for frames and sound: `brew install ffmpeg` on a Mac,
-  `winget install ffmpeg` on Windows. Without it, Kumi reads only a video's words.
+- **ffmpeg**, for frames and sound: `brew install ffmpeg` on a Mac. On Windows
+  and Linux Kumi fetches it by itself the first time it's needed (a static LGPL
+  build from BtbN/FFmpeg-Builds, about 170 MB, checked against the SHA-256 GitHub
+  lists; only the program is kept, in `~/.kumi/tools`). Without it, Kumi reads
+  only a video's words.
 - **whisper.cpp**, only for videos without captions, or when YouTube won't give
   them (which happens from some networks): `brew install whisper-cpp` on a Mac.
   On Windows and Linux Kumi fetches it by itself. Kumi fetches whisper.cpp's

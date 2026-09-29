@@ -89,8 +89,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
 - The conversation shows each video watched, with small pictures of the frames
   and their times; NOW says what Kumi is doing meanwhile.
 - yt-dlp and the speech model are fetched when first needed, each checked
-  against its published checksum; ffmpeg (for frames) and whisper.cpp (on a Mac)
-  are yours, and `kumi doctor` says whether you have them. Videos are kept in
+  against its published checksum, and so are ffmpeg (for frames, and for audio
+  formats) and whisper.cpp on Windows and Linux; on a Mac they're yours
+  (Homebrew), and `kumi doctor` says whether you have them. Videos are kept in
   `~/.kumi/videos`, so watching one again is quick.
 - Kumi's agent core shows the model images from tools for the rest of that
   answer, then puts them away, keeping what was said around each.

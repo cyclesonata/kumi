@@ -2,9 +2,9 @@
  * The programs watching a video needs: yt-dlp (what a video page holds: captions, chapters, its
  * streams), ffmpeg (a frame, or a stretch of sound, from a stream) and, for a video without
  * captions, whisper.cpp (its speech, transcribed on this computer) with a speech model. yt-dlp,
- * the speech model and (on Windows and Linux) whisper.cpp are fetched into Kumi's own folder the
- * first time they're needed, each checked against the checksum its publisher lists; ffmpeg is the
- * producer's (the one Kumi already uses to read audio formats), and so is whisper.cpp on a Mac.
+ * the speech model and (on Windows and Linux) whisper.cpp and ffmpeg are fetched into Kumi's own
+ * folder the first time they're needed, each checked against the checksum its publisher lists; on a
+ * Mac, ffmpeg and whisper.cpp are the producer's (Homebrew), and audio formats are read with afconvert.
  */
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -144,21 +144,91 @@ export function ytDlpExtras(ytdlp: string, signal?: AbortSignal): Promise<string
   return extras;
 }
 
-/** ffmpeg: KUMI_FFMPEG, one on the PATH, or where Homebrew and the usual installers put it. */
-export async function findFfmpeg(options: { env?: Env; signal?: AbortSignal } = {}): Promise<string | undefined> {
+/** Where Kumi keeps the programs it fetches, and who's told when it fetches one: set once as Kumi starts. */
+let programDefaults: { toolsDir?: string; onFetch?: (message: string) => void } = {};
+export function configurePrograms(options: { toolsDir?: string; onFetch?: (message: string) => void }): void { programDefaults = { ...options }; }
+
+/** The ffmpeg build for this computer among a release's files: the newest numbered LGPL one; a Mac has none. */
+export function ffmpegAsset(names: readonly string[], platform: string = process.platform, arch: string = process.arch): string | undefined {
+  const target = platform === "win32" ? (arch === "arm64" ? "winarm64" : arch === "x64" ? "win64" : undefined)
+    : platform === "linux" ? (arch === "arm64" ? "linuxarm64" : arch === "x64" ? "linux64" : undefined) : undefined;
+  if (!target) return undefined;
+  const pattern = new RegExp(`^ffmpeg-n(\\d+)\\.(\\d+)-latest-${target}-lgpl-\\d+\\.\\d+\\.(zip|tar\\.xz)$`);
+  const versions = names.flatMap((name) => { const found = pattern.exec(name); return found ? [{ name, major: Number(found[1]), minor: Number(found[2]) }] : []; });
+  return versions.sort((a, b) => b.major - a.major || b.minor - a.minor)[0]?.name;
+}
+
+const FFMPEG_RELEASE = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest";
+
+export interface FfmpegOptions {
+  env?: Env;
+  signal?: AbortSignal;
+  /** Where Kumi keeps programs it fetched (~/.kumi/tools); set by configurePrograms when left out. */
+  toolsDir?: string;
+  onFetch?: (message: string) => void;
+  /** Only look for what's there: fetch nothing (for the doctor). */
+  installedOnly?: boolean;
+  /** For tests: the network, and the computer. */
+  download?: (url: string, signal?: AbortSignal) => Promise<Uint8Array>;
+  platform?: string;
+  arch?: string;
+}
+
+/**
+ * ffmpeg: KUMI_FFMPEG, one on the PATH, where Homebrew and the usual installers put it, or the copy
+ * Kumi fetched; failing those, on Windows and Linux, a release build is fetched into `toolsDir`
+ * (checked against the SHA-256 GitHub lists for it). A Mac reads audio with afconvert; its ffmpeg
+ * (for a video's frames) comes from Homebrew. Undefined when there's none.
+ */
+export async function findFfmpeg(options: FfmpegOptions = {}): Promise<string | undefined> {
   const env = options.env ?? process.env;
   if (env.KUMI_FFMPEG) return existsSync(env.KUMI_FFMPEG) ? env.KUMI_FFMPEG : undefined;
-  if (await runs("ffmpeg", "-version", options.signal)) return "ffmpeg";
-  const candidates = process.platform === "win32"
-    ? [join(env.ProgramFiles ?? "C:\\Program Files", "ffmpeg", "bin", "ffmpeg.exe"), join(env.LOCALAPPDATA ?? "", "Microsoft", "WinGet", "Links", "ffmpeg.exe")]
-    : ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"];
-  for (const candidate of candidates) if (candidate && existsSync(candidate) && await runs(candidate, "-version", options.signal)) return candidate;
-  return undefined;
+  const platform = options.platform ?? process.platform;
+  const program = platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const toolsDir = options.toolsDir ?? programDefaults.toolsDir;
+  const own = toolsDir ? join(toolsDir, "ffmpeg", program) : undefined;
+  if (own && existsSync(own)) return own;
+  if (!options.platform) {
+    if (await runs("ffmpeg", "-version", options.signal)) return "ffmpeg";
+    const candidates = platform === "win32"
+      ? [join(env.ProgramFiles ?? "C:\\Program Files", "ffmpeg", "bin", "ffmpeg.exe"), join(env.LOCALAPPDATA ?? "", "Microsoft", "WinGet", "Links", "ffmpeg.exe")]
+      : ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"];
+    for (const candidate of candidates) if (candidate && existsSync(candidate) && await runs(candidate, "-version", options.signal)) return candidate;
+  }
+  if (!toolsDir || !own || options.installedOnly) return undefined;
+  const get = options.download ?? download;
+  let release: { assets?: { name?: string; digest?: string; size?: number; browser_download_url?: string }[] };
+  try { release = JSON.parse(new TextDecoder().decode(await get(FFMPEG_RELEASE, options.signal))) as typeof release; } catch { options.signal?.throwIfAborted(); return undefined; }
+  const assets = (release.assets ?? []).filter((item) => item.browser_download_url?.startsWith("https://github.com/"));
+  const asset = ffmpegAsset(assets.map((item) => item.name ?? ""), platform, options.arch ?? process.arch);
+  const published = assets.find((item) => item.name === asset);
+  const expected = /^sha256:([0-9a-f]{64})$/i.exec(published?.digest ?? "")?.[1];
+  if (!asset || !published || !expected) return undefined;
+  (options.onFetch ?? programDefaults.onFetch)?.(`Kumi is fetching ffmpeg, which it reads audio formats and videos with (once, about ${Math.round((published.size ?? 0) / 1e6)} MB).`);
+  const archive = join(toolsDir, `.ffmpeg-${randomUUID()}${asset.endsWith(".zip") ? ".zip" : ".tar.xz"}`);
+  const unpacked = join(toolsDir, `.ffmpeg-${randomUUID()}`);
+  try {
+    if ((await downloadTo(published.browser_download_url!, archive, { toolsDir, ...(options.signal ? { signal: options.signal } : {}), ...(options.download ? { download: options.download } : {}) })) !== expected.toLowerCase()) {
+      throw new VideoError("The ffmpeg Kumi downloaded didn't match its release's checksum, so it wasn't kept.");
+    }
+    await mkdir(unpacked, { recursive: true, mode: 0o700 });
+    // tar reads zip archives too (Windows has had it since 2018), and xz ones.
+    await run("tar", ["-xf", archive, "-C", unpacked], { timeoutMs: 300_000, ...(options.signal ? { signal: options.signal } : {}) });
+    const inside = (await readdir(unpacked, { recursive: true })).map(String).find((name) => { const parts = name.split(/[\\/]/); return parts.at(-1) === program && parts.at(-2) === "bin"; });
+    if (!inside) return undefined;
+    // Only the program: the build is static, and the rest (ffprobe, ffplay, docs) isn't needed.
+    await mkdir(dirname(own), { recursive: true, mode: 0o700 });
+    await rename(join(unpacked, inside), own);
+    if (platform !== "win32") await chmod(own, 0o755);
+    return own;
+  } finally {
+    await rm(archive, { force: true }); await rm(unpacked, { recursive: true, force: true });
+  }
 }
 
 /** How to get ffmpeg on this computer, for the one line that says frames and sound need it. */
 export function ffmpegHint(): string {
-  return process.platform === "darwin" ? "brew install ffmpeg" : process.platform === "win32" ? "winget install ffmpeg" : "your package manager (ffmpeg)";
+  return process.platform === "darwin" ? "brew install ffmpeg" : process.platform === "win32" ? "Kumi fetches it the first time it's needed; or winget install ffmpeg" : "Kumi fetches it the first time it's needed; or your package manager (ffmpeg)";
 }
 
 /** A program by name on the PATH, as a full path; undefined when it isn't there. */

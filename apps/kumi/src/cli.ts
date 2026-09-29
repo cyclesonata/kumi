@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, createTechniqueStore, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
@@ -153,6 +153,8 @@ try {
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
+    // Programs Kumi fetches when first needed (ffmpeg, off a Mac) go in its tools folder, and it says so.
+    configurePrograms({ toolsDir: loadToolsDir(), onFetch: (message) => terminal?.handleEvent({ type: "notice", message }) });
     const stale = config.mode === "live" ? olderBridge(process.env, bundledBridgeVersion) : undefined;
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,

@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
+import { findFfmpeg } from "../video/programs.js";
 
 export interface AudioSource {
   sampleRate: number;
@@ -67,9 +68,12 @@ function run(command: string, args: string[], signal: AbortSignal | undefined): 
 }
 
 async function convert(input: string, output: string, signal: AbortSignal | undefined): Promise<void> {
+  const mac = process.platform === "darwin";
+  // A Mac reads them with afconvert; elsewhere ffmpeg, which Kumi fetches the first time it's needed.
+  const ffmpeg = mac ? "ffmpeg" : await findFfmpeg(signal ? { signal } : {}).catch(() => undefined) ?? "ffmpeg";
   const attempts: [string, string[]][] = [
-    ...(process.platform === "darwin" ? [["afconvert", ["-f", "WAVE", "-d", "LEF32", input, output]] as [string, string[]]] : []),
-    ["ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", input, "-vn", "-acodec", "pcm_f32le", "-f", "wav", output]],
+    ...(mac ? [["afconvert", ["-f", "WAVE", "-d", "LEF32", input, output]] as [string, string[]]] : []),
+    [ffmpeg, ["-v", "error", "-nostdin", "-y", "-i", input, "-vn", "-acodec", "pcm_f32le", "-f", "wav", output]],
   ];
   for (const [command, args] of attempts) {
     try { await run(command, args, signal); return; } catch (error) { if (signal?.aborted) throw error; }

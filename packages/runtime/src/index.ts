@@ -6,7 +6,7 @@ export { analyzeFile, compare, hear, type Analysis, type Comparison } from "./au
 export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
 export { videoTools, WATCH_VIDEO_TOOL } from "./video/tool.js";
 export { findFfmpeg, findWhisper, findYtDlp, watchVideo, youtubeId, type Watched, type WatchRequest } from "./video/index.js";
-export { ffmpegHint, whisperHint } from "./video/programs.js";
+export { configurePrograms, ffmpegHint, whisperHint } from "./video/programs.js";
 export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { KUMI_VERSION } from "./version.js";
