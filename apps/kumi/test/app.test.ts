@@ -41,12 +41,14 @@ function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial
     ...extra,
   };
   let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
-  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
+  // Never the real browser: a sign-in link is only recorded.
+  const browsed: string[] = [];
+  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), openBrowser: (url) => { browsed.push(url); }, mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
   return {
-    input, output, app, calls,
+    input, output, app, calls, browsed,
     onUndo(result: (id: string | undefined) => ChangeRecord | undefined) { undoResult = result; },
     get written() { return written; },
     screen(): string[] {
@@ -664,6 +666,7 @@ test("signing in to ChatGPT from Kumi shows the link to open, copies it on c, an
   await delay(5);
   let lines = h.screen();
   assert.ok(has(lines, "Sign in to ChatGPT") && has(lines, "https://auth.example.test/oauth/authorize") && has(lines, "Waiting for the browser…"));
+  assert.deepEqual(h.browsed, ["https://auth.example.test/oauth/authorize?client=kumi&state=fixture"]);
   assert.ok(has(lines, "c copies the link · esc to cancel"));
   await h.type("c");
   assert.ok(h.written.includes(`\u001b]52;c;${Buffer.from("https://auth.example.test/oauth/authorize?client=kumi&state=fixture").toString("base64")}\u0007`));

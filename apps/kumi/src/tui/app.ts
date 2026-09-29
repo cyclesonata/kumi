@@ -8,7 +8,6 @@ import {
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
-import { openBrowser } from "../login.js";
 import type { ModelControl } from "../models.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -38,6 +37,8 @@ export interface TuiOptions {
   frameMs?: number;
   /** What the producer typed before, for the up arrow; kept across /new, reconnects and restarts. */
   history?: InputHistory;
+  /** Opens a sign-in link in the producer's browser; without it the link is only shown (tests). */
+  openBrowser?: (url: string) => void;
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -1003,7 +1004,7 @@ export class TuiApp {
     const panel: Extract<Panel, { kind: "chatgpt" }> = { kind: "chatgpt", abort, ...(then ? { then } : {}) };
     this.panel = panel;
     this.scheduler.request();
-    void models.signInChatGPT({ signal: abort.signal, onUrl: (url) => { panel.url = url; openBrowser(url); this.scheduler.request(); } })
+    void models.signInChatGPT({ signal: abort.signal, onUrl: (url) => { panel.url = url; this.options.openBrowser?.(url); this.scheduler.request(); } })
       .then(async () => {
         if (this.panel !== panel) return;
         this.panel = undefined;

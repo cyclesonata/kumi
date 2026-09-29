@@ -147,7 +147,7 @@ try {
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
-      history: openInputHistory(loadInputHistoryFile(), secrets),
+      history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };
