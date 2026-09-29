@@ -81,7 +81,8 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   }));
   const sessionId = randomUUID();
   const lifetime = new AbortController();
-  const toolsKey = createHash("sha256").update(JSON.stringify(specs)).digest("base64url").slice(0, 22);
+  // What the conversation was made with besides its messages: some models' reasoning is bound to it.
+  const toolsKey = createHash("sha256").update(JSON.stringify({ instructions, specs })).digest("base64url").slice(0, 22);
   let history = options.checkpoint ? restore(options.checkpoint, binding.id, toolsKey) : [];
   let running: { steering: string[] } | undefined;
   let active: Promise<TurnResult> | undefined;
@@ -134,11 +135,15 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         if (result.calls.length) {
           const { results, reply } = await execute(result.calls, abort, deliver, early);
           messages.push({ role: "tool", content: results });
-          // The tools finished the request and said so: their reply is the answer, with no model call to write one.
-          if (reply !== undefined && !steering.length) {
-            const text = spoke ? `\n\n${reply}` : reply;
-            deliver({ type: "text", text });
-            messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
+          // The tools finished the request and said so: their reply is the answer, with no model call to
+          // write one. A quiet call (a note kept) adds nothing: it ends the turn only when this reply
+          // already holds the model's answer; a model that kept a note first still gets to answer.
+          const answered = result.content.some((part) => part.type === "text" && part.text.trim());
+          if (reply !== undefined && !steering.length && (reply || answered)) {
+            if (reply) {
+              deliver({ type: "text", text: spoke ? `\n\n${reply}` : reply });
+              messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
+            }
             abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed");
           }
         } else if (!steering.length) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("completed"); }
@@ -202,12 +207,13 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   }
 
   /**
-   * Runs a step's calls in order; `reply` is set when all succeeded and some finished the request.
-   * A call that started while it was written finishes with its whole input.
+   * Runs a step's calls in order. `reply` is set when all succeeded and some finished the request, or
+   * every call was quiet (an empty reply: done, nothing to add); then no model reply follows. A call
+   * that started while it was written finishes with its whole input.
    */
   async function execute(calls: StepResult["calls"], abort: AbortSignal, deliver: (event: KernelEvent) => void, early: Map<string, Early>): Promise<{ results: LanguageModelV4ToolResultPart[]; reply?: string }> {
     const results: LanguageModelV4ToolResultPart[] = [];
-    const replies: string[] = []; let failed = false;
+    const replies: string[] = []; let failed = false; let quiet = 0;
     for (const { call, input } of calls) {
       abort.throwIfAborted();
       const streamed = early.get(call.toolCallId);
@@ -221,7 +227,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         try {
           const result = await untilAborted(streamed ? streamed.call.finish(input) : tool.execute(input!, abort), abort);
           outcome = { text: result.text, isError: Boolean(result.isError) };
-          if (!outcome.isError && typeof result.reply === "string" && result.reply.trim()) replies.push(result.reply.trim().slice(0, MAX_REPLY));
+          if (!outcome.isError && typeof result.reply === "string") {
+            if (result.reply.trim()) replies.push(result.reply.trim().slice(0, MAX_REPLY)); else quiet++;
+          }
         } catch (error) {
           abort.throwIfAborted();
           outcome = { text: (error instanceof Error ? error.message : "Tool failed").slice(0, MAX_TOOL_ERROR), isError: true };
@@ -233,7 +241,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       results.push({ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName,
         output: outcome.isError ? { type: "error-text", value: outcome.text } : { type: "text", value: outcome.text } });
     }
-    return { results, ...(!failed && replies.length ? { reply: replies.join("\n\n") } : {}) };
+    return { results, ...(!failed && replies.length ? { reply: replies.join("\n\n") } : !failed && quiet === calls.length ? { reply: "" } : {}) };
   }
 
   return {

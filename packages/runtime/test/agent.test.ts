@@ -514,3 +514,45 @@ test("a reply that breaks off after its plan began isn't asked for again; one th
   assert.equal(early.calls[0]!.abandoned, true);
   await retried.kernel.close();
 });
+
+test("a quiet call (a note kept) beside the model's answer ends the turn; before the answer, or beside a read, the model carries on", async () => {
+  const note = tool("remember", async () => ({ text: "{\"kept\":\"s1\"}", reply: "" }));
+  const read = tool("read", async () => ({ text: "{\"tempo\":120}" }));
+  const answered = harness(() => [...text("Got it: the Reese carries the low end."), call("remember", "{\"note\":\"The Reese is the main bass\",\"about\":\"set\"}"), finish("tool-calls")], { tools: [note, read] });
+  const { events, emit } = collect();
+  assert.equal((await answered.kernel.run("the reese is my main bass", new AbortController().signal, emit)).stopReason, "completed");
+  assert.equal(answered.requests.length, 1, "no model reply after keeping a note");
+  assert.equal(events.filter((event) => event.type === "text").map((event) => event.type === "text" && event.text).join(""), "Got it: the Reese carries the low end.", "nothing added to the answer");
+  assert.equal(answered.kernel.checkpoint().messages.at(-1)?.role, "tool", "the call and its result stay in the conversation");
+  await answered.kernel.close();
+
+  const reading = harness((_options, n) => n === 1 ? [call("read", "{}", "a"), call("remember", "{\"note\":\"x\",\"about\":\"set\"}", "b"), finish("tool-calls")] : [...text("It's 120."), finish()], { tools: [note, read] });
+  await reading.kernel.run("what's the tempo? and remember I like it", new AbortController().signal, () => {});
+  assert.equal(reading.requests.length, 2, "the read's result goes back to the model");
+  await reading.kernel.close();
+
+  // A note kept before the answer is written: the model still answers, after it.
+  const first = harness((_options, n) => n === 1 ? [call("remember", "{\"note\":\"Prefers short reverbs\",\"about\":\"producer\"}"), finish("tool-calls")] : [...text("Short, dark reverbs: try Hybrid Reverb."), finish()], { tools: [note] });
+  const answers = collect();
+  assert.equal((await first.kernel.run("I like short reverbs. Which reverb suits that?", new AbortController().signal, answers.emit)).stopReason, "completed");
+  assert.equal(first.requests.length, 2, "a note kept first doesn't cut the answer off");
+  assert.match(answers.events.map((event) => event.type === "text" ? event.text : "").join(""), /Hybrid Reverb/);
+  assert.ok(!first.kernel.checkpoint().messages.some((message) => message.role === "assistant" && message.content.some((part) => part.type === "text" && !part.text)), "no empty answer is kept");
+  await first.kernel.close();
+});
+
+test("a conversation carried into other instructions (other notes, say) continues without its reasoning", async () => {
+  const thinking: LanguageModelV4StreamPart[] = [
+    { type: "reasoning-start", id: "r1", providerMetadata: { anthropic: { signature: "sig-9" } } }, { type: "reasoning-delta", id: "r1", delta: "hmm" }, { type: "reasoning-end", id: "r1" },
+  ];
+  const first = harness(() => [...thinking, ...text("ok"), finish()]);
+  await first.kernel.run("one", new AbortController().signal, () => {});
+  const checkpoint = JSON.parse(JSON.stringify(first.kernel.checkpoint()));
+  const same = harness(() => [...text("ok"), finish()], { checkpoint });
+  await same.kernel.run("two", new AbortController().signal, () => {});
+  assert.match(JSON.stringify(same.requests[0]!.prompt), /sig-9/);
+  const other = harness(() => [...text("ok"), finish()], { checkpoint, instructions: "fixture instructions\n\n<remembered_notes_untrusted>\n- [s1] new note\n</remembered_notes_untrusted>" });
+  await other.kernel.run("two", new AbortController().signal, () => {});
+  assert.doesNotMatch(JSON.stringify(other.requests[0]!.prompt), /sig-9/);
+  await first.kernel.close(); await same.kernel.close(); await other.kernel.close();
+});

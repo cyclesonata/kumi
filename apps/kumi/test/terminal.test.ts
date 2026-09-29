@@ -171,3 +171,29 @@ test("plain mode names the model, lists a provider's, and sets the model and eff
   assert.match(text, /\[login\] Sign in from a shell: npm run kumi -- login anthropic/, "a sign-in failure names the command that fixes it");
   assert.deepEqual(fake.calls.filter((call) => !call.startsWith("list")), ["choose:openai-codex/gpt-6-luna", "effort:low", "signout:openai-codex"]);
 });
+
+test("plain mode lists what Kumi remembers and forgets a note by its id", async () => {
+  const input = new PassThrough() as PassThrough & { isTTY: boolean; isRaw: boolean; setRawMode(value: boolean): void };
+  input.isTTY = false; input.isRaw = false; input.setRawMode = () => {};
+  let output = "";
+  const sink = Object.assign(new Writable({ write(chunk, _encoding, callback) { output += String(chunk); callback(); } }), { isTTY: false, columns: 100 });
+  const notes = { producer: [{ id: "p1", text: "Prefers short reverbs", at: 1 }], set: [{ id: "s1", text: "The Reese is the main bass", at: 2 }] };
+  const controller: SessionController = {
+    async start() {}, async submit() {}, async refresh() {}, async newConversation() {}, async cancel() {}, async close() {},
+    status() { return { state: "idle", connection: "disconnected", turns: 0 }; }, async undo() { return undefined; },
+    async memory() { return { ...notes, setName: "Night Drive", saved: true }; },
+    async forget(id) { const note = notes.set.find((item) => item.id === id); notes.set = notes.set.filter((item) => item.id !== id); return note; },
+  };
+  const terminal = createTerminal({ controller, input, output: sink, models: fakeModels().control, mode: "inference-only", closeTimeoutMs: 25 });
+  const done = terminal.run();
+  await delay(0);
+  input.write("/memory\n/forget s1\n/forget s9\n"); await delay(20);
+  terminal.handleEvent({ type: "remembered", scope: "producer", note: { id: "p2", text: "Names buses BUS - <what>", at: 3 } });
+  input.end(); assert.equal(await done, 0);
+  const text = stripVTControlCharacters(output);
+  assert.match(text, /\[memory\] About you: p1 Prefers short reverbs/);
+  assert.match(text, /\[memory\] About Night Drive: s1 The Reese is the main bass/);
+  assert.match(text, /\[memory\] Forgot: The Reese is the main bass/);
+  assert.match(text, /\[memory\] Use: \/forget <id>/);
+  assert.match(text, /\[memory\] Will remember about you: Names buses BUS - <what>/);
+});

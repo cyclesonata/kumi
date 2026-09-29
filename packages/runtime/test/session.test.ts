@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { KumiError } from "../src/core/errors.js";
 import { createSession } from "../src/core/session.js";
-import type { ConnectionState, ConversationStore, Kernel, KernelEvent, KernelFactory, KernelOptions, Observation, SavedConversation, SessionEvent, TurnResult } from "../src/core/contracts.js";
+import type { ConnectionState, ConversationStore, Kernel, KernelEvent, KernelFactory, KernelOptions, Memory, MemoryNote, MemoryStore, Observation, SavedConversation, SessionEvent, TurnResult } from "../src/core/contracts.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -11,7 +11,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeoutMs?: number; idleTimeoutMs?: number; turnLimitMs?: number; maxTurns?: number } = {}) {
+function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeoutMs?: number; idleTimeoutMs?: number; turnLimitMs?: number; maxTurns?: number; memory?: MemoryStore } = {}) {
   const events: SessionEvent[] = [];
   const calls: string[] = [];
   const kernels: { closed: number }[] = [];
@@ -23,7 +23,7 @@ function harness(options: { run?: Kernel["run"]; factory?: KernelFactory; timeou
   const session = createSession({
     onEvent: (event) => events.push(event), timeoutMs: options.timeoutMs ?? 5_000,
     ...(options.idleTimeoutMs ? { idleTimeoutMs: options.idleTimeoutMs } : {}), ...(options.turnLimitMs ? { turnLimitMs: options.turnLimitMs } : {}),
-    cancelGraceMs: 10, closeTimeoutMs: 25, ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
+    cancelGraceMs: 10, closeTimeoutMs: 25, ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}), ...(options.memory ? { memory: options.memory } : {}),
     kernelFactory: options.factory ?? (async ({ instructions, tools }) => {
       assert.equal(instructions, observation.instructions); assert.deepEqual(tools, []);
       const record = { closed: 0 }; kernels.push(record);
@@ -337,4 +337,32 @@ test("startup failure closes integration; late startup kernel is closed after ca
   held.resolve({ async run() { return { stopReason: "completed" }; }, async close() { closed++; } });
   await starting; await delay(0);
   assert.equal(closed, 1); assert.equal(h.session.status().state, "closed");
+});
+
+test("what Kumi remembers goes into each new conversation's instructions, with the tools to keep and drop notes", async () => {
+  const saved: Record<string, MemoryNote[]> = { producer: [{ id: "p1", text: "Prefers short reverbs", at: 1 }], set: [] };
+  const memory: MemoryStore = {
+    async load(project): Promise<Memory> { return { producer: [...saved.producer!], set: project ? [...saved.set!] : [] }; },
+    async save(scope, _project, notes) { saved[scope] = [...notes]; },
+  };
+  const created: KernelOptions[] = [];
+  const h = harness({ memory, factory: async (options) => {
+    created.push(options);
+    return { async run(_input, signal) {
+      await options.tools.find((item) => item.name === "remember")!.execute({ note: "The Reese is the main bass", about: "producer" }, signal);
+      return { stopReason: "completed" as const };
+    }, async close() {} };
+  } });
+  await h.session.start();
+  await h.session.submit("the reese is my main bass");
+  assert.match(created[0]!.instructions, /fixture instructions\n\n<remembered_notes_untrusted>[\s\S]*\[p1\] Prefers short reverbs/);
+  assert.deepEqual(created[0]!.tools.map((item) => item.name), ["remember", "forget"]);
+  assert.ok(h.events.some((event) => event.type === "remembered" && event.note.text === "The Reese is the main bass"));
+  const now = await h.session.memory!();
+  assert.deepEqual(now?.producer.map((note) => note.id), ["p1", "p2"]);
+  assert.equal(now?.saved, false, "the fixture's Set isn't saved");
+  assert.equal((await h.session.forget!("p1"))?.text, "Prefers short reverbs");
+  assert.deepEqual(saved.producer!.map((note) => note.id), ["p2"]);
+  assert.ok(h.events.some((event) => event.type === "forgot"));
+  await h.session.close();
 });

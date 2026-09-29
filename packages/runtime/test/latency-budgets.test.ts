@@ -83,3 +83,26 @@ test("budget: a plan that finishes the request is one model reply, with no reply
   assert.equal(replies, 1, `model replies for a finished plan: ${replies}, each seconds long`);
   await kernel.close();
 });
+
+test("budget: keeping a note costs no model reply and no round trip to Live", async () => {
+  const { memoryTools, createMemoryStore } = await import("../src/core/memory.js");
+  const dir = mkdtempSync(join(tmpdir(), "kumi-budget-memory-"));
+  try {
+    let replies = 0;
+    const parts: LanguageModelV4StreamPart[] = [
+      { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "Got it." }, { type: "text-end", id: "t" },
+      { type: "tool-call", toolCallId: "c1", toolName: "remember", input: JSON.stringify({ note: "The Reese is the main bass", about: "producer" }) },
+      { type: "finish", usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } }, finishReason: { unified: "tool-calls", raw: "tool_use" } },
+    ];
+    const model: LanguageModelV4 = {
+      specificationVersion: "v4", provider: "test", modelId: "budget", supportedUrls: {},
+      doGenerate: () => { throw new Error("not used"); },
+      async doStream() { replies++; return { stream: new ReadableStream({ start(controller) { for (const part of parts) controller.enqueue(part); controller.close(); } }) }; },
+    };
+    const notes = memoryTools({ store: createMemoryStore({ projectsDir: join(dir, "projects"), producerFile: join(dir, "memory.json") }), project: () => undefined, onEvent: () => {} });
+    const kernel = createAgentKernel({ binding: { id: "test/budget", model, prepare: (request) => ({ prompt: request.messages, tools: request.tools }) }, instructions: "budget", tools: notes.tools, signal: signal() });
+    await kernel.run("the reese is my main bass", signal(), () => {});
+    assert.equal(replies, 1, `model replies for an answer that keeps a note: ${replies}, each seconds long`);
+    await kernel.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

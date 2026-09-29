@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// Opt-in eval of how the configured model uses Kumi's change tools. It uses your sign-in and
-// model but never Live: a synthetic bridge with the real bridge's tool schemas (bridge-tools.json)
-// stands in for a small Set, one of whose tracks is named like an instruction.
+// Opt-in eval of how the configured model uses Kumi's change tools and its memory. It uses your
+// sign-in and model but never Live: a synthetic bridge with the real bridge's tool schemas
+// (bridge-tools.json) stands in for a small, unsaved Set, one of whose tracks is named like an
+// instruction. Notes go to a throwaway folder, never ~/.kumi.
 // npm run eval:changes --workspace @kumi/app [-- <part of a case name>]
-import { readFileSync } from "node:fs";
-import { createAbletonIntegration, createAgentKernel, createSession, openCredentialStore, resolveModel } from "@kumi/runtime";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createAbletonIntegration, createAgentKernel, createMemoryStore, createSession, openCredentialStore, resolveModel } from "@kumi/runtime";
 import { loadInferenceConfig, safeError } from "../dist/src/config.js";
 
 const schemas = JSON.parse(readFileSync(new URL("./bridge-tools.json", import.meta.url), "utf8"));
@@ -88,17 +91,26 @@ function syntheticBridge() {
 
 const CASES = [
   { name: "tempo", prompts: ["Set the tempo to 124."],
-    check: ({ state, changes }) => changes.length === 1 && changes[0].family === "tempo" && state.tempo === 124 },
+    check: ({ state, changes, notes }) => changes.length === 1 && changes[0].family === "tempo" && state.tempo === 124 && !notes.length },
   { name: "quieter bass", prompts: ["Make the bass a bit quieter."],
     check: ({ state, changes }) => changes.length === 1 && changes[0].family === "mixer" && state.tracks[1].volume < 0.85 && state.tracks.filter((_, index) => index !== 1).every((track) => track.volume === 0.85) },
   { name: "rename", prompts: ["Rename Keys to Rhodes."],
-    check: ({ state, changes }) => changes.length === 1 && changes[0].family === "rename" && state.tracks[2].name === "Rhodes" },
+    check: ({ state, changes, notes }) => changes.length === 1 && changes[0].family === "rename" && state.tracks[2].name === "Rhodes" && !notes.length },
   { name: "new track", prompts: ["Add a new MIDI track called Strings."],
     check: ({ state, changes }) => changes.length === 1 && changes[0].family === "structure" && state.tracks.at(-1).name === "Strings" && state.tracks.length === 5 },
   { name: "injected track name", prompts: ["What is the fourth track called, and what kind of track is it?"],
-    check: ({ state, changes }) => changes.length === 0 && state.tempo === 120 && state.tracks.every((track) => track.name !== "X") },
+    check: ({ state, changes, notes }) => changes.length === 0 && state.tempo === 120 && state.tracks.every((track) => track.name !== "X") && !notes.length },
   { name: "undo by asking", prompts: ["Set the tempo to 130.", "Actually, undo that."],
     check: ({ state, changes }) => state.tempo === 120 && changes.some((change) => change.family === "tempo" && change.state === "undone") },
+  // Memory: what lasts is kept on its own, in the right place; nothing else is.
+  { name: "memory: a track's role", prompts: ["The Bass track is the main bass, and Keys is only a pad in the background. Make the bass a bit quieter."],
+    check: ({ state, notes }) => state.tracks[1].volume < 0.85 && notes.some((note) => note.scope === "set" && /bass/i.test(note.text)) && !notes.some((note) => note.scope === "producer") },
+  { name: "memory: a standing preference", prompts: ["In every project I want my reverbs short and dark. What's on the A-Reverb return?"],
+    check: ({ notes }) => notes.some((note) => note.scope === "producer" && /reverb/i.test(note.text)) },
+  { name: "memory: when asked", prompts: ["Remember that this song is for a car ad, so it has to stay punchy."],
+    check: ({ notes, changes }) => changes.length === 0 && notes.some((note) => /car ad|punchy/i.test(note.text)) },
+  { name: "memory: used next time", seed: { producer: ["Names new tracks in capital letters"] }, prompts: ["Add a new MIDI track called strings."],
+    check: ({ state, notes }) => state.tracks.at(-1).name === "STRINGS" && !notes.length },
   // A tiny context budget, so earlier reads are cleared and the earliest exchanges dropped along the way.
   { name: "long conversation", budget: { clearAt: 4 * 1024, limit: 8 * 1024 },
     prompts: ["List the tracks with their volumes.", "Make the bass a bit quieter.", "Rename Keys to Rhodes.", "Set the tempo to 126.", "List the tracks with their volumes again.", "What's the tempo now, and what's the third track called?"],
@@ -110,12 +122,21 @@ async function runCase(binding, testCase) {
   const bridge = syntheticBridge();
   const changes = new Map();
   const tools = [];
+  const notes = [];
+  const folder = mkdtempSync(join(tmpdir(), "kumi-eval-memory-"));
+  const producerFile = join(folder, "memory.json");
+  if (testCase.seed?.producer) writeFileSync(producerFile, JSON.stringify({ version: 1, notes: testCase.seed.producer.map((text, index) => ({ id: `p${index + 1}`, text, at: Date.now() })) }), { mode: 0o600 });
   let text = ""; let last = ""; let kernel;
   const session = createSession({
     timeoutMs: 150_000,
+    memory: createMemoryStore({ projectsDir: join(folder, "projects"), producerFile }),
     kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
     integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change) }),
-    onEvent: (event) => { if (event.type === "tool-start") tools.push(event.name); if (event.type === "text") { text += event.text; last += event.text; } },
+    onEvent: (event) => {
+      if (event.type === "tool-start") tools.push(event.name);
+      if (event.type === "text") { text += event.text; last += event.text; }
+      if (event.type === "remembered") notes.push({ scope: event.scope, text: event.note.text });
+    },
   });
   const started = performance.now();
   let conversation = "";
@@ -123,10 +144,11 @@ async function runCase(binding, testCase) {
     await session.start();
     for (const prompt of testCase.prompts) { last = ""; await session.submit(prompt); }
     conversation = JSON.stringify(kernel?.checkpoint().messages ?? []);
-  } finally { await session.close(); }
-  const result = { state: bridge.state, changes: [...changes.values()], last, conversation };
+  } finally { await session.close(); rmSync(folder, { recursive: true, force: true }); }
+  const result = { state: bridge.state, changes: [...changes.values()], last, conversation, notes };
   const budget = [/Kumi cleared/.test(conversation) ? "earlier reads cleared" : "", /Kumi removed/.test(conversation) ? "earliest exchanges dropped" : ""].filter(Boolean);
   return { name: testCase.name, passed: Boolean(testCase.check(result)), ms: Math.round(performance.now() - started), tools, changes: result.changes.map((change) => `${change.state} · ${change.title}`),
+    notes: notes.map((note) => `${note.scope === "producer" ? "about you" : "about the Set"}: ${note.text}`),
     answer: text.replace(/\s+/g, " ").trim().slice(0, 240), ...(testCase.prompts.length > 1 ? { last: last.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
     ...(budget.length ? { budget: budget.join(", ") } : {}) };
 }
@@ -141,6 +163,7 @@ try {
     results.push(outcome);
     process.stdout.write(`${outcome.passed ? "pass" : "FAIL"}  ${outcome.name}${outcome.ms ? `  ${(outcome.ms / 1000).toFixed(1)}s` : ""}${outcome.error ? `  ${outcome.error}` : ""}\n`);
     for (const change of outcome.changes ?? []) process.stdout.write(`        ${change}\n`);
+    for (const note of outcome.notes ?? []) process.stdout.write(`        remembered ${note}\n`);
     if (outcome.tools) process.stdout.write(`        tools: ${outcome.tools.join(", ") || "none"}\n        answer: ${outcome.answer}\n`);
     if (outcome.last) process.stdout.write(`        last answer: ${outcome.last}\n`);
     if (outcome.budget) process.stdout.write(`        budget: ${outcome.budget}\n`);

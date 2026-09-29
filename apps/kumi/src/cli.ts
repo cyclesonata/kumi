@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createProjectStore, createSession, KumiError, openCredentialStore,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createSession, KumiError, openCredentialStore,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { loadConfig, loadProjectsDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { loadConfig, loadMemoryFile, loadProjectsDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
@@ -31,9 +31,10 @@ More:
 Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
 a key). An API key in ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENCODE_API_KEY is used when set.
 KUMI_MODEL overrides the chosen model.
-Kumi reads the open Live Set and makes changes you ask for; each change can be undone. Playback control,
-recording, listening and memory are not implemented yet.
-In a session: /help /status /model /effort /login /logout /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
+Kumi reads the open Live Set and makes changes you ask for; each change can be undone. It keeps short notes
+of what you tell it that Live can't show (about you, and about each saved Set). Playback control, recording
+and listening are not implemented yet.
+In a session: /help /status /model /effort /login /logout /memory /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, see docs/en/KUMI_POC.md (Connect to Live).";
@@ -115,6 +116,7 @@ try {
         }),
       onEvent: (event) => terminal?.handleEvent(event),
       ...(config.mode === "live" ? { conversations: createConversationStore(loadProjectsDir()) } : {}),
+      memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";

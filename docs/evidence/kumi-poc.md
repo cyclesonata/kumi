@@ -561,6 +561,19 @@ tracks checked):
   span two or three ticks. One walk per tick for all of them, a Remote Script
   change, would bring the observation to about one tick.
 
+### Memory
+
+`npm run eval:changes` with `openai-codex/gpt-6-astra`, 2026-09-28: 11 of 11,
+including four memory cases. "The Bass track is the main bass, and Keys is only
+a pad in the background. Make the bass a bit quieter." kept two notes about the
+Set and made the change; "In every project I want my reverbs short and dark"
+kept one about the producer; "Remember that this song is for a car ad" was
+kept; a note "Names new tracks in capital letters" made "Add a new MIDI track
+called strings" add STRINGS. The tempo, rename, injected-track-name and undo
+cases kept nothing. In the full-screen app, the first version ended the turn
+when the model kept a note before answering, leaving the question unanswered;
+a note now ends the turn only beside the model's answer.
+
 ## Every Browser device, and racks
 
 On real Live 12.4.15b4 on 2026-09-28, bridge 1.0.28 to 1.0.33, in the

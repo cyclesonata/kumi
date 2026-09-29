@@ -14,7 +14,7 @@ import { VirtualTerminal } from "./vt.js";
 const opened: TuiApp[] = [];
 afterEach(async () => { await Promise.all(opened.splice(0).map((app) => app.close())); });
 
-function harness(columns = 120, rows = 36, models?: ModelControl) {
+function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial<SessionController> = {}) {
   const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false, setRawMode(value: boolean) { this.isRaw = value; } });
   let written = "";
   const output = Object.assign(new Writable({ write(chunk, _encoding, callback) { written += String(chunk); callback(); } }), { isTTY: true, columns, rows });
@@ -34,6 +34,7 @@ function harness(columns = 120, rows = 36, models?: ModelControl) {
       if (change) app.handleEvent({ type: "change", change });
       return change;
     },
+    ...extra,
   };
   let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
   const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
@@ -759,5 +760,59 @@ test("budget: a burst of streamed text is one frame, and a token in a long conve
   h.emit({ type: "text", text: "one more" });
   h.screen();
   assert.equal(transcript.laidOut - laidOut, 1, "of 2,000 entries, only the answer being written is laid out again");
+  await h.app.close();
+});
+
+
+// ---- memory
+
+test("a note Kumi keeps is one quiet line, and its call isn't a step", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("the reese is my main bass\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "text", text: "Got it." });
+  h.emit({ type: "tool-start", id: "m1", name: "remember" });
+  h.emit({ type: "remembered", scope: "set", note: { id: "s1", text: "The Reese is the main bass", at: 1 } });
+  h.emit({ type: "tool-end", id: "m1", name: "remember", isError: false, elapsedMs: 3 });
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 900 });
+  h.emit({ type: "state", state: "idle" });
+  h.emit({ type: "remembered", scope: "producer", note: { id: "p1", text: "Prefers short reverbs", at: 2 } });
+  h.emit({ type: "remembered", scope: "producer", note: { id: "p1", text: "Prefers short, dark reverbs", at: 3 }, replaced: { id: "p1", text: "Prefers short reverbs", at: 2 } });
+  h.emit({ type: "forgot", scope: "set", note: { id: "s1", text: "The Reese is the main bass", at: 1 } });
+  const lines = h.screen();
+  assert.ok(has(lines, "Kumi will remember: The Reese is the main bass"));
+  assert.ok(has(lines, "Kumi will remember about you: Prefers short reverbs"));
+  assert.ok(has(lines, "Kumi updated a note about you: Prefers short, dark reverbs"));
+  assert.ok(has(lines, "Kumi forgot: The Reese is the main bass"));
+  assert.ok(!has(lines, "step"), "keeping a note isn't a step");
+  await h.app.close();
+});
+
+test("/memory shows what Kumi remembers, about you and this Set, and forgets a note when asked", async () => {
+  const memory = { producer: [{ id: "p1", text: "Prefers short, dark reverbs", at: Date.now() - 3_600_000 }], set: [{ id: "s1", text: "The Reese is the main bass", at: Date.now() - 60_000 }] };
+  const forgotten: string[] = [];
+  const h = harness(120, 36, undefined, {
+    async memory() { return { ...memory, setName: "Night Drive", saved: true }; },
+    async forget(id) { forgotten.push(id); const note = [...memory.producer, ...memory.set].find((item) => item.id === id); memory.set = memory.set.filter((item) => item.id !== id); return note; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/memory\r");
+  await delay(10);
+  let lines = h.screen();
+  assert.ok(has(lines, "What Kumi remembers"));
+  assert.ok(has(lines, "About you") && has(lines, "Prefers short, dark reverbs") && has(lines, "About Night Drive") && has(lines, "The Reese is the main bass"));
+  await h.type("\u001b[B\r");
+  await delay(5);
+  lines = h.screen();
+  assert.ok(has(lines, "Forget this note?") && has(lines, "The Reese is the main bass"));
+  await h.type("\r");
+  await delay(10);
+  assert.deepEqual(forgotten, ["s1"]);
+  assert.ok(!has(h.screen(), "Forget this note?"));
   await h.app.close();
 });

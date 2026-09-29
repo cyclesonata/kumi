@@ -3,7 +3,7 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  KumiError, PROVIDER_INFO, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
   type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
@@ -72,6 +72,7 @@ const COMMANDS = [
   { name: "/model", about: "Choose the model Kumi talks to" },
   { name: "/effort", about: "How hard the model thinks" },
   { name: "/login", about: "Sign in to a provider" },
+  { name: "/memory", about: "What Kumi remembers" },
   { name: "/logout", about: "Sign out of a provider" },
   { name: "/status", about: "What Kumi is connected to" },
   { name: "/help", about: "Keys and commands" },
@@ -81,7 +82,7 @@ const COMMANDS = [
 /** Offered only with a ModelControl to answer them. */
 const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logout"];
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
@@ -338,13 +339,21 @@ export class TuiApp {
         this.current.text += this.stream.push(event.text);
         this.transcript.touch(this.current);
         break;
+      case "remembered": {
+        const where = event.scope === "producer" ? "about you" : event.pending ? `once ${this.setName ?? "this Set"} is saved` : "";
+        this.notice(`${event.replaced ? "Kumi updated a note" : "Kumi will remember"}${where ? ` ${where}` : ""}: ${event.note.text}`, "info");
+        break;
+      }
+      case "forgot":
+        this.notice(`Kumi forgot: ${event.note.text}`, "info");
+        break;
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
         if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
         break;
       case "tool-start":
         if (this.planning === event.id) this.planning = undefined;
-        if (!this.current || this.suppress) break;
+        if (!this.current || this.suppress || event.name === REMEMBER_TOOL || event.name === FORGET_TOOL) break;
         this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running" });
         this.transcript.touch(this.current);
         break;
@@ -492,7 +501,8 @@ export class TuiApp {
   private menu(): readonly { name: string; about: string }[] {
     const text = this.editor.text;
     if (this.menuDismissed || !text.startsWith("/") || /\s/.test(text)) return [];
-    const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name)));
+    const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
+      && (command.name !== "/memory" || this.options.controller.memory !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -509,6 +519,11 @@ export class TuiApp {
       this.editor.clear();
       const open = { "/model": () => this.openModels(), "/effort": () => this.openEffort(), "/login": () => this.openLogin(), "/logout": () => this.openLogout() }[command]!;
       await open().catch((error: unknown) => this.panelFailed(error));
+      return;
+    }
+    if (command === "/memory" && controller.memory) {
+      this.editor.clear();
+      await this.openMemory().catch((error: unknown) => this.panelFailed(error));
       return;
     }
     if (command === "/status") {
@@ -726,6 +741,36 @@ export class TuiApp {
         const removed = await models.signOut(provider);
         const still = (await models.providers()).find((status) => status.id === provider)?.via === "environment" ? ` ${keyEnv} is still set, so Kumi uses that key now.` : "";
         this.notice(`${removed ? `Signed out of ${name}.` : `Kumi had no sign-in for ${name} to remove.`}${still}`, "info");
+      } };
+      this.scheduler.request();
+    } };
+    this.scheduler.request();
+  }
+
+  /** /memory: the notes Kumi keeps, about the producer and this Set; choosing one offers to forget it. */
+  private async openMemory(): Promise<void> {
+    const { controller } = this.options;
+    const memory = await controller.memory?.();
+    if (!memory) return;
+    const now = Date.now();
+    const rows = (notes: typeof memory.producer): PickerItem[] => notes.slice().reverse().map((note) => ({ label: note.text, value: note.id, note: since(note.at, now), noteTone: "faint" }));
+    const setName = memory.setName ?? "this Set";
+    const items: PickerItem[] = [
+      { heading: true, label: "About you" },
+      ...(memory.producer.length ? rows(memory.producer) : [{ label: "Nothing yet", inert: true }]),
+      { heading: true, label: `About ${setName}` },
+      ...(!memory.saved ? [{ label: "Kept once the Set is saved", inert: true }] : memory.set.length ? rows(memory.set) : [{ label: "Nothing yet", inert: true }]),
+    ];
+    const picker = new Picker("What Kumi remembers · what you tell it that Live can't show", items, { filterable: true });
+    this.panel = { kind: "pick", picker, choose: (item) => {
+      const confirm = new Picker("Forget this note?", [
+        { label: "Forget it", detail: item.label, value: "yes" },
+        { label: "Keep it", value: "no" },
+      ]);
+      this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
+        this.closePanel();
+        if (answer.value !== "yes") return;
+        if (!await controller.forget?.(item.value!)) this.notice("That note was already gone.", "info");
       } };
       this.scheduler.request();
     } };

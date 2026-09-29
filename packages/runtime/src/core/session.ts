@@ -1,8 +1,9 @@
 import type {
-  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, Observation, SavedConversation,
+  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, MemoryStore, Observation, SavedConversation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
+import { memoryInstructions, memoryTools } from "./memory.js";
 import { OBSERVATION_MARKER } from "../kernel/budget.js";
 
 interface Options {
@@ -21,6 +22,8 @@ interface Options {
   maxTurns?: number;
   /** Keeps each saved Set's conversation between sessions; without it conversations end with Kumi. */
   conversations?: ConversationStore;
+  /** What Kumi remembers about the producer and each saved Set; without it Kumi keeps no notes. */
+  memory?: MemoryStore;
 }
 interface Operation {
   id: number;
@@ -60,6 +63,10 @@ export function createSession(options: Options): SessionController {
   let away = false;
   /** The saved Set the conversation is about, when known. */
   let currentProject: string | undefined;
+  /** The open Set's name, for /memory. */
+  let currentSetName: string | undefined;
+  // Notes are kept by the model's own calls; each write is quiet, so it costs no model reply.
+  const notes = options.memory ? memoryTools({ store: options.memory, project: () => currentProject, onEvent: (event) => emit(event) }) : undefined;
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -144,7 +151,13 @@ export function createSession(options: Options): SessionController {
       op.controller.signal.addEventListener("abort", abortCreation, { once: true });
       let value: Kernel | undefined;
       try {
-        value = await options.kernelFactory({ instructions: observation.instructions, tools: observation.tools, signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+        // The notes go into the instructions once, when the conversation's kernel is built: they stay
+        // in the prompt cache, and a note kept meanwhile is in the conversation already.
+        const remembered = options.memory ? await options.memory.load(observation.project?.id).catch(() => undefined) : undefined;
+        assertCurrent(op);
+        const extra = remembered ? memoryInstructions(remembered, observation.project?.name) : "";
+        value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
+          tools: notes ? [...observation.tools, ...notes.tools] : observation.tools, signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
         if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
         kernel = { value, key: observation.key, revision, lifetime };
       } catch (error) { lifetime.abort(); throw error; }
@@ -174,7 +187,9 @@ export function createSession(options: Options): SessionController {
     observationLabel = undefined;
     const snapshot = await integration.observe(op.controller.signal);
     assertCurrent(op);
-    currentProject = snapshot.project?.id;
+    currentProject = snapshot.project?.id; currentSetName = snapshot.project?.name;
+    // Notes about a Set made before its first save are kept now that it has a file.
+    if (currentProject) void notes?.flush().catch(() => {});
     await ensureKernel(op, snapshot); assertCurrent(op);
     observationLabel = snapshot.label;
     emit({ type: "observation", label: snapshot.label });
@@ -300,6 +315,12 @@ export function createSession(options: Options): SessionController {
       });
       return outcome;
     },
+    async memory() {
+      if (!options.memory) return undefined;
+      const memory = await options.memory.load(currentProject);
+      return { ...memory, ...(currentSetName ? { setName: currentSetName } : {}), saved: currentProject !== undefined };
+    },
+    async forget(id) { return notes?.forget(id); },
     async cancel() { const op = active; if (!op) return; op.controller.abort(); await op.done; },
     async reconfigure() {
       if (state === "closed") throw new Error("Session is closed");

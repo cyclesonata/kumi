@@ -4,6 +4,7 @@ export type JsonObject = Record<string, unknown>;
 /**
  * `reply`, from a tool that finished what the producer asked, is the answer: when every call in
  * the step succeeded and no guidance is waiting, the turn ends there without another model call.
+ * An empty reply is quiet (a note kept): when every call in the step is, the turn ends as is.
  */
 export interface ToolResult { text: string; isError?: boolean; reply?: string }
 
@@ -64,7 +65,7 @@ export interface KernelCheckpoint {
    * the writer's own: another model continues from a portable copy (words, tool calls, results).
    */
   readonly origin?: string;
-  /** The tools it was made with, as a fingerprint: some models' reasoning is bound to them too. */
+  /** The instructions and tools it was made with, as a fingerprint: some models' reasoning is bound to them too. */
   readonly tools?: string;
 }
 
@@ -212,7 +213,28 @@ export type SessionEvent = KernelEvent
   | { type: "notice"; message: string }
   /** `kind` and `provider` say what failed and where, so an app can offer the fix (sign in, choose a model). */
   | { type: "error"; message: string; kind?: FailureKind; provider?: string }
-  | { type: "turn-complete"; result: TurnResult; elapsedMs: number };
+  | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
+  | MemoryEvent;
+
+/** "producer": true of them in any project; "set": about one saved Set. */
+export type MemoryScope = "producer" | "set";
+export interface MemoryNote {
+  /** "p3" (about the producer) or "s3" (about the Set): what the model and /memory name it by. */
+  id: string;
+  text: string;
+  /** Epoch milliseconds it was written. */
+  at: number;
+}
+export interface Memory { producer: MemoryNote[]; set: MemoryNote[] }
+export interface MemoryStore {
+  /** Notes about the producer, and about the saved Set `project` when there is one. */
+  load(project: string | undefined): Promise<Memory>;
+  save(scope: MemoryScope, project: string | undefined, notes: readonly MemoryNote[]): Promise<void>;
+}
+/** A note written or removed, for the app to show; `pending` while the Set isn't saved yet. */
+export type MemoryEvent =
+  | { type: "remembered"; scope: MemoryScope; note: MemoryNote; replaced?: MemoryNote; pending?: boolean }
+  | { type: "forgot"; scope: MemoryScope; note: MemoryNote };
 
 export interface SessionStatus {
   state: TurnState;
@@ -236,6 +258,10 @@ export interface SessionController {
    * error event says why).
    */
   undo(id?: string): Promise<ChangeRecord | undefined>;
+  /** What Kumi remembers now: about the producer, and about the open Set when it's saved. */
+  memory?(): Promise<(Memory & { setName?: string; saved: boolean }) | undefined>;
+  /** Remove a note by id; undefined when there's none. */
+  forget?(id: string): Promise<MemoryNote | undefined>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

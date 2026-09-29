@@ -3,8 +3,9 @@
 Kumi is a streaming producer-assistant conversation about the **current open
 Ableton Live Set**: it reads the Set and makes the changes you ask for, each with
 its own undo ([how changes work](KUMI_CHANGES.md)). For a saved Set it picks up
-the conversation next time and says what changed meanwhile. Playback control,
-recording, listening and learned preferences are not implemented yet. It runs its own agent core and the
+the conversation next time and says what changed meanwhile, and it keeps short
+notes of what you tell it that Live can't show ([what Kumi remembers](#what-kumi-remembers)).
+Playback control, recording and listening are not implemented yet. It runs its own agent core and the
 independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
@@ -80,6 +81,7 @@ yet.
 | `KUMI_MODEL` | `<provider>/<model>` for this run, overriding the chosen model |
 | `KUMI_AUTH_FILE` | Credential store path; default `~/.kumi/auth.json` |
 | `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
+| `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, if not the standard one |
 | `KUMI_TRACE=1` | Dispatch-name trace; no arguments or raw tool payloads |
 | `KUMI_UI=plain` | Plain line-by-line output instead of the full-screen app |
@@ -198,6 +200,7 @@ and a tempo change about 4 s
 | `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model |
 | `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
+| `/memory` | What Kumi remembers, about you and this Set; choose a note to forget it |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/refresh` | Read fresh bounded observations without a model answer |
 | `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
@@ -212,12 +215,43 @@ and partly typed input is preserved while output streams. Kumi's steps read as
 what it did ("looked at your Set") with their timing, never raw payloads. The
 terminal is restored on exit, on crashes and on signals.
 
+## What Kumi remembers
+
+Kumi keeps short notes of what you tell it that Live can't show, and uses them in
+later conversations: what a track or sound is for ("the Reese is the main bass"),
+what you're going for in a song or a section, your habits (naming, colours,
+routing), and what you like or dislike, in sounds and in how Kumi works. It
+decides for itself, as it answers, with no extra wait. When it keeps a note, one
+faint line says so ("Kumi will remember: The Reese is the main bass").
+
+- **Two places.** Notes about you, true in any project, are in `~/.kumi/memory.json`.
+  Notes about a saved Set are in its folder in `~/.kumi/projects`, next to its
+  conversation. Both are readable only by you. Notes about a Set that isn't saved
+  yet are kept once it is.
+- **Short.** Up to 24 notes in each place, a sentence each. A note that's now
+  wrong, or says the same as another, is replaced rather than added to.
+- **Not kept:** anything the Set shows (Kumi reads it fresh every turn), what
+  Kumi did (HISTORY has it), one-off requests, Kumi's own guesses, and anything
+  it only read in the Set, a tool result or a file. A note that reads as
+  instructions to the assistant, or holds something like a key, isn't kept, and
+  one found in the files isn't read back, so text inside a Set (a track name
+  written as an instruction, say) can't become a standing order.
+- **`/memory`** shows what Kumi remembers, about you and this Set; choosing a note
+  offers to forget it. You can also tell Kumi a note is wrong, or to forget it.
+- **Cost.** Notes are loaded when a conversation starts, as part of the model's
+  instructions, so they stay in the provider's prompt cache. A note kept
+  alongside the answer costs no second model reply and no request to Live
+  (`npm test` holds it to that); one kept before the answer is written still
+  lets the model answer.
+- `KUMI_MEMORY_FILE` moves the notes about you elsewhere.
+
 ## Limits and failure behavior
 
 - **Conversations** are kept for saved Sets, in `~/.kumi/projects` next to what Kumi
   last saw of each Set (readable only by you); the oldest exchanges drop off past
   about 256 KB. `/new` discards a Set's conversation. Unsaved Sets' conversations
-  end with Kumi. There's no learned memory or skills yet.
+  end with Kumi. Kumi keeps notes, not skills: a way of working isn't saved as a
+  recipe to replay yet.
 - **Bars and beats:** Kumi doesn't see the Set's time signature yet (the bridge's
   Set row lacks it), so turning bars into beats for clips and locators assumes 4/4.
 - **Long conversations** have no turn limit. Past about 160 KB (roughly 50k
@@ -274,8 +308,9 @@ terminal is restored on exit, on crashes and on signals.
 Your prompts, in-memory conversation and returned Live metadata are sent to the
 selected inference provider. Track/device names and tool results are untrusted
 data, not instructions or permission grants. Reading Live is not local-only.
-Kumi does not save conversation files; terminal scrollback and the provider's
-retention policies are separate. The credential store intentionally persists.
+Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only by
+you; terminal scrollback and the provider's retention policies are separate. The
+credential store intentionally persists.
 
 Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25
 was retired), Kumi's agent

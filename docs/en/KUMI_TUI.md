@@ -42,6 +42,10 @@ every state below.
   has a fix offers it: a missing or refused sign-in asks "Sign in to Anthropic?"
   and resends the message after; a model the provider doesn't offer opens the
   list. Changes apply from the next message, so they're allowed mid-answer.
+- **Memory is quiet.** Kumi keeps notes on its own as it answers; each shows as
+  one faint line in the conversation, never a step, a prompt or a graph.
+  `/memory` lists the notes (about you, about this Set) in a panel like
+  `/model`'s, and choosing one offers to forget it.
 - **Undo is first-class.** Every change is a history entry backed by a bridge
   transaction with verified undo; a whole turn can be undone too.
 - **A view, not the engine.** Visual building blocks are described as data by

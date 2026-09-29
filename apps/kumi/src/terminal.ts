@@ -24,7 +24,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -180,6 +180,19 @@ export function createTerminal(options: Options): Terminal {
         if (argument !== "default" && !(EFFORTS as readonly string[]).includes(argument)) { notice(`[effort] Choose one of ${EFFORTS.join(", ")} or default.`); return; }
         await options.models.setEffort(argument === "default" ? undefined : argument as Effort); notice(`[effort] ${argument}.`); return;
       }
+      if (verb === "/memory") {
+        const memory = await controller.memory?.();
+        if (!memory) { notice("[memory] Kumi keeps no notes here."); return; }
+        const list = (notes: { id: string; text: string }[]) => notes.map((note) => `${note.id} ${note.text}`).join(" · ") || "none";
+        notice(`[memory] About you: ${list(memory.producer)}`);
+        notice(memory.saved ? `[memory] About ${memory.setName ?? "this Set"}: ${list(memory.set)}` : "[memory] This Set isn't saved yet; notes about it are kept once it is.");
+        return;
+      }
+      if (verb === "/forget") {
+        const note = argument ? await controller.forget?.(argument) : undefined;
+        notice(note ? `[memory] Forgot: ${note.text}` : "[memory] Use: /forget <id>, with an id from /memory.");
+        return;
+      }
       if (verb === "/login") { notice("[login] Sign in from a shell: npm run kumi -- login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here."); return; }
       if (verb === "/logout") {
         if (!argument || !(PROVIDERS as readonly string[]).includes(argument)) { notice(`[logout] Use: /logout <provider> (${PROVIDERS.join(", ")}).`); return; }
@@ -253,6 +266,8 @@ export function createTerminal(options: Options): Terminal {
       }
       case "tool-start": if (!suppressOutput) notice(`[tool] ${event.name} started`); break;
       case "tool-end": if (!suppressOutput) notice(`[tool] ${event.name} ${event.isError ? "error" : "success"} · ${event.elapsedMs} ms`); break;
+      case "remembered": notice(`[memory] ${event.replaced ? "Updated" : "Will remember"}${event.scope === "producer" ? " about you" : ""}: ${event.note.text}${event.pending ? " (once the Set is saved)" : ""}`); break;
+      case "forgot": notice(`[memory] Forgot: ${event.note.text}`); break;
       case "turn-complete": {
         if (event.result.stopReason !== "cancelled" && !suppressOutput) presentation?.text(text.finish()); else text.discard();
         const usage = event.result.usage;
