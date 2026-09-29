@@ -960,3 +960,22 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `8
 - Seen on the way: after the reconnect the model's first reads used references from before it
   and failed, then it discovered again. Firing the new scene once reported that playback wasn't
   confirmed.
+
+## Techniques and memory indicators, in the app on real Live
+
+Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `3e0ebce`.
+
+- "Build me a gritty Reese bass on a new MIDI track called Memory Reese: Operator with two
+  detuned oscillators and glide, then a Saturator and an EQ Eight after it." Kumi built and set it
+  up (Operator's oscillators, glide and envelopes; Saturator Hard Curve at 11 dB, 75 % wet; EQ
+  Eight), 3 steps, 31.9 s. Nothing was said about a technique.
+- "That sounds great, I love it." The conversation showed `◆ Kept a technique: Gritty
+  two-oscillator Reese` (and, from the model, `✎ Noted about you: …`). MEMORY appeared under
+  HISTORY with both rows, each with its forget. `~/.kumi/techniques.json` held t1, "fits: Detuned
+  gliding bass with gritty harmonics".
+- Clicking the technique's forget: the row read "forgotten", the conversation said `◆ Forgot the
+  technique: …`, and the file was empty. The note's forget did the same (`✎ Forgot: …`, NOW
+  flashing it), leaving no notes about the producer from the test.
+- The eval (`npm run eval:changes`, gpt-6-astra): "technique: used" and "gap noted" pass. In
+  "technique: learned" the model wrote the technique into the plan in 4 of 6 runs, and 3 were
+  kept; the traced runs show a written draft armed at the end of the turn and kept by "I love it".
