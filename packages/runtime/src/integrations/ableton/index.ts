@@ -29,7 +29,7 @@ const MAKE_CHANGES = "make_changes";
 /** A plan step that waits: while a recording runs, say. */
 const WAIT = "wait";
 const WATCH_TOOL = "watch_me";
-const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: action start just before they do it (Kumi notes the Set as it is; nothing in Live changes), then action stop when they say they're done. Stop gives what changed: tracks added (with routing, arming, monitoring), devices loaded (with the knobs they turned from Live's defaults; switches and modes aren't compared), clips recorded or made, and settings changed, each with its track. Save it at once with save_recipe as the steps that would redo it, with $blanks for what differs each time (the source track, say), leaving out anything clearly unrelated; then say in a few words what the recipe does. The producer can ask you to change it.";
+const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: action start just before they do it (Kumi notes the Set as it is; nothing in Live changes), then action stop when they say they're done. Stop gives what changed: tracks added (with routing, arming, monitoring), devices loaded (with the knobs they turned from Live's defaults; switches and modes aren't compared), clips recorded or made, and settings changed, each with its track. Save it at once with save_recipe as the steps that would redo it, with $blanks for what differs each time (the source track, say), leaving out anything clearly unrelated: a device as load_device (as: \"sat\") and each knob turned as set_device_parameter with deviceRef \"@sat\" and the knob's name as parameter. Then say in a few words what the recipe does. The producer can ask you to change it.";
 /** How many devices added while watching Kumi reads the settings of. */
 const WATCH_DEVICES = 12;
 const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools (or play, record, fire_scene and the like) with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) lets a recording run, as in bouncing a sound to audio: route and arm a new audio track, record, play, wait, stop. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
@@ -540,6 +540,11 @@ export function createAbletonIntegration(options: Options): Integration {
   function changeContext(signal: AbortSignal): ChangeContext {
     return {
       sample: (path) => samples.get(path),
+      async parameters(deviceRef) {
+        const read = payload(await tools!.call("live_discover", { kind: "parameter", parent: deviceRef, fields: ["ref", "name"], limit: 100 }, signal, { host: true }));
+        return (Array.isArray(read.items) ? read.items : []).map((item) => object(item))
+          .filter((row): row is JsonObject & { ref: string; name: string } => typeof row.ref === "string" && typeof row.name === "string").map((row) => ({ ref: row.ref, name: row.name }));
+      },
       async pick(selector: SampleSelector) {
         const named = (selector.folders ?? []).map((folder) => folderPath(folder)).filter((folder): folder is string => Boolean(folder));
         const found = await findSamples({ folders: named.length ? named : defaultSampleFolders(), words: selector.words ?? [], limit: 50, random: selector.random === true || !(selector.words ?? []).length, signal });
@@ -646,7 +651,7 @@ export function createAbletonIntegration(options: Options): Integration {
         input: (group: JsonObject[]) => ({ deviceRef: group[0]!.deviceRef ?? null, pads: group.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null, ...(step.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) })) }) },
       { tool: "set_device_parameter", kind: CHANGES.find((kind) => kind.tool === "set_device_parameters")!, most: 64, what: "parameters",
         offered: (kind: ChangeKind) => "values" in schemaOf(kind),
-        input: (group: JsonObject[]) => ({ deviceRef: group[0]!.deviceRef ?? null, values: group.map((step) => ({ parameterRef: step.parameterRef ?? null, value: step.value ?? null })) }) },
+        input: (group: JsonObject[]) => ({ deviceRef: group[0]!.deviceRef ?? null, values: group.map((step) => ({ ...(typeof step.parameter === "string" && step.parameterRef === undefined ? { parameter: step.parameter } : { parameterRef: step.parameterRef ?? null }), value: step.value ?? null })) }) },
     ];
     const batchStep = (value: unknown, tool: string, device?: unknown) => {
       const item = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};

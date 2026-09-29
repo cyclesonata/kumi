@@ -128,7 +128,7 @@ export const FORGET_RECIPE_TOOL = "forget_recipe";
 
 const SAVE_DESCRIPTION = [
   "Save a way of working as a recipe the producer can replay any time, in any project: a chain on a track, a drum bus, a vocal chain, a sidechain, a resampling loop, a session layout.",
-  "Steps are make_changes steps; put $name where something should be chosen when it runs (the track to work on, say) and declare it in params. Earlier steps' results work as in make_changes (as and @name).",
+  "Steps are make_changes steps; put $name where something should be chosen when it runs (the track to work on, say) and declare it in params. Earlier steps' results work as in make_changes (as and @name); a device a step loads is set by parameter names (set_device_parameter with deviceRef \"@sat\" and parameter \"Drive\"). References from now (track:3) mean nothing later, so a recipe can't keep them.",
   "Save one when the producer asks to keep something as a recipe, describes a routine they repeat, has just had you do a routine they'll clearly want again, or showed you one while you watched (watch_me); then say it's saved, in a few words.",
   "Saving under an existing name replaces it.",
 ].join(" ");

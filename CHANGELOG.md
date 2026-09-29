@@ -59,6 +59,10 @@ The first release for producers to use day to day. Ships with bridge 1.0.34.
 - `watch_me` learns a routine you do by hand. It compares the Set before and
   after, including the knobs you turned on devices you added, so Kumi can save
   it as a recipe.
+- A plan or recipe names a device's parameters (`parameter: "Drive"` on the
+  device an earlier step loaded), so saved routines keep their settings. A saved
+  step can't hold a reference that only means something in the session it was
+  saved in.
 
 ### Memory
 

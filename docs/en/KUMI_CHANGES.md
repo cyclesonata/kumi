@@ -18,7 +18,7 @@ to be dependable.
 | `load_device` | An instrument, effect, Max for Live device or preset from the Browser onto a track, or into a rack's chain (`chainRef`) | `live_browser_load_*` |
 | `edit_rack` | A new chain in a rack (instrument, audio or MIDI effect rack), or a macro added or removed | `live_rack_*` (insert-chain, add-macro, remove-macro) |
 | `set_chain_mixer` | A rack chain's volume, pan, or on/off, to balance chains | `live_chain_mixer_*` |
-| `set_device_parameter` | One device parameter, or several of one device at once (`values`) | `live_device_parameter_*` |
+| `set_device_parameter` | One device parameter, or several of one device at once (`values`), by reference or by name (`parameter: "Drive"`, found on the device when the step runs, so a plan or recipe can set a device an earlier step loaded) | `live_device_parameter_*` |
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
 | `load_sample` | A sample in a new Simpler on an empty MIDI track: one `find_samples` returned, or one Kumi picks | `live_device_*` (insert with a sample) |

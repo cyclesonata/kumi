@@ -605,3 +605,24 @@ test("a streamed plan still sends a rack's pads as one change, and stops where a
     assert.equal(refused.isError, true); assert.equal(b.tempo, 128);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
+
+test("a parameter can be named rather than referenced, found on the device when the step runs: plans and recipes set devices they loaded", async () => {
+  const b = await opened({ parameters: true });
+  try {
+    const context = JSON.parse(b.observation.context) as { tracks: { devices?: { ref: string; name: string }[] }[] };
+    const operator = context.tracks[0]!.devices!.find((device) => device.name === "Operator")!.ref;
+    const one = await tool(b.tools, "set_device_parameter").execute({ deviceRef: operator, parameter: "filter freq", value: 0.3 }, signal());
+    assert.equal(one.isError, false, one.text);
+    assert.equal(b.requests.filter((request) => request.name === "live_device_parameter_preview").at(-1)!.args.parameterRef, "7:parameter:1", "found by its name on the device");
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "set_device_parameter", input: { deviceRef: operator, parameter: "Osc-A Level", value: 0.8 } },
+      { tool: "set_device_parameter", input: { deviceRef: operator, parameter: "Ae Rel", value: 0.2 } },
+    ] }, signal());
+    assert.equal(plan.isError, false, plan.text);
+    const batched = b.requests.filter((request) => request.name === "live_device_parameter_preview").at(-1)!;
+    assert.deepEqual(batched.args.values, [{ parameterRef: "7:parameter:0", value: 0.8 }, { parameterRef: "7:parameter:2", value: 0.2 }], "named steps on one device still go as one change; a prefix finds the name");
+    const unknown = await tool(b.tools, "set_device_parameter").execute({ deviceRef: operator, parameter: "Wobble", value: 1 }, signal());
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.text, /no parameter called "Wobble"; its parameters include Osc-A Level, Filter Freq, Ae Release/);
+  } finally { await b.integration.close(); }
+});

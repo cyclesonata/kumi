@@ -15,6 +15,8 @@ export interface KnownTrack { name: string; color?: string }
 /** What a change can look up while preparing: a sample find_samples returned, with the folder searched. */
 export interface ChangeContext {
   sample(path: string): { path: string; folder: string } | undefined;
+  /** A device's parameters as Live has them now (for a parameter named rather than referenced). */
+  parameters(deviceRef: string): Promise<{ ref: string; name: string }[]>;
   /** A sample Kumi finds itself (at random, or the best match for the words), not one already picked in this answer. */
   pick(selector: SampleSelector): Promise<{ path: string; folder: string } | undefined>;
 }
@@ -164,6 +166,45 @@ function mixerParts(prior: JsonObject, proposed: JsonObject, was: JsonObject, no
  * undo (see docs/evidence/kumi-poc.md); a change is only offered while the bridge advertises
  * both its preview and apply for the open Set.
  */
+/** The parameter schema with a name allowed where a reference goes: `parameter` for one, and in each of `values`. */
+function namedParameters(schema: JsonObject): JsonObject {
+  const properties = { ...((schema.properties ?? {}) as JsonObject) };
+  const NAME = { type: "string", minLength: 1, maxLength: 128, description: "The parameter's name on the device, as Live shows it; instead of parameterRef" };
+  properties.parameter = NAME;
+  const values = properties.values as JsonObject | undefined;
+  if (values && typeof values.items === "object") {
+    const items = values.items as JsonObject;
+    properties.values = { ...values, items: { ...items, properties: { ...((items.properties ?? {}) as JsonObject), parameter: NAME },
+      required: ((items.required as string[] | undefined) ?? []).filter((field) => field !== "parameterRef") } };
+  }
+  return { ...schema, properties };
+}
+
+/** Parameters named rather than referenced, found on the device as it is now (exact name first, then a prefix). */
+async function resolveParameters(input: JsonObject, context: ChangeContext): Promise<JsonObject | string> {
+  const named = typeof input.parameter === "string" || (Array.isArray(input.values) && input.values.some((item) => item && typeof item === "object" && typeof (item as JsonObject).parameter === "string"));
+  if (!named) return input;
+  if (typeof input.deviceRef !== "string") return "Name the device (deviceRef) whose parameter this is.";
+  const list = await context.parameters(input.deviceRef);
+  const find = (name: string) => { const wanted = name.trim().toLowerCase(); return list.find((row) => row.name.toLowerCase() === wanted) ?? list.find((row) => row.name.toLowerCase().startsWith(wanted)); };
+  const missing = (name: string) => `The device has no parameter called ${JSON.stringify(name.slice(0, 64))}; its parameters include ${list.slice(0, 12).map((row) => row.name).join(", ")}.`;
+  const { parameter, ...rest } = input;
+  if (typeof parameter === "string") {
+    const found = find(parameter);
+    if (!found) return missing(parameter);
+    return { ...rest, parameterRef: found.ref };
+  }
+  const values: JsonObject[] = [];
+  for (const item of input.values as JsonObject[]) {
+    if (typeof item?.parameter !== "string") { values.push(item); continue; }
+    const found = find(item.parameter);
+    if (!found) return missing(item.parameter);
+    const { parameter: _name, ...value } = item;
+    values.push({ ...value, parameterRef: found.ref });
+  }
+  return { ...rest, values };
+}
+
 const BASE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "set_tempo", preview: "live_tempo_preview", apply: "live_tempo_apply", family: "tempo",
@@ -319,7 +360,9 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "set_device_parameter", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter",
-    description: "Set one device parameter to a value between its min and max, or several of one device at once with values (one change, one undo) when offered. deviceRef and parameterRef come from discovery in this turn.",
+    description: "Set one device parameter to a value between its min and max, or several of one device at once with values (one change, one undo) when offered. deviceRef and parameterRef come from discovery in this turn; instead of parameterRef, parameter names it (\"Drive\"), found on the device when the step runs: that's how a plan or a recipe sets a device an earlier step loaded (deviceRef \"@sat\").",
+    schema: namedParameters,
+    prepare: (input, context) => resolveParameters(input, context),
     summarize(preview, input, track, applied) {
       if (Array.isArray(preview.parameters)) return parametersSummary(preview, input, track, applied);
       const parameter = record(preview.parameter); const device = record(preview.device);
@@ -338,6 +381,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
     // make_changes turns a run of set_device_parameter steps on one device into this: one Live request for them all.
     tool: "set_device_parameters", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter", internal: true,
     description: "Set several parameters of one device as one change; undo restores them all.",
+    prepare: (input, context) => resolveParameters(input, context),
     summarize: (preview, input, track, applied) => parametersSummary(preview, input, track, applied),
   },
   {
