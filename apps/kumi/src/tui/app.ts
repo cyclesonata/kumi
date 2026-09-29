@@ -103,6 +103,8 @@ export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
+/** How often FOCUS's tree is read again while it shows. */
+const TREE_REFRESH_MS = 4_000;
 const WIDE = 100;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const FAREWELL = "Kumi closed. Each Set's conversation continues next time.";
@@ -192,6 +194,8 @@ export class TuiApp {
   private treeKey: string | undefined;
   private treeReading = false;
   private treeAgain = false;
+  /** While the tree shows, it's read again now and then: a renamed chain or a device added by hand shows. */
+  private treeRefresh: ReturnType<typeof setInterval> | undefined;
   /** The keyboard's place in the tree (Tab moves into it); undefined while typing. */
   private treeCursor: number | undefined;
   /** What the producer points at: shown above the input box and sent with each message until cleared. */
@@ -519,6 +523,7 @@ export class TuiApp {
   private async finish(code = 0, message?: string): Promise<number> {
     if (this.closing) return this.done;
     this.closing = true;
+    this.keepTreeFresh(false);
     this.suppress = true;
     this.stream.discard();
     // A ChatGPT sign-in waiting on the browser stops listening; a half-typed key is dropped.
@@ -745,7 +750,7 @@ export class TuiApp {
   private readTree(again = false): void {
     const ref = this.focus?.trackRef; const read = this.options.controller.deviceTree;
     if (!ref || !read || this.connection !== "connected") return;
-    const key = `${ref}\u0000${this.focus?.device ?? ""}`;
+    const key = `${ref}\u0000${this.focus?.device ?? ""}\u0000${this.focus?.chain ?? ""}`;
     if (!again && key === this.treeKey) return;
     this.treeKey = key;
     if (this.treeReading) { this.treeAgain = true; return; }
@@ -756,6 +761,12 @@ export class TuiApp {
         if (this.treeAgain) { this.treeAgain = false; this.readTree(true); }
         if (!this.closing) this.scheduler.request();
       });
+  }
+
+  /** Every few seconds while the tree shows (one read at a time), so what changed in Live by hand shows too. */
+  private keepTreeFresh(shown: boolean): void {
+    if (shown && !this.treeRefresh) { this.treeRefresh = setInterval(() => { if (!this.closing) this.readTree(true); }, TREE_REFRESH_MS); this.treeRefresh.unref?.(); }
+    else if (!shown && this.treeRefresh) { clearInterval(this.treeRefresh); this.treeRefresh = undefined; }
   }
 
   /** The tree's rows while FOCUS shows it: Live's Device view on the focused track, or the keyboard in it. */
@@ -1440,6 +1451,7 @@ export class TuiApp {
     put(1, "FOCUS", st.label);
     // Live's Device view on the focused track: its devices as a tree (HISTORY gives up the room).
     const rows = this.treeShown();
+    this.keepTreeFresh(rows !== undefined);
     let nowAt = 6;
     if (rows) {
       screen.put(x + 5, area.y + 1, " · Device", st.faint);
@@ -1506,16 +1518,24 @@ export class TuiApp {
     visible.forEach((item) => {
       const index = rows.indexOf(item);
       const cursor = this.treeCursor === index;
-      if (cursor) screen.fill({ x: x - 1, y: row, width: width + 2, height: 1 }, st.selected);
+      // Live's selection: a band under the row and the accent; the keyboard's place: the picker's band.
+      if (cursor || item.role === "focus") screen.fill({ x: x - 1, y: row, width: width + 2, height: 1 }, cursor ? st.selected : st.raised);
       let column = screen.put(x, row, item.prefix, st.faint);
       const mark = icon(item.kind, this.icons);
       column = screen.put(column, row, mark.text, mark.style) + 1;
-      const emphasis = item.role === "focus" || item.ref === this.pinned?.ref;
-      const style = emphasis ? st.accent : !focused || item.role === "path" ? st.text : st.dim;
+      // What's pointed at in Kumi says so quietly at the right; clicking that clears it.
+      const pinned = item.ref === this.pinned?.ref;
+      const label = pinned ? "pinned" : "";
+      const style = item.role === "focus" ? st.accent : pinned ? st.bright : !focused || item.role === "path" ? st.text : st.dim;
       const count = item.count ? ` (${item.count})` : "";
-      const name = truncate(item.name, Math.max(1, x + width - column - textWidth(count)));
+      const name = truncate(item.name, Math.max(1, x + width - column - textWidth(count) - (label ? textWidth(label) + 1 : 0)));
       column = screen.put(column, row, name, style);
       if (count) screen.put(column, row, count, st.faint);
+      if (label) {
+        const at = x + width - textWidth(label);
+        screen.put(at, row, label, st.faint);
+        this.hits.push({ x: at, y: row, width: textWidth(label), action: () => this.unpin() });
+      }
       const at = row;
       this.hits.push({ x, y: at, width, action: () => { this.treeCursor = undefined; this.pin(item); } });
       row++;

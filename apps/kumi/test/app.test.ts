@@ -1163,11 +1163,13 @@ test("FOCUS's Device view draws the track's devices as a tree; a row pointed at 
   await delay(5);
   let lines = h.screen();
   for (const row of ["FOCUS · Device", "■  4-Audio", "├ ≈  Chorus-Ensemble", "├ ▣  Audio Effect Rack", "│ ├ ○  Chain 1", "│ │ ├ ≈  Saturator", "│ │ └ ≈  EQ Eight", "│ └ ○  Chain 2 (1)", "└ ≈  Gate"]) assert.ok(has(lines, row), row);
-  // The focus feed reads twice a second; the tree is read again only when the track or its selected device changes.
+  // The focus feed reads twice a second; the tree is read again only when the track, its selected device or chain changes (a chain renamed in Live).
   h.emit({ type: "focus", focus: { ...focus } });
   h.emit({ type: "focus", focus: { ...focus, device: "EQ Eight" } });
   await delay(5);
-  assert.equal(reads.length, 2);
+  h.emit({ type: "focus", focus: { ...focus, device: "EQ Eight", chain: "Blah" } });
+  await delay(5);
+  assert.equal(reads.length, 3);
   h.emit({ type: "focus", focus });
   await delay(5);
   // By mouse: the row is pointed at, and shown above the input box.
@@ -1176,6 +1178,8 @@ test("FOCUS's Device view draws the track's devices as a tree; a row pointed at 
   await h.type(click(lines, row, "Saturator"));
   lines = h.screen();
   assert.ok(has(lines, "≈  Audio Effect Rack › Chain 1 › Saturator  ×"));
+  // The pointed-at row says so quietly, instead of a second highlight.
+  assert.ok(lines[row]!.includes("Saturator") && lines[row]!.trimEnd().endsWith("pinned"));
   await h.type("make it gentler\r");
   await delay(5);
   assert.deepEqual(sent.at(-1), { text: "make it gentler", pinned: { trackRef: "3:track:3", ref: "d2a", node: "device", name: "Saturator", trail: ["Audio Effect Rack", "Chain 1"], siblings: ["EQ Eight"], track: "4-Audio" } });
@@ -1196,5 +1200,25 @@ test("FOCUS's Device view draws the track's devices as a tree; a row pointed at 
   const clear = lines.findIndex((line) => line.includes("EQ Eight  ×"));
   await h.type(click(lines, clear, "×"));
   assert.ok(!has(h.screen(), "EQ Eight  ×"));
+  await h.app.close();
+});
+
+test("in FOCUS's tree, Live's selection has a band under it and the accent; a pinned row isn't highlighted the same way", async () => {
+  const tree = { trackRef: "3:track:3", devices: [{ ref: "a", name: "Saturator", className: "Saturator" }, { ref: "b", name: "Gate", className: "Gate" }] };
+  const h = harness(120, 36, undefined, { async deviceTree() { return tree; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "focus", focus: { track: { name: "4-Audio", kind: "audio" as const }, trackRef: "3:track:3", device: "Saturator", detail: "Device" as const } });
+  await delay(5);
+  const lines = h.screen();
+  const written = h.written;
+  // #1c1f24 (raised) under the selected row, #86e3b5 (accent) for its name.
+  assert.match(written, /38;2;134;227;181;48;2;28;31;36mSaturator/);
+  const gate = lines.findIndex((line) => line.includes("└ ◇  Gate"));
+  await h.type(click(lines, gate, "Gate"));
+  assert.ok(h.screen()[gate]!.trimEnd().endsWith("pinned"));
+  await h.type(click(h.screen(), gate, "pinned"));
+  assert.ok(!h.screen()[gate]!.includes("pinned"), "clicking pinned clears it");
   await h.app.close();
 });
