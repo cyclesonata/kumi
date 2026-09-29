@@ -296,6 +296,14 @@ npm run eval:changes --workspace @kumi/app      # opt-in: how the model uses the
 npm run accept:live --workspace @kumi/app -- --set "<Set name>"   # opt-in: every change and its undo on real Live
 ```
 
+`npm test` also holds Kumi to latency budgets, counted rather than timed:
+reading the Set before an answer is one round trip to Live, a change three and
+each later step of a plan two, a rack's pads or a device's parameters one change
+whatever their number, a finished plan one model reply, and a burst of streamed
+text one frame. On real Live each round trip waits for a display tick (about
+100 ms) and each model reply takes seconds, so one more of either fails the
+tests; raising a budget is a decision, not a side effect.
+
 `accept:live` changes the open Set and undoes every change, so run it on a
 disposable copy; it refuses any Set but the one named. It needs no sign-in, and
 also times the reads a big Set depends on (tracks, and the Set snapshot Kumi

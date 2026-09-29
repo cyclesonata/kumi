@@ -152,12 +152,16 @@ export class Transcript {
     this.entries.length = 0;
   }
 
+  /** Entries laid out afresh rather than taken from the cache: a frame's real work. */
+  laidOut = 0;
+
   rows(width: number): Row[] {
     const all: Row[] = [];
     for (const entry of this.entries) {
       const revision = this.revisions.get(entry) ?? 0;
       let cached = this.cache.get(entry);
       if (!cached || cached.width !== width || cached.revision !== revision) {
+        this.laidOut++;
         cached = { width, revision, rows: entryRows(entry, width) };
         this.cache.set(entry, cached);
       }

@@ -734,3 +734,30 @@ test("NOW follows a plan: writing it, then each change as it lands while the res
   assert.ok(!has(lines, "working ·"), "the count is for the answer under way");
   await h.app.close();
 });
+
+// ---- latency budgets, counted rather than timed (see packages/runtime/test/latency-budgets.test.ts)
+
+test("budget: a burst of streamed text is one frame, and a token in a long conversation lays out only its own answer", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  for (let index = 0; index < 1_000; index++) {
+    h.emit({ type: "notice", message: `earlier note ${index}` });
+    h.app.handleEvent({ type: "notice", message: `and another ${index}` });
+  }
+  await h.type("go\r");
+  h.emit({ type: "state", state: "running" });
+  h.screen();
+  const frames = () => h.written.split("\u001b[?2026h").length - 1;
+  const before = frames();
+  for (let index = 0; index < 200; index++) h.emit({ type: "text", text: `word${index} ` });
+  h.screen();
+  assert.equal(frames() - before, 1, "200 tokens arriving together are drawn once");
+  const transcript = (h.app as unknown as { transcript: { laidOut: number } }).transcript;
+  const laidOut = transcript.laidOut;
+  h.emit({ type: "text", text: "one more" });
+  h.screen();
+  assert.equal(transcript.laidOut - laidOut, 1, "of 2,000 entries, only the answer being written is laid out again");
+  await h.app.close();
+});
