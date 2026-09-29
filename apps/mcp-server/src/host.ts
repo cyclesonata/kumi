@@ -4934,6 +4934,10 @@ export class McpHost {
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
+      // An empty scene (Live's Scene.is_empty) plays nothing: launching it only stops what's playing, so there'd be no launch to confirm.
+      if (scene.isEmpty === true) {
+        return this.adapterToolError(id, new Error("that scene has no clips to play, so launching it would only stop what's playing"), "Nothing was launched. Put clips in the scene first, or launch another.");
+      }
       const fireState = { isTriggered: scene.isTriggered ?? null, playing: snapshot.playback.transport.playing };
       const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(fireState)).digest("hex") };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: scene.objectIdentity, fireState });

@@ -135,6 +135,11 @@ test("a scene Live launches on its next tick is confirmed in fresh state", async
   const applied = await call("live_scene_fire_apply", { transactionId: preview.body.transactionId, confirmation: "apply", idempotencyKey: "scene-next-tick" });
   assert.equal(applied.body.state, "applied", JSON.stringify(applied.body));
   assert.equal((simulator as any).state.playback.transport.playing, true);
+  // An empty scene has nothing to play, and says so before anything happens.
+  (simulator as any).state.playback.transport.playing = false; (simulator as any).state.scenes[0].isEmpty = true; (simulator as any).state.scenes[0].isTriggered = false;
+  const empty = await call("live_scene_fire_preview", { ref: "scene:scene-1" });
+  assert.equal(empty.isError, true);
+  assert.deepEqual(empty.body, { reason: "that scene has no clips to play, so launching it would only stop what's playing", remediation: "Nothing was launched. Put clips in the scene first, or launch another." });
 });
 
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {
