@@ -8,7 +8,8 @@ import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
-import { defaultSampleFolders, findSamples, folderPath, type Sample } from "./samples.js";
+import { defaultSampleFolders, findSamples, folderPath, userLibrary, type Sample } from "./samples.js";
+import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { setMeter } from "./more-changes.js";
@@ -81,6 +82,8 @@ interface Options {
   onCatchUp?: (catchUp: CatchUp) => void;
   /** How often to look for Live while it's away. */
   reconnectIntervalMs?: number;
+  /** Live's User Library, where the devices Kumi makes go (make_device); Live's default place when left out. */
+  userLibrary?: string;
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
@@ -1170,10 +1173,14 @@ export function createAbletonIntegration(options: Options): Integration {
           each: { type: "object", description: "Repeat this step: each field's list gives that input field its value run by run, e.g. {\"note\": [36, 37, 38, 39]}, or several lists of one length, e.g. {\"parameterRef\": [\"parameter:3\", \"parameter:9\"], \"value\": [0.5, 1]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
         final: { type: "boolean", description: "These changes complete the request: Kumi says what changed and you aren't called again. Leave it out to see the results and carry on." } } },
       execute: (input, signal) => makeChanges(input, signal), stream: (signal, onStart) => streamChanges(signal, onStart) }] : [];
+    // Devices Kumi makes reach Live through its Browser: offered when the bridge can find and load one there.
+    const devices: KernelTool[] = tools!.has("live_browser_inspect") && tools!.has("live_browser_load_preview") ? [deviceTool({ userLibrary: options.userLibrary ?? userLibrary(),
+      // Asked of the bridge directly: a device not listed yet mustn't cost the model its references.
+      browserSees: async (itemId, signal) => { try { return !(await tools!.call("live_browser_inspect", { itemId }, signal)).isError; } catch { return false; } } })] : [];
     const watcher: KernelTool[] = PROJECT_TOOLS.slice(1).every((name) => tools!.has(name)) ? [{ name: WATCH_TOOL, description: WATCH_DESCRIPTION,
       inputSchema: { type: "object", additionalProperties: false, required: ["action"], properties: { action: { type: "string", enum: ["start", "stop"] } } },
       execute: (input, signal) => watch(input, signal) }] : [];
-    return [...reads, sampleSearch, ...edits, ...actions, ...batch, ...undo, ...watcher];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher];
   }
   return {
     async start(signal) {

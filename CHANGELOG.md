@@ -77,6 +77,21 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
 - Kumi's agent core shows the model images from tools for the rest of that
   answer, then puts them away, keeping what was said around each.
 
+### Max for Live devices
+
+- `make_device` makes a MIDI effect you describe in your own words and puts it
+  in your User Library's Kumi folder, for `load_device`. The model writes the
+  device's name, knobs (ordinary Live parameters), code and tests; Kumi builds
+  the device around them from a fixed frame. The frame parses MIDI, keeps count
+  of held notes and runs timers, and hides files, the network and the rest of
+  Max and Live from the code.
+- Before it's made, Kumi runs the code on your computer against its tests and
+  Kumi's own checks (no errors, no hanging notes, nothing running once every
+  note is released), and refuses a device that fails, saying why so the model
+  can fix it.
+- The model reads the guide (what the code can use, the rules and the craft)
+  only when it makes a device, so ordinary requests don't carry it.
+
 ### Recipes
 
 - Kumi saves ways of working as recipes (`save_recipe`) and replays them

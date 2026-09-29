@@ -326,6 +326,30 @@ The frames Kumi looks at go to your model provider with the conversation, for
 the answer they're part of; after that, only their times and what was said
 around them stay in the conversation.
 
+## Making Max for Live devices
+
+Ask Kumi for a MIDI effect Live doesn't have, in your own words, and it makes
+one and puts it on your track:
+
+> make a MIDI effect that keeps only the lowest note of each chord, and put it on the Keys track
+
+Kumi decides the details you wouldn't spell out (a chord is notes within about
+15 ms, say) and tells you what it chose. It writes the device's code and tests,
+and makes it: a Max for Live device in your User Library's Kumi folder, which
+Live's Browser lists like any other. Its knobs are ordinary Live parameters, so
+you can automate and map them, and Kumi can turn them. Loading it is a change
+in HISTORY with its undo. A second device of the same name gets a number
+rather than replacing the first, which a Set may use.
+
+Before a device is made, Kumi runs its code on your computer: the tests Kumi
+wrote for it, and Kumi's own checks. Those are no errors, every note it plays is
+released, and nothing keeps running once you let go. A device that fails isn't
+made; Kumi fixes it first. The code can't reach your files, the network, or the
+rest of Max and Live.
+
+It needs Max for Live (Live Suite, or Standard with the add-on). Audio effects
+and instruments are next.
+
 ## What Kumi remembers
 
 Kumi keeps short notes of what you tell it that Live can't show, and uses them in

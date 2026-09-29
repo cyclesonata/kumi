@@ -70,6 +70,8 @@ function syntheticBridge() {
           const fields = Array.isArray(args.fields) ? args.fields : undefined;
           return wrap({ epoch: 5, kind: args.kind, items: fields ? items.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => fields.includes(key)))) : items, revision: "r", truncated: false });
         }
+        // Devices Kumi makes are in the User Library's Kumi folder; the Browser lists them at once here.
+        if (name === "live_browser_inspect") return /^user_library\/Kumi\//.test(String(args.itemId)) ? wrap({ item: { id: args.itemId, isDevice: true }, loadability: { loadable: true } }) : refusal("browser item identity is missing or ambiguous");
         if (name === "live_snapshot") return wrap({ epoch: 5, snapshot: { set: rows.set()[0], tracks: rows.track(), playback: playback() } });
         if (name === "live_song_state") return wrap({ signatureNumerator: 4, signatureDenominator: 4, swingAmount: 0, isPlaying: state.playing, songLength: 256, exclusiveArm: true });
         if (name === "live_session_emergency_stop") { state.playing = false; state.recording = { session: false, arrangement: false }; return wrap({ stopped: true, stoppedTargets: [], recordingStopped: true }); }
@@ -168,6 +170,9 @@ const CASES = [
   // Recipes: one the producer shows Kumi by hand.
   { name: "watch a tutorial", video: true, prompts: ({ video }) => [`Watch this tutorial and build the bass it makes on a new MIDI track: ${video}`],
     check: ({ tools, requests, last }) => tools.includes("watch_video") && /operator/i.test(last) && requests.some((request) => /Operator/.test(JSON.stringify(request.args ?? {}))) },
+  { name: "make a device", prompts: ["Make me a Max for Live MIDI effect that keeps only the lowest note of each chord I play, and put it on the Keys track."],
+    check: ({ tools, requests }) => tools.filter((name) => name === "make_device").length >= 1
+      && requests.some((request) => request.name === "live_browser_load_preview" && /^user_library\/Kumi\//.test(String(request.args.itemId)) && request.args.trackRef === "5:track:2") },
   { name: "watch me", prompts: ["Watch me set up my usual pad routine, then keep it as a recipe.", "Done."], between: (bridge) => bridge.work(),
     check: ({ tools, recipes }) => tools.filter((name) => name === "watch_me").length >= 2 && recipes.some((recipe) => recipe.steps.some((step) => step.tool === "add_tracks_and_scenes" || step.tool === "load_device")) },
   // Memory: what lasts is kept on its own, in the right place; nothing else is.
@@ -233,7 +238,7 @@ async function runCase(binding, testCase) {
     memory: createMemoryStore({ projectsDir: join(folder, "projects"), producerFile }), recipes, listen: true,
     watch: { videosDir: join(folder, "videos"), toolsDir: join(folder, "tools") },
     kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
-    integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change) }),
+    integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change), userLibrary: join(folder, "User Library") }),
     onEvent: (event) => {
       if (event.type === "tool-start") tools.push(event.name);
       if (event.type === "text") { text += event.text; last += event.text; }

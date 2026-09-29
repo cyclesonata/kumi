@@ -20,6 +20,7 @@ It also:
 - listens to audio, such as a reference track, a sample or its own recording,
   and compares a mix with a reference;
 - watches video tutorials, from YouTube or a file, and builds what they show;
+- makes Max for Live MIDI effects you describe, and puts them on your tracks;
 - saves your ways of working as recipes to replay, including ones it learns by
   watching you;
 - keeps short notes of what you tell it;

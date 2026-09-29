@@ -127,6 +127,7 @@ const STEP_LABELS: Record<string, string> = {
   watch_me: "watched you work",
   save_recipe: "saved a recipe",
   watch_video: "watched a video",
+  make_device: "made a device",
 };
 
 /** What NOW says while a step runs: what Kumi is doing, not what it did. */
@@ -147,6 +148,7 @@ const DOING: Record<string, string> = {
   watch_me: "comparing your Set",
   live_key_estimate: "estimating the key",
   watch_video: "watching the video",
+  make_device: "making a device",
 };
 
 export function doingLabel(tool: string | undefined, fallback: string): string {

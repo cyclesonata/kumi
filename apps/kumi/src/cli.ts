@@ -4,7 +4,7 @@ import {
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
@@ -119,6 +119,7 @@ try {
           onAction: (action) => terminal?.handleEvent({ type: "action", ...action }),
           onWatch: (on) => terminal?.handleEvent({ type: "watching", on }),
           projectStore: createProjectStore(loadProjectsDir()),
+          ...(liveUserLibrary() ? { userLibrary: liveUserLibrary()! } : {}),
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
