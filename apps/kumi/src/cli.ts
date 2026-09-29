@@ -6,7 +6,7 @@ import {
 import { readFileSync } from "node:fs";
 import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { setupBridge } from "./bridge-setup.js";
-import { runDoctor, type LiveProbe } from "./doctor.js";
+import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
@@ -122,8 +122,16 @@ try {
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),
           ...(process.env.KUMI_TRACE === "1" ? { onDispatch: (name: string) => terminal?.handleEvent({ type: "notice", message: `[MCP dispatch] ${name}` }) } : {}),
         }),
-        // A bridge that won't start (older in Live than Kumi's, say): chat without Live, and say how to fix it.
-        () => createInferenceOnlyIntegration(onConnection), (message) => terminal?.handleEvent({ type: "notice", message })),
+        // A bridge that won't start: chat without Live, and say how to fix it. With Live's part as new as
+        // Kumi's, it stopped because Live didn't answer (not open, not using the bridge, or held by a dialog).
+        () => createInferenceOnlyIntegration(onConnection), (message) => {
+          let installed: string | undefined;
+          try { installed = config.mode === "live" ? readBridgeServer(config.bridgeConfig).version : undefined; } catch { installed = undefined; }
+          const current = installed !== undefined && installed === bundledBridgeVersion;
+          terminal?.handleEvent({ type: "notice", message: current
+            ? "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Then /new to connect."
+            : message });
+        }),
       onEvent: (event) => terminal?.handleEvent(event),
       ...(config.mode === "live" ? { conversations: createConversationStore(loadProjectsDir()) } : {}),
       memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),

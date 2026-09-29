@@ -126,7 +126,11 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     }
     const live = await (io.probeLive ?? (async () => ({ started: false })))(configPath).catch(() => ({ started: false } as LiveProbe));
     if (!live.started) {
+      // Kumi's bridge stops at its handshake when Live's Remote Script doesn't answer: an older one
+      // (said above), or Live not open, not using it, or held by a dialog.
+      const current = Boolean(server.version && io.bundledBridgeVersion && !newer(io.bundledBridgeVersion, server.version));
       checks.push(node.status === "fix" ? { status: "note", text: "The bridge didn't start; it needs Node 22 or 24 too" }
+        : current ? { status: "fix", text: "Kumi's bridge couldn't reach Live", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it first. Then: npm run kumi -- doctor" }
         : { status: "fix", text: "The bridge didn't start", next: "Build it (npm run setup), and bring Live's part up to date: quit Live, then run npm run kumi -- bridge. Then: npm run kumi -- doctor" });
     }
     else if (!live.connected) checks.push({ status: "fix", text: "Live isn't connected", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI)" });

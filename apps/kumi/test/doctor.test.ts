@@ -45,6 +45,10 @@ test("the doctor explains Live, the bridge and the terminal in plain words", asy
     assert.equal(away.find((check) => /Live isn't connected/.test(check.text))?.status, "fix");
     const stopped = await doctorChecks(io(s.env, { probeLive: async () => ({ started: false }) }));
     assert.match(stopped.find((check) => /didn't start/.test(check.text))?.next ?? "", /npm run setup/);
+    // With Live's part as new as Kumi's, the bridge stopping at its handshake means Live isn't answering.
+    const unanswered = await doctorChecks(io(s.env, { bundledBridgeVersion: "1.0.9", probeLive: async () => ({ started: false }) }));
+    assert.match(unanswered.find((check) => /couldn't reach Live/.test(check.text))?.next ?? "", /Control Surface.*answer it first/);
+    assert(!unanswered.some((check) => /didn't start/.test(check.text)));
     const small = await doctorChecks(io(s.env, { terminal: { isTTY: true, columns: 50, rows: 12 } }));
     assert.match(small.find((check) => /Terminal/.test(check.text))?.text ?? "", /small/);
     const missing = await doctorChecks(io({ ...s.env, KUMI_REMOTE_SCRIPTS_DIR: join(s.root, "nowhere") }));
