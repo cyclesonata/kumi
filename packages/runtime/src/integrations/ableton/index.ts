@@ -1333,6 +1333,45 @@ export function createAbletonIntegration(options: Options): Integration {
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
     /** A track's devices, racks' chains and what's in them, for FOCUS. */
     deviceTree: (trackRef, signal) => readDeviceTree(trackRef, AbortSignal.any([signal, lifetime.signal])),
+    /** A track's Session slots around a scene (seven), and their clips' names read together, for FOCUS. */
+    async sessionStrip(trackRef, scene, originalSignal) {
+      const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+      if (!available || lost || !tools?.has("live_discover") || !/^\d+:track:\d+$/.test(trackRef)) return undefined;
+      try {
+        const read = await tools.call("live_discover", { kind: "clip-slot", parent: trackRef, fields: ["sceneIndex", "clipRef", "playingStatus"], limit: 100 }, signal, { host: true });
+        if (read.isError) return undefined;
+        const rows = (payload(read).items as JsonObject[] | undefined) ?? [];
+        const start = Math.max(0, Math.min(rows.length - 7, scene - 3));
+        const window = rows.slice(start, start + 7);
+        const clips = await Promise.all(window.map(async (row) => {
+          if (typeof row.clipRef !== "string" || typeof row.ref !== "string") return undefined;
+          const found = await tools!.call("live_discover", { kind: "session-clip", parent: row.ref, fields: ["name", "isAudio"], limit: 1 }, signal, { host: true }).catch(() => undefined);
+          const clip = found && !found.isError ? (payload(found).items as JsonObject[] | undefined)?.[0] : undefined;
+          return clip ? { name: typeof clip.name === "string" ? clip.name.slice(0, 256) : "", audio: clip.isAudio === true } : { name: "", audio: false };
+        }));
+        return { trackRef, scene, slots: window.map((row, index) => ({ index: typeof row.sceneIndex === "number" ? row.sceneIndex : start + index,
+          ...(clips[index] ? { clip: clips[index]! } : {}), ...(row.playingStatus === 1 ? { playing: true } : {}), ...(row.playingStatus === 2 ? { queued: true } : {}) })) };
+      } catch { signal.throwIfAborted(); return undefined; }
+    },
+    /** The Arrangement at a glance: its length, the playhead, the loop and the locators, read together. */
+    async arrangementStrip(originalSignal) {
+      const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+      if (!available || lost || !tools?.has("live_discover")) return undefined;
+      try {
+        const [set, locators, song] = await Promise.all([
+          tools.call("live_discover", { kind: "set", fields: ["position", "loop", "playing"], limit: 1 }, signal, { host: true }),
+          tools.call("live_discover", { kind: "locator", fields: ["name", "position"], limit: 100 }, signal, { host: true }),
+          tools.has("live_song_state") ? tools.call("live_song_state", {}, signal, { host: true }) : Promise.resolve(undefined)]);
+        const row = set.isError ? undefined : (payload(set).items as JsonObject[] | undefined)?.[0];
+        if (!row || typeof row.position !== "number") return undefined;
+        const loop = row.loop && typeof row.loop === "object" ? row.loop as JsonObject : undefined;
+        const length = song && !song.isError ? payload(song).songLength : undefined;
+        const marks = locators.isError ? [] : ((payload(locators).items as JsonObject[] | undefined) ?? []).flatMap((item) => (typeof item.position === "number" ? [{ name: typeof item.name === "string" ? item.name.slice(0, 128) : "", position: item.position }] : []));
+        return { length: typeof length === "number" && length > 0 ? length : Math.max(row.position, ...marks.map((mark) => mark.position), 16), position: row.position, playing: row.playing === true,
+          // The bridge leaves out a loop start of 0.
+          ...(loop && typeof loop.length === "number" ? { loop: { start: typeof loop.start === "number" ? loop.start : 0, length: loop.length, enabled: loop.enabled === true } } : {}), locators: marks };
+      } catch { signal.throwIfAborted(); return undefined; }
+    },
     /** A Session slot's MIDI clip, its notes and which are selected, for FOCUS; the model's references aren't touched. */
     async clipView(slotRef, originalSignal) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);

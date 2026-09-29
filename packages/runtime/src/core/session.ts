@@ -591,6 +591,14 @@ export function createSession(options: Options): SessionController {
       emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
       return true;
     },
+    async sessionStrip(trackRef, scene) {
+      if (!integration?.sessionStrip || connection !== "connected") return undefined;
+      return integration.sessionStrip(trackRef, scene, AbortSignal.timeout(10_000)).catch(() => undefined);
+    },
+    async arrangementStrip() {
+      if (!integration?.arrangementStrip || connection !== "connected") return undefined;
+      return integration.arrangementStrip(AbortSignal.timeout(10_000)).catch(() => undefined);
+    },
     async clipView(slotRef) {
       if (!integration?.clipView || connection !== "connected") return undefined;
       return integration.clipView(slotRef, AbortSignal.timeout(10_000)).catch(() => undefined);

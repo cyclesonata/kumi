@@ -17,7 +17,8 @@ export function parseFocus(row: JsonObject): LiveFocus | null {
   }
   const trackRef = text(row.selectedTrackRef); if (trackRef && focus.track) focus.trackRef = trackRef;
   const slotRef = text(row.highlightedClipSlotRef); if (slotRef) focus.slotRef = slotRef;
-  const scene = text(row.focusSceneName); if (scene) focus.scene = scene;
+  const scene = typeof row.selectedSceneRef === "string" ? /:scene:(\d+)$/.exec(row.selectedSceneRef) : null; if (scene) focus.sceneIndex = Number(scene[1]);
+  const sceneName = text(row.focusSceneName); if (sceneName) focus.scene = sceneName;
   if (typeof row.focusClipName === "string") focus.clip = row.focusClipName.slice(0, 256);
   const device = text(row.focusDeviceName); if (device) focus.device = device;
   const parameter = text(row.focusParameterName);

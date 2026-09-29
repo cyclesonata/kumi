@@ -30,5 +30,7 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
     stopLive: async (signal) => (current.stopLive ? current.stopLive(signal) : false),
     deviceTree: async (trackRef, signal) => current.deviceTree?.(trackRef, signal),
     clipView: async (slotRef, signal) => current.clipView?.(slotRef, signal),
+    sessionStrip: async (trackRef, scene, signal) => current.sessionStrip?.(trackRef, scene, signal),
+    arrangementStrip: async (signal) => current.arrangementStrip?.(signal),
   };
 }

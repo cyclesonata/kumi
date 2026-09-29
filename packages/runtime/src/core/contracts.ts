@@ -158,6 +158,25 @@ export interface Integration {
   deviceTree?(trackRef: string, signal: AbortSignal): Promise<DeviceTree | undefined>;
   /** The MIDI clip in a Session slot, its notes and which are selected, for FOCUS; undefined for none (or audio). */
   clipView?(slotRef: string, signal: AbortSignal): Promise<ClipView | undefined>;
+  /** A track's Session slots around a scene, for FOCUS. */
+  sessionStrip?(trackRef: string, scene: number, signal: AbortSignal): Promise<SessionStrip | undefined>;
+  /** The Arrangement at a glance (length, playhead, loop, locators), for FOCUS. */
+  arrangementStrip?(signal: AbortSignal): Promise<ArrangementStrip | undefined>;
+}
+
+/** A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data. */
+export interface SessionStrip {
+  trackRef: string;
+  scene: number;
+  slots: { index: number; clip?: { name: string; audio: boolean }; playing?: boolean; queued?: boolean }[];
+}
+/** The Arrangement at a glance, in beats. Names are data. */
+export interface ArrangementStrip {
+  length: number;
+  position: number;
+  playing: boolean;
+  loop?: { start: number; length: number; enabled: boolean };
+  locators: { name: string; position: number }[];
 }
 
 /** A MIDI clip as FOCUS draws it: its length in beats, and its notes (the first 512), selected ones marked. */
@@ -212,6 +231,8 @@ export interface LiveFocus {
   trackRef?: string;
   /** The highlighted Session slot's reference, for drawing its clip (FOCUS's MIDI view). */
   slotRef?: string;
+  /** The selected scene's position (0 is the first), for FOCUS's Session strip. */
+  sceneIndex?: number;
   scene?: string;
   /** The clip in the Clip view; "" when it has no name. */
   clip?: string;
@@ -433,6 +454,9 @@ export interface SessionController {
   deviceTree?(trackRef: string): Promise<DeviceTree | undefined>;
   /** The clip in a Session slot, for FOCUS (while connected). */
   clipView?(slotRef: string): Promise<ClipView | undefined>;
+  /** A track's Session slots around a scene, and the Arrangement at a glance, for FOCUS (while connected). */
+  sessionStrip?(trackRef: string, scene: number): Promise<SessionStrip | undefined>;
+  arrangementStrip?(): Promise<ArrangementStrip | undefined>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

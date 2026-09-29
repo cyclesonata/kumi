@@ -3,8 +3,8 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -105,6 +105,8 @@ const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and �
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
 const TREE_REFRESH_MS = 4_000;
+/** And the Arrangement strip, whose playhead moves. */
+const STRIP_REFRESH_MS = 1_500;
 const WIDE = 100;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const FAREWELL = "Kumi closed. Each Set's conversation continues next time.";
@@ -174,6 +176,25 @@ export function fitCrumbs(crumbs: readonly string[], width: number): string[] {
   return crumbs.length === 2 ? [truncate(crumbs[0]!, 12), truncate(crumbs[1]!, Math.max(1, width - textWidth(truncate(crumbs[0]!, 12)) - 3))] : [truncate(crumbs[0]!, width)];
 }
 
+type Touched = "device" | "clip" | "session" | "arrangement";
+
+/**
+ * What FOCUS shows, from what the producer last touched in Live: switching Session and Arrangement, a
+ * scene, a clip (in the Session; an Arrangement clip shows the Arrangement), or a device. Live's
+ * bottom panel nearly always shows a device or a clip, so what changed last says where they are.
+ */
+export function touchedNext(before: LiveFocus | null, after: LiveFocus | null, was: Touched | undefined): Touched | undefined {
+  if (!after) return undefined;
+  const clip = (): Touched => (after.view === "Arrangement" ? "arrangement" : "clip");
+  const view = (): Touched => (after.view === "Arrangement" ? "arrangement" : "session");
+  if (!before) return after.detail === "Clip" ? clip() : after.detail === "Device" && after.device ? "device" : view();
+  if (after.view !== before.view) return view();
+  if (after.sceneIndex !== before.sceneIndex && after.view === "Session") return "session";
+  if (after.detail === "Clip" && (before.detail !== "Clip" || after.slotRef !== before.slotRef || after.clip !== before.clip)) return clip();
+  if (after.detail === "Device" && (before.detail !== "Device" || after.device !== before.device || after.chain !== before.chain || after.trackRef !== before.trackRef)) return "device";
+  return was ?? view();
+}
+
 /** "Current open Set: Night Drive — Remote Script · real-live" → "Night Drive". */
 export function setNameFrom(label: string): string | undefined {
   const match = /^Current open Set: (.*) — [^—]*$/.exec(label);
@@ -201,6 +222,10 @@ export class TuiApp {
   private clipKey: string | undefined;
   private clipReading = false;
   private clipAgain = false;
+  /** FOCUS's Session and Arrangement strips: read when what they show changes, and now and then while they show. */
+  /** What the producer last touched in Live, which FOCUS shows: a device (the tree), a Session clip, the Session or the Arrangement. */
+  private touched: Touched | undefined;
+  private strip: { session?: SessionStrip | undefined; arrangement?: ArrangementStrip | undefined; key?: string; reading?: boolean } = {};
   /** The keyboard's place in the tree (Tab moves into it); undefined while typing. */
   private treeCursor: number | undefined;
   /** What the producer points at: shown above the input box and sent with each message until cleared. */
@@ -337,15 +362,17 @@ export class TuiApp {
         this.connection = event.state;
         // Focus can arrive before the connection says so; the tree is read once it does. Gone, it goes.
         if (event.state === "connected") { this.readTree(true); this.readClip(true); }
-        else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; this.clip = undefined; this.clipKey = undefined; }
+        else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; this.clip = undefined; this.clipKey = undefined; this.strip = {}; }
         break;
       case "observation":
         this.setName = setNameFrom(event.label);
         break;
       case "focus":
+        this.touched = touchedNext(this.focus, event.focus, this.touched);
         this.focus = event.focus;
         this.readTree();
         this.readClip();
+        this.readStrip();
         break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());
@@ -770,9 +797,16 @@ export class TuiApp {
   }
 
   /** Every few seconds while the tree or the clip shows (one read at a time), so what changed in Live by hand shows too. */
-  private keepTreeFresh(shown: false | "tree" | "clip"): void {
+  private refreshing: false | "tree" | "clip" | "session" | "arrangement" = false;
+  private keepTreeFresh(shown: false | "tree" | "clip" | "session" | "arrangement"): void {
+    // The Arrangement's playhead moves, so it's read more often; a change of what shows restarts the timer.
+    if (shown !== this.refreshing && this.treeRefresh) { clearInterval(this.treeRefresh); this.treeRefresh = undefined; }
+    this.refreshing = shown;
     if (shown && !this.treeRefresh) {
-      this.treeRefresh = setInterval(() => { if (this.closing) return; if (this.focus?.detail === "Clip") this.readClip(true); else this.readTree(true); }, TREE_REFRESH_MS);
+      this.treeRefresh = setInterval(() => {
+        if (this.closing) return;
+        if (this.focus?.detail === "Clip") this.readClip(true); else if (this.focus?.detail === "Device") this.readTree(true); else this.readStrip(true);
+      }, shown === "arrangement" ? STRIP_REFRESH_MS : TREE_REFRESH_MS);
       this.treeRefresh.unref?.();
     } else if (!shown && this.treeRefresh) { clearInterval(this.treeRefresh); this.treeRefresh = undefined; }
   }
@@ -780,7 +814,7 @@ export class TuiApp {
   /** Read the highlighted slot's clip when the slot, its name or the selected notes change (or `again`). One read at a time. */
   private readClip(again = false): void {
     const ref = this.focus?.slotRef; const read = this.options.controller.clipView;
-    if (!ref || !read || this.connection !== "connected" || this.focus?.detail !== "Clip") return;
+    if (!ref || !read || this.connection !== "connected" || this.focus?.detail !== "Clip" || this.focus.view !== "Session") return;
     const key = `${ref}\u0000${this.focus?.clip ?? ""}\u0000${this.focus?.selectedNotes ?? 0}`;
     if (!again && key === this.clipKey) return;
     this.clipKey = key;
@@ -794,17 +828,38 @@ export class TuiApp {
       });
   }
 
+  /** Which strip FOCUS shows in place of the path: Live's Session or Arrangement, with no device or clip open. */
+  private stripKind(): "session" | "arrangement" | undefined {
+    const focus = this.focus;
+    if (this.connection !== "connected" || !focus?.track) return undefined;
+    if (this.touched === "arrangement" && focus.view === "Arrangement") return "arrangement";
+    return this.touched === "session" && focus.view === "Session" && focus.trackRef && focus.sceneIndex !== undefined ? "session" : undefined;
+  }
+
+  /** Read the strip FOCUS shows when its track or scene changes (or `again`); one read at a time. */
+  private readStrip(again = false): void {
+    const kind = this.stripKind(); const focus = this.focus; const controller = this.options.controller;
+    if (!kind || !focus) return;
+    const key = kind === "session" ? `s\u0000${focus.trackRef}\u0000${focus.sceneIndex}` : "a";
+    if ((!again && key === this.strip.key) || this.strip.reading) return;
+    this.strip.key = key; this.strip.reading = true;
+    const done = () => { this.strip.reading = false; if (!this.closing) this.scheduler.request(); };
+    if (kind === "session" && controller.sessionStrip) void controller.sessionStrip(focus.trackRef!, focus.sceneIndex!).then((value) => { this.strip.session = value; }, () => {}).finally(done);
+    else if (kind === "arrangement" && controller.arrangementStrip) void controller.arrangementStrip().then((value) => { this.strip.arrangement = value; }, () => {}).finally(done);
+    else this.strip.reading = false;
+  }
+
   /** The clip FOCUS draws: Live's Clip view on a MIDI clip in the highlighted Session slot. */
   private clipShown(): ClipView | undefined {
     const focus = this.focus; const clip = this.clip;
-    return this.connection === "connected" && focus?.track && focus.detail === "Clip" && clip && clip.slotRef === focus.slotRef ? clip : undefined;
+    return this.connection === "connected" && focus?.track && focus.detail === "Clip" && this.touched === "clip" && clip && clip.slotRef === focus.slotRef ? clip : undefined;
   }
 
   /** The tree's rows while FOCUS shows it: Live's Device view on the focused track, or the keyboard in it. */
   private treeShown(): TreeRow[] | undefined {
     const focus = this.focus; const tree = this.tree;
     if (this.connection !== "connected" || !focus?.track || !tree || tree.trackRef !== focus.trackRef) return undefined;
-    if (focus.detail !== "Device" && this.treeCursor === undefined) return undefined;
+    if ((focus.detail !== "Device" || this.touched !== "device") && this.treeCursor === undefined) return undefined;
     const rows = treeRows(tree, { ...(focus.device ? { device: focus.device } : {}), ...(focus.chain ? { chain: focus.chain } : {}) });
     return rows.length ? rows : undefined;
   }
@@ -1483,7 +1538,10 @@ export class TuiApp {
     // Live's Device view on the focused track: its devices as a tree (HISTORY gives up the room).
     const rows = this.treeShown();
     const clip = rows ? undefined : this.clipShown();
-    this.keepTreeFresh(rows ? "tree" : clip ? "clip" : false);
+    const strip = rows || clip ? undefined : this.stripKind();
+    const session = strip === "session" && this.strip.session?.trackRef === this.focus?.trackRef ? this.strip.session : undefined;
+    const arrangement = strip === "arrangement" ? this.strip.arrangement : undefined;
+    this.keepTreeFresh(rows ? "tree" : clip ? "clip" : session ? "session" : arrangement ? "arrangement" : strip ?? false);
     let nowAt = 6;
     if (rows) {
       screen.put(x + 5, area.y + 1, " · Device", st.faint);
@@ -1491,6 +1549,12 @@ export class TuiApp {
     } else if (clip) {
       screen.put(x + 5, area.y + 1, " · Clip", st.faint);
       nowAt = 3 + this.drawClip(screen, x, area.y + 2, width, clip) + 1;
+    } else if (session) {
+      screen.put(x + 5, area.y + 1, " · Session", st.faint);
+      nowAt = 3 + this.drawSession(screen, x, area.y + 2, width, session) + 1;
+    } else if (arrangement) {
+      screen.put(x + 5, area.y + 1, " · Arrangement", st.faint);
+      nowAt = 3 + this.drawArrangement(screen, x, area.y + 2, width, arrangement) + 1;
     } else if (!this.drawFocusPath(screen, x, area.y + 2, width, true)) this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
     put(nowAt, "NOW", st.label);
     const now = this.nowLine();
@@ -1538,6 +1602,53 @@ export class TuiApp {
     const facts = [Number.isInteger(bars) ? `${bars} ${bars === 1 ? "bar" : "bars"}` : `${Math.round(beats * 100) / 100} beats`, `${clip.notes.length} ${clip.notes.length === 1 ? "note" : "notes"}`, selected ? `${selected} selected` : ""].filter(Boolean).join(" · ");
     screen.put(x, y + 1 + (picture ? 4 : 0), truncate(picture ? facts : `${facts} · empty`, width), st.faint);
     return 2 + (picture ? 4 : 0);
+  }
+
+  /** The track, then its slots around the selected scene: a band under the selected one, what plays in the accent, "queued" at the right. */
+  private drawSession(screen: Screen, x: number, y: number, width: number, strip: SessionStrip): number {
+    const track = this.focus!.track!;
+    const mark = icon(trackKind(track.kind), this.icons, chipColor(track.color));
+    screen.put(x, y, mark.text, mark.style);
+    screen.put(x + 3, y, truncate(track.name, Math.max(1, width - 3)), st.text);
+    strip.slots.forEach((slot, index) => {
+      const row = y + 1 + index;
+      if (slot.index === strip.scene) screen.fill({ x: x - 1, y: row, width: width + 2, height: 1 }, st.raised);
+      let column = screen.put(x, row, String(slot.index + 1).padStart(3), st.faint) + 1;
+      if (!slot.clip) { screen.put(column, row, "·", st.faint); return; }
+      const clipMark = icon(slot.clip.audio ? "audio-clip" : "midi-clip", this.icons);
+      column = screen.put(column, row, clipMark.text, clipMark.style) + 1;
+      const label = slot.queued ? "queued" : slot.playing ? "playing" : "";
+      screen.put(column, row, truncate(slot.clip.name || "Untitled clip", Math.max(1, x + width - column - (label ? textWidth(label) + 1 : 0))), slot.playing ? st.accent : slot.clip.name ? st.text : st.dim);
+      if (label) screen.put(x + width - textWidth(label), row, label, slot.playing ? st.accent : st.faint);
+    });
+    return 1 + strip.slots.length;
+  }
+
+  /**
+   * The Arrangement on one line (the loop's stretch heavier, the locators as ticks, the playhead in the
+   * accent), then where the playhead is (its bar, the locator it's past), then the loop and the length.
+   */
+  private drawArrangement(screen: Screen, x: number, y: number, width: number, strip: ArrangementStrip): number {
+    const track = this.focus!.track!;
+    const mark = icon(trackKind(track.kind), this.icons, chipColor(track.color));
+    screen.put(x, y, mark.text, mark.style);
+    screen.put(x + 3, y, truncate(track.name, Math.max(1, width - 3)), st.text);
+    const cells = Math.max(8, width);
+    const span = Math.max(strip.length, strip.position + 4, ...strip.locators.map((locator) => locator.position + 4));
+    const at = (beats: number) => Math.max(0, Math.min(cells - 1, Math.floor(beats / span * cells)));
+    const line = Array.from({ length: cells }, () => ({ text: "─", style: st.faint }));
+    if (strip.loop) for (let cell = at(strip.loop.start); cell <= at(strip.loop.start + strip.loop.length); cell++) line[cell] = { text: "━", style: strip.loop.enabled ? st.dim : st.faint };
+    for (const locator of strip.locators) line[at(locator.position)] = { text: "┼", style: st.dim };
+    line[at(strip.position)] = { text: "┃", style: st.accent };
+    let column = x;
+    for (const cell of line) column = screen.put(column, y + 1, cell.text, cell.style);
+    const bar = (beats: number) => Math.floor(beats / 4) + 1;
+    const past = [...strip.locators].filter((locator) => locator.position <= strip.position).sort((a, b) => b.position - a.position)[0];
+    const where = [`bar ${bar(strip.position)}`, strip.playing ? "playing" : "", past?.name ? `after ${past.name}` : ""].filter(Boolean).join(" · ");
+    const whole = [strip.loop?.enabled ? `loop ${bar(strip.loop.start)}–${bar(strip.loop.start + strip.loop.length)}` : "", `${bar(strip.length) - 1} bars`].filter(Boolean).join(" · ");
+    screen.put(x, y + 2, truncate(where, width), st.dim);
+    screen.put(x, y + 3, truncate(whole, width), st.faint);
+    return 4;
   }
 
   /** "▣ Audio Effect Rack › Chain 1 › Saturator  ×": what the next messages mean by "this"; × clears it. */

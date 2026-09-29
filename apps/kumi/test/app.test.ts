@@ -6,7 +6,7 @@ import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
-import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } from "../src/tui/app.js";
+import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, touchedNext, TuiApp } from "../src/tui/app.js";
 import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
@@ -1231,7 +1231,7 @@ test("FOCUS's MIDI view draws the highlighted clip as a small piano roll, its se
   void h.app.run();
   await delay(5);
   connect(h);
-  const focus = { track: { name: "Keys", color: "#5ec1f7", kind: "midi" as const }, slotRef: "3:clip_slot:2:0", clip: "Chords", detail: "Clip" as const, selectedNotes: 1 };
+  const focus = { track: { name: "Keys", color: "#5ec1f7", kind: "midi" as const }, slotRef: "3:clip_slot:2:0", clip: "Chords", detail: "Clip" as const, view: "Session" as const, selectedNotes: 1 };
   h.emit({ type: "focus", focus });
   await delay(5);
   const lines = h.screen();
@@ -1246,4 +1246,47 @@ test("FOCUS's MIDI view draws the highlighted clip as a small piano roll, its se
   await delay(5);
   assert.deepEqual(reads, ["3:clip_slot:2:0", "3:clip_slot:2:0"]);
   await h.app.close();
+});
+
+test("FOCUS's Session strip shows the track's slots around the selected scene; the Arrangement strip, a timeline and where the playhead is", async () => {
+  const session = { trackRef: "3:track:1", scene: 2, slots: [
+    { index: 0, clip: { name: "Intro", audio: false } }, { index: 1, clip: { name: "Verse", audio: false }, playing: true },
+    { index: 2, clip: { name: "Drop", audio: true }, queued: true }, { index: 3 }] };
+  const arrangement = { length: 128, position: 64, playing: true, loop: { start: 64, length: 16, enabled: true }, locators: [{ name: "Verse", position: 32 }, { name: "Drop", position: 96 }] };
+  const asked: string[] = [];
+  const h = harness(120, 36, undefined, {
+    async sessionStrip(trackRef, scene) { asked.push(`session ${trackRef} ${scene}`); return session; },
+    async arrangementStrip() { asked.push("arrangement"); return arrangement; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const focus = { track: { name: "Bass", color: "#f59a3c", kind: "midi" as const }, trackRef: "3:track:1", sceneIndex: 2, view: "Session" as const };
+  h.emit({ type: "focus", focus });
+  await delay(5);
+  let lines = h.screen();
+  for (const row of ["FOCUS · Session", "■  Bass", "1 ▬  Intro", "2 ▬  Verse", "3 ▬  Drop", "4 ·"]) assert.ok(has(lines, row), row);
+  assert.ok(lines.find((line) => line.includes("Verse"))!.trimEnd().endsWith("playing"));
+  assert.ok(lines.find((line) => line.includes("Drop"))!.trimEnd().endsWith("queued"));
+  h.emit({ type: "focus", focus: { ...focus, view: "Arrangement" as const } });
+  await delay(5);
+  lines = h.screen();
+  assert.ok(has(lines, "FOCUS · Arrangement"));
+  assert.ok(lines.some((line) => /─+┼─+┃━+.*┼─+/.test(line)), "the loop, the locators and the playhead on one line");
+  assert.ok(has(lines, "bar 17 · playing · after Verse")); assert.ok(has(lines, "loop 17–21 · 32 bars"));
+  assert.deepEqual(asked, ["session 3:track:1 2", "arrangement"]);
+  // A device or clip open in Live shows that instead.
+  h.emit({ type: "focus", focus: { ...focus, view: "Arrangement" as const, detail: "Device" as const, device: "Operator" } });
+  assert.ok(!has(h.screen(), "FOCUS · Arrangement") && !has(h.screen(), "FOCUS · Session"));
+  await h.app.close();
+});
+
+test("FOCUS follows what the producer last touched in Live: a device, a Session clip, a scene, or the view", () => {
+  const base = { track: { name: "Bass" }, view: "Session" as const, detail: "Device" as const, device: "Operator", sceneIndex: 0 };
+  assert.equal(touchedNext(null, base, undefined), "device");
+  assert.equal(touchedNext(base, { ...base, sceneIndex: 1 }, "device"), "session", "a scene");
+  assert.equal(touchedNext({ ...base, sceneIndex: 1 }, { ...base, sceneIndex: 1, device: "Reverb" }, "session"), "device", "a device");
+  assert.equal(touchedNext(base, { ...base, detail: "Clip", slotRef: "s" }, "device"), "clip", "a Session clip");
+  assert.equal(touchedNext(base, { ...base, view: "Arrangement" }, "device"), "arrangement", "the Arrangement");
+  assert.equal(touchedNext({ ...base, view: "Arrangement" }, { ...base, view: "Arrangement", detail: "Clip", slotRef: "s" }, "arrangement"), "arrangement", "an Arrangement clip");
+  assert.equal(touchedNext(base, { ...base }, "session"), "session", "nothing changed: as it was");
 });
