@@ -43,9 +43,12 @@ const BRIDGE_DIR = fileURLToPath(new URL("../../../mcp-server/", import.meta.url
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 
 function runProgram(command: string, args: readonly string[], cwd?: string): Promise<Ran> {
+  // npm is npm.cmd on Windows, which only starts through a shell; the shell gets one command line,
+  // so paths with spaces (a user folder like "C:\Users\Jo Smith") are quoted.
+  const shell = process.platform === "win32" && command === "npm";
+  const line = shell ? args.map((arg) => (/[\s&|<>^()]/.test(arg) ? `"${arg}"` : arg)) : [...args];
   return new Promise((resolve) => {
-    // npm is npm.cmd on Windows, which only starts through a shell.
-    execFile(command, [...args], { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 10 * 60_000, shell: process.platform === "win32" && command === "npm" }, (error, stdout, stderr) => {
+    execFile(command, line, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 10 * 60_000, shell }, (error, stdout, stderr) => {
       const code = error && typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : error ? 1 : 0;
       resolve({ code, stdout: String(stdout), stderr: String(stderr) });
     });
