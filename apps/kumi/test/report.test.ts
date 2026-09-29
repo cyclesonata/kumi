@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import { redactor, writeReport } from "../src/report.js";
@@ -34,7 +34,7 @@ test("the report holds versions, the doctor, the last conversation, the gap log 
     const file = join(home, "kumi-report-2026-09-29T20-00-00.txt");
     assert.deepEqual(readdirSync(home).filter((name) => name.startsWith("kumi-report")), ["kumi-report-2026-09-29T20-00-00.txt"]);
     if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o077, 0, "only this user can read it");
-    assert.match(printed, /Kumi's report is in ~\/kumi-report-2026-09-29T20-00-00\.txt/);
+    assert.ok(printed.includes(`Kumi's report is in ~${sep}kumi-report-2026-09-29T20-00-00.txt`), "in the platform's own form");
     const text = readFileSync(file, "utf8");
     for (const heading of ["## Versions", "## Doctor", "## Settings", "## Last conversation", "## What Kumi couldn't do (gap log)", "## Live's log"]) assert.ok(text.includes(heading), heading);
     assert.match(text, /Kumi \d+\.\d+\.\d+/); assert.match(text, /Terminal: ghostty/); assert.match(text, /model: openai-codex\/gpt-6-astra/);

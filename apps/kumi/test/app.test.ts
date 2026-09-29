@@ -43,7 +43,9 @@ function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial
   let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
   // Never the real browser: a sign-in link is only recorded.
   const browsed: string[] = [];
-  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), openBrowser: (url) => { browsed.push(url); }, mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
+  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), openBrowser: (url) => { browsed.push(url); },
+    // Glyphs whatever the terminal running the tests (a CI Windows runner would get badges); badges are tested on their own.
+    icons: "glyphs", mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
@@ -1289,4 +1291,18 @@ test("FOCUS follows what the producer last touched in Live: a device, a Session 
   assert.equal(touchedNext(base, { ...base, view: "Arrangement" }, "device"), "arrangement", "the Arrangement");
   assert.equal(touchedNext({ ...base, view: "Arrangement" }, { ...base, view: "Arrangement", detail: "Clip", slotRef: "s" }, "arrangement"), "arrangement", "an Arrangement clip");
   assert.equal(touchedNext(base, { ...base }, "session"), "session", "nothing changed: as it was");
+});
+
+test("where glyphs may not show (the old Windows console), FOCUS's tree draws two-letter badges instead", async () => {
+  const tree = { trackRef: "3:track:3", devices: [{ ref: "a", name: "Saturator", className: "Saturator", deviceType: "audio_effect" as const }] };
+  const h = harness(120, 36, undefined, { async deviceTree() { return tree; } });
+  (h.app as unknown as { icons: string }).icons = "badges";
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "focus", focus: { track: { name: "4-Audio", kind: "audio" as const }, trackRef: "3:track:3", device: "Saturator", detail: "Device" as const } });
+  await delay(5);
+  const lines = h.screen();
+  assert.ok(has(lines, "AT 4-Audio") && has(lines, "└ FX Saturator"));
+  await h.app.close();
 });
