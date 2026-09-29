@@ -265,5 +265,9 @@ test("off a Mac, ffmpeg is fetched once into Kumi's folder, checked against its 
     await assert.rejects(findFfmpeg({ ...options, toolsDir: other, download: async (url: string) => (url.startsWith("https://api.github.com/") ? release(`sha256:${"0".repeat(64)}`) : new Uint8Array(data)) }), /didn't match its release's checksum/);
     assert.equal(existsSync(join(other, "ffmpeg")), false);
     assert.deepEqual(readdirSync(other), [], "nothing left behind");
+    // A disk without room for it says so, and nothing is fetched.
+    const before = asked.length;
+    await assert.rejects(findFfmpeg({ ...options, toolsDir: join(root, "third"), free: async () => 150_000_000 }), /Kumi needs ffmpeg for this, and would fetch it\. Only 150 MB is free on the disk Kumi keeps its programs on/);
+    assert.equal(asked.length, before + 1, "only the release was looked at");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

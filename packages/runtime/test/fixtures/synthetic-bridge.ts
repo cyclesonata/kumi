@@ -4,13 +4,15 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ChangeRecord, JsonObject, KernelTool } from "../../src/core/contracts.js";
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
+import { lowDisk } from "../../src/core/disk.js";
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
 type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
   /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
   /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string;
-  /** The Set's saved file, which the bridge can back up (live_project_backup_*). */ savedSet?: string };
+  /** The Set's saved file, which the bridge can back up (live_project_backup_*). */ savedSet?: string;
+  /** Free space on the disk Live records to, in bytes (plenty when left out). */ freeDisk?: number };
 export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
@@ -189,7 +191,8 @@ export function bridge(options: Options = {}) {
   const states: string[] = [];
   const actions: { title: string; playing?: boolean; recording?: boolean }[] = [];
   const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), onChange: (change) => records.push(change),
-    onAction: (action) => actions.push(action), changeTimeoutMs: 2_000, reconnectIntervalMs: 10 });
+    onAction: (action) => actions.push(action), changeTimeoutMs: 2_000, reconnectIntervalMs: 10,
+    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
   return {
     integration, requests, records, states, actions, get tempo() { return tempo; },
     /** How many Live round trips `work` waited for one after another; concurrent ones count once. */

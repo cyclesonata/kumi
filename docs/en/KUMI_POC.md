@@ -459,6 +459,11 @@ sending, when you choose.
 
 ## Limits and failure behavior
 
+- **A nearly full disk** makes recordings, saves and downloads fail partway, often
+  without saying why. Kumi checks first and says what's free and what to do:
+  recording needs 500 MB on the disk Live records to (the Set's), a Max for Live
+  device 100 MB on the User Library's disk, and a program Kumi fetches (ffmpeg, a
+  speech model) room for itself on Kumi's.
 - **Conversations** are kept per Set in `~/.kumi/projects`, next to what Kumi last
   saw of each Set (readable only by you): saved after every answer, the latest 20
   per Set, the oldest exchanges dropping off past about 256 KB. An unsaved Set's

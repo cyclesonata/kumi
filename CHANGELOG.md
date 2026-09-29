@@ -175,6 +175,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
 
 ### Setup
 
+- On a nearly full disk, recording, making a device and fetching ffmpeg or a
+  speech model are refused first, saying what's free and what to do, instead of
+  failing partway.
 - On an API key, `/status` says the tokens this session's answers took (in,
   cached, out).
 

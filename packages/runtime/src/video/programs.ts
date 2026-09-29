@@ -13,6 +13,7 @@ import { chmod, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { lowDisk, MB } from "../core/disk.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -168,10 +169,11 @@ export interface FfmpegOptions {
   onFetch?: (message: string) => void;
   /** Only look for what's there: fetch nothing (for the doctor). */
   installedOnly?: boolean;
-  /** For tests: the network, and the computer. */
+  /** For tests: the network, the computer, and its free disk. */
   download?: (url: string, signal?: AbortSignal) => Promise<Uint8Array>;
   platform?: string;
   arch?: string;
+  free?: (path: string) => Promise<number | undefined>;
 }
 
 /**
@@ -204,6 +206,9 @@ export async function findFfmpeg(options: FfmpegOptions = {}): Promise<string | 
   const published = assets.find((item) => item.name === asset);
   const expected = /^sha256:([0-9a-f]{64})$/i.exec(published?.digest ?? "")?.[1];
   if (!asset || !published || !expected) return undefined;
+  // The archive, and the program unpacked from it, side by side for a moment.
+  const full = await lowDisk(toolsDir, 2 * (published.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on", options.free);
+  if (full) throw new VideoError(`Kumi needs ffmpeg for this, and would fetch it. ${full}`);
   (options.onFetch ?? programDefaults.onFetch)?.(`Kumi is fetching ffmpeg, which it reads audio formats and videos with (once, about ${Math.round((published.size ?? 0) / 1e6)} MB).`);
   const archive = join(toolsDir, `.ffmpeg-${randomUUID()}${asset.endsWith(".zip") ? ".zip" : ".tar.xz"}`);
   const unpacked = join(toolsDir, `.ffmpeg-${randomUUID()}`);
@@ -335,6 +340,8 @@ export async function whisperModel(name: string, options: ProgramOptions): Promi
   const listed = files.find((file) => file.path === name);
   const expected = listed?.lfs?.oid;
   if (!expected || !/^[0-9a-f]{64}$/i.test(expected)) throw new VideoError(`Kumi couldn't find the speech model ${name} to fetch.`);
+  const full = await lowDisk(options.toolsDir, (listed?.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on");
+  if (full) throw new VideoError(`Transcribing needs a speech model, which Kumi would fetch. ${full}`);
   options.onFetch?.(`Kumi is fetching a speech model, to transcribe videos without captions (once, about ${Math.round((listed?.size ?? 0) / 1e6)} MB).`);
   const temporary = join(dirname(path), `.${name}-${randomUUID()}`);
   try {

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
+import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { CatchUp, ChangeRecord, ConnectionState, DisconnectCause, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
@@ -78,6 +80,8 @@ interface Options {
   onChange?: (change: ChangeRecord) => void;
   /** Something Kumi did in Live that isn't a change to the Set (playing, launching, recording, showing), for NOW. */
   onAction?: (action: { title: string; playing?: boolean; recording?: boolean }) => void;
+  /** For tests: the free-disk check before recording. */
+  lowDisk?: typeof lowDisk;
   /** Kumi started (true) or stopped (false) watching the producer work (watch_me), for NOW. */
   onWatch?: (on: boolean) => void;
   /** Bound on one apply or undo once sent; it runs to the end even if the turn is cancelled. */
@@ -1043,6 +1047,11 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!cleanup) requireFreshReferences(input);
       const prepared = kind.prepare ? kind.prepare(input) : input;
       if (typeof prepared === "string") return { text: prepared, isError: true };
+      // Live records into the Set's folder (an unsaved Set's into its own, on the system disk).
+      if (kind.tool === "record" && input.action === "start" && !cleanup) {
+        const full = await (options.lowDisk ?? lowDisk)(project?.path ? dirname(project.path) : homedir(), 500 * MB, "Live records to");
+        if (full) return { text: `${full} Nothing was recorded.`, isError: true };
+      }
       const previewed = await tools.call(kind.preview, prepared, signal, { host: true }); if (!cleanup) assertLease(lease, signal);
       if (previewed.isError) return { text: JSON.stringify(previewed), isError: true };
       const preview = payload(previewed);

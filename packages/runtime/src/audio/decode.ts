@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import { findFfmpeg } from "../video/programs.js";
+import { findFfmpeg, VideoError } from "../video/programs.js";
 
 export interface AudioSource {
   sampleRate: number;
@@ -70,7 +70,8 @@ function run(command: string, args: string[], signal: AbortSignal | undefined): 
 async function convert(input: string, output: string, signal: AbortSignal | undefined): Promise<void> {
   const mac = process.platform === "darwin";
   // A Mac reads them with afconvert; elsewhere ffmpeg, which Kumi fetches the first time it's needed.
-  const ffmpeg = mac ? "ffmpeg" : await findFfmpeg(signal ? { signal } : {}).catch(() => undefined) ?? "ffmpeg";
+  // A disk too full to fetch it says so; other failures fall through to trying ffmpeg on the PATH.
+  const ffmpeg = mac ? "ffmpeg" : await findFfmpeg(signal ? { signal } : {}).catch((error: unknown) => { if (error instanceof VideoError) throw new AudioError(error.message); return undefined; }) ?? "ffmpeg";
   const attempts: [string, string[]][] = [
     ...(mac ? [["afconvert", ["-f", "WAVE", "-d", "LEF32", input, output]] as [string, string[]]] : []),
     [ffmpeg, ["-v", "error", "-nostdin", "-y", "-i", input, "-vn", "-acodec", "pcm_f32le", "-f", "wav", output]],

@@ -10,6 +10,7 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { KernelTool } from "../core/contracts.js";
 import { encodeAmxd } from "./amxd.js";
+import { lowDisk, MB } from "../core/disk.js";
 import { checkMidiDevice } from "./harness.js";
 import { midiDevicePatcher } from "./midi.js";
 import { checkSpec, MAX_CONTROLS, UNITS, type Control } from "./spec.js";
@@ -105,6 +106,9 @@ export function deviceTool(options: DeviceToolOptions): KernelTool {
       signal.throwIfAborted();
       // Where Live's Browser looks: a folder that stays, so new files are noticed quickly.
       const folder = join(options.userLibrary, "Kumi");
+      // A device file cut short by a full disk would load as a broken device.
+      const full = await lowDisk(options.userLibrary, 100 * MB, "Live's User Library is on");
+      if (full) return { text: `${full} No device was made.`, isError: true };
       await mkdir(folder, { recursive: true, mode: 0o755 });
       const name = freeName(folder, spec.name);
       const file = join(folder, `${name}.amxd`);
