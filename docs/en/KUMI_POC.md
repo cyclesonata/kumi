@@ -44,9 +44,18 @@ npm run kumi -- model                         # show the model
 npm run kumi -- model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
 npm run kumi -- auth                          # which providers are usable; never prints secrets
 npm run kumi -- doctor                        # check Node, sign-in, the bridge, Live and the terminal
+npm run kumi -- update                        # bring Kumi up to date, and the bridge in Live when it's older
 npm run kumi -- report                        # a file to send when something goes wrong
 npm run kumi -- --inference-only              # chat without Live
 ```
+
+`update` moves this checkout forward on its branch (`git merge --ff-only`; it
+leaves a checkout with changes of its own alone), runs `npm run setup`, and then
+updates the bridge in Live if it's older than Kumi's, asking you to quit Live
+first. Kumi says when there's a newer version: once a day at most it asks git
+for the version on the checkout's branch, and says nothing when there's none, no
+network, or no checkout. When the bridge in Live is older than Kumi's, Kumi says
+so as it starts.
 
 `report` writes `~/kumi-report-<date>.txt`: Kumi's and the bridge's versions,
 the doctor's checks, what Kumi did in your last conversation (your requests, its

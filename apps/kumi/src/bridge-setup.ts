@@ -42,7 +42,7 @@ export interface BridgeSetupIo {
 const BRIDGE_DIR = fileURLToPath(new URL("../../../mcp-server/", import.meta.url));
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 
-function runProgram(command: string, args: readonly string[], cwd?: string): Promise<Ran> {
+export function runProgram(command: string, args: readonly string[], cwd?: string): Promise<Ran> {
   // npm is npm.cmd on Windows, which only starts through a shell; the shell gets one command line,
   // so paths with spaces (a user folder like "C:\Users\Jo Smith") are quoted.
   const shell = process.platform === "win32" && command === "npm";
@@ -56,7 +56,7 @@ function runProgram(command: string, args: readonly string[], cwd?: string): Pro
 }
 
 /** Whether Live is running: on macOS its process is "Live"; on Windows, "Ableton Live … .exe". */
-async function isLiveRunning(run: NonNullable<BridgeSetupIo["run"]>): Promise<boolean> {
+export async function isLiveRunning(run: NonNullable<BridgeSetupIo["run"]>): Promise<boolean> {
   if (process.platform === "darwin") return (await run("pgrep", ["-x", "Live"])).code === 0;
   if (process.platform === "win32") return /Ableton Live/i.test((await run("tasklist", ["/FI", "IMAGENAME eq Ableton Live*", "/NH"])).stdout);
   return false;

@@ -4,11 +4,13 @@ import {
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadMemoryFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { writeReport } from "./report.js";
+import { newerKumi, olderBridge, runUpdate } from "./update.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
@@ -31,6 +33,7 @@ More:
   npm run kumi -- model [<provider>/<model>]   Show or choose the model
   npm run kumi -- auth                   Show which providers are usable (no secrets)
   npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
+  npm run kumi -- update                 Bring Kumi up to date, and the bridge in Live when it's older
   npm run kumi -- report                 Write a file to send when something goes wrong (no keys in it)
   npm run kumi -- --version              Show Kumi's version
 
@@ -83,6 +86,7 @@ try {
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
+  else if (config.mode === "update") process.exitCode = await runUpdate({ out: process.stdout, env: process.env });
   else if (config.mode === "report") process.exitCode = await writeReport({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
@@ -149,13 +153,18 @@ try {
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
+    const stale = config.mode === "live" ? olderBridge(process.env, bundledBridgeVersion) : undefined;
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,
-      ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : {}) });
+      ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: npm run kumi -- update` } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };
     process.on("SIGINT", interrupt); process.on("SIGTERM", terminate);
-    try { process.exitCode = await terminal.run(); }
+    const running = terminal.run();
+    // A newer Kumi, asked of git at most once a day while Kumi starts; nothing is said without one.
+    void newerKumi({ cacheFile: join(dirname(loadSettingsFile()), "update-check.json") })
+      .then((latest) => { if (latest) terminal?.handleEvent({ type: "notice", message: `Kumi ${latest} is out (this is ${KUMI_VERSION}). Quit Kumi, then run: npm run kumi -- update` }); }, () => {});
+    try { process.exitCode = await running; }
     finally {
       process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", terminate);
       // Normally exit naturally. A leaked dependency handle must not hang the TUI
