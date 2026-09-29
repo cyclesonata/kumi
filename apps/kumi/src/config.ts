@@ -58,19 +58,22 @@ export const loadInputHistoryFile = (env: Env = process.env) => absoluteFile(env
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
 
 /** Non-secret preferences: the chosen model and how hard it thinks. */
-export interface Settings { model?: string; effort?: Effort }
+export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string }
 
 /** The settings file; a missing or unreadable file, or an unknown value, means none. */
 export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown };
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown };
     return { ...(typeof value.model === "string" && validModel(value.model) ? { model: value.model } : {}),
-      ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}) };
+      ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}),
+      ...(typeof value.panelTab === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.panelTab) ? { panelTab: value.panelTab } : {}) };
   } catch { return {}; }
 }
 
 export function writeSettings(file: string, next: Settings): void {
-  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}) };
+  // The pane's tab is kept when a caller (choosing a model) doesn't say.
+  const panelTab = "panelTab" in next ? next.panelTab : readSettings(file).panelTab;
+  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });

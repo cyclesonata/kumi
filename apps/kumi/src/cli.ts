@@ -158,6 +158,7 @@ try {
     const stale = config.mode === "live" ? olderBridge(process.env, bundledBridgeVersion) : undefined;
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,
+      panelTab: { load: () => readSettings(loadSettingsFile()).panelTab, save: (id) => { try { writeSettings(loadSettingsFile(), { ...readSettings(loadSettingsFile()), panelTab: id }); } catch { /* next time, then */ } } },
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: npm run kumi -- update` } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };

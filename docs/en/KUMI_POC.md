@@ -181,7 +181,11 @@ npm --prefix /absolute/path/to/checkout run kumi
 ## Use
 
 In a terminal window Kumi runs full screen: the conversation on the left, a Live
-pane on the right (FOCUS, NOW, HISTORY) and the input box at the bottom. Below
+pane on the right and the input box at the bottom. The pane's top half is FOCUS
+(where you are in Live) and NOW; its bottom half is a tabbed area, HISTORY its
+first tab, which scrolls with the mouse wheel, or Shift+Tab then the arrows (Enter
+undoes the row, Esc goes back to typing). In FOCUS's tree, Tab, the arrows and
+Enter point at a device for your next messages. Below
 100 columns the Live pane folds into a strip above the input box. Piped output,
 or `KUMI_UI=plain` (for screen readers, say), keeps the plain line-by-line mode.
 See [the terminal UI design](KUMI_TUI.md).
@@ -392,7 +396,7 @@ routing), and what you like or dislike, in sounds and in how Kumi works. It
 decides for itself, as it answers, with no extra wait. Everything it keeps shows
 as it happens: a line of its own in the conversation (`✎ Noted about you: …`,
 `◆ Kept a technique: Neuro from a Reese`, `↻ Saved a recipe: Drum bus`), a moment
-in NOW, and a row in the pane's MEMORY group with a **forget** click.
+in NOW, and a row at the top of the HISTORY tab with a **forget** click.
 
 - **Two places.** Notes about you, true in any project, are in `~/.kumi/memory.json`.
   Notes about a saved Set are in its folder in `~/.kumi/projects`, next to its

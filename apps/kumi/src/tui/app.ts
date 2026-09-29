@@ -21,6 +21,7 @@ import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type Memo
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
 import { treeRows, treeWindow, type TreeRow } from "./tree.js";
+import { TabPanel, type Tab, type TabRow } from "./tabs.js";
 import { textWidth, truncate } from "./width.js";
 import { wrap } from "./wrap.js";
 
@@ -43,6 +44,10 @@ export interface TuiOptions {
   openBrowser?: (url: string) => void;
   /** Icons as glyphs or two-letter badges; found from the terminal when left out. */
   icons?: IconStyle;
+  /** More tabs after HISTORY in the pane's lower half (none in 1.0; tests add one). */
+  tabs?: readonly Tab[];
+  /** Which tab showed last, kept across restarts. */
+  panelTab?: { load(): string | undefined; save(id: string): void };
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -210,6 +215,9 @@ export class TuiApp {
   /** What this session's answers took, for /status on an API key. */
   private readonly used = { input: 0, output: 0, cached: 0, answers: 0 };
   private readonly icons: IconStyle;
+  /** The right pane's lower half: tabs, HISTORY the first. */
+  private readonly tabs: TabPanel;
+  private tabsArea: Rect | undefined;
   /** FOCUS's device view: the focused track's devices, read when the track or its selected device changes. */
   private tree: DeviceTree | undefined;
   private treeKey: string | undefined;
@@ -290,6 +298,8 @@ export class TuiApp {
     this.connection = options.mode === "inference-only" ? "disconnected" : "connecting";
     this.depth = options.colorDepth ?? detectColorDepth();
     this.icons = options.icons ?? detectIconStyle();
+    const history: Tab = { id: "history", title: "HISTORY", empty: "Nothing changed yet", badge: () => this.changes.length || undefined, rows: (width) => this.historyRows(width) };
+    this.tabs = new TabPanel([history, ...(options.tabs ?? [])], options.panelTab?.load(), (id) => options.panelTab?.save(id));
     this.renderer = new Renderer(this.depth);
     this.scheduler = new FrameScheduler(() => this.draw(), options.frameMs ?? 16);
     this.tty = new Tty({
@@ -588,13 +598,16 @@ export class TuiApp {
     if (this.panel && (event.type === "text" || event.type === "paste" || event.type === "key")) { this.panelInput(event); this.scheduler.request(); return; }
     if (event.type === "text" || event.type === "paste") {
       // Typing goes back to the input box.
-      this.treeCursor = undefined;
+      this.treeCursor = undefined; this.tabs.leave();
       this.editor.insert(sanitizeText(event.text));
       this.menuDismissed = false;
     } else if (event.type === "key") {
       this.key(event);
     } else if (event.type === "mouse" && event.action === "wheel") {
-      this.scrollBy(event.direction === "up" ? 3 : -3);
+      // Over the tabbed area it scrolls the tab; anywhere else, the conversation.
+      const area = this.tabsArea;
+      if (area && event.x >= area.x - 2 && event.x < area.x + area.width + 2 && event.y >= area.y && event.y < area.y + area.height) this.tabs.scrollBy(event.direction === "up" ? -3 : 3);
+      else this.scrollBy(event.direction === "up" ? 3 : -3);
     } else if (event.type === "mouse" && event.action === "press" && event.button === "left") {
       this.hits.find((hit) => event.y === hit.y && event.x >= hit.x && event.x < hit.x + hit.width)?.action();
     }
@@ -605,6 +618,18 @@ export class TuiApp {
     const { name, ctrl, alt, shift } = event;
     const menu = this.menu();
     const width = this.inputWidth();
+    // Shift+Tab moves into the tabbed area (again, to its next tab); there, arrows and pages move, Enter
+    // does the row's action (undo), Esc or Tab goes back to typing.
+    if (name === "tab" && shift && !ctrl && !alt && !menu.length) {
+      this.treeCursor = undefined;
+      if (this.tabs.inside) this.tabs.next(); else this.tabs.enter();
+      return;
+    }
+    if (this.tabs.inside) {
+      if (name === "escape" || name === "tab") { this.tabs.leave(); return; }
+      if (!ctrl && !alt && this.tabs.key(name)) return;
+      this.tabs.leave();
+    }
     // In FOCUS's tree: arrows move, Enter points at the row, Esc or Tab goes back to typing.
     if (this.treeCursor !== undefined) {
       const rows = this.treeShown();
@@ -1545,7 +1570,7 @@ export class TuiApp {
     let nowAt = 6;
     if (rows) {
       screen.put(x + 5, area.y + 1, " · Device", st.faint);
-      nowAt = 3 + this.drawTree(screen, x, area.y + 2, width, rows, Math.max(3, Math.min(12, area.height - 16))) + 1;
+      nowAt = 3 + this.drawTree(screen, x, area.y + 2, width, rows, Math.max(2, Math.min(12, area.height - this.bottomHeight(area.height) - 10))) + 1;
     } else if (clip) {
       screen.put(x + 5, area.y + 1, " · Clip", st.faint);
       nowAt = 3 + this.drawClip(screen, x, area.y + 2, width, clip) + 1;
@@ -1570,13 +1595,16 @@ export class TuiApp {
       let column = x;
       for (const part of line) column = screen.put(column, area.y + nowAt + 2 + row, part.text, part.style);
     });
-    // MEMORY, under HISTORY, once Kumi has kept something this session: its latest three, each with its forget.
-    const shown = Math.min(3, this.kept.length);
-    const memoryRows = shown ? shown + 2 + (this.kept.length > shown ? 1 : 0) : 0;
-    const historyRows = Math.max(0, area.height - nowAt - 6 - memoryRows);
-    put(nowAt + 4, "HISTORY", st.label);
-    this.drawHistory(screen, { x, y: area.y + nowAt + 5, width, height: historyRows });
-    if (shown && historyRows >= 2) this.drawMemory(screen, { x, y: area.y + nowAt + 5 + historyRows + 1, width, height: memoryRows - 1 });
+    // The lower half, anchored to the bottom: the tab strip, then the active tab (HISTORY) filling the rest.
+    const bottom = this.bottomHeight(area.height);
+    const top = area.y + area.height - bottom;
+    this.tabsArea = { x, y: top, width, height: bottom - 1 };
+    this.tabs.draw(screen, this.tabsArea, this.hits);
+  }
+
+  /** The tabbed area's height: half the pane, but at least its strip and a few rows; FOCUS gives way first. */
+  private bottomHeight(pane: number): number {
+    return Math.min(Math.max(7, Math.floor(pane / 2)), Math.max(1, pane - 8));
   }
 
   /**
@@ -1715,23 +1743,6 @@ export class TuiApp {
     return row - y;
   }
 
-  /** What Kumi kept this session, newest first, each with its forget (or "forgotten"). */
-  private drawMemory(screen: Screen, area: Rect): void {
-    screen.put(area.x, area.y, "MEMORY", st.label);
-    const newest = [...this.kept].reverse();
-    let y = area.y + 1;
-    for (const entry of newest.slice(0, 3)) {
-      const action = entry.forgotten ? "forgotten" : "forget";
-      const actionX = area.x + area.width - textWidth(action);
-      screen.put(area.x, y, MEMORY_GLYPHS[entry.what], { fg: palette[entry.what] });
-      screen.put(area.x + 2, y, truncate(entry.title, Math.max(1, actionX - area.x - 3)), entry.forgotten ? st.faint : st.text);
-      screen.put(actionX, y, action, entry.forgotten ? st.faint : st.accent);
-      if (!entry.forgotten) this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.forgetKept(entry); } });
-      y++;
-    }
-    if (newest.length > 3) screen.put(area.x, y, truncate(`${newest.length - 3} more · /memory`, area.width), st.faint);
-  }
-
   /** MEMORY's forget: gone from Kumi's memory (its event marks the row), or already gone. */
   private async forgetKept(entry: { forgotten?: boolean; forget: () => Promise<boolean> }): Promise<void> {
     const gone = await entry.forget().catch(() => false);
@@ -1760,34 +1771,35 @@ export class TuiApp {
     if (entry) entry.forgotten = true;
   }
 
-  /** Kumi's changes, newest first, each with its own undo. */
-  private drawHistory(screen: Screen, area: Rect): void {
-    if (area.height <= 0) return;
-    if (!this.changes.length) { screen.put(area.x, area.y, truncate("Nothing changed yet", area.width), st.faint); return; }
-    const newest = [...this.changes].reverse();
-    let y = area.y;
-    let shown = 0;
-    for (const change of newest) {
+  /**
+   * HISTORY's rows: what Kumi kept this session first (its latest three, each with its forget), then
+   * Kumi's changes, newest first, each with its own undo; a title gets two lines, so the values
+   * ("0.0 dB → -2.0 dB") aren't the part cut off.
+   */
+  private historyRows(width: number): TabRow[] {
+    const rows: TabRow[] = [];
+    const kept = [...this.kept].reverse().slice(0, 3);
+    for (const entry of kept) {
+      rows.push({ spans: [{ text: `${MEMORY_GLYPHS[entry.what]} `, style: { fg: palette[entry.what] } }, { text: entry.title, style: entry.forgotten ? st.faint : st.text }],
+        right: { text: entry.forgotten ? "forgotten" : "forget", style: entry.forgotten ? st.faint : st.accent },
+        ...(entry.forgotten ? {} : { action: () => { void this.forgetKept(entry); } }) });
+    }
+    if (this.kept.length > 3) rows.push({ spans: [{ text: `${this.kept.length - 3} more kept · /memory`, style: st.faint }] });
+    if (kept.length && this.changes.length) rows.push({ spans: [] });
+    // Ids restart with each Kumi process (a resumed conversation's may repeat), so rows are keyed by place.
+    for (const [place, change] of [...this.changes].reverse().entries()) {
       const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : change.state === "expired" ? "no undo" : "check Live";
       const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" || change.state === "expired" ? st.faint : st.warn;
-      const actionX = area.x + area.width - textWidth(action);
       const titleStyle = change.state === "undone" || change.state === "expired" ? st.faint : st.text;
-      // A title gets two lines, so the values ("0.0 dB → -2.0 dB") aren't the part cut off.
-      const lines = wrap([{ text: change.title, style: titleStyle }], Math.max(1, actionX - area.x - 3)).map((spans) => spans.map((span) => span.text).join(""));
-      const rows = Math.min(2, lines.length);
-      const left = newest.length - shown;
-      if (y + rows > area.y + area.height - (left > 1 ? 1 : 0)) break;
-      const marker = change.state === "undone" || change.state === "expired" ? { text: "○", style: st.faint }
-        : change.state === "unsure" ? { text: "●", style: st.warn }
-        : change.track ? { text: "■", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓", style: st.accent };
-      screen.put(area.x, y, marker.text, marker.style);
-      screen.put(area.x + 2, y, lines[0] ?? "", titleStyle);
-      if (rows > 1) screen.put(area.x + 2, y + 1, truncate(lines.slice(1).join(" "), Math.max(1, area.width - 2)), titleStyle);
-      screen.put(actionX, y, action, actionStyle);
-      if (change.state === "applied") this.hits.push({ x: actionX, y, width: textWidth(action), action: () => { void this.undo(change.id); } });
-      y += rows; shown++;
+      const lines = wrap([{ text: change.title, style: titleStyle }], Math.max(1, width - textWidth(action) - 3)).map((spans) => spans.map((span) => span.text).join(""));
+      const marker = change.state === "undone" || change.state === "expired" ? { text: "○ ", style: st.faint }
+        : change.state === "unsure" ? { text: "● ", style: st.warn }
+        : change.track ? { text: "■ ", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓ ", style: st.accent };
+      const undo = change.state === "applied" ? { action: () => { void this.undo(change.id); } } : {};
+      rows.push({ spans: [marker, { text: lines[0] ?? "", style: titleStyle }], right: { text: action, style: actionStyle }, item: `change ${place}`, ...undo });
+      if (lines.length > 1) rows.push({ spans: [{ text: "  ", style: titleStyle }, { text: lines.slice(1).join(" "), style: titleStyle }], item: `change ${place}`, ...undo });
     }
-    if (shown < newest.length) screen.put(area.x, y, truncate(`${newest.length - shown} earlier`, area.width), st.faint);
+    return rows;
   }
 
   private drawDock(screen: Screen, area: Rect): void {

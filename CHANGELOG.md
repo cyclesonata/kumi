@@ -145,8 +145,12 @@ The first release for producers to use day to day. Ships with bridge 1.0.45.
   deleted it or said no. Kept techniques are named in the model's instructions,
   read whole when a request fits, adapted, and Kumi says it's using one.
 - Every save shows: a line of its own kind in the conversation (`✎` notes, `◆`
-  techniques, `↻` recipes), a moment in NOW, and a MEMORY group in the pane with a
-  forget click on each. `/memory` lists and forgets all three kinds.
+  techniques, `↻` recipes), a moment in NOW, and the latest three at the top of
+  the HISTORY tab with a forget click on each. `/memory` lists and forgets all
+  three kinds.
+- The right pane: FOCUS and NOW on top, and in its bottom half a tabbed area,
+  HISTORY its first tab, scrolled by the wheel or Shift+Tab and the arrows (Enter
+  undoes a row). The tab showing is remembered. Later tabs slot in as modules.
 - What Kumi couldn't do for lack of a tool or Live's scripting is logged on your
   computer for Kumi's developers (`~/.kumi/gaps.jsonl`), never read back and not
   part of what Kumi remembers.

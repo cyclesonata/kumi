@@ -109,8 +109,8 @@ old line-by-line interface (`terminal.ts`).
    `▁▂▃▄▅▆▇█`), and a comparison shows each band as dB over or under the
    reference, coloured when it matters (±1.5 dB). Everything Kumi keeps is a line
    of its own kind, with its glyph and colour: `✎` notes, `◆` techniques, `↻`
-   recipes. NOW shows it for a moment, and the pane's MEMORY group (under HISTORY,
-   once something is kept) lists the latest three with a **forget** click each.
+   recipes. NOW shows it for a moment, and the HISTORY tab lists the latest three
+   first, above Kumi's changes, with a **forget** click each.
    `/memory` opens all of it in the panel above the input box; `/recipes` the
    recipes.
 

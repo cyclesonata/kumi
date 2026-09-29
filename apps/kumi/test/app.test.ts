@@ -6,7 +6,7 @@ import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
-import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, touchedNext, TuiApp } from "../src/tui/app.js";
+import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, touchedNext, TuiApp, type TuiOptions } from "../src/tui/app.js";
 import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
@@ -18,7 +18,7 @@ import { VirtualTerminal } from "./vt.js";
 const opened: TuiApp[] = [];
 afterEach(async () => { await Promise.all(opened.splice(0).map((app) => app.close())); });
 
-function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial<SessionController> = {}, history?: InputHistory) {
+function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial<SessionController> = {}, history?: InputHistory, more: Partial<TuiOptions> = {}) {
   const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false, setRawMode(value: boolean) { this.isRaw = value; } });
   let written = "";
   const output = Object.assign(new Writable({ write(chunk, _encoding, callback) { written += String(chunk); callback(); } }), { isTTY: true, columns, rows });
@@ -45,7 +45,7 @@ function harness(columns = 120, rows = 36, models?: ModelControl, extra: Partial
   const browsed: string[] = [];
   const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), ...(history ? { history } : {}), openBrowser: (url) => { browsed.push(url); },
     // Glyphs whatever the terminal running the tests (a CI Windows runner would get badges); badges are tested on their own.
-    icons: "glyphs", mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
+    icons: "glyphs", mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100, ...more });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
@@ -1084,8 +1084,9 @@ test("every memory save is a line of its own kind, a moment in NOW, and a MEMORY
   h.emit({ type: "recipe", action: "saved", name: "Drum bus", steps: 3 });
   lines = h.screen();
   assert.ok(has(lines, "✎ Noted about you: Prefers short reverbs") && has(lines, "↻ Saved a recipe: Drum bus (3 steps)"));
-  const memory = lines.findIndex((line) => /MEMORY\s*$/.test(line));
-  assert.ok(memory > 0, "MEMORY sits in the pane");
+  // What Kumi kept comes first in the HISTORY tab, right under its strip.
+  const memory = lines.findIndex((line) => /HISTORY[^─]*─{3,}/.test(line));
+  assert.ok(memory > 0, "the tab strip sits in the pane");
   assert.ok(lines[memory + 1]!.includes("↻ Drum bus") && lines[memory + 1]!.includes("forget"), "newest first, each with its forget");
   assert.ok(lines[memory + 2]!.includes("✎ Prefers short reverbs"));
   assert.ok(lines[memory + 3]!.includes("◆ Neuro from a Reese"));
@@ -1305,4 +1306,98 @@ test("where glyphs may not show (the old Windows console), FOCUS's tree draws tw
   const lines = h.screen();
   assert.ok(has(lines, "AT 4-Audio") && has(lines, "└ FX Saturator"));
   await h.app.close();
+});
+
+const changesFor = (count: number): ChangeRecord[] => Array.from({ length: count }, (_, index) => ({ id: `c${index + 1}`, family: "tempo" as const, title: `Tempo change ${index + 1}`, state: "applied" as const, at: index }));
+const stripRow = (lines: string[]) => lines.findIndex((line) => /HISTORY[^─]*─{3,}/.test(line));
+
+test("the right pane's lower half is the tabbed area, anchored to the bottom at every height; FOCUS gives way first", async () => {
+  for (const rows of [24, 36, 50]) {
+    const h = harness(120, rows);
+    void h.app.run();
+    await delay(5);
+    connect(h);
+    const lines = h.screen();
+    const pane = rows - 1;
+    const bottom = Math.min(Math.max(7, Math.floor(pane / 2)), pane - 8);
+    assert.equal(stripRow(lines), 1 + pane - bottom, `strip at ${rows} rows`);
+    assert.ok(lines.findIndex((line) => line.includes("NOW")) < stripRow(lines), "FOCUS and NOW above it");
+    assert.ok(has(lines, "Nothing changed yet"));
+    await h.app.close();
+  }
+});
+
+test("HISTORY scrolls by wheel and by keyboard, says how much more at its ends, holds its place as rows arrive, and undo works where it's scrolled", async () => {
+  const h = harness(120, 36);
+  h.onUndo((id) => ({ ...changesFor(40).find((change) => change.id === id)!, state: "undone" }));
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  for (const change of changesFor(40)) h.emit({ type: "change", change });
+  await delay(4_100); // NOW's flash of the last change passes
+  let lines = h.screen();
+  const strip = stripRow(lines);
+  assert.ok(lines[strip]!.includes("HISTORY 40"), "a dim count beside the title");
+  assert.ok(lines[strip + 1]!.includes("Tempo change 40"), "newest first");
+  assert.ok(lines.some((line) => /↓ \d+ more/.test(line)));
+  // The wheel over it scrolls it (the conversation stays put).
+  const x = lines[strip]!.indexOf("HISTORY") + 2;
+  await h.type(`\u001b[<65;${x};${strip + 4}M`);
+  lines = h.screen();
+  assert.ok(lines[strip + 1]!.includes("↑ 4 more") && lines[strip + 2]!.includes("Tempo change 36"));
+  // A new change arrives while scrolled: the view stays on the same rows.
+  h.emit({ type: "change", change: { ...changesFor(41)[40]!, id: "c41" } });
+  lines = h.screen();
+  assert.ok(lines[strip + 2]!.includes("Tempo change 36"), "held in place");
+  // Undo on a row where it's scrolled to.
+  await h.type(click(lines, strip + 2, "undo"));
+  await delay(5);
+  assert.ok(h.calls.includes("undo:c36"));
+  // By keyboard: Shift+Tab goes in, arrows move, Enter undoes the row, Esc goes back to typing.
+  await h.type("\u001b[Z");
+  await h.type("\u001b[B");
+  await h.type("\r");
+  await delay(5);
+  assert.ok(h.calls.includes("undo:c35"), JSON.stringify(h.calls));
+  await h.type("\u001b");
+  await delay(30);
+  await h.type("x");
+  assert.ok(has(h.screen(), "x"), "typing goes to the input box again");
+  await h.app.close();
+});
+
+test("tabs register as modules: a second one (a test stub) switches by click and by Shift+Tab, and the one showing is remembered", async () => {
+  let saved: string | undefined;
+  const store = { load: () => saved, save: (id: string) => { saved = id; } };
+  const stub = { id: "stub", title: "STUB", rows: () => [{ spans: [{ text: "stub row", style: {} }] }] };
+  const h = harness(120, 36, undefined, {}, undefined, { tabs: [stub], panelTab: store });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  let lines = h.screen();
+  const strip = stripRow(lines);
+  assert.ok(lines[strip]!.includes("HISTORY") && lines[strip]!.includes("STUB"));
+  await h.type(click(lines, strip, "STUB"));
+  lines = h.screen();
+  assert.ok(lines[strip + 1]!.includes("stub row")); assert.equal(saved, "stub");
+  await h.type("\u001b[Z"); await h.type("\u001b[Z");
+  assert.ok(has(h.screen(), "Nothing changed yet"), "Shift+Tab again: the next tab"); assert.equal(saved, "history");
+  await h.app.close();
+  saved = "stub";
+  const again = harness(120, 36, undefined, {}, undefined, { tabs: [stub], panelTab: store });
+  void again.app.run();
+  await delay(5);
+  connect(again);
+  assert.ok(again.screen()[strip + 1]!.includes("stub row"), "after a restart, the tab that showed");
+  await again.app.close();
+  // With one tab, the strip is a heading, and switching does nothing harmful.
+  const one = harness(120, 36);
+  void one.app.run();
+  await delay(5);
+  connect(one);
+  lines = one.screen();
+  await one.type(click(lines, stripRow(lines), "HISTORY"));
+  await one.type("\u001b[Z"); await one.type("\u001b[Z");
+  assert.ok(has(one.screen(), "Nothing changed yet"));
+  await one.app.close();
 });
