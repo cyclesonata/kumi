@@ -165,4 +165,3 @@ export async function opened(options: { padBatches?: boolean; parameters?: boole
   // Keep the fixture's getters live (a spread would copy their current values).
   return Object.assign(b, { tools: observation.tools, observation });
 }
-
