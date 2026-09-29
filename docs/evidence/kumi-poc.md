@@ -884,3 +884,49 @@ Still refused on real Live, for the bridge:
   clip came back "Live didn't confirm the undo". Of the run's 21 changes, 18 had
   an undo to try and 8 were undone; the rest were kept or unsure. They're in the
   testbed Set, along with the tutorial's "Au5 Tutorial Reese" track.
+
+## Bridge 1.0.35 and resampling on real Live
+
+Installed with `npm run kumi -- bridge --yes` from a clean tree at `afc6772` (UTC 15:58); Live
+was quit on the testbed and reopened, and the producer answered its recovery prompt.
+
+- **Refusals say why:** a clip launched while Live played was refused with "clip launch requires
+  a stopped, non-recording baseline with no active Session targets", no longer "adapter request
+  failed".
+- **Back to Arrangement:** a track that had played its Session clip read `backToArranger` true;
+  after `play back-to-arrangement`, false.
+- **Recording** needs its destination to be the only armed track, and Live 12.4 arms a MIDI track
+  when Kumi makes one. Kumi's record now disarms any other armed track first; plans said
+  "Recording in the Arrangement on … Bounce, after disarming …".
+- **Resampling a Session clip** (launch it, then record at once): a new Operator track's clip of
+  C3s was heard at -14.3 LUFS, C3.
+- **Resampling from the Arrangement:** a playhead moved while Live is stopped isn't where playback
+  starts. After `set_transport` 1200, `start` played from the start marker (beat 1.6) and `continue`
+  from where it last stopped (beat 6.4), so earlier Arrangement bounces were silent. Jumping while
+  playing works (1201.9 half a second later): play, jump a bar before the sound, record. An
+  Operator clip copied to bar 301 and resampled that way was heard at -17.4 LUFS.
+- The testbed's own "Reese Bass" Session clip is silent (no notes), which is why the day's first
+  bounces of it measured nothing; a fresh track's meter read 0.76 while its clip played.
+- **Undo:** a new track undone at once is undone. Undoing one that has changed since (something
+  recorded, loaded or routed on it) is refused by the bridge, rightly, and HISTORY now says so
+  instead of "try again".
+
+## Making a Max for Live device on real Live
+
+- Live 12.4.15b4 bundles Max 9.1.5, with `v8`, `v8.codebox` and `v8ui`.
+- A device Kumi writes to `User Library/Kumi` is listed by Live's Browser in 0.4 to 6 s, under its
+  name without `.amxd` (`user_library/Kumi/Lowest Note`); `load_device` loads it. On a track with
+  Electric, Live placed the MIDI effect before the instrument. Its knob is a Live parameter
+  ("Window 15.0 ms", 1–50), turned through `set_device_parameter` with its undo.
+- **The code runs in Live's Max:** a made "Octave Up" (Shift +12 st) before Operator on a track of
+  C3s, resampled and heard, sounded C4 (261 Hz); the same take without it sounded C3 (131 Hz).
+- **The eval** ("make a device", gpt-6-astra): the model read the guide, made "Lowest Note" (4 of 4
+  tests and Kumi's checks) and loaded it on Keys in one plan, in 46.3 s. A first run failed on a
+  harness fault the eval exposed: a test's note-on of velocity 0 went to the device as velocity 1.
+- **The real app** (PTY, gpt-6-astra, real Live): "Create an M4L MIDI device that takes a chord
+  and outputs only its lowest note, and put it on the Reese Bass track." Kumi said it would use a
+  15 ms chord window, made the device ("making a device" in NOW), and loaded it: "Done: Loaded
+  Lowest Note on Reese Bass", 3 steps, 52.2 s. NOW pictured "Lowest Note → Operator → Auto
+  Pan-Tremolo".
+- Recording one MIDI track's output onto another armed MIDI track captured no notes on real Live,
+  with no device as well, so device behaviour is checked by ear (resampling) for now.
