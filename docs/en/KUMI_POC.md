@@ -399,7 +399,10 @@ adapted. For example, the Reese-to-neuro chain from a tutorial becomes a neuro b
 on another track, with Auto Filter standing in for a plugin you don't have.
 
 - **Learned quietly.** When a plan builds a sound or a chain, the model writes a
-  draft of it into that plan, without a word about it. Kumi keeps the draft only
+  draft of it into that plan, without a word about it. When it doesn't, and the
+  answer loaded two devices or more, Kumi drafts one from the build itself: your
+  words for what it fits, the chain in order, and the settings it changed.
+  Kumi keeps the draft only
   if your next moves say you liked the result: you played it, kept working on it
   or around it (knobs included), saved the Set, said so, or moved on to other
   things and left it in place (after a couple of requests, or ten minutes). It's

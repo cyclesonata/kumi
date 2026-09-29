@@ -142,6 +142,39 @@ interface Pending {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** A request's words for what it asks for: "Build me a gritty Reese bass on a new MIDI track: …" → "gritty Reese bass on a new MIDI track". */
+function asked(request: string): string {
+  const first = request.split(/[.!?:;\n]/, 1)[0] ?? "";
+  return first.replace(/^\s*(please\s+)?((can|could|would) you\s+)?(please\s+)?(build|make|give|create|design|set up|put together)(\s+me)?\s+(an?\s+|the\s+|some\s+)?/i, "").trim();
+}
+
+/**
+ * A draft from a build itself, for a turn that built a chain (two devices or more loaded) without
+ * the model writing its technique: the producer's words for what it fits, the chain in order and
+ * the settings Kumi changed. Written without a model call, so learning doesn't depend on the model
+ * remembering to; a draft from the model, which says why, is used instead whenever there is one.
+ */
+export function draftFromBuild(changes: readonly ChangeRecord[], request: string): Pending["draft"] | undefined {
+  const applied = changes.filter((record) => record.state === "applied");
+  const chains = new Map<string, string[]>();
+  for (const record of applied) {
+    if (record.family !== "device") continue;
+    const loaded = /^Loaded (.+?)(?: into .+?)?(?: on (.+))?$/.exec(record.title);
+    const device = loaded?.[1]; const track = record.track?.name ?? loaded?.[2] ?? "";
+    if (!device || device === "a device") continue;
+    chains.set(track, [...(chains.get(track) ?? []), device]);
+  }
+  const devices = [...chains.values()].flat();
+  if (devices.length < 2) return undefined;
+  const made = applied.map((record) => /^Added (?:MIDI |audio |return )?track “(.+)”/.exec(record.title)?.[1]).find(Boolean);
+  const wanted = asked(request);
+  const name = made ?? (wanted ? wanted.charAt(0).toUpperCase() + wanted.slice(1) : `${devices[0]} chain`);
+  const idea = `${[...chains].map(([track, list]) => `${list.join(" → ")}${chains.size > 1 && track ? ` on ${track}` : ""}`).join("; ")}.`;
+  const settings = applied.filter((record) => record.family === "parameter").map((record) => record.title).join("; ");
+  const checked = checkTechnique({ name, fits: wanted || name, idea, ...(settings ? { settings } : {}) });
+  return "technique" in checked ? checked.technique : undefined;
+}
+
 const POSITIVE = /\b(love|loving|nice|great|perfect|awesome|amazing|beautiful|sick|dope|fire|exactly|cool|keep (it|that|this)|sounds? (good|great|right|sick|amazing|nice))\b|🔥|👍/i;
 const NEGATIVE = /\b(not like that|no[,.!]|nope|don'?t like|hate|scrap|start over|redo|remove (it|that|this)|delete (it|that|this)|undo|wrong|awful|terrible|doesn'?t (sound|work))\b|^no\b/i;
 
@@ -153,11 +186,13 @@ export class TechniqueDrafts {
   private pending: Pending | undefined;
   /** This turn's changes so far: a draft usually comes after the build it's about. */
   private recent: ChangeRecord[] = [];
+  /** What the producer asked for this turn, for a draft Kumi writes from the build. */
+  private request = "";
 
   constructor(private readonly options: { keep: (draft: Pending["draft"]) => Promise<void>; settleMs?: number }) {}
 
   /** A turn starts: its changes are counted afresh. */
-  turnStarted(): void { this.recent = []; }
+  turnStarted(request = ""): void { this.recent = []; this.request = request; }
 
   /** The turn was stopped: a draft from it goes, since what it built may be half done. */
   abandon(): void { if (this.pending?.open) this.pending = undefined; }
@@ -210,8 +245,10 @@ export class TechniqueDrafts {
     if (POSITIVE.test(text) || ++pending.said >= 2) void this.settle(true);
   }
 
-  /** A turn ended: the drafting turn's build is complete, and the waiting starts. */
+  /** A turn ended: the drafting turn's build is complete, and the waiting starts. A turn that built a chain
+   * without the model's draft gets one from the build. */
   turnEnded(): void {
+    if (!this.pending?.open) { const built = draftFromBuild(this.recent, this.request); if (built) this.draft(built); }
     const pending = this.pending;
     if (!pending?.open) return;
     pending.open = false;

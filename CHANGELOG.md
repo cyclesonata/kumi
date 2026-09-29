@@ -124,7 +124,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.39.
 - Kumi keeps short notes of what you tell it that Live can't show, about you and
   about each saved Set.
 - Techniques: when Kumi builds a sound or a chain (from a tutorial, or a request
-  of several steps), it drafts what made it work, and keeps it only if your next
+  of several steps), it drafts what made it work (the model's draft, or, when
+  the model gives none, one from the build: what you asked for, the chain in
+  order, the settings it changed), and keeps it only if your next
   moves say you liked the result (you played it, kept working on it, saved the
   Set, said so, or moved on and left it). It's dropped quietly if you undid it,
   deleted it or said no. Kept techniques are named in the model's instructions,

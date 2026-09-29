@@ -445,6 +445,9 @@ export function createSession(options: Options): SessionController {
           emit({ type: "error", message, ...(error instanceof KumiError ? { kind: error.kind, ...(error.provider ? { provider: error.provider } : {}) } : {}) });
           // A failed answer keeps the steps it finished (see the kernel); keep them for next time too.
           if (isTurn && op.phase === "inference") saveConversation(true);
+          // Like a stopped one, a failed answer's draft goes: what it built may be half done. Left open, it would
+          // take the next turns' changes as its build and never hear what the producer said.
+          if (isTurn) learned?.drafts.abandon();
           if (!isTurn && phase === "start") {
             try { await dropResources(); } catch { /* startup remains failed */ }
             throw new Error("Could not start Kumi session; check model login and connection.");
@@ -476,7 +479,7 @@ export function createSession(options: Options): SessionController {
         const snapshot = await observe(op); assertCurrent(op);
         // The Set as it is now (read first: a deleted build's gone), then the producer's words, may say
         // what they thought of the last build; and a new turn begins.
-        learned?.drafts.said(input); learned?.drafts.turnStarted();
+        learned?.drafts.said(input); learned?.drafts.turnStarted(input);
         op.phase = "inference";
         return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) { op.progress?.(event); emit(event); } });

@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import type { ChangeRecord, JsonObject, KernelOptions, KernelTool, SessionEvent, TechniqueEvent } from "../src/core/contracts.js";
 import { createSession } from "../src/core/session.js";
-import { checkTechnique, createTechniqueStore, MAX_TECHNIQUES, TECHNIQUE_TOOL, techniqueInstructions, techniqueTools, type Technique, type TechniqueStore } from "../src/core/techniques.js";
+import { checkTechnique, createTechniqueStore, draftFromBuild, MAX_TECHNIQUES, TECHNIQUE_TOOL, techniqueInstructions, techniqueTools, type Technique, type TechniqueStore } from "../src/core/techniques.js";
 import { GAP_TOOL, gapTools } from "../src/core/gaps.js";
 
 const signal = () => new AbortController().signal;
@@ -286,4 +286,64 @@ test("a build plan without its technique asks for one in its result; other plans
   assert.equal(asksForTechnique({ ...loads, technique: { name: "x" } }), false, "it has one");
   assert.equal(asksForTechnique({ ...loads, final: true }), false, "a final plan ends the answer");
   assert.equal(asksForTechnique({ steps: [{ tool: "set_mixer" }] }), false, "not a build");
+});
+
+test("a turn that built a chain without the model's draft gets one from the build, kept the same way", async () => {
+  const at = (id: string, family: ChangeRecord["family"], title: string): ChangeRecord => ({ id, family, title, state: "applied", at: 1, track: { name: "Gritty Reese" } });
+  const build = [at("c1", "structure", "Added MIDI track “Gritty Reese”"), at("c2", "device", "Loaded Operator on Gritty Reese"), at("c3", "device", "Loaded Saturator on Gritty Reese"),
+    at("c4", "device", "Loaded EQ Eight on Gritty Reese"), at("c5", "parameter", "Operator · Osc-B Fine 0 → 12"), at("c6", "parameter", "Saturator · Drive 0.0 dB → 11 dB")];
+  const request = "Build me a gritty Reese bass on a new MIDI track: Operator with two detuned oscillators and glide, then a Saturator and an EQ Eight after it.";
+  assert.deepEqual(draftFromBuild(build, request), { name: "Gritty Reese", fits: "gritty Reese bass on a new MIDI track", idea: "Operator → Saturator → EQ Eight.",
+    settings: "Operator · Osc-B Fine 0 → 12; Saturator · Drive 0.0 dB → 11 dB" });
+  // One device, or devices Kumi can't name, isn't a chain.
+  assert.equal(draftFromBuild(build.slice(0, 2), request), undefined);
+  assert.equal(draftFromBuild([at("c1", "device", "Loaded a device on Bass"), at("c2", "device", "Loaded a device on Bass")], request), undefined);
+  // Without a new track, the request names it.
+  assert.equal(draftFromBuild(build.slice(1, 3), "Could you make me a warm pad chain.")?.name, "Warm pad chain");
+
+  const j = judge();
+  j.learned.drafts.turnStarted(request);
+  for (const record of build) j.learned.drafts.change(record);
+  j.learned.drafts.turnEnded();
+  j.learned.drafts.said("love it");
+  await delay(10);
+  assert.deepEqual(j.kept().map((event) => event.technique.name), ["Gritty Reese"]);
+  assert.equal(j.store.saved[0]!.idea, "Operator → Saturator → EQ Eight.");
+  // The model's own draft, which says why, is kept instead.
+  const drafted = judge();
+  drafted.learned.drafts.turnStarted(request);
+  for (const record of build) drafted.learned.drafts.change(record);
+  await drafted.tool.execute({ action: "draft", ...neuro }, signal());
+  drafted.learned.drafts.turnEnded();
+  drafted.learned.drafts.said("love it");
+  await delay(10);
+  assert.deepEqual(drafted.kept().map((event) => event.technique.name), ["Neuro from a Reese"]);
+  // An undone build leaves nothing to draft.
+  const undone = judge();
+  undone.learned.drafts.turnStarted(request);
+  for (const record of build) undone.learned.drafts.change({ ...record, state: "undone" });
+  undone.learned.drafts.turnEnded();
+  await undone.learned.drafts.close();
+  assert.equal(undone.events.length, 0);
+});
+
+test("a failed answer's draft goes, and the next turns aren't taken as its build", async () => {
+  const store = memoryStore();
+  const events: SessionEvent[] = [];
+  let fail = true;
+  const session = createSession({ onEvent: (event) => events.push(event), cancelGraceMs: 10, closeTimeoutMs: 25, techniques: store, gaps: join(tmpdir(), `kumi-gaps-${process.pid}-unused2.jsonl`),
+    kernelFactory: async (options) => ({ async run(_input, run) {
+      if (fail) { await options.tools.find((tool) => tool.name === TECHNIQUE_TOOL)!.execute({ action: "draft", ...neuro }, run); throw new Error("provider went away"); }
+      return { stopReason: "completed" };
+    }, async close() {} }),
+    integrationFactory: (listener) => ({ async start() { listener("connected"); }, async close() {},
+      async observe() { return { key: "k", label: "Set", context: "ctx", instructions: "i", tools: [], tracks: ["Neuro Bass"] }; } }) });
+  await session.start();
+  await session.submit("build a neuro bass").catch(() => {});
+  fail = false;
+  await session.submit("I love it");
+  await delay(5);
+  await session.close();
+  assert.ok(events.some((event) => event.type === "error"));
+  assert.ok(!events.some((event) => event.type === "technique"), "nothing from a failed answer is kept");
 });

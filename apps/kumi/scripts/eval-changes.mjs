@@ -27,7 +27,10 @@ function syntheticBridge() {
   const state = { tempo: 120, tracks: [{ name: "Kick", kind: "midi", volume: 0.85, pan: 0 }, { name: "Bass", kind: "midi", volume: 0.85, pan: 0 },
     { name: "Keys", kind: "midi", volume: 0.85, pan: 0 }, { name: INJECTION, kind: "audio", volume: 0.85, pan: 0 }], returns: [{ name: "A-Reverb" }],
     playing: false, position: 0, recording: { session: false, arrangement: false }, worked: false,
-    devices: [{ ref: "5:device:1:0", parentRef: "5:track:1", objectIdentity: "live:1", name: "Operator", className: "Operator" }] };
+    devices: [{ ref: "5:device:1:0", parentRef: "5:track:1", objectIdentity: "live:1", name: "Operator", className: "Operator" }],
+    parameters: [{ ref: "5:parameter:1:0:1", parentRef: "5:device:1:0", name: "Filter Freq", value: 0.6, min: 0, max: 1, defaultValue: 1, displayValue: "5.2 kHz" }] };
+  /** A few knobs of each device the Browser loads here, so a build can be set up. */
+  const KNOBS = { Operator: ["Osc-B Coarse", "Osc-B Fine", "Glide Time", "Filter Freq"], Saturator: ["Drive", "Dry/Wet"], "EQ Eight": ["1 Frequency A", "8 Frequency A", "8 Gain A"] };
   /** Every call Kumi made, in order, with its arguments. */
   const requests = [];
   const pending = new Map(); const done = new Map(); let next = 0;
@@ -44,7 +47,7 @@ function syntheticBridge() {
       clipRef: scene === 0 && index < 3 ? `5:clip:${index}:0` : null }))),
     "session-clip": () => [0, 1, 2].map((index) => ({ ref: `5:clip:${index}:0`, parentRef: `5:clip_slot:${index}:0`, name: `${state.tracks[index].name} loop`, length: 16, isAudio: false })),
     "routing-choice": () => ["Ext. In", "Resampling", ...state.tracks.map((track) => track.name), ...state.returns.map((track) => track.name)].map((name, index) => ({ name, type: "", direction: "input-type", ref: `5:routing_choice:${index}` })),
-    parameter: () => [{ ref: "5:parameter:1:0:1", parentRef: "5:device:1:0", name: "Filter Freq", value: 0.6, min: 0, max: 1, defaultValue: 1, displayValue: "5.2 kHz" }] };
+    parameter: () => state.parameters };
   const playback = () => ({ transport: { playing: state.playing, sessionRecord: state.recording.session, arrangementRecord: state.recording.arrangement, position: state.position }, firedTargets: [], playingTargets: [] });
   return {
     state, requests,
@@ -52,12 +55,12 @@ function syntheticBridge() {
     work() {
       state.worked = true;
       state.devices = [...state.devices, { ref: "5:device:4:0", parentRef: "5:track:4", objectIdentity: "live:2", name: "Saturator", className: "Saturator" }];
-      rows.parameter = () => [{ ref: "5:parameter:4:0:1", parentRef: "5:device:4:0", name: "Drive", value: 18, defaultValue: 0, displayValue: "18.0 dB" },
+      state.parameters = [{ ref: "5:parameter:4:0:1", parentRef: "5:device:4:0", name: "Drive", value: 18, defaultValue: 0, displayValue: "18.0 dB" },
         { ref: "5:parameter:4:0:2", parentRef: "5:device:4:0", name: "Dry/Wet", value: 1, defaultValue: 1, displayValue: "100 %" }];
       state.tracks.push({ name: "Pad", kind: "audio", volume: 0.85, pan: 0 });
     },
     endpoint: {
-      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.34" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
+      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.39" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
       async list() { return { tools: schemas }; },
       async call(name, args) {
         requests.push({ name, args });
@@ -96,6 +99,7 @@ function syntheticBridge() {
           return wrap({ transactionId: id, epoch: 5, prior: { tracks: state.tracks.map((track, index) => ({ ref: ref(index), name: track.name, index })), scenes: [] },
             proposed: (args.tracks ?? []).map((item) => ({ kind: "track", name: item.name, trackKind: item.kind, index: item.index ?? 0 })), confirmation: "apply" });
         }
+        if (name === "live_browser_load_preview") { pending.set(id, { name, args }); return wrap({ transactionId: id, epoch: 5, trackRef: args.trackRef, item: { id: args.itemId, name: String(args.itemId).split("/").at(-1) }, confirmation: "apply" }); }
         // Everything else Kumi previews works as the bridge's would, remembered in `requests`.
         if (name.endsWith("_preview")) { pending.set(id, { name, args }); return wrap({ transactionId: id, epoch: 5, prior: {}, proposed: args, confirmation: "apply" }); }
         if (name.endsWith("_apply")) {
@@ -117,6 +121,15 @@ function syntheticBridge() {
             const start = state.tracks.length; state.tracks.push(...added);
             done.set(args.transactionId, { undo: () => { state.tracks.splice(start, added.length); } });
             return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: ref(start + index), name: item.name })) });
+          }
+          if (preview === "live_browser_load_preview" && typeof input.trackRef === "string") {
+            const name = String(input.itemId).split("/").at(-1).replace(/\.[a-z]+$/i, "");
+            const at = state.devices.filter((device) => device.parentRef === input.trackRef).length;
+            const device = { ref: `${input.trackRef.replace(":track:", ":device:")}:${at}`, parentRef: input.trackRef, objectIdentity: `live:${state.devices.length + 1}`, name, className: name.replace(/\s+/g, "") };
+            const knobs = (KNOBS[name] ?? ["Dry/Wet"]).map((knob, index) => ({ ref: `${device.ref.replace(":device:", ":parameter:")}:${index + 1}`, parentRef: device.ref, name: knob, value: 0.5, min: 0, max: 1, defaultValue: 0.5, displayValue: "50 %" }));
+            state.devices.push(device); state.parameters.push(...knobs);
+            done.set(args.transactionId, { undo: () => { state.devices = state.devices.filter((item) => item !== device); state.parameters = state.parameters.filter((item) => !knobs.includes(item)); } });
+            return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: device.ref });
           }
           return wrap({ transactionId: args.transactionId, state: "applied" });
         }
@@ -253,7 +266,8 @@ async function runCase(binding, testCase) {
     techniques: createTechniqueStore(techniquesFile), gaps: gapsFile,
     watch: { videosDir: join(folder, "videos"), toolsDir: join(folder, "tools") },
     kernelFactory: async (options) => (kernel = createAgentKernel({ ...options, binding, ...(testCase.budget ? { budget: testCase.budget } : {}) })),
-    integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => changes.set(change.id, change), userLibrary: join(folder, "User Library") }),
+    integrationFactory: (onConnection) => createAbletonIntegration({ onConnection, connect: async () => bridge.endpoint, onChange: (change) => { changes.set(change.id, change); session.watch?.({ type: "change", change }); },
+      onAction: (action) => session.watch?.({ type: "action", ...action }), userLibrary: join(folder, "User Library") }),
     onEvent: (event) => {
       if (event.type === "tool-start") tools.push(event.name);
       if (event.type === "text") { text += event.text; last += event.text; }
@@ -300,6 +314,8 @@ try {
     for (const change of outcome.changes ?? []) process.stdout.write(`        ${change}\n`);
     for (const note of outcome.notes ?? []) process.stdout.write(`        remembered ${note}\n`);
     for (const recipe of outcome.recipes ?? []) process.stdout.write(`        recipe ${recipe}\n`);
+    for (const technique of outcome.techniques ?? []) process.stdout.write(`        technique ${technique}\n`);
+    for (const gap of outcome.gaps ?? []) process.stdout.write(`        gap ${gap}\n`);
     if (outcome.live?.length) process.stdout.write(`        live: ${outcome.live.join(", ")}\n`);
     if (outcome.tools) process.stdout.write(`        tools: ${outcome.tools.join(", ") || "none"}\n        answer: ${outcome.answer}\n`);
     if (outcome.last) process.stdout.write(`        last answer: ${outcome.last}\n`);
