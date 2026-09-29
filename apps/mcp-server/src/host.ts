@@ -1822,12 +1822,16 @@ export class McpHost {
         if (field === "punchOut" && typeof prior.punchOut === "boolean") restore.punchOut = prior.punchOut;
       }
       if (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity) return this.transactionError(id, "transport Set identity changed after apply; undo refused");
-      if (!reconciliation && (transaction.appliedRevision === undefined || snapshot.playback.revision !== transaction.appliedRevision)) return this.transactionError(id, "transport state revision changed after apply; undo refused");
+      // Playing, stopping and recording since change the playback revision and move the playhead, so undo
+      // puts the change back as long as each field it changed still reads as it left it; the playhead only
+      // while stopped, since moving it while playing would be heard.
       const current = snapshot.playback.transport;
+      if (!reconciliation && current.playing === true) delete restore.position;
+      if (!reconciliation && Object.keys(restore).length === 0) return this.transactionError(id, "transport undo refused while playing: only the playhead changed; stop playback first");
       if (reconciliation) {
         await this.confirmTransportFields(adapter, context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
       } else {
-        for (const [field, proposed] of Object.entries(transaction.proposed)) if (!McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return this.transactionError(id, "transport field changed after apply; undo refused");
+        for (const [field, proposed] of Object.entries(transaction.proposed)) if (field !== "position" && !McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return this.transactionError(id, "transport field changed after apply; undo refused");
         const result = await this.invokeUndoRecovery(transaction, adapter, "transport.set", { ...restore, expectedRevision: snapshot.playback.revision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("transport undo was not confirmed");
       }
@@ -2113,6 +2117,12 @@ export class McpHost {
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Routing state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  /** Routing fields as they can be written back: a sub-routing Live reads as none (No Input has none)
+   * isn't written; Live leaves it empty when the type is put back. */
+  private static writableRouting(prior: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(prior).filter(([field, value]) => !(value === null && /SubRouting$/.test(field))));
   }
 
   private observedRouting(track: JsonObject): Record<string, unknown> {
@@ -8532,7 +8542,7 @@ export class McpHost {
         const trackRef = track.ref as LiveRef;
         const current = { inputType: (track.routing as JsonObject).inputType, inputSubRouting: (track.routing as JsonObject).inputSubRouting, outputType: (track.routing as JsonObject).outputType, outputSubRouting: (track.routing as JsonObject).outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
         const expected = reconciliation ? routing.prior : routing.created; for (const key of Object.keys(routing.prior)) if (current[key as keyof typeof current] !== expected?.[key]) return this.transactionError(id, reconciliation ? "routing undo replay did not restore prior state" : "routing changed after apply; undo refused");
-        if (!reconciliation) { const restore: JsonObject = { ref: trackRef, ...routing.prior, expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, trackRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
+        if (!reconciliation) { const restore: JsonObject = { ref: trackRef, ...McpHost.writableRouting(routing.prior), expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, trackRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
         await this.confirmRoutingFields(adapter, context, trackRef, routing.payload.expectedObjectIdentity as string, routing.prior, "routing exact prior state was not restored"); routing.state = "undone";
         return this.successText(id, { transactionId: routing.id, state: "undone", restored: routing.prior, idempotent: false });
       } catch (cause) { routing.state = "uncertain"; return this.adapterToolError(id, cause, "Routing undo is uncertain; inspect routing and feedback state."); }

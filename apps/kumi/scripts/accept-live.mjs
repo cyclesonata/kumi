@@ -217,7 +217,9 @@ try {
       const t1 = performance.now();
       try {
         const after = await integration.undo(record.id, signal());
-        say(after.state === "undone", performance.now() - t1, `${after.state} · ${record.title}${after.note ? ` (${after.note})` : ""}`);
+        // A bounce that recorded keeps its track, and the track it recorded from, as a producer would want.
+        const keeps = after.state === "kept" && [`Added audio track “${BOUNCE}”`, `Added MIDI track “${PAD}”`].includes(record.title);
+        say(after.state === "undone" || keeps, performance.now() - t1, `${after.state} · ${record.title}${after.note ? ` (${after.note})` : ""}`);
       } catch (error) { say(false, performance.now() - t1, `${record.title}: ${String(error?.message ?? error).slice(0, 200)}`); }
     }
     for (const record of records.values()) if (record.state === "unsure") say(false, undefined, `unsure, check Live: ${record.title}`);
@@ -226,7 +228,7 @@ try {
     process.stdout.write("\n");
     try {
       observation = await integration.observe(signal());
-      const after = await state();
+      const after = await state(); after.tracks = after.tracks.filter((name) => name !== BOUNCE && name !== PAD);
       const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
       const restored = same(before.tempo, after.tempo) && same(before.tracks, after.tracks) && before.scenes === after.scenes && same(before.locators, after.locators);
       say(restored, undefined, restored ? `Set as it was: tempo ${after.tempo}, ${after.tracks.length} tracks, ${after.scenes} scenes, ${after.locators.length} locators`

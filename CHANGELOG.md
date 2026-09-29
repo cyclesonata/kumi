@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.37.
+The first release for producers to use day to day. Ships with bridge 1.0.38.
 
 ### Changes to the Set
 
@@ -53,6 +53,9 @@ The first release for producers to use day to day. Ships with bridge 1.0.37.
 - A track whose input became No Input (its source track was deleted) no longer
   counts as armed: Live can't disarm it and it records nothing, but it used to
   stop recording elsewhere (bridge 1.0.37).
+- A loop or playhead change undoes after playing or recording since; the
+  playhead goes back only while stopped. A routing change on a track that had
+  No Input undoes too (bridge 1.0.38).
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 

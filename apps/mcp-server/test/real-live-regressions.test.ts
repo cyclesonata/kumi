@@ -101,6 +101,16 @@ test("a playhead, loop or locators past the end of the Set are refused with wher
   assert.equal((await simulator.snapshotAsync()).arrangement.locators.some((locator) => locator.name === "Kumi Start"), false);
 });
 
+test("routing a No Input track and undoing it puts No Input back without writing an empty sub-routing", async () => {
+  const simulator = checkingArguments(new DeterministicLiveSimulator()); const { call, apply, undo } = hostFor(simulator);
+  (simulator as any).state.tracks[0].routing = { ...(simulator as any).state.tracks[0].routing, inputType: "No Input", inputSubRouting: null };
+  const routed = await call("live_routing_preview", { trackRef: "track:track-1", inputType: "Ext. In", inputSubRouting: "1" });
+  assert.equal((await apply(routed, "route-from-no-input")).body.state, "applied");
+  const undone = await undo(routed, "route-from-no-input-undo");
+  assert.equal(undone.body.state, "undone", JSON.stringify(undone.body));
+  assert.deepEqual([(simulator as any).state.tracks[0].routing.inputType, (simulator as any).state.tracks[0].routing.inputSubRouting], ["No Input", null]);
+});
+
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, apply, undo } = hostFor(simulator);
   const created = await call("live_track_structure_preview", { action: "create-return", name: "Sweep Return" });

@@ -1109,7 +1109,7 @@ test("serve flushes the exit acknowledgement before terminating and ignores a no
   assert.deepEqual(notifiedRecords.map((record) => record.id), [1]);
 });
 
-test("transport preview applies with a revision fence and guardedly undoes", async () => {
+test("transport preview applies with a revision fence and undoes what still reads as it left it", async () => {
   const { adapter, state: fixtureState } = auditionFixture();
   const host = new McpHost(adapter);
   ready(host);
@@ -1140,14 +1140,22 @@ test("transport preview applies with a revision fence and guardedly undoes", asy
 
   const conflictPreview = JSON.parse(((await host.handleAsync({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "live_transport_preview", arguments: { metronome: true } } })) as any).result.content[0].text);
   await host.handleAsync({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "live_transport_apply", arguments: { transactionId: conflictPreview.transactionId, confirmation: "apply", idempotencyKey: "transport-conflict-apply" } } });
-  // Even an ABA edit that returns the touched field to the proposed value has
-  // a new authoritative revision and must not be mistaken for our post-state.
+  // A field changed since, by hand, keeps the change as it is.
   fixtureState.playback.transport.metronome = false;
-  fixtureState.playback.transport.metronome = true;
-  fixtureState.playback.revision = "external-transport-aba-edit";
+  fixtureState.playback.revision = "external-transport-edit";
   const refused = await host.handleAsync({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: conflictPreview.transactionId, confirmation: "undo", idempotencyKey: "transport-conflict-undo" } } });
   assert.equal((refused as any).result.isError, true);
-  assert.equal(fixtureState.playback.transport.metronome, true);
+  assert.equal(fixtureState.playback.transport.metronome, false);
+
+  // Playing since (a new playback revision, the playhead elsewhere) doesn't stop the undo: setting a loop,
+  // listening, then taking it back is the usual order.
+  const loopPreview = JSON.parse(((await host.handleAsync({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "live_transport_preview", arguments: { position: 16, loopEnabled: true } } })) as any).result.content[0].text);
+  await host.handleAsync({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "live_transport_apply", arguments: { transactionId: loopPreview.transactionId, confirmation: "apply", idempotencyKey: "transport-loop-apply" } } });
+  fixtureState.playback.transport.position = 40; fixtureState.playback.revision = "played-and-stopped";
+  const loopUndone = await host.handleAsync({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: loopPreview.transactionId, confirmation: "undo", idempotencyKey: "transport-loop-undo" } } });
+  assert.equal((loopUndone as any).result.isError, false, JSON.stringify(loopUndone));
+  assert.equal(fixtureState.playback.transport.loop.enabled, false);
+  assert.equal(fixtureState.playback.transport.position, 0);
 });
 
 test("clip launch previews, applies with one dispatch, verifies, and stops through the owning track", async () => {

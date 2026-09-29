@@ -713,7 +713,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const track = this.findTrack(objectRef("ref"));
         if (!track || args.expectedObjectIdentity !== track.objectIdentity) throw new Error("routing track identity changed since preview");
         if (args.expectedStateRevision !== routingStateRevision(track)) throw new Error("routing state changed since preview");
-        if (args.inputType !== undefined) track.routing = { ...(track.routing ?? {}), inputType: args.inputType as string | null } as RoutingState;
+        // As in Live, No Input has no sub-routing.
+        if (args.inputType !== undefined) track.routing = { ...(track.routing ?? {}), inputType: args.inputType as string | null, ...(args.inputType === "No Input" ? { inputSubRouting: null } : {}) } as RoutingState;
         if (args.inputSubRouting !== undefined) track.routing = { ...(track.routing ?? {}), inputSubRouting: args.inputSubRouting as string | null } as RoutingState;
         if (args.outputType !== undefined) track.routing = { ...(track.routing ?? {}), outputType: args.outputType as string | null } as RoutingState;
         if (args.outputSubRouting !== undefined) track.routing = { ...(track.routing ?? {}), outputSubRouting: args.outputSubRouting as string | null } as RoutingState;
