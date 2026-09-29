@@ -39,6 +39,8 @@ test("--version says Kumi's release, which is the packages' version", async () =
   for (const file of ["package.json", "apps/kumi/package.json", "packages/runtime/package.json"]) {
     assert.equal((JSON.parse(await readFile(join(root, file), "utf8")) as { version: string }).version, KUMI_VERSION, file);
   }
+  const app = JSON.parse(await readFile(join(root, "apps/kumi/package.json"), "utf8")) as { dependencies: Record<string, string> };
+  assert.equal(app.dependencies["@kumi/runtime"], KUMI_VERSION, "the app asks for the runtime beside it, or npm ci looks for it on the registry");
   assert.match(KUMI_VERSION, /^1\.\d+\.\d+$/);
 });
 
