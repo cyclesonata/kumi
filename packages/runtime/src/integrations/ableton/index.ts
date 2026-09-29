@@ -736,7 +736,9 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!running.recording && !running.playing) return undefined;
       const settle = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]);
       const what = running.recording ? "the recording and playback" : "playback";
-      return await stopEverything(settle) ? `Kumi stopped ${what}, since the plan didn't finish.` : `The plan didn't finish and Live may still be ${running.recording ? "recording" : "playing"}; tell the producer.`;
+      if (!await stopEverything(settle)) return `The plan didn't finish and Live may still be ${running.recording ? "recording" : "playing"}; tell the producer.`;
+      try { options.onAction?.({ title: running.recording ? "Recording stopped" : "Stopped", playing: false, recording: false }); } catch { /* a listener failure must not affect Live */ }
+      return `Kumi stopped ${what}, since the plan didn't finish.`;
     };
     const settled = (async (): Promise<Stop | undefined> => {
       let outcome: Stop | undefined; let finished = false;

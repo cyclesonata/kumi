@@ -89,6 +89,7 @@ test("a plan that recorded and then failed doesn't leave Live recording or playi
     assert.deepEqual([b.transport.playing, b.transport.arrangementRecord], [false, false]);
     assert.equal(b.transport.emergencyStops, 1);
     assert.equal(b.requests.find((request) => request.name === "live_session_emergency_stop")!.args.expectedRecording, "arrangement");
+    assert.deepEqual(b.actions.at(-1), { title: "Recording stopped", playing: false, recording: false }, "NOW shows the stop");
   } finally { await b.integration.close(); }
 });
 

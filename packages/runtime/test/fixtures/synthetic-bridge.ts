@@ -165,9 +165,11 @@ export function bridge(options: Options = {}) {
     try { return await answer(name, args, signal); } finally { settledDepth = Math.max(settledDepth, depth); }
   };
   const states: string[] = [];
-  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), onChange: (change) => records.push(change), changeTimeoutMs: 2_000, reconnectIntervalMs: 10 });
+  const actions: { title: string; playing?: boolean; recording?: boolean }[] = [];
+  const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => states.push(state), onChange: (change) => records.push(change),
+    onAction: (action) => actions.push(action), changeTimeoutMs: 2_000, reconnectIntervalMs: 10 });
   return {
-    integration, requests, records, states, get tempo() { return tempo; },
+    integration, requests, records, states, actions, get tempo() { return tempo; },
     /** How many Live round trips `work` waited for one after another; concurrent ones count once. */
     async roundTrips<T>(work: () => Promise<T>): Promise<{ value: T; trips: number; calls: number }> {
       const before = requests.length; settledDepth = 0; deepest = 0;
