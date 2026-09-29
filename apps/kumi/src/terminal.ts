@@ -24,7 +24,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -188,6 +188,11 @@ export function createTerminal(options: Options): Terminal {
         notice(memory.saved ? `[memory] About ${memory.setName ?? "this Set"}: ${list(memory.set)}` : "[memory] This Set isn't saved yet; notes about it are kept once it is.");
         return;
       }
+      if (verb === "/recipes") {
+        const recipes = await controller.recipes?.() ?? [];
+        notice(recipes.length ? `[recipes] ${recipes.map((recipe) => `${recipe.name}${recipe.params.length ? ` (needs ${recipe.params.map((param) => param.name).join(", ")})` : ""}: ${recipe.about}`).join(" · ")}` : "[recipes] None yet. Ask Kumi to save a way of working as a recipe.");
+        return;
+      }
       if (verb === "/forget") {
         const note = argument ? await controller.forget?.(argument) : undefined;
         notice(note ? `[memory] Forgot: ${note.text}` : "[memory] Use: /forget <id>, with an id from /memory.");
@@ -268,6 +273,8 @@ export function createTerminal(options: Options): Terminal {
       case "tool-end": if (!suppressOutput) notice(`[tool] ${event.name} ${event.isError ? "error" : "success"} · ${event.elapsedMs} ms`); break;
       case "remembered": notice(`[memory] ${event.replaced ? "Updated" : "Will remember"}${event.scope === "producer" ? " about you" : ""}: ${event.note.text}${event.pending ? " (once the Set is saved)" : ""}`); break;
       case "forgot": notice(`[memory] Forgot: ${event.note.text}`); break;
+      case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
+      case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
       case "turn-complete": {
         if (event.result.stopReason !== "cancelled" && !suppressOutput) presentation?.text(text.finish()); else text.discard();
         const usage = event.result.usage;

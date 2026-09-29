@@ -16,7 +16,13 @@ export interface Step {
 export type Entry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; steps: Step[]; status: "running" | "done" | "stopped" | "failed"; elapsedMs?: number }
-  | { kind: "notice"; text: string; tone: "info" | "warn" };
+  | { kind: "notice"; text: string; tone: "info" | "warn" }
+  /** Audio Kumi listened to: its tonal balance, or its differences from a reference. */
+  | { kind: "heard"; file: string; summary: string; bands: number[]; compared?: { reference: string; summary: string; differences: number[] } };
+
+/** Ten bands, low to high, as the listening analysis names them. */
+const BAND_LABELS = ["sub", "bass", "u.bas", "l.mid", "mids", "u.mid", "pres", "bite", "brill", "air"];
+const BARS = "▁▂▃▄▅▆▇█";
 
 export interface Row {
   spans: Span[];
@@ -56,6 +62,8 @@ const STEP_LABELS: Record<string, string> = {
   set_track_color: "changed a track colour",
   undo_change: "undid a change",
   make_changes: "made changes",
+  listen: "listened",
+  run_recipe: "ran a recipe",
   find_samples: "looked for samples",
   load_sample: "loaded a sample",
   load_sample_to_pad: "loaded a pad",
@@ -71,6 +79,8 @@ const DOING: Record<string, string> = {
   live_browser_search: "searching the Browser",
   live_note_read: "reading notes",
   make_changes: "making changes",
+  listen: "listening",
+  run_recipe: "running a recipe",
   find_samples: "looking for samples",
   undo_change: "undoing a change",
 };
@@ -97,6 +107,7 @@ function entryRows(entry: Entry, width: number): Row[] {
     const style = entry.tone === "warn" ? S.warn : S.faint;
     return wrap([{ text: entry.text, style }], inner).map((spans) => ({ spans }));
   }
+  if (entry.kind === "heard") return heardRows(entry, inner);
   const rows: Row[] = [];
   if (entry.text) {
     for (const row of renderMarkdown(entry.text.replace(/\n+$/, ""), inner, S.text)) {
@@ -125,6 +136,32 @@ function entryRows(entry: Entry, width: number): Row[] {
   }
   if (entry.status === "stopped") rows.push({ spans: [{ text: "stopped", style: S.faint }] });
   if (entry.status === "failed" && !entry.text) rows.push({ spans: [{ text: "Kumi couldn't answer that; see the note below.", style: S.faint }] });
+  return rows;
+}
+
+/**
+ * What Kumi heard, in three quiet rows: the file and its summary, then its balance as a small
+ * spectrum (or, against a reference, how many dB each band is over or under it), then the bands.
+ */
+function heardRows(entry: Extract<Entry, { kind: "heard" }>, width: number): Row[] {
+  const cell = width >= 60 ? 6 : 5;
+  const fits = Math.max(1, Math.min(BAND_LABELS.length, Math.floor(width / cell)));
+  const title = entry.compared ? `Heard ${entry.file} against ${entry.compared.reference}, loudness matched` : `Heard ${entry.file} · ${entry.summary}`;
+  const rows: Row[] = wrap([{ text: title, style: S.dim }], width).map((spans) => ({ spans }));
+  const pad = (text: string) => text.padEnd(cell).slice(0, cell);
+  if (entry.compared) {
+    rows.push({ spans: entry.compared.differences.slice(0, fits).map((value) => {
+      const text = `${value > 0 ? "+" : value < 0 ? "−" : " "}${Math.abs(value).toFixed(1)}`;
+      return { text: pad(text), style: Math.abs(value) >= 1.5 ? (value > 0 ? S.warn : S.accent) : S.faint };
+    }) });
+  } else {
+    const loudest = Math.max(...entry.bands);
+    rows.push({ spans: entry.bands.slice(0, fits).map((value) => {
+      const level = Math.max(0, Math.min(7, Math.round(7 + (value - loudest) / 4)));
+      return { text: pad(BARS[level]!.repeat(cell - 2)), style: S.accent };
+    }) });
+  }
+  rows.push({ spans: BAND_LABELS.slice(0, fits).map((label) => ({ text: pad(label), style: S.faint })) });
   return rows;
 }
 

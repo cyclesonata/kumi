@@ -816,3 +816,62 @@ test("/memory shows what Kumi remembers, about you and this Set, and forgets a n
   assert.ok(!has(h.screen(), "Forget this note?"));
   await h.app.close();
 });
+
+// ---- listening and recipes
+
+test("what Kumi heard shows as a small spectrum, and a comparison as dB over or under the reference", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "heard", file: "ref.wav", summary: "−8.4 LUFS · 128 BPM · F minor", bands: [-8, -5, -7, -9, -10, -12, -13, -16, -18, -22] });
+  h.emit({ type: "heard", file: "mix.wav", summary: "−12.1 LUFS", bands: [-8, -5, -7, -6, -10, -12, -15, -17, -19, -22],
+    compared: { reference: "ref.wav", summary: "−8.4 LUFS", differences: [0.2, 0.4, -0.3, 2.8, 0, -1.1, -2, -1.5, -0.8, 0.5], headlines: ["low mids +2.8 dB"] } });
+  const lines = h.screen();
+  assert.ok(has(lines, "Heard ref.wav · −8.4 LUFS · 128 BPM · F minor"));
+  // 4 dB a step below the loudest band: the bass is full height, the air 17 dB down is under half.
+  assert.ok(lines.some((line) => /████/.test(line) && /▄▄▄▄/.test(line)), "a spectrum of bars");
+  assert.ok(has(lines, "Heard mix.wav against ref.wav, loudness matched"));
+  assert.ok(lines.some((line) => line.includes("+2.8") && line.includes("−2.0")), "signed differences per band");
+  assert.ok(lines.filter((line) => line.includes("l.mid") && line.includes("air")).length === 2, "the bands, low to high");
+  await h.app.close();
+});
+
+test("/recipes lists saved ways of working; one without blanks runs straight away, one with blanks asks what to run it on", async () => {
+  const ran: string[] = []; const forgotten: string[] = [];
+  const recipes = [
+    { name: "Drum bus", about: "Glue, saturation and a short room on a new return", params: [], steps: 3, used: 2, lastUsed: Date.now() - 86_400_000, created: 1 },
+    { name: "Resample twice", about: "OTT and Saturator, then Grain Delay", params: [{ name: "track", about: "the track to resample" }], steps: 6, used: 0, created: 2 },
+  ];
+  const h = harness(120, 36, undefined, {
+    async recipes() { return recipes; },
+    async runRecipe(name) { ran.push(name); return { text: "Done:\n- Added return track “Drum Bus”", isError: false }; },
+    async forgetRecipe(name) { forgotten.push(name); return true; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/recipes\r");
+  await delay(10);
+  let lines = h.screen();
+  assert.ok(has(lines, "Your recipes") && has(lines, "Drum bus") && has(lines, "Resample twice") && has(lines, "used 1 day ago"));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Run it now"));
+  await h.type("\r");
+  await delay(10);
+  assert.deepEqual(ran, ["Drum bus"], "no blanks: it runs with no model reply");
+  assert.ok(has(h.screen(), "Added return track “Drum Bus”"));
+  await h.type("/recipes\r");
+  await delay(10);
+  await h.type("\u001b[B\r");
+  await delay(5);
+  lines = h.screen();
+  assert.ok(has(lines, "Run it on…") && has(lines, "Kumi needs: the track to resample"));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Run my recipe “Resample twice” on"), "the box says it, for the producer to finish");
+  h.emit({ type: "recipe", action: "saved", name: "Vocal chain", steps: 4 });
+  assert.ok(has(h.screen(), "Kumi saved the recipe “Vocal chain” (4 steps)"));
+  await h.app.close();
+});

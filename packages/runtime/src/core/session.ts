@@ -1,9 +1,11 @@
 import type {
-  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, MemoryStore, Observation, SavedConversation,
+  ChangeRecord, ConnectionState, ConversationStore, Integration, IntegrationFactory, Kernel, KernelCheckpoint, KernelFactory, KernelTool, MemoryStore, Observation, SavedConversation,
   SessionController, SessionEvent, SessionStatus, TurnResult, TurnState,
 } from "./contracts.js";
 import { KumiError } from "./errors.js";
 import { memoryInstructions, memoryTools } from "./memory.js";
+import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
+import { listeningTools } from "../audio/tools.js";
 import { OBSERVATION_MARKER } from "../kernel/budget.js";
 
 interface Options {
@@ -24,6 +26,10 @@ interface Options {
   conversations?: ConversationStore;
   /** What Kumi remembers about the producer and each saved Set; without it Kumi keeps no notes. */
   memory?: MemoryStore;
+  /** Let the model hear audio files (reference tracks, samples, bounces). */
+  listen?: boolean;
+  /** The producer's saved recipes; without it none are offered. */
+  recipes?: RecipeStore;
 }
 interface Operation {
   id: number;
@@ -67,6 +73,12 @@ export function createSession(options: Options): SessionController {
   let currentSetName: string | undefined;
   // Notes are kept by the model's own calls; each write is quiet, so it costs no model reply.
   const notes = options.memory ? memoryTools({ store: options.memory, project: () => currentProject, onEvent: (event) => emit(event) }) : undefined;
+  // Recipes run through the open Set's plan tool, with its checks, HISTORY and undo.
+  let planTool: KernelTool | undefined;
+  const recipes = options.recipes ? recipeTools({ store: options.recipes, plan: () => planTool, onEvent: (event) => emit(event) }) : [];
+  // Files are found by path; the integration can also name something in the Set by its file.
+  const listening = options.listen ? listeningTools({ onEvent: (event) => emit(event),
+    resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
   let turns = 0;
   let nextOperation = 0;
   let active: Operation | undefined;
@@ -155,9 +167,11 @@ export function createSession(options: Options): SessionController {
         // in the prompt cache, and a note kept meanwhile is in the conversation already.
         const remembered = options.memory ? await options.memory.load(observation.project?.id).catch(() => undefined) : undefined;
         assertCurrent(op);
-        const extra = remembered ? memoryInstructions(remembered, observation.project?.name) : "";
+        const saved = options.recipes ? await options.recipes.list().catch(() => []) : [];
+        assertCurrent(op);
+        const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved)].filter(Boolean).join("\n\n");
         value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-          tools: notes ? [...observation.tools, ...notes.tools] : observation.tools, signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+          tools: [...observation.tools, ...(notes?.tools ?? []), ...listening, ...recipes], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
         if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
         kernel = { value, key: observation.key, revision, lifetime };
       } catch (error) { lifetime.abort(); throw error; }
@@ -188,6 +202,7 @@ export function createSession(options: Options): SessionController {
     const snapshot = await integration.observe(op.controller.signal);
     assertCurrent(op);
     currentProject = snapshot.project?.id; currentSetName = snapshot.project?.name;
+    planTool = snapshot.tools.find((tool) => tool.name === "make_changes");
     // Notes about a Set made before its first save are kept now that it has a file.
     if (currentProject) void notes?.flush().catch(() => {});
     await ensureKernel(op, snapshot); assertCurrent(op);
@@ -321,6 +336,31 @@ export function createSession(options: Options): SessionController {
       return { ...memory, ...(currentSetName ? { setName: currentSetName } : {}), saved: currentProject !== undefined };
     },
     async forget(id) { return notes?.forget(id); },
+    async recipes() {
+      if (!options.recipes) return [];
+      return (await options.recipes.list()).map((recipe) => ({ name: recipe.name, about: recipe.about, params: recipe.params, steps: recipe.steps.length, used: recipe.used, created: recipe.created,
+        ...(recipe.lastUsed ? { lastUsed: recipe.lastUsed } : {}) }));
+    },
+    async runRecipe(name) {
+      if (!started) throw new Error("Session is not started");
+      const run = recipes.find((tool) => tool.name === RUN_RECIPE_TOOL);
+      if (!run) return { text: "Kumi keeps no recipes here.", isError: true };
+      let outcome = { text: "", isError: true };
+      // A fresh look at the Set first, as for an answer: the recipe's steps need current references.
+      await perform(false, "refresh", async (op) => {
+        await observe(op);
+        const result = await run.execute({ name, with: {}, final: true }, op.controller.signal);
+        outcome = { text: result.reply ?? result.text, isError: Boolean(result.isError) };
+        return undefined;
+      });
+      return outcome;
+    },
+    async forgetRecipe(name) {
+      const recipe = await options.recipes?.get(name);
+      if (!recipe || !await options.recipes!.remove(recipe.name)) return false;
+      emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
+      return true;
+    },
     async cancel() { const op = active; if (!op) return; op.controller.abort(); await op.done; },
     async reconfigure() {
       if (state === "closed") throw new Error("Session is closed");

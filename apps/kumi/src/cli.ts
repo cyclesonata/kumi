@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createSession, KumiError, openCredentialStore,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, KumiError, openCredentialStore,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { loadConfig, loadMemoryFile, loadProjectsDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { loadConfig, loadMemoryFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
@@ -117,6 +117,8 @@ try {
       onEvent: (event) => terminal?.handleEvent(event),
       ...(config.mode === "live" ? { conversations: createConversationStore(loadProjectsDir()) } : {}),
       memory: createMemoryStore({ projectsDir: loadProjectsDir(), producerFile: loadMemoryFile() }),
+      listen: true,
+      recipes: createRecipeStore(loadRecipesDir()),
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";

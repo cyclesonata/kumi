@@ -38,6 +38,8 @@ export const loadAuthFile = (env: Env = process.env) => absoluteFile(env, "KUMI_
 export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_SETTINGS_FILE", join(homedir(), ".kumi", "settings.json"));
 /** What Kumi remembers about the producer, in any project (each Set's notes are in its project folder). */
 export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(homedir(), ".kumi", "memory.json"));
+/** The producer's recipes, one file each. */
+export const loadRecipesDir = (env: Env = process.env) => absoluteFile(env, "KUMI_RECIPES_DIR", join(homedir(), ".kumi", "recipes"));
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
 

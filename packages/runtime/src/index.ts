@@ -1,5 +1,8 @@
-export type { CatchUp, ChangeFamily, ChangeRecord, ClipNote, DevicePlacement, ConversationStore, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Memory, MemoryEvent, MemoryNote, MemoryScope, MemoryStore, Observation, SessionController, SessionEvent, SessionStatus, StreamingCall, ToolResult, TurnResult, TurnState, Usage } from "./core/contracts.js";
+export type { CatchUp, ChangeFamily, ChangeRecord, ClipNote, DevicePlacement, ConversationStore, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, HeardEvent, KernelTool, LiveFocus, RecipeEvent, RecipeSummary, Memory, MemoryEvent, MemoryNote, MemoryScope, MemoryStore, Observation, SessionController, SessionEvent, SessionStatus, StreamingCall, ToolResult, TurnResult, TurnState, Usage } from "./core/contracts.js";
 export { createMemoryStore, FORGET_TOOL, MAX_NOTE, MAX_NOTES, memoryInstructions, REMEMBER_TOOL } from "./core/memory.js";
+export { analyzeFile, compare, hear, type Analysis, type Comparison } from "./audio/index.js";
+export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
+export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";

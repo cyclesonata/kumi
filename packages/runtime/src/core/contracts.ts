@@ -121,6 +121,8 @@ export interface Integration {
   close(): Promise<void>;
   /** Undo one of Kumi's changes (the latest undoable one when `id` is omitted). */
   undo?(id: string | undefined, signal: AbortSignal): Promise<ChangeRecord>;
+  /** The audio file behind something in the Set the model names (a clip, say); undefined when it isn't one. */
+  audioFile?(named: string, signal: AbortSignal): Promise<string | undefined>;
 }
 export type IntegrationFactory = (connection: (state: ConnectionState) => void) => Integration;
 
@@ -214,7 +216,9 @@ export type SessionEvent = KernelEvent
   /** `kind` and `provider` say what failed and where, so an app can offer the fix (sign in, choose a model). */
   | { type: "error"; message: string; kind?: FailureKind; provider?: string }
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
-  | MemoryEvent;
+  | MemoryEvent
+  | HeardEvent
+  | RecipeEvent;
 
 /** "producer": true of them in any project; "set": about one saved Set. */
 export type MemoryScope = "producer" | "set";
@@ -231,6 +235,22 @@ export interface MemoryStore {
   load(project: string | undefined): Promise<Memory>;
   save(scope: MemoryScope, project: string | undefined, notes: readonly MemoryNote[]): Promise<void>;
 }
+/**
+ * Audio Kumi listened to, for the app to picture: its summary line and band levels (dB share of
+ * the whole, low to high), and for a comparison the reference and the differences per band.
+ */
+export interface HeardEvent {
+  type: "heard";
+  file: string;
+  summary: string;
+  bands: number[];
+  compared?: { reference: string; summary: string; differences: number[]; headlines: string[] };
+}
+/** A recipe saved, run or removed, for the app to show. */
+export interface RecipeEvent { type: "recipe"; action: "saved" | "updated" | "running" | "forgotten"; name: string; steps: number }
+/** A recipe as the app lists it. */
+export interface RecipeSummary { name: string; about: string; params: { name: string; about: string }[]; steps: number; used: number; lastUsed?: number; created: number }
+
 /** A note written or removed, for the app to show; `pending` while the Set isn't saved yet. */
 export type MemoryEvent =
   | { type: "remembered"; scope: MemoryScope; note: MemoryNote; replaced?: MemoryNote; pending?: boolean }
@@ -262,6 +282,11 @@ export interface SessionController {
   memory?(): Promise<(Memory & { setName?: string; saved: boolean }) | undefined>;
   /** Remove a note by id; undefined when there's none. */
   forget?(id: string): Promise<MemoryNote | undefined>;
+  /** The producer's saved recipes, most recently used first. */
+  recipes?(): Promise<RecipeSummary[]>;
+  /** Run a recipe that has no blanks, straight away (no model involved); what it did, in words. */
+  runRecipe?(name: string): Promise<{ text: string; isError: boolean }>;
+  forgetRecipe?(name: string): Promise<boolean>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

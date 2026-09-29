@@ -3,7 +3,7 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
   type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
@@ -73,6 +73,7 @@ const COMMANDS = [
   { name: "/effort", about: "How hard the model thinks" },
   { name: "/login", about: "Sign in to a provider" },
   { name: "/memory", about: "What Kumi remembers" },
+  { name: "/recipes", about: "Your saved ways of working" },
   { name: "/logout", about: "Sign out of a provider" },
   { name: "/status", about: "What Kumi is connected to" },
   { name: "/help", about: "Keys and commands" },
@@ -82,7 +83,7 @@ const COMMANDS = [
 /** Offered only with a ModelControl to answer them. */
 const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logout"];
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
@@ -347,13 +348,25 @@ export class TuiApp {
       case "forgot":
         this.notice(`Kumi forgot: ${event.note.text}`, "info");
         break;
+      case "recipe": {
+        const steps = `${event.steps} ${event.steps === 1 ? "step" : "steps"}`;
+        const text = event.action === "saved" ? `Kumi saved the recipe “${event.name}” (${steps})` : event.action === "updated" ? `Kumi updated the recipe “${event.name}” (${steps})`
+          : event.action === "running" ? `Running your recipe “${event.name}” (${steps})` : `Kumi forgot the recipe “${event.name}”`;
+        this.notice(text, "info");
+        break;
+      }
+      case "heard":
+        this.transcript.add({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
+          ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) });
+        break;
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
         if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
         break;
       case "tool-start":
         if (this.planning === event.id) this.planning = undefined;
-        if (!this.current || this.suppress || event.name === REMEMBER_TOOL || event.name === FORGET_TOOL) break;
+        // Keeping notes and recipes shows as a line of its own, not a step.
+        if (!this.current || this.suppress || [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL].includes(event.name)) break;
         this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running" });
         this.transcript.touch(this.current);
         break;
@@ -502,7 +515,7 @@ export class TuiApp {
     const text = this.editor.text;
     if (this.menuDismissed || !text.startsWith("/") || /\s/.test(text)) return [];
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
-      && (command.name !== "/memory" || this.options.controller.memory !== undefined));
+      && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -519,6 +532,11 @@ export class TuiApp {
       this.editor.clear();
       const open = { "/model": () => this.openModels(), "/effort": () => this.openEffort(), "/login": () => this.openLogin(), "/logout": () => this.openLogout() }[command]!;
       await open().catch((error: unknown) => this.panelFailed(error));
+      return;
+    }
+    if (command === "/recipes" && controller.recipes) {
+      this.editor.clear();
+      await this.openRecipes().catch((error: unknown) => this.panelFailed(error));
       return;
     }
     if (command === "/memory" && controller.memory) {
@@ -771,6 +789,42 @@ export class TuiApp {
         this.closePanel();
         if (answer.value !== "yes") return;
         if (!await controller.forget?.(item.value!)) this.notice("That note was already gone.", "info");
+      } };
+      this.scheduler.request();
+    } };
+    this.scheduler.request();
+  }
+
+  /**
+   * /recipes: the producer's saved ways of working. Choosing one runs it (straight away when it
+   * has no blanks; otherwise the box is filled in to say what to run it on) or forgets it.
+   */
+  private async openRecipes(): Promise<void> {
+    const { controller } = this.options;
+    const recipes = await controller.recipes?.() ?? [];
+    const now = Date.now();
+    const items: PickerItem[] = recipes.length ? recipes.map((recipe) => ({ label: recipe.name, detail: recipe.about, value: recipe.name,
+      note: recipe.used ? `used ${since(recipe.lastUsed ?? recipe.created, now)}` : `${recipe.steps} steps`, noteTone: "faint" as const }))
+      : [{ label: "None yet: ask Kumi to save a way of working as a recipe", inert: true }];
+    const picker = new Picker("Your recipes · ways of working Kumi replays without planning again", items, { filterable: true });
+    this.panel = { kind: "pick", picker, choose: (item) => {
+      const recipe = recipes.find((candidate) => candidate.name === item.value)!;
+      const blanks = recipe.params.map((param) => param.about || param.name).join(", ");
+      const actions = new Picker(`“${recipe.name}” · ${recipe.steps} steps`, [
+        { label: recipe.params.length ? "Run it on…" : "Run it now", detail: recipe.params.length ? `Kumi needs: ${blanks}` : recipe.about, value: "run" },
+        { label: "Forget it", value: "forget" },
+        { label: "Keep it", value: "keep" },
+      ]);
+      this.panel = { kind: "pick", picker: actions, choose: async (answer) => {
+        this.closePanel();
+        if (answer.value === "forget") { if (!await controller.forgetRecipe?.(recipe.name)) this.notice("That recipe was already gone.", "info"); return; }
+        if (answer.value !== "run") return;
+        // With blanks, the producer says what to run it on, in their own words.
+        if (recipe.params.length) { this.editor.set(`Run my recipe “${recipe.name}” on `); this.scheduler.request(); return; }
+        if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+        this.activity = `running “${recipe.name}”`;
+        const outcome = await controller.runRecipe?.(recipe.name).catch((error: unknown) => ({ text: safeError(error, this.secrets), isError: true }));
+        if (outcome) this.notice(outcome.isError ? `The recipe stopped: ${outcome.text}` : outcome.text, outcome.isError ? "warn" : "info");
       } };
       this.scheduler.request();
     } };
