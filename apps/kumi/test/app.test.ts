@@ -398,7 +398,7 @@ test("NOW draws a new clip's notes as a tiny piano roll", async () => {
     clip: { length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) } };
   const text = (line: { text: string }[] | undefined) => (line ?? []).map((part) => part.text).join("");
   const lines = changePicture(chord, 12)!;
-  assert.deepEqual(lines.map(text), ["⠉".repeat(12), "⣉".repeat(12)], "three pitches in three lanes: top, middle and bottom");
+  assert.deepEqual(lines.map(text), ["⣉".repeat(12), "⣀".repeat(12)], "C, E and G at their distance: G at the top, E three lanes down, C at the bottom");
   const melody: ChangeRecord = { ...chord, clip: { length: 4, notes: [{ pitch: 72, start: 0, duration: 2, velocity: 100 }, { pitch: 60, start: 2, duration: 2, velocity: 30 }] } };
   const [high, low] = changePicture(melody, 8)!;
   assert.equal(text(high), "⠉⠉⠉⠉⠀⠀⠀⠀"); assert.equal(text(low), "⠀⠀⠀⠀⣀⣀⣀⣀", "time runs across, higher notes sit higher");
@@ -409,8 +409,8 @@ test("NOW draws a new clip's notes as a tiny piano roll", async () => {
   connect(h);
   h.emit({ type: "change", change: chord });
   const screen = h.screen();
-  const row = screen.findIndex((line) => line.includes("⠉⠉⠉⠉⠉⠉⠉⠉"));
-  assert.ok(row > 0 && screen[row + 1]!.includes("⣉⣉⣉⣉⣉⣉⣉⣉"), "two rows under NOW");
+  const row = screen.findIndex((line) => line.includes("⣉⣉⣉⣉⣉⣉⣉⣉"));
+  assert.ok(row > 0 && screen[row + 1]!.includes("⣀⣀⣀⣀⣀⣀⣀⣀"), "two rows under NOW");
   assert.ok(screen[row - 1]!.includes("New MIDI clip"), "right under the change's title");
   await h.app.close();
 });
@@ -1220,5 +1220,30 @@ test("in FOCUS's tree, Live's selection has a band under it and the accent; a pi
   assert.ok(h.screen()[gate]!.trimEnd().endsWith("pinned"));
   await h.type(click(h.screen(), gate, "pinned"));
   assert.ok(!h.screen()[gate]!.includes("pinned"), "clicking pinned clears it");
+  await h.app.close();
+});
+
+test("FOCUS's MIDI view draws the highlighted clip as a small piano roll, its selected notes standing out", async () => {
+  const view = { slotRef: "3:clip_slot:2:0", name: "Chords", length: 4, notes: [
+    { pitch: 60, start: 0, duration: 1, velocity: 90 }, { pitch: 64, start: 1, duration: 1, velocity: 90, selected: true }, { pitch: 67, start: 2, duration: 2, velocity: 90 }] };
+  const reads: string[] = [];
+  const h = harness(120, 36, undefined, { async clipView(ref) { reads.push(ref); return view; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const focus = { track: { name: "Keys", color: "#5ec1f7", kind: "midi" as const }, slotRef: "3:clip_slot:2:0", clip: "Chords", detail: "Clip" as const, selectedNotes: 1 };
+  h.emit({ type: "focus", focus });
+  await delay(5);
+  const lines = h.screen();
+  assert.ok(has(lines, "FOCUS · Clip")); assert.ok(has(lines, "■  Keys › ▬  Chords")); assert.ok(has(lines, "1 bar · 3 notes · 1 selected"));
+  const roll = lines.filter((line) => /[⠁-⣿]/.test(line.slice(80)));
+  assert.equal(roll.length >= 2, true, "a piano roll of braille rows");
+  // Selected notes stand out in the accent, the rest are quiet.
+  assert.match(h.written, /38;2;134;227;181;48;2;20;22;26m[⠀-⣿]/);
+  // Read again when the selection changes, not on every focus report.
+  h.emit({ type: "focus", focus: { ...focus } });
+  h.emit({ type: "focus", focus: { ...focus, selectedNotes: 2 } });
+  await delay(5);
+  assert.deepEqual(reads, ["3:clip_slot:2:0", "3:clip_slot:2:0"]);
   await h.app.close();
 });

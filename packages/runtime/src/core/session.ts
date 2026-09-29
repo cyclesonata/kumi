@@ -591,6 +591,10 @@ export function createSession(options: Options): SessionController {
       emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
       return true;
     },
+    async clipView(slotRef) {
+      if (!integration?.clipView || connection !== "connected") return undefined;
+      return integration.clipView(slotRef, AbortSignal.timeout(10_000)).catch(() => undefined);
+    },
     async deviceTree(trackRef) {
       if (!integration?.deviceTree || connection !== "connected") return undefined;
       return integration.deviceTree(trackRef, AbortSignal.timeout(10_000)).catch(() => undefined);

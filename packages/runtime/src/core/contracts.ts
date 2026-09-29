@@ -156,6 +156,16 @@ export interface Integration {
   stopLive?(signal: AbortSignal): Promise<boolean>;
   /** A track's devices, racks' chains and what's in them, for FOCUS; undefined when Live can't say. */
   deviceTree?(trackRef: string, signal: AbortSignal): Promise<DeviceTree | undefined>;
+  /** The MIDI clip in a Session slot, its notes and which are selected, for FOCUS; undefined for none (or audio). */
+  clipView?(slotRef: string, signal: AbortSignal): Promise<ClipView | undefined>;
+}
+
+/** A MIDI clip as FOCUS draws it: its length in beats, and its notes (the first 512), selected ones marked. */
+export interface ClipView {
+  slotRef: string;
+  name: string;
+  length: number;
+  notes: (ClipNote & { selected?: boolean })[];
 }
 
 /** A device in a track's tree: what the bridge says it is, and a rack's chains. Names are data. */
@@ -200,6 +210,8 @@ export interface LiveFocus {
   track?: { name: string; color?: string; kind?: "midi" | "audio" | "group" | "return" | "main" };
   /** The selected track's reference, for reading its devices (FOCUS's tree). */
   trackRef?: string;
+  /** The highlighted Session slot's reference, for drawing its clip (FOCUS's MIDI view). */
+  slotRef?: string;
   scene?: string;
   /** The clip in the Clip view; "" when it has no name. */
   clip?: string;
@@ -419,6 +431,8 @@ export interface SessionController {
   stopLive?(): Promise<boolean>;
   /** A track's device tree, for FOCUS (while connected). */
   deviceTree?(trackRef: string): Promise<DeviceTree | undefined>;
+  /** The clip in a Session slot, for FOCUS (while connected). */
+  clipView?(slotRef: string): Promise<ClipView | undefined>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

@@ -126,10 +126,10 @@ test("a download that doesn't match its published checksum isn't kept", async ()
   const model = new TextEncoder().encode("a speech model");
   const sha = createHash("sha256").update(model).digest("hex");
   const tree = (oid: string) => async (url: string) => (url.includes("/api/models/") ? new TextEncoder().encode(JSON.stringify([{ path: "ggml-tiny.en.bin", size: model.length, lfs: { oid } }])) : model);
-  await assert.rejects(whisperModel("ggml-tiny.en.bin", { toolsDir, download: tree("f".repeat(64)), env: {} }), /didn't match/);
+  await assert.rejects(whisperModel("ggml-tiny.en.bin", { toolsDir, download: tree("f".repeat(64)), env: {}, free: async () => 1e12 }), /didn't match/);
   assert.deepEqual(readdirSync(join(toolsDir, "whisper-models")), []);
   const fetched: string[] = [];
-  const path = await whisperModel("ggml-tiny.en.bin", { toolsDir, download: tree(sha), env: {}, onFetch: (message) => fetched.push(message) });
+  const path = await whisperModel("ggml-tiny.en.bin", { toolsDir, download: tree(sha), env: {}, free: async () => 1e12, onFetch: (message) => fetched.push(message) });
   assert.equal(readFileSync(path, "utf8"), "a speech model");
   assert.equal(fetched.length, 1);
   // Kept: asked again, nothing is fetched.
@@ -249,7 +249,8 @@ test("off a Mac, ffmpeg is fetched once into Kumi's folder, checked against its 
     const asked: string[] = []; const said: string[] = [];
     const download = async (url: string) => { asked.push(url); return url.startsWith("https://api.github.com/") ? release(sha) : new Uint8Array(data); };
     const toolsDir = join(root, "tools");
-    const options = { env: {}, toolsDir, platform: "linux", arch: "x64", download, onFetch: (message: string) => said.push(message) };
+    // Room on the disk, whatever this computer's is.
+    const options = { env: {}, toolsDir, platform: "linux", arch: "x64", download, onFetch: (message: string) => said.push(message), free: async () => 1e12 };
     assert.equal(await findFfmpeg({ ...options, installedOnly: true }), undefined, "the doctor fetches nothing");
     assert.equal(asked.length, 0);
     const found = await findFfmpeg(options);

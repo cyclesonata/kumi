@@ -3,7 +3,7 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
   type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
@@ -194,8 +194,13 @@ export class TuiApp {
   private treeKey: string | undefined;
   private treeReading = false;
   private treeAgain = false;
-  /** While the tree shows, it's read again now and then: a renamed chain or a device added by hand shows. */
+  /** While the tree or the clip shows, it's read again now and then: what changed in Live by hand shows. */
   private treeRefresh: ReturnType<typeof setInterval> | undefined;
+  /** FOCUS's MIDI view: the highlighted Session slot's clip, read when the slot, the clip or the selected notes change. */
+  private clip: ClipView | undefined;
+  private clipKey: string | undefined;
+  private clipReading = false;
+  private clipAgain = false;
   /** The keyboard's place in the tree (Tab moves into it); undefined while typing. */
   private treeCursor: number | undefined;
   /** What the producer points at: shown above the input box and sent with each message until cleared. */
@@ -331,8 +336,8 @@ export class TuiApp {
         // The session says what happened and what Kumi does about it (a notice).
         this.connection = event.state;
         // Focus can arrive before the connection says so; the tree is read once it does. Gone, it goes.
-        if (event.state === "connected") this.readTree(true);
-        else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; }
+        if (event.state === "connected") { this.readTree(true); this.readClip(true); }
+        else { this.tree = undefined; this.treeKey = undefined; this.treeCursor = undefined; this.clip = undefined; this.clipKey = undefined; }
         break;
       case "observation":
         this.setName = setNameFrom(event.label);
@@ -340,6 +345,7 @@ export class TuiApp {
       case "focus":
         this.focus = event.focus;
         this.readTree();
+        this.readClip();
         break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());
@@ -763,10 +769,35 @@ export class TuiApp {
       });
   }
 
-  /** Every few seconds while the tree shows (one read at a time), so what changed in Live by hand shows too. */
-  private keepTreeFresh(shown: boolean): void {
-    if (shown && !this.treeRefresh) { this.treeRefresh = setInterval(() => { if (!this.closing) this.readTree(true); }, TREE_REFRESH_MS); this.treeRefresh.unref?.(); }
-    else if (!shown && this.treeRefresh) { clearInterval(this.treeRefresh); this.treeRefresh = undefined; }
+  /** Every few seconds while the tree or the clip shows (one read at a time), so what changed in Live by hand shows too. */
+  private keepTreeFresh(shown: false | "tree" | "clip"): void {
+    if (shown && !this.treeRefresh) {
+      this.treeRefresh = setInterval(() => { if (this.closing) return; if (this.focus?.detail === "Clip") this.readClip(true); else this.readTree(true); }, TREE_REFRESH_MS);
+      this.treeRefresh.unref?.();
+    } else if (!shown && this.treeRefresh) { clearInterval(this.treeRefresh); this.treeRefresh = undefined; }
+  }
+
+  /** Read the highlighted slot's clip when the slot, its name or the selected notes change (or `again`). One read at a time. */
+  private readClip(again = false): void {
+    const ref = this.focus?.slotRef; const read = this.options.controller.clipView;
+    if (!ref || !read || this.connection !== "connected" || this.focus?.detail !== "Clip") return;
+    const key = `${ref}\u0000${this.focus?.clip ?? ""}\u0000${this.focus?.selectedNotes ?? 0}`;
+    if (!again && key === this.clipKey) return;
+    this.clipKey = key;
+    if (this.clipReading) { this.clipAgain = true; return; }
+    this.clipReading = true;
+    void read.call(this.options.controller, ref).then((clip) => { if (clip?.slotRef === this.focus?.slotRef) this.clip = clip; else if (!clip) this.clip = undefined; }, () => {})
+      .finally(() => {
+        this.clipReading = false;
+        if (this.clipAgain) { this.clipAgain = false; this.readClip(true); }
+        if (!this.closing) this.scheduler.request();
+      });
+  }
+
+  /** The clip FOCUS draws: Live's Clip view on a MIDI clip in the highlighted Session slot. */
+  private clipShown(): ClipView | undefined {
+    const focus = this.focus; const clip = this.clip;
+    return this.connection === "connected" && focus?.track && focus.detail === "Clip" && clip && clip.slotRef === focus.slotRef ? clip : undefined;
   }
 
   /** The tree's rows while FOCUS shows it: Live's Device view on the focused track, or the keyboard in it. */
@@ -1451,11 +1482,15 @@ export class TuiApp {
     put(1, "FOCUS", st.label);
     // Live's Device view on the focused track: its devices as a tree (HISTORY gives up the room).
     const rows = this.treeShown();
-    this.keepTreeFresh(rows !== undefined);
+    const clip = rows ? undefined : this.clipShown();
+    this.keepTreeFresh(rows ? "tree" : clip ? "clip" : false);
     let nowAt = 6;
     if (rows) {
       screen.put(x + 5, area.y + 1, " · Device", st.faint);
       nowAt = 3 + this.drawTree(screen, x, area.y + 2, width, rows, Math.max(3, Math.min(12, area.height - 16))) + 1;
+    } else if (clip) {
+      screen.put(x + 5, area.y + 1, " · Clip", st.faint);
+      nowAt = 3 + this.drawClip(screen, x, area.y + 2, width, clip) + 1;
     } else if (!this.drawFocusPath(screen, x, area.y + 2, width, true)) this.focusLines().forEach((line, index) => put(2 + index, line.text, line.style));
     put(nowAt, "NOW", st.label);
     const now = this.nowLine();
@@ -1478,6 +1513,31 @@ export class TuiApp {
     put(nowAt + 4, "HISTORY", st.label);
     this.drawHistory(screen, { x, y: area.y + nowAt + 5, width, height: historyRows });
     if (shown && historyRows >= 2) this.drawMemory(screen, { x, y: area.y + nowAt + 5 + historyRows + 1, width, height: memoryRows - 1 });
+  }
+
+  /**
+   * The track and the clip, then its notes as a small piano roll (four rows; selected notes stand out
+   * when there are some), then its length and how many notes. The rows it used, the track's included.
+   */
+  private drawClip(screen: Screen, x: number, y: number, width: number, clip: ClipView): number {
+    const track = this.focus!.track!;
+    const mark = icon(trackKind(track.kind), this.icons, chipColor(track.color));
+    screen.put(x, y, mark.text, mark.style);
+    const clipMark = icon("midi-clip", this.icons);
+    let column = screen.put(x + 3, y, truncate(track.name, Math.max(1, Math.floor((width - 6) / 2))), st.text);
+    column = screen.put(column, y, " › ", st.faint);
+    column = screen.put(column, y, clipMark.text, clipMark.style) + 1;
+    screen.put(column, y, truncate(clip.name || "Untitled clip", Math.max(1, x + width - column)), st.bright);
+    const picture = clipPicture(clip, Math.min(width, 32), 4);
+    picture?.forEach((line, row) => {
+      let at = x;
+      for (const part of line) at = screen.put(at, y + 1 + row, part.text, part.style);
+    });
+    const beats = clip.length; const bars = beats / 4;
+    const selected = clip.notes.filter((note) => note.selected).length;
+    const facts = [Number.isInteger(bars) ? `${bars} ${bars === 1 ? "bar" : "bars"}` : `${Math.round(beats * 100) / 100} beats`, `${clip.notes.length} ${clip.notes.length === 1 ? "note" : "notes"}`, selected ? `${selected} selected` : ""].filter(Boolean).join(" · ");
+    screen.put(x, y + 1 + (picture ? 4 : 0), truncate(picture ? facts : `${facts} · empty`, width), st.faint);
+    return 2 + (picture ? 4 : 0);
   }
 
   /** "▣ Audio Effect Rack › Chain 1 › Saturator  ×": what the next messages mean by "this"; × clears it. */
@@ -1841,27 +1901,34 @@ function devicesPicture(placement: DevicePlacement, width: number): Span[][] | u
 const BRAILLE = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]] as const;
 
 /**
- * A clip as a tiny piano roll in braille, two rows high: time runs across, higher notes sit
- * higher, louder notes are brighter. Up to eight different pitches get a lane each, spread out;
- * more share lanes by pitch.
+ * A clip as a tiny piano roll in braille, `rows` rows high (two by default): time runs across, higher
+ * notes sit higher, louder notes are brighter, or, when some are marked selected, those are. Notes a
+ * few semitones apart sit at their distance; wider ones get a lane per pitch, spread out, and more
+ * pitches than lanes share them.
  */
-function clipPicture(clip: NonNullable<ChangeRecord["clip"]>, width: number): { text: string; style: Style }[][] | undefined {
+export function clipPicture(clip: { length: number; notes: readonly (ClipNote & { selected?: boolean })[] }, width: number, rows = 2): { text: string; style: Style }[][] | undefined {
   if (!(clip.length > 0) || !clip.notes.length) return undefined;
   const cells = Math.max(8, Math.min(32, width));
   const columns = cells * 2;
+  const lanes = rows * 4;
   const pitches = [...new Set(clip.notes.map((note) => note.pitch))].sort((a, b) => b - a);
   const high = pitches[0]!; const low = pitches[pitches.length - 1]!;
-  const lane = (pitch: number) => pitches.length === 1 ? 3
-    : pitches.length <= 8 ? Math.round(pitches.indexOf(pitch) * 7 / (pitches.length - 1)) : Math.round((high - pitch) * 7 / (high - low));
-  // The loudest velocity at each dot, 0 where there's no note.
-  const dots = Array.from({ length: 8 }, () => Array<number>(columns).fill(0));
+  // Notes within fewer semitones than there are lanes sit at their real distance, centred; wider ones are spread.
+  const top = Math.floor((lanes - 1 - (high - low)) / 2);
+  const lane = (pitch: number) => high - low < lanes ? top + high - pitch
+    : pitches.length <= lanes ? Math.round(pitches.indexOf(pitch) * (lanes - 1) / (pitches.length - 1)) : Math.round((high - pitch) * (lanes - 1) / (high - low));
+  // With a selection, what's selected stands out (as a loud note would); the rest is quiet.
+  const marking = clip.notes.some((note) => note.selected);
+  const weight = (note: ClipNote & { selected?: boolean }) => (marking ? (note.selected ? 127 : 1) : note.velocity);
+  // The strongest weight at each dot, 0 where there's no note.
+  const dots = Array.from({ length: lanes }, () => Array<number>(columns).fill(0));
   for (const note of clip.notes) {
     const first = Math.min(columns - 1, Math.max(0, Math.floor(note.start / clip.length * columns)));
     const last = Math.max(first, Math.min(columns - 1, Math.ceil((note.start + note.duration) / clip.length * columns) - 1));
     const row = dots[lane(note.pitch)]!;
-    for (let column = first; column <= last; column++) row[column] = Math.max(row[column]!, note.velocity);
+    for (let column = first; column <= last; column++) row[column] = Math.max(row[column]!, weight(note));
   }
-  return [0, 1].map((textRow) => {
+  return Array.from({ length: rows }, (_, textRow) => {
     const spans: { text: string; style: Style }[] = [];
     for (let cell = 0; cell < cells; cell++) {
       let bits = 0; let loudest = 0;

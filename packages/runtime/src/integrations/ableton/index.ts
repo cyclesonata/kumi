@@ -1333,6 +1333,40 @@ export function createAbletonIntegration(options: Options): Integration {
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
     /** A track's devices, racks' chains and what's in them, for FOCUS. */
     deviceTree: (trackRef, signal) => readDeviceTree(trackRef, AbortSignal.any([signal, lifetime.signal])),
+    /** A Session slot's MIDI clip, its notes and which are selected, for FOCUS; the model's references aren't touched. */
+    async clipView(slotRef, originalSignal) {
+      const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+      if (!available || lost || !tools?.has("live_discover") || !/^\d+:clip_slot:\d+:\d+$/.test(slotRef)) return undefined;
+      const clipRef = slotRef.replace(":clip_slot:", ":clip:");
+      try {
+        const clips = await tools.call("live_discover", { kind: "session-clip", parent: slotRef, fields: ["name", "length", "isAudio"], limit: 1 }, signal, { host: true });
+        const clip = clips.isError ? undefined : (payload(clips).items as JsonObject[] | undefined)?.[0];
+        if (!clip || clip.isAudio === true || typeof clip.length !== "number" || !(clip.length > 0)) return undefined;
+        const notes: JsonObject[] = []; let cursor: string | undefined;
+        for (let page = 0; page < 6 && notes.length < 512; page++) {
+          const read = await tools.call("live_discover", { kind: "note", parent: clipRef, limit: 100, ...(cursor ? { cursor } : {}) }, signal, { host: true });
+          if (read.isError) break;
+          const body = payload(read);
+          notes.push(...(Array.isArray(body.items) ? body.items as JsonObject[] : []));
+          cursor = typeof body.nextCursor === "string" ? body.nextCursor : undefined;
+          if (!cursor) break;
+        }
+        // Which are selected in Live's editor (by id), when the bridge can say.
+        let selected = new Set<number>();
+        if (tools.has("live_note_read")) {
+          const read = await tools.call("live_note_read", { clipRef, selected: true }, signal, { host: true }).catch(() => undefined);
+          const ids = read && !read.isError ? (payload(read).notes as JsonObject[] | undefined)?.map((note) => note.id) : undefined;
+          selected = new Set((ids ?? []).filter((id): id is number => typeof id === "number"));
+        }
+        const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+        return { slotRef, name: typeof clip.name === "string" ? clip.name.slice(0, 256) : "", length: clip.length,
+          notes: notes.slice(0, 512).flatMap((note) => {
+            const pitch = number(note.pitch); const start = number(note.start); const duration = number(note.duration);
+            if (pitch === undefined || start === undefined || duration === undefined) return [];
+            return [{ pitch, start, duration, velocity: number(note.velocity) ?? 100, ...(typeof note.id === "number" && selected.has(note.id) ? { selected: true } : {}) }];
+          }) };
+      } catch { signal.throwIfAborted(); return undefined; }
+    },
     /** An audio clip in the Set, named by its clipRef from discovery, as the file it plays; undefined for anything that isn't a clip. */
     async audioFile(named, originalSignal) {
       const given = named.trim(); const ref = longRefs.get(given) ?? given;

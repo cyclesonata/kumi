@@ -64,6 +64,8 @@ export interface ProgramOptions {
   download?: (url: string, signal?: AbortSignal) => Promise<Uint8Array>;
   /** Only look for what's there: fetch nothing (for the doctor). */
   installedOnly?: boolean;
+  /** For tests: free space on a disk. */
+  free?: (path: string) => Promise<number | undefined>;
 }
 
 async function download(url: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -340,7 +342,7 @@ export async function whisperModel(name: string, options: ProgramOptions): Promi
   const listed = files.find((file) => file.path === name);
   const expected = listed?.lfs?.oid;
   if (!expected || !/^[0-9a-f]{64}$/i.test(expected)) throw new VideoError(`Kumi couldn't find the speech model ${name} to fetch.`);
-  const full = await lowDisk(options.toolsDir, (listed?.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on");
+  const full = await lowDisk(options.toolsDir, (listed?.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on", options.free);
   if (full) throw new VideoError(`Transcribing needs a speech model, which Kumi would fetch. ${full}`);
   options.onFetch?.(`Kumi is fetching a speech model, to transcribe videos without captions (once, about ${Math.round((listed?.size ?? 0) / 1e6)} MB).`);
   const temporary = join(dirname(path), `.${name}-${randomUUID()}`);

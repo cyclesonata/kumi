@@ -16,6 +16,7 @@ export function parseFocus(row: JsonObject): LiveFocus | null {
     focus.track = { name: track, ...(color ? { color } : {}), ...(kind ? { kind } : {}) };
   }
   const trackRef = text(row.selectedTrackRef); if (trackRef && focus.track) focus.trackRef = trackRef;
+  const slotRef = text(row.highlightedClipSlotRef); if (slotRef) focus.slotRef = slotRef;
   const scene = text(row.focusSceneName); if (scene) focus.scene = scene;
   if (typeof row.focusClipName === "string") focus.clip = row.focusClipName.slice(0, 256);
   const device = text(row.focusDeviceName); if (device) focus.device = device;
