@@ -411,8 +411,16 @@ function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { m
 
 /** An adapter failure as a tool may show it: bounded bridge and host messages, anything else generic.
  * "request failed: ..." carries the Remote Script's bounded validation message or exception type. */
+/**
+ * What a refusal says to the client. Known reasons pass; so does the host's own sentence saying why it
+ * refused ("recording start requires the exact destination to be the only armed track"), so the
+ * client can fix the cause. Anything else (a runtime error, a message with a path or a stack) is
+ * masked as "adapter request failed".
+ */
 function adapterReason(raw: string): string {
-  return /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+  const known = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240;
+  const hostSentence = raw.length <= 240 && /^(?:[a-z]|Live )/.test(raw) && !/[\r\n]/.test(raw) && !/(?:^|[\s'"(=])(?:\/[^\s/'"]+){2,}|[A-Za-z]:\\|\bat \S+ \(|node:internal/.test(raw);
+  return known || hostSentence ? raw : "adapter request failed";
 }
 
 /** Live reads a switched-off scene tempo or time signature as -1 (outside what can be written): such a

@@ -2225,11 +2225,15 @@ test("recording preview gates intent, destination, and recording state", async (
   assert.equal((missingDestination as any).result.isError, true);
   const unarmed = await call(3, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
   assert.equal((unarmed as any).result.isError, true);
+  // The refusal says why, so the client can fix it.
+  assert.match(JSON.parse((unarmed as any).result.content[0].text).reason, /^destination track is not armed for recording/);
   (simulator as any).state.tracks[0].armed = true;
   const structure = simulator.snapshot(); const expectedStructureRevision = createHash("sha256").update(JSON.stringify({ tracks: structure.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: structure.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex");
   simulator.invoke({ operation: "track.create", args: { name: "Other Armed", kind: "audio", index: 1, expectedStructureRevision } }); (simulator as any).state.tracks[1].armed = true;
   const multipleArmed = await call(21, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
-  assert.equal((multipleArmed as any).result.isError, true); (simulator as any).state.tracks[1].armed = false;
+  assert.equal((multipleArmed as any).result.isError, true);
+  assert.equal(JSON.parse((multipleArmed as any).result.content[0].text).reason, "recording start requires the exact destination to be the only armed track");
+  (simulator as any).state.tracks[1].armed = false;
   let preview = JSON.parse(((await call(4, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
   (simulator as any).state.tracks[1].armed = true;
   const racedArm = await call(22, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-raced-arm" });

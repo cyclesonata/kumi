@@ -1116,7 +1116,9 @@ export function createAbletonIntegration(options: Options): Integration {
     }
     if (result.isError) {
       const message = resultText(result).slice(0, 2048);
-      if (uncertain(result)) return { record: update({ state: "unsure", note: "Live didn't confirm the undo; try again." }), text: message, isError: true };
+      // A refusal is final even when the bridge calls its own state uncertain: trying again won't help.
+      const refused = /modified after apply|changed before deletion|undo refused/i.test(message);
+      if (uncertain(result) && !refused) return { record: update({ state: "unsure", note: "Live didn't confirm the undo; try again." }), text: message, isError: true };
       return { record: update({ state: "kept", note: undoNote(message) }), text: message, isError: true };
     }
     const body = payload(result);

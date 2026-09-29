@@ -480,9 +480,10 @@ export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "par
 
 /** A bridge refusal, in plain words for HISTORY. The model also gets the bridge's own message. */
 export function undoNote(message: string): string {
+  if (/created Session structure was modified|Session structure changed before deletion/i.test(message)) return "It changed after Kumi made it (something recorded, loaded or routed on it), so Kumi left it: deleting it would lose that. Delete it in Live if you don't need it.";
   if (/epoch|connection/i.test(message)) return "Live restarted or reconnected since, so Kumi can't undo this.";
   if (/unknown|expired|not found/i.test(message)) return "Kumi can't undo this anymore.";
-  if (/changed|postcondition|no longer|fingerprint|revision|identity|mismatch/i.test(message)) return "It changed in Live since, so Kumi left it as it is.";
+  if (/changed|modified|refused|postcondition|no longer|fingerprint|revision|identity|mismatch/i.test(message)) return "It changed in Live since, so Kumi left it as it is.";
   if (/momentary|structural|not undoable/i.test(message)) return "Live gives Kumi no way to take this back; change it in Live if you need to.";
   return "Live didn't accept the undo, so Kumi left it as it is.";
 }

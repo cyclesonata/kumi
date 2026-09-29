@@ -403,6 +403,24 @@ test("undo goes through the bridge's guarded undo; a refusal keeps the change, s
   } finally { await b.integration.close(); }
 });
 
+test("undoing a track Kumi made that has changed since is refused for good: kept, with why, not \"try again\"", async () => {
+  const b = await opened();
+  try {
+    await tool(b.tools, "add_tracks_and_scenes").execute({ tracks: [{ name: "Bounce", kind: "audio" }], scenes: [] }, signal());
+    const id = b.records.at(-1)!.id;
+    // As the bridge says it: the reason is final, though its remediation calls the state uncertain.
+    b.refuseUndo(JSON.stringify({ reason: "created Session structure was modified after apply; undo refused", remediation: "Session-structure undo is uncertain; inspect authoritative tracks and scenes." }));
+    const kept = await b.integration.undo!(id, signal());
+    assert.equal(kept.state, "kept");
+    assert.match(kept.note ?? "", /^It changed after Kumi made it .* Delete it in Live if you don't need it\.$/);
+    // A real uncertainty still says to try again.
+    b.refuseUndo(JSON.stringify({ reason: "remote operation timed out", remediation: "Session-structure undo is uncertain; inspect authoritative tracks and scenes." }));
+    await tool(b.tools, "add_tracks_and_scenes").execute({ tracks: [{ name: "Other", kind: "audio" }], scenes: [] }, signal());
+    const unsure = await b.integration.undo!(b.records.at(-1)!.id, signal());
+    assert.equal(unsure.state, "unsure");
+  } finally { await b.integration.close(); }
+});
+
 test("the bridge offering new tools after a change keeps the Set, its references and undo current", async () => {
   const b = await opened();
   try {
