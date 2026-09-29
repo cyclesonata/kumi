@@ -7,6 +7,7 @@ import type { SessionController, SessionEvent, TurnState } from "@kumi/runtime";
 import { createTerminal } from "../src/terminal.js";
 import { KeyInput } from "../src/input.js";
 import { StreamingText, sanitizeText } from "../src/text.js";
+import { fakeModels, MODELS } from "./fake-models.js";
 
 function fixture(tty = false, hold = false, startupNotice?: string) {
   const input = new PassThrough() as PassThrough & { isTTY: boolean; isRaw: boolean; setRawMode(value: boolean): void };
@@ -28,7 +29,7 @@ function fixture(tty = false, hold = false, startupNotice?: string) {
     status() { return { state, connection: "disconnected", turns: 0, maxTurns: 30 }; },
     async undo() { calls.push("undo"); return { id: "c1", family: "tempo", title: "Tempo 120 → 124 BPM", state: "undone", at: 1 }; },
   };
-  const terminal = createTerminal({ controller, input, output: sink, model: "openai-codex/fixture", mode: "inference-only", secrets: ["private-token"], closeTimeoutMs: 25,
+  const terminal = createTerminal({ controller, input, output: sink, models: fakeModels({ model: "openai-codex/fixture", signedIn: ["openai-codex"] }).control, mode: "inference-only", secrets: ["private-token"], closeTimeoutMs: 25,
     ...(startupNotice ? { startupNotice } : {}) });
   const done = terminal.run();
   return { input, sink, terminal, controller, done, calls, emit: (event: SessionEvent) => terminal.handleEvent(event), get output() { return output; } };
@@ -141,4 +142,30 @@ test("interrupted secret prefixes and unterminated escape sequences are discarde
   assert.equal(text.push("next"), "next"); assert.equal(text.finish(), "");
   assert.equal(text.push("\u001b]0;hidden"), ""); text.discard();
   assert.equal(text.push("fresh"), "fresh");
+});
+
+test("plain mode names the model, lists a provider's, and sets the model and effort by name", async () => {
+  const input = new PassThrough() as PassThrough & { isTTY: boolean; isRaw: boolean; setRawMode(value: boolean): void };
+  input.isTTY = false; input.isRaw = false; input.setRawMode = () => {};
+  let output = "";
+  const sink = Object.assign(new Writable({ write(chunk, _encoding, callback) { output += String(chunk); callback(); } }), { isTTY: false, columns: 100 });
+  const controller: SessionController = {
+    async start() {}, async submit() {}, async refresh() {}, async newConversation() {}, async cancel() {}, async close() {},
+    status() { return { state: "idle", connection: "disconnected", turns: 0 }; }, async undo() { return undefined; },
+  };
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
+  const terminal = createTerminal({ controller, input, output: sink, models: fake.control, mode: "inference-only", closeTimeoutMs: 25 });
+  const done = terminal.run();
+  await delay(0);
+  input.write("/model\n/model openai-codex\n/model openai-codex/gpt-6-luna\n/effort low\n/effort turbo\n/logout openai-codex\n"); await delay(20);
+  input.end(); assert.equal(await done, 0);
+  const text = stripVTControlCharacters(output);
+  assert.match(text, /Kumi · openai-codex\/gpt-6-astra/);
+  assert.match(text, /\[model\] openai-codex\/gpt-6-astra\. List a provider's with \/model <provider> \(openai-codex\)/);
+  assert.match(text, /\[model\] openai-codex: gpt-6-astra, gpt-6-luna/);
+  assert.match(text, /\[model\] openai-codex\/gpt-6-luna from the next answer on\./);
+  assert.match(text, /\[effort\] low\./);
+  assert.match(text, /\[effort\] Choose one of low, medium, high, xhigh, max or default\./);
+  assert.match(text, /\[logout\] Signed out of openai-codex\./);
+  assert.deepEqual(fake.calls.filter((call) => !call.startsWith("list")), ["choose:openai-codex/gpt-6-luna", "effort:low", "signout:openai-codex"]);
 });

@@ -1,16 +1,17 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Writable } from "node:stream";
 import stringWidth from "string-width";
-import { since, type SessionController, type SessionEvent } from "@kumi/runtime";
+import { EFFORTS, since, type Effort, type ProviderId, PROVIDERS, type SessionController, type SessionEvent } from "@kumi/runtime";
 import { safeError } from "./config.js";
 import { KeyInput, type TerminalInput } from "./input.js";
+import type { ModelControl } from "./models.js";
 import { sanitizeText, StreamingText } from "./text.js";
 
 interface Options {
   controller: SessionController;
   input: TerminalInput;
   output: Writable & { isTTY?: boolean; columns?: number };
-  model: string;
+  models: ModelControl;
   mode: "live" | "inference-only";
   /** Shown once under the header, e.g. how to connect Live. */
   startupNotice?: string;
@@ -23,7 +24,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /refresh · /new · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. No history is persisted.";
+const HELP = "/help · /status · /undo · /refresh · /new · /model [provider/model] · /effort [level|default] · /logout <provider> · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -171,7 +172,19 @@ export function createTerminal(options: Options): Terminal {
     // Connecting or reading the Set, not answering: keep the message and send it when Kumi is ready.
     if (busy() && !answering && !command.startsWith("/") && queued === undefined) { queued = inputLine; notice("[waiting] Kumi is getting ready; your message goes as soon as it is."); return; }
     if (busy()) { notice("[busy] Busy; cancel first. No second turn was submitted."); return; }
+    const [verb, argument] = command.split(/\s+/, 2);
     try {
+      if (verb === "/model") { await modelCommand(argument); return; }
+      if (verb === "/effort") {
+        if (!argument) { notice(`[effort] ${options.models.current().effort ?? "the model's default"}. Choose one of ${EFFORTS.join(", ")} or default.`); return; }
+        if (argument !== "default" && !(EFFORTS as readonly string[]).includes(argument)) { notice(`[effort] Choose one of ${EFFORTS.join(", ")} or default.`); return; }
+        await options.models.setEffort(argument === "default" ? undefined : argument as Effort); notice(`[effort] ${argument}.`); return;
+      }
+      if (verb === "/login") { notice("[login] Sign in from a shell: npm run kumi -- login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here."); return; }
+      if (verb === "/logout") {
+        if (!argument || !(PROVIDERS as readonly string[]).includes(argument)) { notice(`[logout] Use: /logout <provider> (${PROVIDERS.join(", ")}).`); return; }
+        notice(await options.models.signOut(argument as ProviderId) ? `[logout] Signed out of ${argument}.` : `[logout] There was no sign-in for ${argument} to remove.`); return;
+      }
       if (command === "/undo") {
         const change = await controller.undo();
         if (change) notice(change.state === "undone" ? `[undo] Undid: ${change.title}` : `[undo] Kept: ${change.title}. ${change.note ?? ""}`.trim());
@@ -181,6 +194,23 @@ export function createTerminal(options: Options): Terminal {
       else { answering = true; try { await controller.submit(inputLine); } finally { answering = false; } }
     } catch (error) { if (!closing) reportError(error); }
     finally { if (!closing && input.isTTY && output.isTTY) rl?.prompt(true); }
+  }
+  /** /model: say which it is, list a provider's, or choose one. */
+  async function modelCommand(argument: string | undefined) {
+    const { models } = options;
+    if (!argument) {
+      const current = models.current();
+      const signedIn = (await models.providers()).filter((provider) => provider.signedIn).map((provider) => provider.id);
+      notice(`[model] ${current.model ?? "none chosen"}${current.effort ? `, effort ${current.effort}` : ""}. List a provider's with /model <provider> (${signedIn.join(", ") || "sign in first"}); choose with /model <provider>/<model>.`);
+      return;
+    }
+    if ((PROVIDERS as readonly string[]).includes(argument)) {
+      const listed = await models.models(argument as ProviderId);
+      notice(`[model] ${argument}: ${listed.map((model) => model.model).join(", ") || "no models listed"}`);
+      return;
+    }
+    await models.choose(argument);
+    notice(`[model] ${argument} from the next answer on.`);
   }
   function handleEvent(event: SessionEvent) {
     if (closing) return;
@@ -239,9 +269,15 @@ export function createTerminal(options: Options): Terminal {
       rl.on("SIGINT", interrupt);
       rl.on("close", () => { void finish(); });
       input.on("error", () => { void finish(1); }); output.on("error", () => { void finish(1); });
-      notice(`Kumi · ${options.model} · ${options.mode === "inference-only" ? "MCP disconnected / No Live access" : "MCP connecting / Live unverified"}`);
+      notice(`Kumi · ${options.models.current().model ?? "no model chosen yet"} · ${options.mode === "inference-only" ? "MCP disconnected / No Live access" : "MCP connecting / Live unverified"}`);
       notice("Conversations about saved Sets continue next time; others end when Kumi closes. /help for commands.");
       if (options.startupNotice) notice(options.startupNotice);
+      // No model yet: the first one a signed-in provider lists.
+      if (!options.models.current().model) {
+        void options.models.chooseDefault().then((chosen) => {
+          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : "[model] Not signed in to a provider yet. Sign in with: npm run kumi -- login <provider>, then /model.");
+        }, () => undefined);
+      }
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {
         if (!closing) { reportError(error); await finish(1); }
       });

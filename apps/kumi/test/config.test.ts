@@ -11,8 +11,9 @@ const env = { ...isolated, KUMI_MODEL: "openai-codex/gpt-6-astra" };
 const secret = "test-only-secret-do-not-log";
 const defaultAuth = join(homedir(), ".kumi", "auth.json");
 
-test("requires an explicit <provider>/<model>; does not need a Gateway key", () => {
-  for (const value of [undefined, "", " \t\n", "guess", "gateway/model", "openai-codex/", "openai-codex/model\nInjected", "openai-codex/white space"]) {
+test("a model is <provider>/<model>, or none yet (Kumi then offers one); no Gateway key is needed", () => {
+  assert.deepEqual(loadInferenceConfig({ ...isolated }), { authFile: defaultAuth });
+  for (const value of ["", " \t\n", "guess", "gateway/model", "openai-codex/", "openai-codex/model\nInjected", "openai-codex/white space"]) {
     assert.throws(() => loadInferenceConfig({ ...isolated, KUMI_MODEL: value }), /KUMI_MODEL|model/);
   }
   for (const model of ["openai-codex/gpt-6-astra", "openai/gpt-6-luna", "anthropic/claude-haiku-4-5-20251001", "opencode/kimi-k2.6", "opencode-go/gpt-5.5"]) {
@@ -33,15 +34,18 @@ test("supports only an explicit absolute credential-file override; never echoes 
   });
 });
 
-test("sign-in commands: login (browser, device, Pi import), logout and status", () => {
+test("sign-in commands: login (browser, device, Pi import, a key asked for), logout and status", () => {
   const pi = join(homedir(), ".pi", "agent", "auth.json");
-  assert.deepEqual(loadConfig(["login", "openai-codex"], isolated), { mode: "login", method: "browser", authFile: defaultAuth, piAuthFile: pi, settingsFile: isolated.KUMI_SETTINGS_FILE });
+  assert.deepEqual(loadConfig(["login", "openai-codex"], isolated), { mode: "login", provider: "openai-codex", method: "browser", authFile: defaultAuth, piAuthFile: pi, settingsFile: isolated.KUMI_SETTINGS_FILE });
   assert.equal((loadConfig(["login", "openai-codex", "--device"], {}) as { method: string }).method, "device");
   assert.equal((loadConfig(["login", "openai-codex", "--from-pi"], {}) as { method: string }).method, "import-pi");
-  assert.deepEqual(loadConfig(["logout", "openai-codex"], { KUMI_AUTH_FILE: "/x/auth.json" }), { mode: "logout", authFile: "/x/auth.json" });
+  for (const provider of ["anthropic", "openai", "opencode", "opencode-go"]) assert.deepEqual(loadConfig(["login", provider], isolated), { mode: "login", provider, method: "key", authFile: defaultAuth, piAuthFile: pi, settingsFile: isolated.KUMI_SETTINGS_FILE });
+  assert.deepEqual(loadConfig(["logout", "openai-codex"], { KUMI_AUTH_FILE: "/x/auth.json" }), { mode: "logout", provider: "openai-codex", authFile: "/x/auth.json" });
+  assert.deepEqual(loadConfig(["logout", "anthropic"], { KUMI_AUTH_FILE: "/x/auth.json" }), { mode: "logout", provider: "anthropic", authFile: "/x/auth.json" });
   assert.deepEqual(loadConfig(["auth"], isolated), { mode: "auth", authFile: defaultAuth, settingsFile: isolated.KUMI_SETTINGS_FILE });
-  assert.throws(() => loadConfig(["login", "anthropic"], {}), /ANTHROPIC_API_KEY/);
-  for (const args of [["login"], ["login", "openai-codex", "--token", secret], ["login", "openai-codex", "--device", "--from-pi"], ["logout", "openai-codex", "--all"], ["auth", secret]]) {
+  // A key is asked for, never read from the command line, where shell history would keep it.
+  assert.throws(() => loadConfig(["login", "anthropic", secret], {}), (error: unknown) => error instanceof Error && /asks for the API key/.test(error.message) && !error.message.includes(secret));
+  for (const args of [["login"], ["login", secret], ["logout", secret], ["login", "anthropic", "--device"], ["login", "openai-codex", "--token", secret], ["login", "openai-codex", "--device", "--from-pi"], ["logout", "openai-codex", "--all"], ["auth", secret]]) {
     assert.throws(() => loadConfig(args, {}), (error: unknown) => error instanceof Error && !error.message.includes(secret));
   }
 });
@@ -70,12 +74,17 @@ test("the chosen model persists in an owner-only settings file; KUMI_MODEL overr
   try {
     const settingsFile = join(dir, "nested", "settings.json");
     const local = { ...isolated, KUMI_SETTINGS_FILE: settingsFile };
-    assert.throws(() => loadInferenceConfig(local), /npm run kumi -- model/);
+    assert.equal(loadInferenceConfig(local).model, undefined);
     assert.deepEqual(loadConfig(["model", "anthropic/claude-sonnet-5"], local), { mode: "model", settingsFile, model: "anthropic/claude-sonnet-5" });
     assert.deepEqual(loadConfig(["model"], local), { mode: "model", settingsFile });
     assert.throws(() => loadConfig(["model", `x/${secret}`], local), (error: unknown) => error instanceof Error && !error.message.includes(secret));
     writeSettings(settingsFile, { model: "anthropic/claude-sonnet-5" });
     if (process.platform !== "win32") assert.equal(statSync(settingsFile).mode & 0o777, 0o600);
+    assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5" });
+    // How hard it thinks is kept alongside; a level Kumi doesn't know is left out.
+    writeSettings(settingsFile, { model: "anthropic/claude-sonnet-5", effort: "low" });
+    assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5", effort: "low" });
+    writeFileSync(settingsFile, JSON.stringify({ model: "anthropic/claude-sonnet-5", effort: "ludicrous" }));
     assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5" });
     assert.equal(loadInferenceConfig(local).model, "anthropic/claude-sonnet-5");
     assert.equal(loadInferenceConfig({ ...local, KUMI_MODEL: "openai/gpt-6-luna" }).model, "openai/gpt-6-luna");

@@ -2,26 +2,26 @@ import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, w
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { parseModelId, PROVIDERS } from "@kumi/runtime";
+import { EFFORTS, parseModelId, PROVIDER_INFO, PROVIDERS, type Effort, type ProviderId } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
 export const SUPPORTED_NODE_MAJORS = [22, 24];
-/** Chosen after a ChatGPT sign-in when no model is set; change with `npm run kumi -- model`. */
-export const DEFAULT_CODEX_MODEL = "openai-codex/gpt-6-astra";
 
 export interface InferenceConfig {
-  model: string;
+  /** Unset until one is chosen (Kumi then offers /model). */
+  model?: string;
   /** Kumi's own owner-only credential store; never sent to prompts or the MCP child. */
   authFile: string;
 }
 
-export type LoginMethod = "browser" | "device" | "import-pi";
+/** ChatGPT signs in through the browser (or a code, or Pi's sign-in); other providers take a key. */
+export type LoginMethod = "browser" | "device" | "import-pi" | "key";
 export type AppConfig =
   | { mode: "help" }
   | { mode: "auth"; authFile: string; settingsFile: string }
-  | { mode: "login"; method: LoginMethod; authFile: string; piAuthFile: string; settingsFile: string }
-  | { mode: "logout"; authFile: string }
+  | { mode: "login"; provider: ProviderId; method: LoginMethod; authFile: string; piAuthFile: string; settingsFile: string }
+  | { mode: "logout"; provider: ProviderId; authFile: string }
   | { mode: "model"; settingsFile: string; model?: string }
   | { mode: "doctor" }
   | (InferenceConfig & { mode: "inference-only"; bridgeMissing?: true })
@@ -39,15 +39,20 @@ export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "K
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
 
-/** Non-secret preferences such as the chosen model; a missing or unreadable file means none. */
-export function readSettings(file: string): { model?: string } {
+/** Non-secret preferences: the chosen model and how hard it thinks. */
+export interface Settings { model?: string; effort?: Effort }
+
+/** The settings file; a missing or unreadable file, or an unknown value, means none. */
+export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown };
-    return typeof value.model === "string" ? { model: value.model } : {};
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown };
+    return { ...(typeof value.model === "string" && validModel(value.model) ? { model: value.model } : {}),
+      ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}) };
   } catch { return {}; }
 }
 
-export function writeSettings(file: string, settings: { model?: string }): void {
+export function writeSettings(file: string, next: Settings): void {
+  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -63,8 +68,7 @@ export function loadInferenceConfig(env: Env = process.env): InferenceConfig {
     throw new Error(`KUMI_MODEL must be <provider>/<model> with provider one of ${PROVIDERS.join(", ")}.`);
   }
   const model = env.KUMI_MODEL ?? readSettings(loadSettingsFile(env)).model;
-  if (!validModel(model)) throw new Error("Choose a model first: npm run kumi -- model <provider>/<model> (or set KUMI_MODEL).");
-  return { model, authFile: loadAuthFile(env) };
+  return { ...(model ? { model } : {}), authFile: loadAuthFile(env) };
 }
 
 /** The bridge configuration Live itself uses, named by the installed Remote Script's reference file. */
@@ -88,13 +92,17 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
     return { mode: "model", settingsFile: loadSettingsFile(env), ...(args[1] ? { model: args[1] } : {}) };
   }
   if (args[0] === "login" || args[0] === "logout") {
-    if (args[1] !== "openai-codex") {
-      throw new Error("Only openai-codex has a sign-in; API-key providers read OPENAI_API_KEY, ANTHROPIC_API_KEY or OPENCODE_API_KEY.");
+    if (!(PROVIDERS as readonly (string | undefined)[]).includes(args[1])) throw new Error(`Use: ${args[0]} <provider>, with provider one of ${PROVIDERS.join(", ")}.`);
+    const provider = args[1] as ProviderId;
+    if (args[0] === "logout") {
+      if (args.length !== 2) throw new Error(`Use: logout ${provider}.`);
+      return { mode: "logout", provider, authFile: loadAuthFile(env) };
     }
-    if (args[0] === "logout" && args.length === 2) return { mode: "logout", authFile: loadAuthFile(env) };
-    const method = args[0] === "login" && args.length <= 3 ? LOGIN_METHODS[args[2] ?? ""] : undefined;
-    if (!method) throw new Error("Use: login openai-codex [--device | --from-pi], or logout openai-codex.");
-    return { mode: "login", method, authFile: loadAuthFile(env), piAuthFile: join(homedir(), ".pi", "agent", "auth.json"), settingsFile: loadSettingsFile(env) };
+    // A key is asked for, never taken as an argument, so it stays out of shell history.
+    const chatgpt = PROVIDER_INFO[provider].signIn === "chatgpt";
+    const method = chatgpt ? (args.length <= 3 ? LOGIN_METHODS[args[2] ?? ""] : undefined) : args.length === 2 ? "key" : undefined;
+    if (!method) throw new Error(chatgpt ? "Use: login openai-codex [--device | --from-pi]." : `Use: login ${provider}; Kumi asks for the API key, so it stays out of your shell history.`);
+    return { mode: "login", provider, method, authFile: loadAuthFile(env), piAuthFile: join(homedir(), ".pi", "agent", "auth.json"), settingsFile: loadSettingsFile(env) };
   }
   if (args.length === 1 && args[0] === "--inference-only") {
     return { mode: "inference-only", ...loadInferenceConfig(env) };

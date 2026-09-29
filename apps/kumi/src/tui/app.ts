@@ -2,10 +2,16 @@
  * Kumi's full-screen terminal app: a header, the conversation, the Live pane (FOCUS, NOW,
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
-import { since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type LiveFocus, type SessionController, type SessionEvent } from "@kumi/runtime";
+import {
+  KumiError, PROVIDER_INFO, since, type CatchUp, type ChangeRecord, type ConnectionState, type DevicePlacement, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  type SessionController, type SessionEvent,
+} from "@kumi/runtime";
 import { safeError } from "../config.js";
+import { openBrowser } from "../login.js";
+import type { ModelControl } from "../models.js";
 import { sanitizeText, StreamingText } from "../text.js";
 import { Editor, type EditorLayout } from "./editor.js";
+import { Picker, type PickerItem } from "./picker.js";
 import type { InputEvent } from "./keys.js";
 import { Renderer, type Cursor } from "./render.js";
 import { FrameScheduler } from "./scheduler.js";
@@ -20,7 +26,8 @@ export interface TuiOptions {
   controller: SessionController;
   input: TtyInput;
   output: TtyOutput;
-  model: string;
+  /** The model and its sign-ins, for /model, /effort, /login and /logout; without it those aren't offered. */
+  models?: ModelControl;
   mode: "live" | "inference-only";
   startupNotice?: string;
   secrets?: readonly string[];
@@ -32,17 +39,49 @@ export interface TuiOptions {
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
 
+/**
+ * What's open above the input box: a list to choose from, a key being pasted (never shown), or a
+ * ChatGPT sign-in waiting in the browser.
+ */
+type Panel =
+  | { kind: "pick"; picker: Picker; choose(item: PickerItem): void | Promise<void> }
+  | { kind: "key"; provider: ProviderId; secret: string; checking?: boolean; status?: { text: string; tone: "info" | "warn" }; then?: () => void | Promise<void> }
+  | { kind: "chatgpt"; url?: string; abort: AbortController; then?: () => void | Promise<void> };
+
+/** A row of a panel: text, a dimmer detail beside it, a note at the right edge. */
+interface PanelLine {
+  text: string;
+  style: Style;
+  detail?: { text: string; style: Style };
+  right?: { text: string; style: Style };
+  /** The selected row. */
+  band?: boolean;
+  indent?: number;
+  /** Labels in a list share a column, so their details line up. */
+  labelWidth?: number;
+}
+
+/** For efforts whose provider doesn't describe them. */
+const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking", medium: "Balanced", high: "Thorough", xhigh: "More thorough still", max: "As hard as it can" };
+
 const COMMANDS = [
   { name: "/new", about: "Start a fresh conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
   { name: "/refresh", about: "Read your Live Set again" },
   { name: "/copy", about: "Copy Kumi's last answer" },
+  { name: "/model", about: "Choose the model Kumi talks to" },
+  { name: "/effort", about: "How hard the model thinks" },
+  { name: "/login", about: "Sign in to a provider" },
+  { name: "/logout", about: "Sign out of a provider" },
   { name: "/status", about: "What Kumi is connected to" },
   { name: "/help", about: "Keys and commands" },
   { name: "/quit", about: "Close Kumi" },
 ] as const;
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · ctrl+c clears the box, then quits · type / for commands";
+/** Offered only with a ModelControl to answer them. */
+const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logout"];
+
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 const WIDE = 100;
@@ -127,7 +166,8 @@ export class TuiApp {
   private readonly table = new StyleTable();
   private readonly editor = new Editor();
   private readonly transcript = new Transcript();
-  private readonly secrets: readonly string[];
+  /** Kept out of everything shown; keys pasted into Kumi join it. */
+  private readonly secrets: string[];
   private readonly stream: StreamingText;
   private current: Assistant | undefined;
   private connection: ConnectionState;
@@ -157,6 +197,9 @@ export class TuiApp {
   /** A message typed while Kumi was connecting or reading the Set; sent as soon as it's ready. */
   private queued: string | undefined;
   private activity = "connecting to Live";
+  private panel: Panel | undefined;
+  /** The last message sent, to send again after a sign-in it was waiting for. */
+  private lastSent: string | undefined;
   private readonly done: Promise<number>;
   private resolveDone!: (code: number) => void;
 
@@ -164,7 +207,7 @@ export class TuiApp {
   private readonly depth: ColorDepth;
 
   constructor(private readonly options: TuiOptions) {
-    this.secrets = options.secrets ?? [];
+    this.secrets = [...(options.secrets ?? [])];
     this.stream = new StreamingText(this.secrets);
     this.connection = options.mode === "inference-only" ? "disconnected" : "connecting";
     this.depth = options.colorDepth ?? detectColorDepth();
@@ -189,6 +232,7 @@ export class TuiApp {
     void Promise.resolve().then(() => { if (!this.closing) return this.options.controller.start(); }).catch((error: unknown) => {
       if (!this.closing) void this.finish(1, `Kumi couldn't start: ${safeError(error, this.secrets)}`);
     });
+    void Promise.resolve().then(() => this.checkModel()).catch((error: unknown) => this.panelFailed(error));
     return this.done;
   }
 
@@ -275,6 +319,7 @@ export class TuiApp {
         this.failed = true;
         this.stream.discard();
         this.notice(event.message, "warn");
+        if (event.kind) this.offerFix(event.kind, event.provider);
         break;
       case "text":
         if (this.suppress || !this.current) return;
@@ -344,6 +389,10 @@ export class TuiApp {
     this.closing = true;
     this.suppress = true;
     this.stream.discard();
+    // A ChatGPT sign-in waiting on the browser stops listening; a half-typed key is dropped.
+    if (this.panel?.kind === "chatgpt") this.panel.abort.abort();
+    if (this.panel?.kind === "key") this.panel.secret = "";
+    this.panel = undefined;
     this.scheduler.dispose();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -366,6 +415,7 @@ export class TuiApp {
 
   private onInput(event: InputEvent): void {
     if (this.closing) return;
+    if (this.panel && (event.type === "text" || event.type === "paste" || event.type === "key")) { this.panelInput(event); this.scheduler.request(); return; }
     if (event.type === "text" || event.type === "paste") {
       this.editor.insert(sanitizeText(event.text));
       this.menuDismissed = false;
@@ -431,7 +481,7 @@ export class TuiApp {
   private menu(): readonly { name: string; about: string }[] {
     const text = this.editor.text;
     if (this.menuDismissed || !text.startsWith("/") || /\s/.test(text)) return [];
-    const matches = COMMANDS.filter((command) => command.name.startsWith(text));
+    const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name)));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -443,17 +493,24 @@ export class TuiApp {
     const { controller } = this.options;
     if (command === "/quit") { this.editor.clear(); await this.finish(0); return; }
     if (command === "/help") { this.editor.clear(); this.notice(HELP, "info"); return; }
+    // The model and its sign-ins can change any time: an answer running now finishes as it started.
+    if (this.options.models && MODEL_COMMANDS.includes(command)) {
+      this.editor.clear();
+      const open = { "/model": () => this.openModels(), "/effort": () => this.openEffort(), "/login": () => this.openLogin(), "/logout": () => this.openLogout() }[command]!;
+      await open().catch((error: unknown) => this.panelFailed(error));
+      return;
+    }
     if (command === "/status") {
       this.editor.clear();
       const status = controller.status();
-      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.options.model} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}`, "info");
+      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}`, "info");
       return;
     }
     // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
     if (this.busy && !this.current && !this.pendingTurn && !command.startsWith("/") && this.queued === undefined) {
       this.editor.clear();
       this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
-      this.queued = raw;
+      this.queued = raw; this.lastSent = raw;
       this.activity = "getting ready";
       this.scheduler.request();
       return;
@@ -478,6 +535,7 @@ export class TuiApp {
       } else if (command.startsWith("/")) this.notice(`There's no ${command.split(/\s/)[0]} command. Type / to see them.`, "info");
       else {
         this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
+        this.lastSent = raw;
         await this.send(raw);
         return;
       }
@@ -487,6 +545,283 @@ export class TuiApp {
       if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
     }
     this.scheduler.request();
+  }
+
+  // ---- the model, and signing in
+
+  /** The model for the header and /status: "Claude Sonnet 5.5 · high". */
+  private modelLabel(): string | undefined {
+    const current = this.options.models?.current();
+    if (!current) return undefined;
+    if (!current.model) return "no model chosen";
+    const name = current.name ?? current.model.slice(current.model.indexOf("/") + 1);
+    return current.effort ? `${name} · ${current.effort}` : name;
+  }
+
+  private closePanel(): void {
+    const panel = this.panel;
+    if (panel?.kind === "chatgpt") panel.abort.abort();
+    if (panel?.kind === "key") panel.secret = "";
+    this.panel = undefined;
+    this.scheduler.request();
+  }
+
+  private panelFailed(error: unknown): void {
+    this.closePanel();
+    if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
+  }
+
+  private panelInput(event: InputEvent): void {
+    const panel = this.panel!;
+    if (event.type === "key") {
+      const { name, ctrl } = event;
+      if (name === "escape" || (ctrl && name === "c")) { this.closePanel(); return; }
+      if (panel.kind === "pick") {
+        if (name === "up") panel.picker.move(-1);
+        else if (name === "down" || name === "tab") panel.picker.move(1);
+        else if (name === "backspace") panel.picker.erase();
+        else if (name === "enter") {
+          const item = panel.picker.selected();
+          if (item) void Promise.resolve().then(() => panel.choose(item)).catch((error: unknown) => this.panelFailed(error));
+        }
+      } else if (panel.kind === "key" && !panel.checking) {
+        if (name === "backspace") panel.secret = panel.secret.slice(0, -1);
+        else if (ctrl && name === "u") panel.secret = "";
+        else if (name === "enter" && panel.secret) void this.submitKey(panel);
+      }
+      return;
+    }
+    if (event.type !== "text" && event.type !== "paste") return;
+    // The sign-in link, through the terminal's clipboard, for a browser that didn't open by itself.
+    if (panel.kind === "chatgpt" && panel.url && event.text.toLowerCase() === "c") {
+      this.tty.write(`\u001b]52;c;${Buffer.from(panel.url, "utf8").toString("base64")}\u0007`);
+      this.notice("Copied the sign-in link.", "info");
+      return;
+    }
+    if (panel.kind === "pick") panel.picker.type(event.text);
+    // A key is one word: spaces and line breaks a paste brings along go.
+    else if (panel.kind === "key" && !panel.checking) { panel.secret = (panel.secret + event.text.replace(/[\s\x00-\x1f\x7f]/g, "")).slice(0, 4096); delete panel.status; }
+  }
+
+  /** /model: every provider's models, from their own lists, under whether Kumi is signed in there. */
+  private async openModels(): Promise<void> {
+    const models = this.options.models;
+    if (!models) return;
+    const picker = new Picker("Choose a model", [{ label: "Reading your sign-ins…", inert: true }], { filterable: true });
+    this.panel = { kind: "pick", picker, choose: (item) => this.chooseModelItem(item) };
+    this.scheduler.request();
+    const statuses = await this.options.models!.providers();
+    const lists = new Map<ProviderId, ModelInfo[] | "refused" | "unreadable">();
+    const current = models.current().model;
+    const signInItem = (provider: typeof statuses[number], again = false): PickerItem => ({
+      label: `Sign in to ${provider.name}${again ? " again" : ""}`, detail: provider.signIn === "chatgpt" ? "with your ChatGPT plan" : "with an API key",
+      value: `signin:${provider.id}`, note: "sign in", noteTone: "accent" });
+    const build = (): PickerItem[] => statuses.flatMap((provider): PickerItem[] => {
+      const listed = lists.get(provider.id);
+      const heading: PickerItem = { heading: true, label: provider.name, noteTone: listed === "refused" ? "warn" : "faint",
+        note: listed === "refused" ? provider.via === "environment" ? `${provider.keyEnv} not accepted` : "sign-in not accepted"
+          : provider.via === "environment" ? `key from ${provider.keyEnv}` : provider.signedIn ? "signed in" : "not signed in" };
+      if (!provider.signedIn) return [heading, signInItem(provider)];
+      if (listed === undefined) return [heading, { label: "Reading its models…", inert: true }];
+      if (listed === "refused") return [heading, signInItem(provider, true)];
+      if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
+      if (!listed.length) return [heading, { label: "It lists no models for this sign-in.", inert: true }];
+      return [heading, ...listed.map((model): PickerItem => ({ label: model.name, ...(model.description ? { detail: model.description } : {}), value: model.id,
+        ...(model.id === current ? { note: "current", noteTone: "accent" as const } : {}) }))];
+    });
+    const update = () => {
+      if (this.panel?.kind !== "pick" || this.panel.picker !== picker) return;
+      picker.setItems(build()); picker.select(current); this.scheduler.request();
+    };
+    update();
+    await Promise.all(statuses.filter((provider) => provider.signedIn).map(async (provider) => {
+      try { lists.set(provider.id, await models.models(provider.id)); }
+      catch (error) { lists.set(provider.id, error instanceof KumiError && error.kind === "auth" ? "refused" : "unreadable"); }
+      update();
+    }));
+  }
+
+  private async chooseModelItem(item: PickerItem): Promise<void> {
+    const models = this.options.models!;
+    const value = item.value!;
+    if (value.startsWith("signin:")) { this.signIn(value.slice("signin:".length) as ProviderId, () => this.openModels()); return; }
+    try {
+      await models.choose(value);
+    } catch (error) {
+      // Its provider isn't signed in: sign in there first, then use it.
+      if (error instanceof KumiError && error.kind === "auth" && error.provider) { this.signIn(error.provider as ProviderId, () => this.chooseModelItem(item)); return; }
+      throw error;
+    }
+    this.closePanel();
+    const current = models.current();
+    const effort = current.effort ? `, at ${current.effort} effort` : current.defaultEffort ? `, at its usual ${current.defaultEffort} effort` : "";
+    this.notice(`Kumi talks to ${current.name ?? value} from your next message${effort}.${current.pinned ? " KUMI_MODEL is set, so this lasts until Kumi closes." : ""}`, "info");
+  }
+
+  /** /effort: the levels the current model takes, with its own default first. */
+  private async openEffort(): Promise<void> {
+    const models = this.options.models!;
+    let current = models.current();
+    if (!current.model) { await this.openModels(); return; }
+    if (current.provider) await models.models(current.provider).catch(() => undefined);
+    current = models.current();
+    const name = current.name ?? current.model!;
+    if (!current.efforts.length) { this.notice(`${name} has no effort setting to choose.`, "info"); return; }
+    const items: PickerItem[] = [
+      { label: current.defaultEffort ? `Default (${current.defaultEffort})` : "Default", detail: "The model's own setting", value: "default", ...(!current.effort ? { note: "current", noteTone: "accent" } : {}) },
+      ...current.efforts.map((level): PickerItem => ({ label: level.effort, detail: level.description ?? EFFORT_WORDS[level.effort], value: level.effort,
+        ...(current.effort === level.effort ? { note: "current", noteTone: "accent" as const } : {}) })),
+    ];
+    const picker = new Picker(`How hard ${name} thinks · lower answers sooner`, items);
+    picker.select(current.effort ?? "default");
+    this.panel = { kind: "pick", picker, choose: async (item) => {
+      const effort = item.value === "default" ? undefined : item.value as Effort;
+      await models.setEffort(effort);
+      this.closePanel();
+      this.notice(effort ? `${name} thinks at ${effort} effort from your next message.` : `${name} uses its own effort from your next message.`, "info");
+    } };
+    this.scheduler.request();
+  }
+
+  /** /login: each provider, and how Kumi signs in there. */
+  private async openLogin(): Promise<void> {
+    const statuses = await this.options.models!.providers();
+    const picker = new Picker("Sign in to", statuses.map((provider): PickerItem => ({
+      label: provider.name, detail: provider.signIn === "chatgpt" ? "with your ChatGPT plan" : "with an API key", value: provider.id,
+      note: provider.via === "environment" ? `key from ${provider.keyEnv}` : provider.signedIn ? "signed in" : "sign in", noteTone: provider.signedIn ? "faint" : "accent" })));
+    this.panel = { kind: "pick", picker, choose: (item) => this.signIn(item.value as ProviderId) };
+    this.scheduler.request();
+  }
+
+  /** /logout: the sign-ins Kumi keeps; a key from the environment is Kumi's to use, not to remove. */
+  private async openLogout(): Promise<void> {
+    const models = this.options.models!;
+    const statuses = (await this.options.models!.providers()).filter((provider) => provider.signedIn);
+    if (!statuses.length) { this.notice("You're not signed in to any provider.", "info"); return; }
+    const picker = new Picker("Sign out of", statuses.map((provider): PickerItem => ({
+      label: provider.name, value: provider.id, ...(provider.via === "environment" ? { inert: true, detail: `Its key comes from ${provider.keyEnv}; unset it to sign out` }
+        : { detail: provider.via === "chatgpt" ? "Your ChatGPT sign-in" : "The key saved in Kumi" }) })));
+    this.panel = { kind: "pick", picker, choose: (item) => {
+      const provider = item.value as ProviderId; const name = PROVIDER_INFO[provider].name;
+      const { keyEnv } = PROVIDER_INFO[provider];
+      const shared = PROVIDER_INFO[provider].credential === "opencode" ? " (OpenCode Zen and Go share it)" : "";
+      const confirm = new Picker(`Sign out of ${name}?`, [
+        { label: "Sign out", detail: `Kumi forgets this sign-in${shared}`, value: "yes" },
+        { label: "Keep it", value: "no" },
+      ]);
+      this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
+        this.closePanel();
+        if (answer.value !== "yes") return;
+        const removed = await models.signOut(provider);
+        const still = (await models.providers()).find((status) => status.id === provider)?.via === "environment" ? ` ${keyEnv} is still set, so Kumi uses that key now.` : "";
+        this.notice(`${removed ? `Signed out of ${name}.` : `Kumi had no sign-in for ${name} to remove.`}${still}`, "info");
+      } };
+      this.scheduler.request();
+    } };
+    this.scheduler.request();
+  }
+
+  /** Sign in to `provider` (a pasted key, or ChatGPT in the browser), then carry on with `then`. */
+  private signIn(provider: ProviderId, then?: () => void | Promise<void>): void {
+    const models = this.options.models;
+    if (!models) return;
+    if (PROVIDER_INFO[provider].signIn === "api-key") {
+      this.panel = { kind: "key", provider, secret: "", ...(then ? { then } : {}) };
+      this.scheduler.request();
+      return;
+    }
+    const abort = new AbortController();
+    const panel: Extract<Panel, { kind: "chatgpt" }> = { kind: "chatgpt", abort, ...(then ? { then } : {}) };
+    this.panel = panel;
+    this.scheduler.request();
+    void models.signInChatGPT({ signal: abort.signal, onUrl: (url) => { panel.url = url; openBrowser(url); this.scheduler.request(); } })
+      .then(async () => {
+        if (this.panel !== panel) return;
+        this.panel = undefined;
+        this.notice("Signed in to ChatGPT.", "info");
+        await panel.then?.();
+      })
+      .catch((error: unknown) => {
+        if (this.panel === panel) this.panel = undefined;
+        if (!abort.signal.aborted && !this.closing) this.notice(`The ChatGPT sign-in didn't finish: ${safeError(error, this.secrets)}`, "warn");
+      })
+      .finally(() => this.scheduler.request());
+  }
+
+  /** Check the pasted key with its provider; keep it unless the provider refuses it. */
+  private async submitKey(panel: Extract<Panel, { kind: "key" }>): Promise<void> {
+    const models = this.options.models!;
+    const name = PROVIDER_INFO[panel.provider].name;
+    const key = panel.secret;
+    panel.checking = true; panel.status = { text: `Checking the key with ${name}…`, tone: "info" };
+    this.scheduler.request();
+    let verdict: "ok" | "refused" | "unreachable";
+    try { verdict = await models.saveKey(panel.provider, key); }
+    catch (error) { panel.checking = false; panel.status = { text: safeError(error, [...this.secrets, key]), tone: "warn" }; this.scheduler.request(); return; }
+    if (verdict === "refused") {
+      panel.checking = false; panel.secret = "";
+      panel.status = { text: `${name} didn't accept that key. Paste it again, or esc to leave it.`, tone: "warn" };
+      this.scheduler.request();
+      return;
+    }
+    this.secrets.push(key);
+    panel.secret = "";
+    if (this.panel === panel) this.panel = undefined;
+    this.notice(verdict === "ok" ? `Signed in to ${name}.` : `Kept your ${name} key; ${name} didn't answer just now, so it isn't checked yet.`, "info");
+    try { await panel.then?.(); } catch (error) { this.panelFailed(error); }
+    this.scheduler.request();
+  }
+
+  /** After a failed answer, the fix for what failed: sign in there, or another model. */
+  private offerFix(kind: string, provider: string | undefined): void {
+    const models = this.options.models;
+    if (!models || this.panel) return;
+    if (kind === "config" && !models.current().model) { void this.openModels().catch((error: unknown) => this.panelFailed(error)); return; }
+    if (kind === "model" || kind === "config") {
+      this.panel = { kind: "pick", picker: new Picker("Choose another model?", [{ label: "Choose a model", value: "model" }, { label: "Not now", value: "later" }]),
+        choose: (item) => { this.closePanel(); if (item.value === "model") return this.openModels(); } };
+      this.scheduler.request();
+      return;
+    }
+    if (kind !== "auth" || !provider || !(provider in PROVIDER_INFO)) return;
+    const info = PROVIDER_INFO[provider as ProviderId];
+    this.panel = { kind: "pick", picker: new Picker(`Sign in to ${info.name}?`, [
+      { label: "Sign in now", detail: info.signIn === "chatgpt" ? "with your ChatGPT plan, in the browser" : "with an API key", value: "signin" },
+      { label: "Choose another model", value: "model" },
+      { label: "Not now", value: "later" },
+    ]), choose: (item) => {
+      this.closePanel();
+      if (item.value === "signin") this.signIn(provider as ProviderId, () => this.resend());
+      else if (item.value === "model") return this.openModels();
+    } };
+    this.scheduler.request();
+  }
+
+  /** Send the message that was waiting for a sign-in again, when nothing's running. */
+  private resend(): void {
+    if (!this.lastSent || this.busy) return;
+    this.notice("Sending your message again.", "info");
+    void this.send(this.lastSent);
+  }
+
+  /**
+   * At startup. No model yet: the first one a signed-in provider lists, said so; signed in
+   * nowhere, the choice of where. A model whose provider isn't signed in: the offer to sign in.
+   */
+  private async checkModel(): Promise<void> {
+    const models = this.options.models;
+    if (!models || this.panel || this.closing) return;
+    const current = models.current();
+    if (!current.model) {
+      const chosen = await models.chooseDefault();
+      if (this.closing) return;
+      if (chosen) { this.notice(`Kumi talks to ${chosen.name}, ${PROVIDER_INFO[chosen.provider].name}'s first choice. /model changes it.`, "info"); return; }
+      this.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key.", "info");
+      if (!this.panel) await this.openModels();
+      return;
+    }
+    const status = (await models.providers()).find((provider) => provider.id === current.provider);
+    if (status && !status.signedIn) this.offerFix("auth", status.id);
   }
 
   /** Start a turn for a message already shown in the conversation. */
@@ -575,8 +910,9 @@ export class TuiApp {
     this.drawConversation(screen, conversation);
     if (pane) this.drawPane(screen, { x: left, y: 1, width: pane, height: rows - 1 });
     else this.drawDock(screen, { x: 0, y: boxTop - dock - 1, width: columns, height: dock });
-    const cursor = this.drawComposer(screen, { x: 1, y: boxTop, width: left - 2, height: boxHeight }, layout, visibleRows);
-    this.drawMenu(screen, boxTop, left);
+    let cursor: Cursor | undefined = this.drawComposer(screen, { x: 1, y: boxTop, width: left - 2, height: boxHeight }, layout, visibleRows);
+    if (this.panel) cursor = this.drawPanel(screen, this.panel, boxTop, left);
+    else this.drawMenu(screen, boxTop, left);
     this.tty.write(this.renderer.frame(screen, this.closing ? undefined : cursor));
   }
 
@@ -590,9 +926,20 @@ export class TuiApp {
     const status = this.status();
     const start = columns - 2 - textWidth(`● ${status.text}`);
     let x = screen.put(2, 0, "Kumi", st.title);
+    // The model gives way to the Set's name when the window is narrow.
+    let end = start - 2;
+    const model = this.modelLabel();
+    if (model) {
+      const text = truncate(model, 36);
+      const at = start - 3 - textWidth(text);
+      if (at - (x + (this.setName ? Math.min(textWidth(this.setName), 16) + 5 : 0)) >= 2) {
+        screen.put(at, 0, text, this.options.models?.current().model ? st.faint : st.warn);
+        end = at - 3;
+      }
+    }
     if (this.setName) {
       x = screen.put(x, 0, "  ·  ", st.faint);
-      screen.put(x, 0, truncate(this.setName, Math.max(0, start - x - 2)), st.text);
+      screen.put(x, 0, truncate(this.setName, Math.max(0, end - x)), st.text);
     }
     screen.put(start, 0, "●", status.dot);
     screen.put(start + 1, 0, ` ${status.text}`, st.dim);
@@ -794,9 +1141,95 @@ export class TuiApp {
     } else {
       layout.rows.slice(first, first + visibleRows).forEach((row, index) => screen.put(x, box.y + 1 + index, row, st.bright, box));
     }
-    const hint = this.menu().length ? "enter to choose · esc to close" : this.busy ? "esc to stop" : "enter to send";
+    const hint = this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
+      : this.panel?.kind === "chatgpt" ? (this.panel.url ? "c copies the link · esc to cancel" : "esc to cancel")
+      : this.menu().length ? "enter to choose · esc to close" : this.busy ? "esc to stop" : "enter to send";
     if (textWidth(hint) + 2 < width) screen.put(box.x + box.width - 2 - textWidth(hint), box.y + box.height - 1, hint, st.faint);
     return { x: x + layout.cursorColumn, y: box.y + 1 + layout.cursorRow - first };
+  }
+
+  /**
+   * The open panel, raised above the input box like the / menu: a title, then a list that keeps
+   * the selection in view, or a key box that shows dots only. Returns where the cursor goes (in the
+   * key box; nowhere otherwise).
+   */
+  private drawPanel(screen: Screen, panel: Panel, boxTop: number, left: number): Cursor | undefined {
+    const width = Math.min(76, left - 2);
+    const x = 3;
+    const inner = width - 4;
+    // Rows between the header and the input box, less the panel's padding.
+    const space = boxTop - 5;
+    const lines: PanelLine[] = [];
+    // A sentence wraps rather than being cut off.
+    const say = (text: string, style: Style) => {
+      for (const row of wrap([{ text, style }], inner)) lines.push({ text: row.map((span) => span.text).join("").trimEnd(), style });
+    };
+    let cursorAt: { line: number; column: number } | undefined;
+    if (panel.kind === "pick") {
+      const { picker } = panel;
+      const visible = picker.visible();
+      const selected = picker.selected();
+      const filter = picker.filter ? `filter: ${picker.filter}` : picker.options.filterable ? "type to filter" : undefined;
+      lines.push({ text: picker.title, style: st.title, ...(filter ? { right: { text: filter, style: picker.filter ? st.bright : st.faint } } : {}) });
+      if (!visible.length) lines.push({ text: `Nothing matches “${picker.filter}”.`, style: st.faint });
+      const rows = Math.max(1, Math.min(14, space - 2));
+      const at = selected ? visible.indexOf(selected) : 0;
+      let first = Math.max(0, Math.min(at - Math.floor(rows / 2), visible.length - rows));
+      // The selection's heading comes along when it's just above the window.
+      if (first > 0 && visible[first - 1]?.heading && at - first < rows - 1) first--;
+      const shown = visible.slice(first, first + rows);
+      const labelWidth = Math.min(28, Math.max(0, ...shown.filter((item) => !item.heading && item.detail).map((item) => textWidth(item.label))));
+      shown.forEach((item, index) => {
+        const note = item.note ? { text: item.note, style: item.noteTone === "accent" ? st.accent : item.noteTone === "warn" ? st.warn : st.faint } : undefined;
+        const more = index === 0 && first > 0 ? `↑ ${first} more` : index === shown.length - 1 && first + rows < visible.length ? `↓ ${visible.length - first - rows} more` : undefined;
+        const right = note ?? (more ? { text: more, style: st.faint } : undefined);
+        if (item.heading) { lines.push({ text: item.label, style: st.label, ...(right ? { right } : {}) }); return; }
+        const chosen = item === selected;
+        lines.push({ text: item.label, style: item.inert ? st.faint : chosen ? st.accent : st.text, indent: 2, band: chosen, labelWidth,
+          ...(item.detail ? { detail: { text: item.detail, style: chosen ? st.bright : st.dim } } : {}), ...(right ? { right } : {}) });
+      });
+    } else if (panel.kind === "key") {
+      const info = PROVIDER_INFO[panel.provider];
+      lines.push({ text: `Sign in to ${info.name}`, style: st.title });
+      say(`Paste your ${info.name} API key. It stays hidden, even here.`, st.dim);
+      const dots = "•".repeat(Math.min(panel.secret.length, Math.max(8, inner - 20)));
+      lines.push({ text: dots, style: st.bright, band: true, ...(panel.secret ? { right: { text: `${panel.secret.length} characters`, style: st.faint } } : {}) });
+      if (!panel.checking) cursorAt = { line: lines.length - 1, column: textWidth(dots) };
+      if (panel.status) say(panel.status.text, panel.status.tone === "warn" ? st.warn : st.dim);
+      else if (info.keyPage) say(`Make one at ${info.keyPage}.`, st.faint);
+      say(`Kumi checks it with ${info.name}, then keeps it in ~/.kumi, readable only by you.`, st.faint);
+    } else {
+      lines.push({ text: "Sign in to ChatGPT", style: st.title });
+      if (!panel.url) say("Starting the sign-in…", st.dim);
+      else {
+        say("Finish in your browser. If it didn't open, open this link (c copies it):", st.dim);
+        const parts = chunk(panel.url, inner);
+        // A very long link keeps its start; c still copies all of it.
+        for (const part of parts.slice(0, Math.max(1, space - 4))) lines.push({ text: part, style: st.accent });
+        lines.push({ text: "Waiting for the browser…", style: st.faint });
+      }
+    }
+    // Padding above, a gap under the title, padding below; the gap goes when space is short.
+    const gap = lines.length + 3 <= boxTop - 2 ? 1 : 0;
+    const height = lines.length + gap + 2;
+    const top = Math.max(1, boxTop - 1 - height);
+    screen.fill({ x: 1, y: top, width, height: Math.min(height, boxTop - 1 - top) }, st.raised);
+    const rowOf = (index: number) => top + 1 + index + (index > 0 ? gap : 0);
+    lines.forEach((line, index) => {
+      const y = rowOf(index);
+      if (y >= boxTop - 1) return;
+      if (line.band) screen.fill({ x: 1, y, width, height: 1 }, st.selected);
+      const start = x + (line.indent ?? 0);
+      const end = x + inner - (line.right ? textWidth(line.right.text) + 2 : 0);
+      const label = truncate(line.text, Math.max(1, end - start));
+      let column = screen.put(start, y, label, line.style);
+      if (line.detail) {
+        column = Math.max(column, start + (line.labelWidth ?? 0)) + 2;
+        if (column < end) screen.put(column, y, truncate(line.detail.text, end - column), line.detail.style);
+      }
+      if (line.right) screen.put(x + inner - textWidth(line.right.text), y, line.right.text, line.right.style);
+    });
+    return cursorAt && rowOf(cursorAt.line) < boxTop - 1 ? { x: x + cursorAt.column, y: rowOf(cursorAt.line) } : undefined;
   }
 
   private drawMenu(screen: Screen, boxTop: number, left: number): void {
@@ -928,6 +1361,13 @@ function clipPicture(clip: NonNullable<ChangeRecord["clip"]>, width: number): { 
     }
     return spans;
   });
+}
+
+/** `text` in pieces of `width` cells, for a link that must stay whole to be copied. */
+function chunk(text: string, width: number): string[] {
+  const parts: string[] = [];
+  for (let at = 0; at < text.length; at += Math.max(1, width)) parts.push(text.slice(at, at + Math.max(1, width)));
+  return parts;
 }
 
 /** A catch-up as one line for the conversation. */

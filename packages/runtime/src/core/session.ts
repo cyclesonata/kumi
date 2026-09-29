@@ -52,6 +52,10 @@ export function createSession(options: Options): SessionController {
   let integrationGeneration = 0;
   let kernel: { value: Kernel; key: string; revision: string; lifetime: AbortController } | undefined;
   let mustReset = false;
+  /** The model changed: the kernel is rebuilt at the next safe point, carrying the conversation on. */
+  let rebuild = false;
+  /** That conversation, and whose Set it is. */
+  let switched: { checkpoint: KernelCheckpoint; key: string } | undefined;
   /** Live went away while connected; cleared when it's back. */
   let away = false;
   /** The saved Set the conversation is about, when known. */
@@ -102,11 +106,18 @@ export function createSession(options: Options): SessionController {
   }
   async function ensureKernel(op: Operation, observation: Observation) {
     assertCurrent(op);
+    if (rebuild) {
+      rebuild = false;
+      const held = kernel;
+      if (held?.value.checkpoint) switched = { checkpoint: held.value.checkpoint(), key: held.key };
+      await dropKernel(); assertCurrent(op);
+    }
     const identityChanged = kernel !== undefined && kernel.key !== observation.key;
     const revision = observation.revision ?? "";
     let carried: KernelCheckpoint | undefined;
     if (kernel && !identityChanged && !mustReset && kernel.revision !== revision) {
-      // Same Set, new tools (say, a first clip made clip tools appear): keep the conversation.
+      // Same Set, new tools (say, a first clip made clip tools appear): keep the conversation (the
+      // new kernel drops reasoning made with the old tools).
       if (kernel.value.checkpoint) carried = kernel.value.checkpoint();
       if (carried) { await dropKernel(); assertCurrent(op); }
     }
@@ -120,6 +131,9 @@ export function createSession(options: Options): SessionController {
     if (!kernel) {
       // A saved Set's conversation carries on from its last settled turn.
       let resumed: SavedConversation | undefined;
+      // A model change carries the conversation on (same Set only; a new Set starts its own).
+      if (!carried && switched?.key === observation.key) carried = switched.checkpoint;
+      switched = undefined;
       if (!carried && observation.project && options.conversations) {
         resumed = await options.conversations.load(observation.project.id).catch(() => undefined);
         assertCurrent(op);
@@ -221,10 +235,14 @@ export function createSession(options: Options): SessionController {
             if (workSettled) saveConversation();
           }
         } else {
-          const message = op.phase === "undo" ? (error instanceof KumiError ? error.message : "The undo didn't finish; check Live.")
+          // Sign-in, billing and model problems say so wherever they happen (building the model's
+          // kernel is part of reading the Set), with where they happened, so the fix can be offered.
+          const actionable = error instanceof KumiError && (error.kind === "auth" || error.kind === "billing" || error.kind === "model" || error.kind === "config");
+          const message = actionable ? error.message
+            : op.phase === "undo" ? (error instanceof KumiError ? error.message : "The undo didn't finish; check Live.")
             : op.phase !== "inference" ? "Context refresh failed; no answer was generated from old observations."
             : error instanceof KumiError ? error.message : "Inference failed; check the configured model, sign-in and connection.";
-          emit({ type: "error", message });
+          emit({ type: "error", message, ...(error instanceof KumiError ? { kind: error.kind, ...(error.provider ? { provider: error.provider } : {}) } : {}) });
           // A failed answer keeps the steps it finished (see the kernel); keep them for next time too.
           if (isTurn && op.phase === "inference") saveConversation();
           if (!isTurn && phase === "start") {
@@ -283,6 +301,12 @@ export function createSession(options: Options): SessionController {
       return outcome;
     },
     async cancel() { const op = active; if (!op) return; op.controller.abort(); await op.done; },
+    async reconfigure() {
+      if (state === "closed") throw new Error("Session is closed");
+      // Not now: an answer may be running. The next turn or refresh rebuilds the kernel for the new
+      // model and carries the settled conversation on.
+      rebuild = true;
+    },
     close() {
       if (closing) return closing;
       const op = active;

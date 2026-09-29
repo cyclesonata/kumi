@@ -1,3 +1,4 @@
+import type { FailureKind } from "./errors.js";
 export type JsonObject = Record<string, unknown>;
 
 export interface KernelTool {
@@ -36,8 +37,13 @@ export interface TurnResult {
 export interface KernelCheckpoint {
   readonly version: 1;
   readonly messages: readonly unknown[];
-  /** The provider that wrote it; another provider continues from a portable copy (text and tool calls). */
+  /**
+   * The model that wrote it ("<provider>/<model>"; a provider alone in older saves). Reasoning is
+   * the writer's own: another model continues from a portable copy (words, tool calls, results).
+   */
   readonly origin?: string;
+  /** The tools it was made with, as a fingerprint: some models' reasoning is bound to them too. */
+  readonly tools?: string;
 }
 
 /** One exchange of a conversation, as the producer saw it. */
@@ -182,7 +188,8 @@ export type SessionEvent = KernelEvent
   | { type: "connection"; state: ConnectionState }
   | { type: "observation"; label: string }
   | { type: "notice"; message: string }
-  | { type: "error"; message: string }
+  /** `kind` and `provider` say what failed and where, so an app can offer the fix (sign in, choose a model). */
+  | { type: "error"; message: string; kind?: FailureKind; provider?: string }
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number };
 
 export interface SessionStatus {
@@ -207,4 +214,9 @@ export interface SessionController {
    * error event says why).
    */
   undo(id?: string): Promise<ChangeRecord | undefined>;
+  /**
+   * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
+   * the kernel afresh through the factory, continuing this conversation. Safe during a turn.
+   */
+  reconfigure?(): Promise<void>;
 }

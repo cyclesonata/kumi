@@ -7,8 +7,9 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { API_KEY_ENV, OPENAI_CODEX, openCredentialStore, parseModelId } from "@kumi/runtime";
+import { apiKeyFor, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, type ProviderId } from "@kumi/runtime";
 import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
+import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -57,18 +58,24 @@ function nodeCheck(version: string): Check {
 }
 
 async function signInCheck(env: Env): Promise<Check> {
+  const store = openCredentialStore(loadAuthFile(env));
+  const signedIn = async (provider: ProviderId) => PROVIDER_INFO[provider].signIn === "chatgpt"
+    ? (await store.get(OPENAI_CODEX).catch(() => undefined))?.type === "oauth"
+    : Boolean(await apiKeyFor(provider, store, env).catch(() => undefined));
   const model = env.KUMI_MODEL ?? readSettings(loadSettingsFile(env)).model;
-  if (!model) return { status: "fix", text: "No model chosen", next: "npm run kumi -- login openai-codex (or: npm run kumi -- model <provider>/<model>)" };
-  const parsed = parseModelId(model);
-  if (!parsed) return { status: "fix", text: `The model "${model.slice(0, 80)}" isn't one Kumi knows`, next: "npm run kumi -- model <provider>/<model>" };
-  if (parsed.provider === OPENAI_CODEX) {
-    const credential = await openCredentialStore(loadAuthFile(env)).get(OPENAI_CODEX).catch(() => undefined);
-    return credential ? { status: "ok", text: `Signed in to ChatGPT · model ${model}` }
-      : { status: "fix", text: `Not signed in to ChatGPT (model ${model})`, next: "npm run kumi -- login openai-codex" };
+  if (!model) {
+    for (const provider of OFFER_ORDER) {
+      if (await signedIn(provider)) return { status: "ok", text: `Signed in to ${PROVIDER_INFO[provider].name} · Kumi starts with its first model (/model changes it)` };
+    }
+    return { status: "fix", text: "Not signed in to a provider", next: "npm run kumi -- login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key" };
   }
-  const variable = (API_KEY_ENV as Record<string, string>)[parsed.provider];
-  return variable && env[variable] ? { status: "ok", text: `${parsed.provider} API key from ${variable} · model ${model}` }
-    : { status: "fix", text: `No API key for ${parsed.provider} (model ${model})`, next: variable ? `Set ${variable} in your environment` : "npm run kumi -- model <provider>/<model>" };
+  const parsed = parseModelId(model);
+  if (!parsed) return { status: "fix", text: `The model "${model.slice(0, 80)}" isn't one Kumi knows`, next: "Choose one with /model in Kumi" };
+  const info = PROVIDER_INFO[parsed.provider];
+  if (!(await signedIn(parsed.provider))) return { status: "fix", text: `Not signed in to ${info.name} (model ${model})`, next: `npm run kumi -- login ${parsed.provider}` };
+  if (info.signIn === "chatgpt") return { status: "ok", text: `Signed in to ChatGPT · model ${model}` };
+  const key = await apiKeyFor(parsed.provider, store, env).catch(() => undefined);
+  return { status: "ok", text: `${parsed.provider} API key ${key?.source === "env" ? `from ${info.keyEnv}` : "saved in Kumi"} · model ${model}` };
 }
 
 interface BridgeServer { command?: string; entry?: string; version?: string }

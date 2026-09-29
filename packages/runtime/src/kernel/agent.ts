@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
   JSONSchema7, LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4FinishReason, LanguageModelV4FunctionTool,
@@ -81,8 +81,8 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   }));
   const sessionId = randomUUID();
   const lifetime = new AbortController();
-  const provider = binding.id.split("/")[0] ?? binding.id;
-  let history = options.checkpoint ? restore(options.checkpoint, provider) : [];
+  const toolsKey = createHash("sha256").update(JSON.stringify(specs)).digest("base64url").slice(0, 22);
+  let history = options.checkpoint ? restore(options.checkpoint, binding.id, toolsKey) : [];
   let running: { steering: string[] } | undefined;
   let active: Promise<TurnResult> | undefined;
   let closing: Promise<void> | undefined;
@@ -117,8 +117,13 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       for (let step = 0; ; step++) {
         if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...messages]; return settled("max-steps"); }
         const fitted = fit(earlier, messages, budget);
-        earlier = fitted.history;
-        if (fitted.turn !== messages) messages.splice(0, messages.length, ...fitted.turn);
+        if (fitted.history !== earlier || fitted.turn !== messages) {
+          // Kumi just changed what came before. Some providers bind a model's reasoning to the exact
+          // conversation it saw (Anthropic's current models refuse the request otherwise), so the
+          // reasoning goes, once: what was said, called and read stays.
+          earlier = withoutReasoning(fitted.history);
+          messages.splice(0, messages.length, ...withoutReasoning(fitted.turn));
+        }
         const request = binding.prepare({ instructions, messages: [...earlier, ...messages], tools: specs, sessionId });
         const result = await stream(request, abort, (text) => { spoke = true; deliver({ type: "text", text }); });
         add(usage, result.usage); reported = true;
@@ -206,7 +211,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     },
     checkpoint() {
       if (running) throw new Error("Kernel is busy; checkpoint between turns");
-      return { version: 1, messages: structuredClone(history), origin: provider };
+      return { version: 1, messages: structuredClone(history), origin: binding.id, tools: toolsKey };
     },
     transcript() {
       return history.flatMap((message): TranscriptLine[] => {
@@ -307,16 +312,29 @@ function user(text: string): LanguageModelV4Message {
   return { role: "user", content: [{ type: "text", text }] };
 }
 
-function restore(checkpoint: KernelCheckpoint, provider: string): LanguageModelV4Message[] {
+function restore(checkpoint: KernelCheckpoint, model: string, tools: string): LanguageModelV4Message[] {
   if (checkpoint?.version !== 1 || !Array.isArray(checkpoint.messages)) throw new Error("Unsupported checkpoint version.");
   const messages = structuredClone(checkpoint.messages) as LanguageModelV4Message[];
-  if (!checkpoint.origin || checkpoint.origin === provider) return messages;
-  // Another provider's reasoning and replay metadata mean nothing here: keep words, tool calls and results.
+  if (!checkpoint.origin) return messages;
+  // Reasoning belongs to the model that wrote it, and Claude's to the tools it saw as well: another
+  // model, or other tools, continue from the words, tool calls and results. (Older saves name only
+  // the provider.)
+  const sameModel = checkpoint.origin === model || checkpoint.origin === model.split("/")[0];
+  const sameTools = checkpoint.tools === undefined || checkpoint.tools === tools;
+  return sameModel && sameTools ? messages : withoutReasoning(messages);
+}
+
+/**
+ * The conversation without the models' reasoning or any provider's replay metadata: what was said,
+ * the tool calls and their results. A copy; messages left with nothing in them go.
+ */
+export function withoutReasoning(messages: readonly LanguageModelV4Message[]): LanguageModelV4Message[] {
   const plain = <T extends { providerOptions?: unknown }>(part: T): T => { const { providerOptions: _metadata, ...rest } = part; return rest as T; };
-  return messages.map((message) => (message.role === "system" ? message : {
-    ...message,
-    content: (message.content as { type: string; providerOptions?: unknown }[]).filter((part) => part.type !== "reasoning").map(plain),
-  }) as LanguageModelV4Message);
+  return messages.flatMap((message) => {
+    if (message.role === "system") return [message];
+    const content = (message.content as { type: string; providerOptions?: unknown }[]).filter((part) => part.type !== "reasoning").map(plain);
+    return content.length ? [{ ...plain(message as { providerOptions?: unknown }), content } as LanguageModelV4Message] : [];
+  });
 }
 
 /** Resolve with the work, or reject as soon as the signal aborts; a late settlement is ignored. */

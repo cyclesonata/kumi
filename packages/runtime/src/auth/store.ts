@@ -12,7 +12,12 @@ export interface OAuthCredential {
   expires: number;
   accountId: string;
 }
-export type Credential = OAuthCredential;
+/** A provider's API key, typed or pasted by the producer. */
+export interface ApiKeyCredential {
+  type: "api-key";
+  key: string;
+}
+export type Credential = OAuthCredential | ApiKeyCredential;
 
 export interface CredentialStore {
   readonly path: string;
@@ -98,7 +103,13 @@ export function openCredentialStore(path: string): CredentialStore {
   };
 }
 
+/** An API key as providers issue them: one word of printable characters. */
+export function validApiKey(value: unknown): value is string {
+  return typeof value === "string" && /^[\x21-\x7e]{8,4096}$/.test(value);
+}
+
 function isCredential(value: unknown): value is Credential {
+  if ((value as { type?: unknown } | null)?.type === "api-key") return validApiKey((value as ApiKeyCredential).key);
   const entry = value as Partial<OAuthCredential> | null;
   return Boolean(entry) && entry!.type === "oauth" && typeof entry!.access === "string" && entry!.access.length > 0
     && typeof entry!.refresh === "string" && entry!.refresh.length > 0 && typeof entry!.expires === "number" && Number.isFinite(entry!.expires)

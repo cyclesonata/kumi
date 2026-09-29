@@ -7,12 +7,14 @@ import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, TuiApp } f
 import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
 import { RESTORE } from "../src/tui/tty.js";
+import type { ModelControl } from "../src/models.js";
+import { fakeModels, MODELS } from "./fake-models.js";
 import { VirtualTerminal } from "./vt.js";
 
 const opened: TuiApp[] = [];
 afterEach(async () => { await Promise.all(opened.splice(0).map((app) => app.close())); });
 
-function harness(columns = 120, rows = 36) {
+function harness(columns = 120, rows = 36, models?: ModelControl) {
   const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false, setRawMode(value: boolean) { this.isRaw = value; } });
   let written = "";
   const output = Object.assign(new Writable({ write(chunk, _encoding, callback) { written += String(chunk); callback(); } }), { isTTY: true, columns, rows });
@@ -34,7 +36,7 @@ function harness(columns = 120, rows = 36) {
     },
   };
   let undoResult: ((id: string | undefined) => ChangeRecord | undefined) | undefined;
-  const app = new TuiApp({ controller, input, output, model: "openai-codex/fixture", mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
+  const app = new TuiApp({ controller, input, output, ...(models ? { models } : {}), mode: "live", secrets: ["private-token"], colorDepth: "truecolor", frameMs: 1, closeTimeoutMs: 100 });
   opened.push(app);
   let vt = new VirtualTerminal(columns, rows);
   let consumed = 0;
@@ -520,4 +522,186 @@ test("the editor moves by character, word and line, and wraps wide characters wh
   assert.equal(editor.vertical(20, -1), true);
   assert.equal(editor.cursor, 6, "up keeps the column");
   assert.equal(editor.vertical(20, -1), false);
+});
+
+// ---- the model, and signing in
+
+const panelLines = (lines: string[]) => lines.slice(1);
+
+test("/model lists each provider's own models under whether Kumi is signed in there; typing filters, and a choice says when it applies", async () => {
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  assert.match(h.screen()[0]!, /Night Drive +GPT-6 Astra +● Live {2}$/, "the header names the model");
+  await h.type("/model\r");
+  await delay(10);
+  let lines = panelLines(h.screen());
+  assert.ok(has(lines, "Choose a model") && has(lines, "type to filter"));
+  assert.ok(lines.some((line) => /ChatGPT +signed in/.test(line)));
+  assert.ok(lines.some((line) => line.includes("GPT-6 Astra") && line.includes("Frontier model for complex work") && line.includes("current")));
+  assert.ok(lines.some((line) => /Anthropic +not signed in/.test(line)));
+  assert.ok(lines.some((line) => line.includes("Sign in to Anthropic") && line.includes("with an API key") && line.includes("sign in")));
+  assert.ok(has(h.screen(), "↑↓ to move · enter to choose · esc to close"));
+  await h.type("luna");
+  lines = panelLines(h.screen());
+  assert.ok(has(lines, "filter: luna") && has(lines, "GPT-6 Luna") && !has(lines, "GPT-6 Astra") && !has(lines, "Anthropic"));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(fake.calls.includes("choose:openai-codex/gpt-6-luna"));
+  lines = h.screen();
+  assert.ok(!has(lines, "Choose a model"), "the panel closes");
+  assert.ok(has(lines, "Kumi talks to GPT-6 Luna from your next message, at its usual low effort."));
+  assert.match(lines[0]!, /GPT-6 Luna +● Live/);
+  await h.app.close();
+});
+
+test("signing in with a key never shows it: dots only, checked with the provider first, and asked again when refused", async () => {
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(5);
+  await h.type("/login\r");
+  await delay(5);
+  let lines = h.screen();
+  assert.ok(has(lines, "Sign in to") && lines.some((line) => line.includes("Anthropic") && line.includes("with an API key")));
+  await h.type("\u001b[B\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Paste your Anthropic API key. It stays hidden, even here."));
+  const refused = "refused-key-0123456789";
+  await h.type(`\u001b[200~${refused}\u001b[201~`);
+  lines = h.screen();
+  assert.ok(has(lines, "•".repeat(refused.length)) && has(lines, `${refused.length} characters`));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Anthropic didn't accept that key. Paste it again, or esc to leave it."));
+  const key = "sk-ant-private-0123456789abcdef";
+  await h.type(`\u001b[200~${key}\u001b[201~\r`);
+  await delay(10);
+  lines = h.screen();
+  assert.ok(has(lines, "Signed in to Anthropic.") && !has(lines, "Paste your Anthropic API key"));
+  assert.ok(fake.calls.includes(`key:anthropic:${key.length}`));
+  // Should the key ever come back in a message, it's hidden there too.
+  h.emit({ type: "notice", message: `the provider echoed ${key}` });
+  h.screen();
+  for (const secret of [refused, key]) assert.ok(!h.written.includes(secret), "a key is never drawn");
+  await h.app.close();
+});
+
+test("an answer that fails for want of a sign-in offers one, then sends the message again", async () => {
+  const fake = fakeModels({ model: "anthropic/claude-sonnet-5-5", signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(10);
+  assert.ok(has(h.screen(), "Sign in to Anthropic?"), "offered as Kumi starts");
+  await h.type("\u001b");
+  assert.ok(!has(h.screen(), "Sign in to Anthropic?"));
+  await h.type("How do I tame the snare?\r");
+  await delay(5);
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "error", message: "Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).", kind: "auth", provider: "anthropic" });
+  h.emit({ type: "state", state: "idle" });
+  let lines = h.screen();
+  assert.ok(has(lines, "Not signed in to Anthropic") && has(lines, "Sign in to Anthropic?") && has(lines, "Sign in now") && has(lines, "Choose another model"));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Paste your Anthropic API key"));
+  await h.type("\u001b[200~sk-ant-fixture-0000\u001b[201~\r");
+  await delay(10);
+  lines = h.screen();
+  assert.ok(has(lines, "Signed in to Anthropic.") && has(lines, "Sending your message again."));
+  assert.deepEqual(h.calls.filter((call) => call.startsWith("submit")), ["submit:How do I tame the snare?", "submit:How do I tame the snare?"]);
+  await h.app.close();
+});
+
+test("a model the provider doesn't offer, or no model at all, opens the choice", async () => {
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(5);
+  h.emit({ type: "error", message: "ChatGPT doesn't offer gpt-6-astra to this sign-in (HTTP 404); choose another model.", kind: "model", provider: "openai-codex" });
+  assert.ok(has(h.screen(), "Choose another model?"));
+  await h.type("\r");
+  await delay(10);
+  assert.ok(has(h.screen(), "Choose a model"));
+  await h.app.close();
+});
+
+test("with no model chosen, Kumi starts with a signed-in provider's first one and says so; signed in nowhere, it shows where to sign in", async () => {
+  const signed = fakeModels({ signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, signed.control);
+  void h.app.run();
+  await delay(10);
+  assert.ok(has(h.screen(), "Kumi talks to GPT-6 Astra, ChatGPT's first choice. /model changes it."));
+  await h.app.close();
+  const none = fakeModels({ lists: MODELS });
+  const fresh = harness(120, 36, none.control);
+  void fresh.app.run();
+  await delay(10);
+  const lines = fresh.screen();
+  assert.ok(has(lines, "Sign in to a provider to talk to its models"));
+  assert.ok(has(lines, "Choose a model") && has(lines, "Sign in to ChatGPT") && has(lines, "with your ChatGPT plan"));
+  assert.match(lines[0]!, /no model chosen/);
+  await fresh.app.close();
+});
+
+test("signing in to ChatGPT from Kumi shows the link to open, copies it on c, and can be cancelled", async () => {
+  const fake = fakeModels({ lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(10);
+  await h.type("\r");
+  await delay(5);
+  let lines = h.screen();
+  assert.ok(has(lines, "Sign in to ChatGPT") && has(lines, "https://auth.example.test/oauth/authorize") && has(lines, "Waiting for the browser…"));
+  assert.ok(has(lines, "c copies the link · esc to cancel"));
+  await h.type("c");
+  assert.ok(h.written.includes(`\u001b]52;c;${Buffer.from("https://auth.example.test/oauth/authorize?client=kumi&state=fixture").toString("base64")}\u0007`));
+  assert.ok(has(h.screen(), "Copied the sign-in link."));
+  fake.finishChatGPT();
+  await delay(10);
+  lines = h.screen();
+  assert.ok(has(lines, "Signed in to ChatGPT."));
+  assert.ok(lines.some((line) => line.includes("GPT-6 Astra") && line.includes("current")), "then its models, the first one chosen");
+  await h.type("\u001b");
+  await h.type("/login\r");
+  await delay(5);
+  await h.type("\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Waiting for the browser…"));
+  await h.type("\u001b");
+  await delay(5);
+  lines = h.screen();
+  assert.ok(!has(lines, "Waiting for the browser…") && !has(lines, "didn't finish"), "cancelling is quiet");
+  await h.app.close();
+});
+
+test("/effort offers the levels the model takes, with its own default first; /logout asks before signing out", async () => {
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
+  const h = harness(120, 36, fake.control);
+  void h.app.run();
+  await delay(5);
+  await h.type("/effort\r");
+  await delay(10);
+  let lines = panelLines(h.screen());
+  assert.ok(has(lines, "How hard GPT-6 Astra thinks · lower answers sooner"));
+  assert.ok(lines.some((line) => line.includes("Default (medium)") && line.includes("current")));
+  assert.ok(lines.some((line) => /^\s+xhigh\s+More thorough still/.test(line)));
+  await h.type("\u001b[B\r");
+  await delay(5);
+  assert.ok(fake.calls.includes("effort:low"));
+  lines = h.screen();
+  assert.ok(has(lines, "GPT-6 Astra thinks at low effort from your next message."));
+  assert.match(lines[0]!, /GPT-6 Astra · low +● /);
+  await h.type("/logout\r");
+  await delay(5);
+  assert.ok(has(h.screen(), "Sign out of") && has(h.screen(), "Your ChatGPT sign-in"));
+  await h.type("\r");
+  assert.ok(has(h.screen(), "Sign out of ChatGPT?"));
+  await h.type("\r");
+  await delay(5);
+  assert.ok(fake.calls.includes("signout:openai-codex"));
+  assert.ok(has(h.screen(), "Signed out of ChatGPT."));
+  await h.app.close();
 });

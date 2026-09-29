@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import { KumiError } from "../src/core/errors.js";
 import { createSession } from "../src/core/session.js";
 import type { ConnectionState, ConversationStore, Kernel, KernelEvent, KernelFactory, KernelOptions, Observation, SavedConversation, SessionEvent, TurnResult } from "../src/core/contracts.js";
 
@@ -198,6 +199,43 @@ test("a changed tool catalog for the same Set keeps the conversation in a rebuil
   assert.ok(carried?.messages[0]?.includes("one"));
   assert.equal(created[1]?.tools, 1);
   assert(!h.events.some((e) => e.type === "notice" && /fresh conversation/.test(e.message)), "no reset notice");
+  await h.session.close();
+});
+
+test("a model change rebuilds the kernel when it's next needed, carrying the conversation on, even mid-answer", async () => {
+  const created: { checkpoint?: unknown }[] = [];
+  const held = deferred<TurnResult>();
+  let turns = 0;
+  const h = harness({ factory: async ({ checkpoint }) => {
+    created.push({ ...(checkpoint ? { checkpoint } : {}) });
+    const history: string[] = checkpoint ? [...(checkpoint.messages as string[])] : [];
+    return {
+      async run(input: string) { history.push(input); return ++turns === 2 ? held.promise : { stopReason: "completed" as const }; },
+      async close() {},
+      checkpoint() { return { version: 1 as const, messages: [...history] }; },
+    };
+  } });
+  await h.session.start(); await h.session.submit("one");
+  const answering = h.session.submit("two");
+  await delay(0);
+  await h.session.reconfigure!();
+  assert.equal(created.length, 1, "the answer running now finishes as it started");
+  held.resolve({ stopReason: "completed" });
+  await answering;
+  await h.session.submit("three");
+  assert.equal(created.length, 2, "the next answer uses the new model");
+  const carried = (created[1]?.checkpoint as { messages: string[] }).messages;
+  assert.equal(carried.length, 2);
+  assert.ok(carried[0]?.includes("one") && carried[1]?.includes("two"));
+  await h.session.close();
+});
+
+test("a failed answer's error says what failed and where, so the app can offer the fix", async () => {
+  const h = harness({ run: async () => { throw new KumiError("auth", "Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).", "anthropic"); } });
+  await h.session.start();
+  await h.session.submit("hello");
+  const error = h.events.find((event) => event.type === "error");
+  assert.deepEqual(error, { type: "error", message: "Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).", kind: "auth", provider: "anthropic" });
   await h.session.close();
 });
 

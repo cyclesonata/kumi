@@ -33,6 +33,15 @@ every state below.
   control, the clip tab (Notes, Envelopes with the chosen envelope, MPE), the
   Browser item, mixer controls and the Arrangement position. The indicator only
   shows what Live actually reports, because it defines what "this" means.
+- **The model is the producer's choice, made in place.** `/model`, `/effort`,
+  `/login` and `/logout` open a panel above the input box, drawn like the `/`
+  menu: providers as headings with whether Kumi is signed in there, their models
+  read from the providers themselves (Kumi keeps no list), typing to filter. The
+  header names the model and its effort. A key is typed or pasted into a box that
+  shows only dots and its length, and is checked before it's kept. A failure that
+  has a fix offers it: a missing or refused sign-in asks "Sign in to Anthropic?"
+  and resends the message after; a model the provider doesn't offer opens the
+  list. Changes apply from the next message, so they're allowed mid-answer.
 - **Undo is first-class.** Every change is a history entry backed by a bridge
   transaction with verified undo; a whole turn can be undone too.
 - **A view, not the engine.** Visual building blocks are described as data by

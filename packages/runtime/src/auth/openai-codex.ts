@@ -17,7 +17,7 @@ export const DEVICE_VERIFICATION_URL = `${AUTH_BASE}/codex/device`;
 const SCOPE = "openid profile email offline_access";
 const REFRESH_MARGIN_MS = 5 * 60_000;
 const DEVICE_TIMEOUT_MS = 15 * 60_000;
-export const LOGIN_HINT = "Sign in with: npm run kumi -- login openai-codex";
+export const LOGIN_HINT = "Sign in with /login in Kumi, or: npm run kumi -- login openai-codex";
 
 type Fetch = typeof fetch;
 export interface LoginOptions { signal: AbortSignal; fetch?: Fetch }
@@ -42,13 +42,13 @@ async function requestTokens(body: URLSearchParams, options: LoginOptions, previ
   if (!response.ok) {
     throw new KumiError("auth", previousRefresh
       ? `OpenAI sign-in could not be refreshed (HTTP ${response.status}). ${LOGIN_HINT}`
-      : `OpenAI sign-in failed (HTTP ${response.status}).`);
+      : `OpenAI sign-in failed (HTTP ${response.status}).`, OPENAI_CODEX);
   }
   const json = await response.json() as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
   const refresh = typeof json.refresh_token === "string" && json.refresh_token ? json.refresh_token : previousRefresh;
-  if (typeof json.access_token !== "string" || !json.access_token || !refresh) throw new KumiError("auth", "OpenAI returned an incomplete token response.");
+  if (typeof json.access_token !== "string" || !json.access_token || !refresh) throw new KumiError("auth", "OpenAI returned an incomplete token response.", OPENAI_CODEX);
   const accountId = accountIdFromToken(json.access_token);
-  if (!accountId) throw new KumiError("auth", "The OpenAI token has no ChatGPT account; sign in with a ChatGPT plan that includes Codex.");
+  if (!accountId) throw new KumiError("auth", "The OpenAI token has no ChatGPT account; sign in with a ChatGPT plan that includes Codex.", OPENAI_CODEX);
   const exp = claims(json.access_token)?.exp;
   const expires = typeof json.expires_in === "number" ? Date.now() + json.expires_in * 1000
     : typeof exp === "number" ? exp * 1000 : Date.now() + 60 * 60_000;
@@ -159,14 +159,14 @@ export function codexTokenSource(store: CredentialStore, options: { fetch?: Fetc
   const fresh = (credential: OAuthCredential) => credential.expires - now() > REFRESH_MARGIN_MS;
   return async () => {
     const current = await store.get(OPENAI_CODEX);
-    if (!current) throw new KumiError("auth", `Not signed in to ChatGPT (openai-codex). ${LOGIN_HINT}`);
+    if (current?.type !== "oauth") throw new KumiError("auth", `Not signed in to ChatGPT (openai-codex). ${LOGIN_HINT}`, OPENAI_CODEX);
     if (fresh(current)) return { access: current.access, accountId: current.accountId };
     refreshing ??= store.update(OPENAI_CODEX, async (latest) => {
-      if (!latest) throw new KumiError("auth", `Not signed in to ChatGPT (openai-codex). ${LOGIN_HINT}`);
+      if (latest?.type !== "oauth") throw new KumiError("auth", `Not signed in to ChatGPT (openai-codex). ${LOGIN_HINT}`, OPENAI_CODEX);
       if (fresh(latest)) return latest;
       // Not tied to one caller's cancellation: concurrent requests share this refresh.
       return refreshCodexCredential(latest, { signal: AbortSignal.timeout(30_000), ...(options.fetch ? { fetch: options.fetch } : {}) });
-    }).finally(() => { refreshing = undefined; });
+    }).finally(() => { refreshing = undefined; }) as Promise<OAuthCredential | undefined>;
     const credential = await refreshing;
     return { access: credential!.access, accountId: credential!.accountId };
   };

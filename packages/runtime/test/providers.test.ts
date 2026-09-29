@@ -109,8 +109,9 @@ test("codex: refreshes a token near expiry under the store lock and persists the
     assert.equal(requests.filter((request) => request.url.includes("oauth/token")).length, 1, "one refresh, shared by later requests");
     assert.equal(requests.at(-1)?.headers.get("authorization"), `Bearer ${fresh}`);
     const stored = await store.get("openai-codex");
-    assert.equal(stored?.refresh, "refresh-2");
-    assert(stored!.expires > Date.now() + 30 * 60_000);
+    assert(stored?.type === "oauth");
+    assert.equal(stored.refresh, "refresh-2");
+    assert(stored.expires > Date.now() + 30 * 60_000);
     await kernel.close();
   });
 });
@@ -162,6 +163,29 @@ test("API-key providers use their own endpoints, credentials, and cache/session 
       check(requests[0]!);
       await kernel.close();
     }
+  });
+});
+
+test("a key saved in Kumi signs in when the environment has none, and the chosen effort goes on the wire", async () => {
+  await withStore(undefined, async (store) => {
+    await store.update("anthropic", async () => ({ type: "api-key", key: "sk-ant-saved-0000" }));
+    await store.update("openai", async () => ({ type: "api-key", key: "sk-openai-saved-0000" }));
+    const send = async (model: string, effort?: "low") => {
+      const { fetch, requests } = recorder(() => rejection());
+      const kernel = kernelFor(await resolveModel({ model, store, fetch, env: {}, ...(effort ? { effort } : {}) }));
+      await assert.rejects(kernel.run("hi", new AbortController().signal, () => {}), /fixture rejection/);
+      await kernel.close();
+      return requests[0]!;
+    };
+    const claude = await send("anthropic/claude-sonnet-5-5", "low");
+    assert.equal(claude.headers.get("x-api-key"), "sk-ant-saved-0000");
+    assert.deepEqual(claude.body.output_config, { effort: "low" });
+    const gpt = await send("openai/gpt-6-luna", "low");
+    assert.equal(gpt.headers.get("authorization"), "Bearer sk-openai-saved-0000");
+    assert.equal((gpt.body.reasoning as { effort?: string } | undefined)?.effort, "low");
+    // No effort chosen: the model's own.
+    assert.equal((await send("anthropic/claude-sonnet-5-5")).body.output_config, undefined);
+    assert.equal((await send("openai/gpt-6-luna")).body.reasoning, undefined);
   });
 });
 

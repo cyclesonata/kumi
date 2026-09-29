@@ -40,6 +40,19 @@ test("credential store is owner-only, atomic, and removes entries on request", a
   });
 });
 
+test("credential store keeps API keys beside sign-ins, and refuses anything that isn't one word", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "kumi-auth-keys-"));
+  try {
+    const store = openCredentialStore(join(dir, "auth.json"));
+    await store.update("anthropic", async () => ({ type: "api-key", key: "sk-ant-fixture-0001" }));
+    assert.deepEqual(await openCredentialStore(join(dir, "auth.json")).get("anthropic"), { type: "api-key", key: "sk-ant-fixture-0001" });
+    for (const key of ["", "short", "two words-here", "line\nbreak-0000", "x".repeat(4097)]) {
+      await assert.rejects(store.update("openai", async () => ({ type: "api-key", key })), /malformed/);
+    }
+    assert.deepEqual(Object.keys(await store.list()), ["anthropic"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("credential store refuses readable-by-others and malformed files without printing their contents", async () => {
   await inTemp(async (dir) => {
     const path = join(dir, "auth.json");
@@ -66,7 +79,8 @@ test("concurrent updates from separate processes' stores serialize under the loc
     const old = new Date(Date.now() - 60_000);
     await utimes(`${path}.lock`, old, old);
     await openCredentialStore(path).update("c", async () => credential("c"));
-    assert.equal((await openCredentialStore(path).get("c"))?.refresh, "c");
+    const c = await openCredentialStore(path).get("c");
+    assert.equal(c?.type === "oauth" ? c.refresh : undefined, "c");
   });
 });
 

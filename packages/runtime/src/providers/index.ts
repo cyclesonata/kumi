@@ -14,6 +14,44 @@ export type ProviderId = typeof PROVIDERS[number];
 export const API_KEY_ENV = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", opencode: "OPENCODE_API_KEY", "opencode-go": "OPENCODE_API_KEY" } as const;
 export const USER_AGENT = `kumi/0.0.1 (${platform()} ${release()}; ${arch()})`;
 
+/** How hard a model thinks before answering; providers take a subset (a model lists its own). */
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = typeof EFFORTS[number];
+
+/** A provider as producers know it, and how Kumi signs in to it. */
+export interface ProviderInfo {
+  id: ProviderId;
+  name: string;
+  /** "chatgpt": a ChatGPT plan, signed in through the browser; "api-key": a key the producer pastes. */
+  signIn: "chatgpt" | "api-key";
+  /** Where its sign-in is kept; OpenCode's two gateways share one key. */
+  credential: string;
+  keyEnv?: string;
+  /** Where to make a key. */
+  keyPage?: string;
+}
+export const PROVIDER_INFO: Readonly<Record<ProviderId, ProviderInfo>> = {
+  "openai-codex": { id: "openai-codex", name: "ChatGPT", signIn: "chatgpt", credential: "openai-codex" },
+  anthropic: { id: "anthropic", name: "Anthropic", signIn: "api-key", credential: "anthropic", keyEnv: "ANTHROPIC_API_KEY", keyPage: "platform.claude.com (API keys)" },
+  openai: { id: "openai", name: "OpenAI API", signIn: "api-key", credential: "openai", keyEnv: "OPENAI_API_KEY", keyPage: "platform.openai.com/api-keys" },
+  opencode: { id: "opencode", name: "OpenCode Zen", signIn: "api-key", credential: "opencode", keyEnv: "OPENCODE_API_KEY", keyPage: "opencode.ai/auth" },
+  "opencode-go": { id: "opencode-go", name: "OpenCode Go", signIn: "api-key", credential: "opencode", keyEnv: "OPENCODE_API_KEY", keyPage: "opencode.ai/auth" },
+};
+
+/**
+ * A provider's API key: the one the producer saved in Kumi (with /login, the most deliberate and
+ * usually the latest choice; an environment variable is often a stale one), else the environment's.
+ * Undefined when there's none.
+ */
+export async function apiKeyFor(provider: ProviderId, store: CredentialStore, env: Readonly<Record<string, string | undefined>> = {}): Promise<{ key: string; source: "env" | "saved" } | undefined> {
+  const info = PROVIDER_INFO[provider];
+  if (info.signIn !== "api-key") return undefined;
+  const saved = await store.get(info.credential);
+  if (saved?.type === "api-key") return { key: saved.key, source: "saved" };
+  const fromEnv = info.keyEnv ? env[info.keyEnv] : undefined;
+  return fromEnv ? { key: fromEnv, source: "env" } : undefined;
+}
+
 const MODEL_ID = /^(openai-codex|openai|anthropic|opencode|opencode-go)\/([a-zA-Z0-9][a-zA-Z0-9._:-]{0,127})$/;
 const CODEX_URL = "https://chatgpt.com/backend-api/codex";
 const OPENCODE_URL = { opencode: "https://opencode.ai/zen/v1", "opencode-go": "https://opencode.ai/zen/go/v1" } as const;
@@ -30,6 +68,8 @@ export interface ResolveModelOptions {
   store: CredentialStore;
   env?: Readonly<Record<string, string | undefined>>;
   fetch?: typeof fetch;
+  /** Left out, the model's own default. */
+  effort?: Effort;
 }
 
 /** Build a binding for a configured model. Fails before any request when credentials are missing. */
@@ -46,6 +86,8 @@ export async function resolveModel(options: ResolveModelOptions): Promise<ModelB
   };
   const bind = (languageModel: LanguageModelV4, prepare: (request: ModelRequest) => LanguageModelV4CallOptions): ModelBinding =>
     ({ id: options.model, model: languageModel, prepare });
+  // OpenAI's wire format names effort reasoningEffort; Anthropic's names it effort (see anthropicRequest).
+  const openaiEffort: Record<string, string> = options.effort ? { reasoningEffort: options.effort } : {};
 
   if (provider === "openai-codex") {
     const token = codexTokenSource(options.store, { fetch: base });
@@ -63,21 +105,22 @@ export async function resolveModel(options: ResolveModelOptions): Promise<ModelB
         return identified(input, { ...init, headers });
       },
     });
-    return bind(codex.responses(model), (request) => ({ ...responsesRequest(request, { textVerbosity: "low" }), headers: { "session-id": request.sessionId } }));
+    return bind(codex.responses(model), (request) => ({ ...responsesRequest(request, { textVerbosity: "low", ...openaiEffort }), headers: { "session-id": request.sessionId } }));
   }
-  const apiKey = options.env?.[API_KEY_ENV[provider]];
-  if (!apiKey) throw new KumiError("auth", `${provider} needs an API key in ${API_KEY_ENV[provider]}.`);
-  if (provider === "openai") return bind(createOpenAI({ apiKey, fetch: identified }).responses(model), (request) => responsesRequest(request));
-  if (provider === "anthropic") return bind(createAnthropic({ apiKey, fetch: identified }).messages(model), anthropicRequest);
+  const info = PROVIDER_INFO[provider];
+  const apiKey = (await apiKeyFor(provider, options.store, options.env))?.key;
+  if (!apiKey) throw new KumiError("auth", `Not signed in to ${info.name}: add its API key with /login (or set ${info.keyEnv}).`, provider);
+  if (provider === "openai") return bind(createOpenAI({ apiKey, fetch: identified }).responses(model), (request) => responsesRequest(request, openaiEffort));
+  if (provider === "anthropic") return bind(createAnthropic({ apiKey, fetch: identified }).messages(model), (request) => anthropicRequest(request, options.effort));
 
   // OpenCode Zen/Go serve each model family on its native wire format.
   const baseURL = OPENCODE_URL[provider];
   const session = (request: ModelRequest) => ({ "x-opencode-session": request.sessionId });
   if (/^(gpt-|grok-|muse-)/.test(model)) {
-    return bind(createOpenAI({ apiKey, baseURL, fetch: identified }).responses(model), (request) => ({ ...responsesRequest(request), headers: session(request) }));
+    return bind(createOpenAI({ apiKey, baseURL, fetch: identified }).responses(model), (request) => ({ ...responsesRequest(request, openaiEffort), headers: session(request) }));
   }
   if (/^claude-/.test(model)) {
-    return bind(createAnthropic({ authToken: apiKey, baseURL, fetch: identified }).messages(model), (request) => ({ ...anthropicRequest(request), headers: session(request) }));
+    return bind(createAnthropic({ authToken: apiKey, baseURL, fetch: identified }).messages(model), (request) => ({ ...anthropicRequest(request, options.effort), headers: session(request) }));
   }
   if (/^gemini-/.test(model)) throw new KumiError("config", "Gemini models through OpenCode are not supported yet.");
   return bind(createOpenAICompatible({ name: provider, apiKey, baseURL, fetch: identified, includeUsage: true }).chatModel(model), (request) => ({
@@ -98,9 +141,10 @@ function responsesRequest(request: ModelRequest, extra: Record<string, string> =
 }
 
 /** Anthropic: cache the stable instructions/tools prefix and the growing conversation. */
-function anthropicRequest(request: ModelRequest): LanguageModelV4CallOptions {
+function anthropicRequest(request: ModelRequest, effort?: Effort): LanguageModelV4CallOptions {
   const messages: LanguageModelV4Message[] = [...request.messages];
   const last = messages.at(-1);
   if (last) messages[messages.length - 1] = { ...last, providerOptions: { ...last.providerOptions, ...CACHE } } as LanguageModelV4Message;
-  return { prompt: [{ role: "system", content: request.instructions, providerOptions: CACHE }, ...messages], ...toolOptions(request) };
+  return { prompt: [{ role: "system", content: request.instructions, providerOptions: CACHE }, ...messages], ...toolOptions(request),
+    ...(effort ? { providerOptions: { anthropic: { effort } } } : {}) };
 }

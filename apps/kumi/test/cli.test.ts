@@ -28,7 +28,7 @@ test("root npm start forwards CLI arguments from a different cwd; help requires 
     cwd: tmpdir(), env: { ...process.env, KUMI_MODEL: "", KUMI_AUTH_FILE: "" }, timeout: 15_000, shell: process.platform === "win32",
   });
   assert.match(stdout, /--bridge-config/); assert.match(stdout, /--inference-only/); assert.match(stdout, /producer assistant for Ableton Live/);
-  assert.match(stdout, /npm run setup/); assert.match(stdout, /login openai-codex/); assert.match(stdout, /Node\.js 22 or 24/);
+  assert.match(stdout, /npm run setup/); assert.match(stdout, /login <provider>/); assert.match(stdout, /\/login/); assert.match(stdout, /Node\.js 22 or 24/);
   assert.equal(stderr, "");
 });
 
@@ -41,17 +41,23 @@ test("CLI rejects invalid configuration without echoing model/credential-like va
   });
 });
 
-test("missing credentials fail before the terminal starts, with sign-in guidance and no model request", async () => {
+test("without a sign-in Kumi still starts, and an answer says where to sign in, before any model request", async () => {
   const dir = await mkdtemp(join(tmpdir(), "kumi-cli-test-"));
   try {
-    for (const [model, pattern] of [["openai-codex/gpt-6-astra", /login openai-codex/], ["anthropic/claude-sonnet-5", /ANTHROPIC_API_KEY/]] as const) {
-      await assert.rejects(exec(process.execPath, [cli, "--inference-only"], {
+    for (const [model, pattern] of [["openai-codex/gpt-6-astra", /Not signed in to ChatGPT \(openai-codex\)/], ["anthropic/claude-sonnet-5", /Not signed in to Anthropic: add its API key with \/login \(or set ANTHROPIC_API_KEY\)/]] as const) {
+      const child = execFile(process.execPath, [cli, "--inference-only"], {
         env: { ...process.env, KUMI_MODEL: model, KUMI_AUTH_FILE: join(dir, "absent.json"), ANTHROPIC_API_KEY: "", KUMI_SETTINGS_FILE: join(dir, "settings.json") }, timeout: 15_000,
-      }), (error: unknown) => {
-        const failure = error as Error & { code: number; stdout: string; stderr: string; killed?: boolean };
-        assert.equal(failure.code, 1); assert(!failure.killed); assert.match(failure.stderr, pattern);
-        assert.doesNotMatch(failure.stdout, /kumi>/, "terminal must not start"); return true;
       });
+      let stdout = "";
+      child.stdout!.on("data", (chunk) => { stdout += String(chunk); });
+      const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+      child.stdin!.write("How do I tame a snare?\n");
+      // The answer fails at once (nothing to send it with), then Kumi closes at the end of input.
+      for (let waited = 0; !pattern.test(stdout) && waited < 10_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+      child.stdin!.end();
+      assert.equal(await exited, 0);
+      assert.match(stdout, pattern);
+      assert.match(stdout, new RegExp(`Kumi · ${model.replace("/", "\\/")}`));
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -67,15 +73,16 @@ test("login --from-pi imports only the ChatGPT session into an owner-only store;
     await writeFile(join(home, ".pi", "agent", "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", access, refresh: "refresh-private", expires: Date.now() + 7_200_000 } }), { mode: 0o600 });
     const imported = await exec(process.execPath, [cli, "login", "openai-codex", "--from-pi"], { env, timeout: 15_000 });
     assert.match(imported.stdout, /Signed in to ChatGPT/);
-    assert.match(imported.stdout, /Model: openai-codex\/gpt-6-astra/);
+    // No model is written into Kumi: it starts with ChatGPT's own first choice.
+    assert.match(imported.stdout, /Next: npm run kumi\. It starts with ChatGPT's first model; \/model changes it\./);
     const authFile = join(home, ".kumi", "auth.json");
     if (process.platform !== "win32") assert.equal((await stat(authFile)).mode & 0o777, 0o600);
     assert.equal(JSON.parse(await readFile(authFile, "utf8")).credentials["openai-codex"].accountId, "acct-cli");
     const status = await exec(process.execPath, [cli, "auth"], { env, timeout: 15_000 });
     assert.match(status.stdout, /openai-codex\s+signed in/);
     assert.match(status.stdout, /openai\s+API key from OPENAI_API_KEY/);
-    assert.match(status.stdout, /anthropic\s+not configured/);
-    assert.match(status.stdout, /Model: openai-codex\/gpt-6-astra/);
+    assert.match(status.stdout, /anthropic\s+not signed in \(npm run kumi -- login anthropic\)/);
+    assert.match(status.stdout, /Model: not chosen yet/);
     assert.match((await exec(process.execPath, [cli, "model", "anthropic/claude-sonnet-5"], { env, timeout: 15_000 })).stdout, /Model set to anthropic\/claude-sonnet-5/);
     assert.match((await exec(process.execPath, [cli, "model"], { env, timeout: 15_000 })).stdout, /Model: anthropic\/claude-sonnet-5/);
     const removed = await exec(process.execPath, [cli, "logout", "openai-codex"], { env, timeout: 15_000 });

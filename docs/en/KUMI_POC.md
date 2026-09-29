@@ -15,20 +15,31 @@ stops before doing anything. From the repository root:
 
 ```sh
 npm run setup                                 # install and build Kumi and the bridge
-npm run kumi -- login openai-codex            # or add --device on a machine without a browser
-npm run kumi                                  # start
+npm run kumi                                  # start; sign in and choose a model inside
 ```
 
-`login` opens the browser and receives the callback on `localhost:1455`. The first
-sign-in also chooses `openai-codex/gpt-6-astra` as the model if you have not
-chosen one; access depends on your account.
+Inside Kumi, `/login` signs in: to ChatGPT with your plan (the browser opens and
+the sign-in comes back on `localhost:1455`), or to Anthropic, OpenAI or OpenCode
+with an API key, pasted into a box that shows only dots. Kumi checks a key with
+its provider before keeping it. `/model` lists every provider's models, read from
+the provider itself, so a model released today is there without a Kumi update.
+With no model chosen yet, Kumi starts with the first model a signed-in provider
+lists, and says which. `/effort` sets how hard the model thinks, from the levels
+that model takes (lower answers sooner). `/logout` signs out. Choices apply from
+your next message and are kept for next time. When an answer fails because a
+sign-in is missing or was refused, Kumi says so, offers to sign in and then sends
+your message again; a model the provider doesn't offer opens the list.
+
+The same from a shell:
 
 ```sh
+npm run kumi -- login openai-codex            # ChatGPT; add --device on a machine without a browser
+npm run kumi -- login anthropic               # asks for the key without showing it; also openai, opencode
+npm run kumi -- logout <provider>             # remove Kumi's sign-in there
 npm run kumi -- model                         # show the model
-npm run kumi -- model anthropic/<model>       # choose another; saved in ~/.kumi/settings.json
+npm run kumi -- model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
 npm run kumi -- auth                          # which providers are usable; never prints secrets
 npm run kumi -- doctor                        # check Node, sign-in, the bridge, Live and the terminal
-npm run kumi -- logout openai-codex           # remove the local sign-in
 npm run kumi -- --inference-only              # chat without Live
 ```
 
@@ -36,18 +47,27 @@ npm run kumi -- --inference-only              # chat without Live
 Pi-based POC (`~/.pi/agent/auth.json`) once. Kumi and Pi then share that session;
 when either refreshes it, the other may need to sign in again.
 
-Credentials live in Kumi's own owner-only store (`~/.kumi/auth.json`, mode 600; on
-Windows it relies on your user folder being private, as it is by default).
-Tokens refresh automatically shortly before expiry, under a cross-process lock.
-Never paste an access/refresh token or API key into a prompt, command argument,
-issue, log, or repository file.
+Sign-ins and keys live in Kumi's own owner-only store (`~/.kumi/auth.json`, mode
+600; on Windows it relies on your user folder being private, as it is by default).
+Tokens refresh automatically shortly before expiry, under a cross-process lock. A
+key saved with `/login` is used first; without one, a key in the environment is
+used, and Kumi can't sign out of that (unset it instead). Paste an API key only into Kumi's key box or its
+`login` prompt: never into a message, a command argument, an issue, a log or a
+repository file.
 
-| Provider | Model | Credential |
+| Provider | Model | Sign-in |
 | --- | --- | --- |
-| ChatGPT plan | `openai-codex/<model>` | `login openai-codex` |
-| OpenAI API | `openai/<model>` | `OPENAI_API_KEY` |
-| Anthropic API | `anthropic/<model>` | `ANTHROPIC_API_KEY` |
-| OpenCode Zen / Go | `opencode/<model>`, `opencode-go/<model>` | `OPENCODE_API_KEY` |
+| ChatGPT plan | `openai-codex/<model>` | `/login` (browser), or `login openai-codex` |
+| Anthropic API | `anthropic/<model>` | `/login` with an API key, or `ANTHROPIC_API_KEY` |
+| OpenAI API | `openai/<model>` | `/login` with an API key, or `OPENAI_API_KEY` |
+| OpenCode Zen / Go | `opencode/<model>`, `opencode-go/<model>` | `/login` with an API key (one for both), or `OPENCODE_API_KEY` |
+
+Effort goes to ChatGPT and OpenAI models as their reasoning effort and to Claude
+as its `effort`; each model offers its own levels, and "Default" leaves it to the
+model. Changing model keeps the conversation: what was said, Kumi's steps and
+their results carry over; the earlier model's private reasoning doesn't, because
+it belongs to that model (Claude checks its own reasoning is never moved or
+edited).
 
 No Gateway key is needed. Claude and Gemini subscription sign-ins are not
 offered: their providers do not permit them in third-party tools. OpenCode routes
@@ -59,7 +79,7 @@ yet.
 | --- | --- |
 | `KUMI_MODEL` | `<provider>/<model>` for this run, overriding the chosen model |
 | `KUMI_AUTH_FILE` | Credential store path; default `~/.kumi/auth.json` |
-| `KUMI_SETTINGS_FILE` | Settings (chosen model) path; default `~/.kumi/settings.json` |
+| `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, if not the standard one |
 | `KUMI_TRACE=1` | Dispatch-name trace; no arguments or raw tool payloads |
 | `KUMI_UI=plain` | Plain line-by-line output instead of the full-screen app |
@@ -175,7 +195,9 @@ and a tempo change about 4 s
 | Enter | Send |
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
-| `/help`, `/status` | Keys and commands; what Kumi is connected to |
+| `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model |
+| `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
+| `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/refresh` | Read fresh bounded observations without a model answer |
 | `/copy` | Copy Kumi's last answer to the clipboard (through the terminal; to select text yourself, hold Shift while dragging, Option in iTerm2) |
@@ -240,9 +262,10 @@ terminal is restored on exit, on crashes and on signals.
   remains available with no Live tools. `/new` or restart reconnects; Kumi runs no
   hidden reconnect loop. The standalone bridge retains its own status-refresh
   behavior while its MCP process is connected.
-- Missing login/model access, an unbuilt Kumi, invalid configuration or startup
-  failure is reported with the command that fixes it, without provider payloads
-  or credentials.
+- A missing or refused sign-in, or a model the provider doesn't offer, is said
+  plainly with the fix offered (sign in, choose another model). An unbuilt Kumi,
+  invalid configuration or startup failure is reported with the command that
+  fixes it. Neither includes provider payloads or credentials.
 - Metadata is not audio: no listening, quality scoring, edits, playback control,
   recording, rack construction or song generation is implemented.
 

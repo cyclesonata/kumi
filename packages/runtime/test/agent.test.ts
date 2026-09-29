@@ -168,10 +168,16 @@ test("provider HTTP failures become Kumi-written messages without credentials or
     message: statusCode === 400 ? "Unsupported parameter: max_output_tokens" : "Bearer leaked-token", url: "https://example.invalid",
     requestBodyValues: { authorization: "Bearer leaked-token" }, statusCode, responseBody, isRetryable: false,
   });
-  for (const [status, pattern] of [[401, /rejected the credentials/], [429, /limit/], [404, /rejected the request \(HTTP 404\)/], [400, /max_output_tokens/]] as const) {
+  // Each says what went wrong, and its kind and provider let the app offer the fix.
+  for (const [status, kind, pattern] of [
+    [401, "auth", /test didn't accept Kumi's sign-in \(HTTP 401\): sign in again/], [403, "auth", /can't use fixture \(HTTP 403\)/],
+    [402, "billing", /billing/], [404, "model", /doesn't offer fixture to this sign-in \(HTTP 404\); choose another model/],
+    [429, "rate-limit", /limit/], [529, "provider", /overloaded/], [400, "request", /turned the request down \(HTTP 400\): Unsupported parameter: max_output_tokens/],
+  ] as const) {
     const h = harness(() => Promise.reject(failure(status)));
     await assert.rejects(h.kernel.run("q", new AbortController().signal, () => {}), (error: unknown) => {
       assert(error instanceof KumiError); assert.match(error.message, pattern); assert(!error.message.includes("leaked-token"));
+      assert.equal(error.kind, kind); assert.equal(error.provider, "test");
       return true;
     });
     await h.kernel.close();
@@ -184,7 +190,7 @@ test("retries once before any output escapes, but never after text was delivered
   assert.equal((await retried.kernel.run("q", new AbortController().signal, () => {})).stopReason, "completed");
   assert.equal(retried.requests.length, 2);
   const streamed = harness(() => [...text("partial"), { type: "error", error: unavailable() }]);
-  await assert.rejects(streamed.kernel.run("q", new AbortController().signal, () => {}), /unavailable \(HTTP 503\)/);
+  await assert.rejects(streamed.kernel.run("q", new AbortController().signal, () => {}), /overloaded right now \(HTTP 503\)/);
   assert.equal(streamed.requests.length, 1);
   await retried.kernel.close(); await streamed.kernel.close();
 });
@@ -280,23 +286,52 @@ test("steering enters at the next model boundary, even after a final answer", as
   await h.kernel.close();
 });
 
-test("a checkpoint says which provider wrote it; another provider continues from a portable copy", async () => {
+test("a checkpoint says which model wrote it, with which tools; another model or other tools continue from a portable copy", async () => {
   const thinking: LanguageModelV4StreamPart[] = [
     { type: "reasoning-start", id: "r1", providerMetadata: { test: { replay: "provider-only" } } }, { type: "reasoning-delta", id: "r1", delta: "thinking" }, { type: "reasoning-end", id: "r1" },
   ];
   const first = harness(() => [...thinking, ...text("Try a shorter release."), finish()]);
   await first.kernel.run("How do I tame the snare?\n\n<current_observation_untrusted>\n{\"tempo\":120}\n</current_observation_untrusted>", new AbortController().signal, () => {});
   const checkpoint = first.kernel.checkpoint();
-  assert.equal(checkpoint.origin, "test");
+  assert.equal(checkpoint.origin, "test/fixture");
+  assert.match(checkpoint.tools ?? "", /^[\w-]{22}$/);
   assert.deepEqual(first.kernel.transcript(), [{ role: "user", text: "How do I tame the snare?" }, { role: "assistant", text: "Try a shorter release." }], "the producer's words, without the host's observation");
-  const same = harness(() => [...text("ok"), finish()], { checkpoint: JSON.parse(JSON.stringify(checkpoint)) });
-  await same.kernel.run("next", new AbortController().signal, () => {});
-  assert.match(JSON.stringify(same.requests[0]!.prompt[1]), /provider-only/, "the same provider replays everything");
-  const other = harness(() => [...text("ok"), finish()], { checkpoint: { ...JSON.parse(JSON.stringify(checkpoint)), origin: "elsewhere" } });
-  await other.kernel.run("next", new AbortController().signal, () => {});
-  const replayed = JSON.stringify(other.requests[0]!.prompt[1]);
-  assert.doesNotMatch(replayed, /provider-only|reasoning/); assert.match(replayed, /Try a shorter release/);
-  await first.kernel.close(); await same.kernel.close(); await other.kernel.close();
+  const replay = async (changes: object, options: Parameters<typeof harness>[1] = {}) => {
+    const next = harness(() => [...text("ok"), finish()], { ...options, checkpoint: { ...JSON.parse(JSON.stringify(checkpoint)), ...changes } });
+    await next.kernel.run("next", new AbortController().signal, () => {});
+    await next.kernel.close();
+    return JSON.stringify(next.requests[0]!.prompt[1]);
+  };
+  assert.match(await replay({}), /provider-only/, "the same model with the same tools replays everything");
+  assert.match(await replay({ origin: "test" }), /provider-only/, "an older save names only the provider");
+  for (const [changes, options, why] of [
+    [{ origin: "elsewhere/model" }, {}, "another provider"], [{ origin: "test/other-model" }, {}, "another model"],
+    [{}, { tools: [tool("lookup", async () => ({ text: "x" }))] }, "other tools"],
+  ] as const) {
+    const replayed = await replay(changes, options);
+    assert.doesNotMatch(replayed, /provider-only|reasoning/, why); assert.match(replayed, /Try a shorter release/, why);
+  }
+  await first.kernel.close();
+});
+
+test("when the budget clears earlier turns, their reasoning goes too, so a model that checks its history never sees it edited", async () => {
+  const big = JSON.stringify({ items: "x".repeat(3000) });
+  const thinking: LanguageModelV4StreamPart[] = [
+    { type: "reasoning-start", id: "r1", providerMetadata: { anthropic: { signature: "sig-1" } } }, { type: "reasoning-delta", id: "r1", delta: "hmm" }, { type: "reasoning-end", id: "r1" },
+  ];
+  const h = harness((_options, n) => n % 2 === 1 ? [...thinking, call("read", "{}", `c${n}`), finish("tool-calls")] : [...text(`answer ${n / 2}`), finish()], {
+    tools: [tool("read", async () => ({ text: big }))], budget: { clearAt: 4096, limit: 64 * 1024 },
+  });
+  const observed = (words: string) => `${words}\n\n<current_observation_untrusted>\n{"tempo":120}\n</current_observation_untrusted>`;
+  await h.kernel.run(observed("one"), new AbortController().signal, () => {});
+  await h.kernel.run(observed("two"), new AbortController().signal, () => {});
+  assert.match(JSON.stringify(h.requests[2]!.prompt), /sig-1/, "under the budget, reasoning is replayed as it was");
+  await h.kernel.run(observed("three"), new AbortController().signal, () => {});
+  const cleared = JSON.stringify(h.requests[4]!.prompt);
+  assert.match(cleared, /Kumi cleared the rest/);
+  assert.doesNotMatch(cleared, /sig-1|"reasoning"/);
+  assert.doesNotMatch(JSON.stringify(h.kernel.checkpoint().messages.slice(0, 4)), /sig-1/, "and stays gone from the saved conversation");
+  await h.kernel.close();
 });
 
 test("a checkpoint restores settled history into a fresh kernel", async () => {

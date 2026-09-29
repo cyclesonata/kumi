@@ -13,24 +13,33 @@ export function retryDelayMs(error: unknown): number | undefined {
   return requested <= MAX_RETRY_WAIT_MS ? Math.max(250, requested) : undefined;
 }
 
-/** Map any inference failure to a message Kumi wrote; provider detail is bounded and never includes credentials. */
+/** Providers by the name producers know them; the binding id's prefix otherwise. */
+const PROVIDER_NAMES: Record<string, string> = { "openai-codex": "ChatGPT", openai: "OpenAI", anthropic: "Anthropic", opencode: "OpenCode Zen", "opencode-go": "OpenCode Go" };
+
+/**
+ * Map any inference failure to a message Kumi wrote, tagged with the provider it concerns so the
+ * app can offer the fix (sign in again, choose another model). Provider detail is bounded and never
+ * includes credentials.
+ */
 export function describeFailure(error: unknown, bindingId: string): KumiError {
   if (error instanceof KumiError) return error;
   const provider = bindingId.split("/")[0] ?? bindingId;
+  const model = bindingId.slice(provider.length + 1) || bindingId;
+  const name = PROVIDER_NAMES[provider] ?? provider;
   if (APICallError.isInstance(error)) {
     const status = error.statusCode;
-    if (status === 401 || status === 403) {
-      return new KumiError("auth", `${provider} rejected the credentials (HTTP ${status}). Sign in again or check the API key.`);
-    }
-    if (status === 429) return new KumiError("rate-limit", `${provider} rate or usage limit reached (HTTP 429); try again later.`);
-    if (status !== undefined && status >= 500) return new KumiError("provider", `${provider} is unavailable (HTTP ${status}); try again.`);
-    if (status !== undefined) {
-      const detail = providerDetail(error);
-      return new KumiError("request", `${provider} rejected the request (HTTP ${status})${detail ? `: ${detail}` : ""}. Check the configured model.`);
-    }
-    return new KumiError("network", `Could not reach ${provider}; check the network connection.`);
+    const detail = providerDetail(error);
+    if (status === 401) return new KumiError("auth", `${name} didn't accept Kumi's sign-in (HTTP 401): sign in again, or check the key.`, provider);
+    if (status === 403) return new KumiError("auth", `${name} says this sign-in can't use ${model} (HTTP 403)${detail ? `: ${detail}` : ""}.`, provider);
+    if (status === 402) return new KumiError("billing", `${name} needs billing sorted before it answers (HTTP 402)${detail ? `: ${detail}` : ""}.`, provider);
+    if (status === 404) return new KumiError("model", `${name} doesn't offer ${model} to this sign-in (HTTP 404); choose another model.`, provider);
+    if (status === 429) return new KumiError("rate-limit", `${name}'s rate or usage limit was reached (HTTP 429); try again in a moment${detail ? ` (${detail})` : ""}.`, provider);
+    if (status === 529 || status === 503) return new KumiError("provider", `${name} is overloaded right now (HTTP ${status}); try again in a moment.`, provider);
+    if (status !== undefined && status >= 500) return new KumiError("provider", `${name} is having trouble (HTTP ${status}); try again.`, provider);
+    if (status !== undefined) return new KumiError("request", `${name} turned the request down (HTTP ${status})${detail ? `: ${detail}` : ""}.`, provider);
+    return new KumiError("network", `Kumi couldn't reach ${name}; check the connection.`, provider);
   }
-  return new KumiError("provider", "Inference failed; check the configured model, sign-in, and connection.");
+  return new KumiError("provider", "The model didn't answer; check the model, sign-in and connection.", provider);
 }
 
 /** The provider's own short explanation of a rejected request (e.g. an unsupported parameter). */

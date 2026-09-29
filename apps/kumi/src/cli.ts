@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createProjectStore, createSession, openCredentialStore, resolveModel,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createProjectStore, createSession, KumiError, openCredentialStore,
+  type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
-import { loadConfig, loadProjectsDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { loadConfig, loadProjectsDir, loadSettingsFile, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { runDoctor, type LiveProbe } from "./doctor.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
+import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
 
@@ -13,27 +15,39 @@ const HELP = `Kumi — producer assistant for Ableton Live
 
 First run (Node.js 22 or 24):
   npm run setup                          Install and build Kumi and the Ableton bridge
-  npm run kumi -- login openai-codex     Sign in with a ChatGPT plan (--device without a browser)
-  npm run kumi                           Talk about the open Live Set; the installed bridge is found automatically
+  npm run kumi                           Talk about the open Live Set; the installed bridge is found automatically.
+                                         Sign in there with /login, and choose a model with /model.
 
 More:
   npm run kumi -- --inference-only       Chat without Live
   npm run kumi -- --bridge-config /absolute/path/bridge-config.json
+  npm run kumi -- login <provider>       Sign in from the shell: openai-codex with a ChatGPT plan (--device
+                                         without a browser); anthropic, openai, opencode with an API key (asked for)
+  npm run kumi -- logout <provider>      Remove Kumi's sign-in for that provider
   npm run kumi -- model [<provider>/<model>]   Show or choose the model
   npm run kumi -- auth                   Show which providers are usable (no secrets)
   npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
-  npm run kumi -- logout openai-codex    Remove the local ChatGPT sign-in
 
-Providers: openai-codex (ChatGPT sign-in), openai (OPENAI_API_KEY), anthropic (ANTHROPIC_API_KEY),
-opencode and opencode-go (OPENCODE_API_KEY). KUMI_MODEL overrides the chosen model.
+Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
+a key). An API key in ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENCODE_API_KEY is used when set.
+KUMI_MODEL overrides the chosen model.
 Kumi reads the open Live Set and makes changes you ask for; each change can be undone. Playback control,
 recording, listening and memory are not implemented yet.
-In a session: /help /status /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
+In a session: /help /status /model /effort /login /logout /undo /refresh /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, see docs/en/KUMI_POC.md (Connect to Live).";
 const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY]
   .filter((value): value is string => Boolean(value));
+
+/**
+ * A kernel for when the model can't be reached yet (none chosen, not signed in): Kumi still starts
+ * and reads Live, and each answer says what's missing, so the app can offer the fix. It keeps the
+ * conversation it was given for the kernel that replaces it.
+ */
+function unavailableKernel(error: KumiError, checkpoint: KernelCheckpoint | undefined): Kernel {
+  return { async run() { throw error; }, async close() {}, ...(checkpoint ? { checkpoint: () => checkpoint } : {}) };
+}
 
 /** Start the bridge the way Kumi does, ask Live how it is, and stop again. */
 async function probeLive(bridgeConfig: string): Promise<LiveProbe> {
@@ -63,7 +77,7 @@ try {
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "auth") await authStatus(config, { out: process.stdout, env: process.env });
-  else if (config.mode === "logout") await logout(config, { out: process.stdout });
+  else if (config.mode === "logout") await logout(config, { out: process.stdout, env: process.env });
   else if (config.mode === "model") {
     const settings = readSettings(config.settingsFile);
     if (config.model) writeSettings(config.settingsFile, { ...settings, model: config.model });
@@ -75,17 +89,22 @@ try {
     const interrupt = () => cancel.abort();
     process.once("SIGINT", interrupt);
     try {
-      await login(config, { out: process.stdout, env: process.env, signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(15 * 60_000)]),
+      await login(config, { out: process.stdout, env: process.env, signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(15 * 60_000)]), input: process.stdin,
         ...(process.stdout.isTTY ? { openBrowser } : {}) });
     } finally { process.removeListener("SIGINT", interrupt); }
   } else {
     const store = openCredentialStore(config.authFile);
-    // Fails here, before the terminal starts, when the provider has no usable credentials.
-    const binding = await resolveModel({ model: config.model, store, env: process.env });
-    for (const credential of Object.values(await store.list())) secrets.push(credential.access, credential.refresh);
+    for (const credential of Object.values(await store.list().catch(() => ({})))) {
+      if (credential.type === "oauth") secrets.push(credential.access, credential.refresh); else secrets.push(credential.key);
+    }
     let terminal: Terminal | undefined;
+    // A missing sign-in or model isn't a reason not to start: the app offers /login and /model.
+    const models = createModelControl({ store, settingsFile: loadSettingsFile(), env: process.env, changed: async () => { await controller.reconfigure?.(); } });
     const controller = createSession({
-      kernelFactory: async (options) => createAgentKernel({ ...options, binding }),
+      kernelFactory: async (options) => {
+        try { return createAgentKernel({ ...options, binding: await models.binding() }); }
+        catch (error) { if (error instanceof KumiError) return unavailableKernel(error, options.checkpoint); throw error; }
+      },
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
         : createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
@@ -99,7 +118,7 @@ try {
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
-    terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, model: config.model, mode: config.mode, secrets,
+    terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };
