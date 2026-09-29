@@ -61,6 +61,11 @@ Ctrl-C clears the input box, then quits. Kumi keeps each saved Set's
 conversation for next time (an unsaved Set's ends when you quit). It reads the
 Set fresh before each answer; `/new` reconnects and clears the conversation.
 
+## Tested with, and what's next
+
+So far Kumi has been tested only with Ableton Live 12.4.15b4; other versions of
+Live haven't been tried yet. Support for Renoise and Reaper is up next.
+
 ## Development
 
 ```sh

@@ -44,6 +44,11 @@ Remote Script，然后等待你打开 Live。首次安装时，请在 Live 的
 工作，`/stop` 停止 Live，Ctrl-C 先清空输入框，空时退出。[更新日志（英文）](CHANGELOG.md)。
 使用 `npm run typecheck` 和 `npm test` 进行测试，无需凭据或 Live。
 
+## 测试环境与后续计划
+
+目前 Kumi 只在 Ableton Live 12.4.15b4 上测试过，其他版本的 Live 尚未试用。接下来将支持
+Renoise 和 Reaper。
+
 ## Ableton MCP Beyond — 独立桥接组件
 
 [![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)

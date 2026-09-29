@@ -47,6 +47,11 @@ Esc で処理を中止、`/stop` で Live を停止、Ctrl-C で入力欄をク�
 [変更履歴（英語）](CHANGELOG.md)。
 テストは `npm run typecheck` と `npm test`。認証情報や Live は不要です。
 
+## 動作確認と今後の予定
+
+Kumi の動作確認は、今のところ Ableton Live 12.4.15b4 でのみ行っています。ほかのバージョンの
+Live ではまだ試していません。次は Renoise と Reaper への対応を予定しています。
+
 ## Ableton MCP Beyond — 独立したブリッジ
 
 [![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
