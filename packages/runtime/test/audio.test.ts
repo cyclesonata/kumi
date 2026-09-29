@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { analyzeFile, noteValue } from "../src/audio/analyze.js";
 import { openAudio } from "../src/audio/decode.js";
+import { hear } from "../src/audio/index.js";
+import { execFileSync } from "node:child_process";
 
 const RATE = 48000;
 const folder = mkdtempSync(join(tmpdir(), "kumi-audio-test-"));
@@ -216,4 +218,22 @@ test("the listen tool hears a file, or sets it against a reference with loudness
   assert.equal(heard.type, "heard"); assert.equal(heard.compared.reference, "reference.wav"); assert.equal(heard.compared.differences.length, 10);
   const missing = await listen!.execute({ file: join(folder, "nowhere.wav") }, signal);
   assert.equal(missing.isError, true); assert.match(missing.text, /no file there/);
+});
+
+test("stopping a listen while a format is being converted stops the converter and leaves no copy behind", { skip: process.platform !== "darwin" && "afconvert makes the M4A here" }, async () => {
+  const source = wav("long.wav", [tone(RATE * 90, 110, 0.3)]);
+  const m4a = join(folder, "long.m4a");
+  execFileSync("afconvert", ["-f", "m4af", "-d", "aac", source, m4a]);
+  const copies = () => readdirSync(tmpdir()).filter((name) => name.startsWith("kumi-audio-") && !name.startsWith("kumi-audio-test-")).sort();
+  const before = copies();
+  const stop = new AbortController();
+  const listening = hear(m4a, { signal: stop.signal });
+  setTimeout(() => stop.abort(), 30);
+  await assert.rejects(listening);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(copies(), before, "the converted copy is gone");
+  const finished = await hear(m4a, {});
+  assert.equal(finished.file, "long.m4a", "named as the producer's file, not the converted copy");
+  assert.equal(finished.format, "m4a");
+  assert.deepEqual(copies(), before, "and gone after a listen that finished too");
 });

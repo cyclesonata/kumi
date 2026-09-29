@@ -33,20 +33,29 @@ type Encoding = { kind: "int"; bits: 8 | 16 | 24 | 32; signed: boolean } | { kin
 interface Layout { sampleRate: number; channels: number; frames: number; dataOffset: number; littleEndian: boolean; encoding: Encoding; format: string }
 
 /** Open an audio file for reading in blocks. Throws AudioError for what isn't readable audio. */
-export async function openAudio(path: string, options: { signal?: AbortSignal } = {}): Promise<AudioSource> {
+/**
+ * A file Kumi can read as PCM: WAV and AIFF as they are, other formats converted once to a
+ * temporary WAV (stopped with `signal`, which stops the converter too); `cleanup` deletes it.
+ */
+export async function prepareAudio(path: string, options: { signal?: AbortSignal } = {}): Promise<{ path: string; format?: string; cleanup: () => Promise<void> }> {
   const extension = extname(path).toLowerCase();
   if (!AUDIO_EXTENSIONS.includes(extension)) throw new AudioError(`${extension || "That file"} isn't an audio format Kumi reads (WAV, AIFF, MP3, M4A, FLAC, Ogg).`);
-  if (DIRECT.has(extension)) return openPcm(path);
-  // Converted once to a temporary WAV, deleted when the source is closed.
+  if (DIRECT.has(extension)) return { path, cleanup: async () => {} };
   const folder = await mkdtemp(join(tmpdir(), "kumi-audio-"));
-  const wav = join(folder, "converted.wav");
+  const cleanup = () => rm(folder, { recursive: true, force: true });
+  try { await convert(path, join(folder, "converted.wav"), options.signal); }
+  catch (error) { await cleanup(); throw error; }
+  return { path: join(folder, "converted.wav"), format: extension.slice(1), cleanup };
+}
+
+export async function openAudio(path: string, options: { signal?: AbortSignal } = {}): Promise<AudioSource> {
+  const prepared = await prepareAudio(path, options);
   try {
-    await convert(path, wav, options.signal);
-    const source = await openPcm(wav);
-    return { ...source, format: extension.slice(1), read: (frames) => source.read(frames), seek: (frame) => source.seek(frame),
-      close: async () => { await source.close(); await rm(folder, { recursive: true, force: true }); } };
+    const source = await openPcm(prepared.path);
+    return { ...source, format: prepared.format ?? source.format, read: (frames) => source.read(frames), seek: (frame) => source.seek(frame),
+      close: async () => { await source.close(); await prepared.cleanup(); } };
   } catch (error) {
-    await rm(folder, { recursive: true, force: true });
+    await prepared.cleanup();
     throw error;
   }
 }

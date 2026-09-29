@@ -6,17 +6,25 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import type { Analysis, AnalyzeOptions } from "./analyze.js";
-import { AudioError } from "./decode.js";
+import { AudioError, prepareAudio } from "./decode.js";
 
 export { ANALYSIS_VERSION, BANDS, analyzeFile, type Analysis, type AnalyzeOptions, type SoundAnalysis } from "./analyze.js";
 export { AUDIO_EXTENSIONS, AudioError, openAudio } from "./decode.js";
 
-/** Analyze a file in a worker thread; `signal` stops it. */
-export function hear(path: string, options: AnalyzeOptions = {}): Promise<Analysis> {
+/** Analyze a file in a worker thread; `signal` stops it, and anything it started. */
+export async function hear(path: string, options: AnalyzeOptions = {}): Promise<Analysis> {
   const { signal, ...rest } = options;
   signal?.throwIfAborted();
+  // Other formats are converted here, where stopping stops the converter too; the worker reads the
+  // WAV, and the converted copy is deleted however the listening ends.
+  const prepared = await prepareAudio(path, signal ? { signal } : {});
+  try { return await inWorker(prepared.path, { ...rest }, { name: path, ...(prepared.format ? { format: prepared.format } : {}) }, signal); }
+  finally { await prepared.cleanup(); }
+}
+
+function inWorker(path: string, options: Omit<AnalyzeOptions, "signal">, as: { name: string; format?: string }, signal: AbortSignal | undefined): Promise<Analysis> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./worker.js", import.meta.url), { workerData: { path, options: rest } });
+    const worker = new Worker(new URL("./worker.js", import.meta.url), { workerData: { path, options, as } });
     const stop = () => { void worker.terminate(); reject(signal!.reason ?? new Error("Listening was stopped.")); };
     signal?.addEventListener("abort", stop, { once: true });
     worker.once("message", (message: { result?: Analysis; error?: { message: string; audio: boolean } }) => {

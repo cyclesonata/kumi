@@ -511,6 +511,14 @@ export function createAbletonIntegration(options: Options): Integration {
   const knownTrack = (ref: unknown) => (typeof ref === "string" ? known.get(ref) : undefined);
   /** The track a Live reference is on (a track, or what's on one: slots, clips, devices, chains, their parameters), by its position. */
   const trackIndexOf = (ref: string) => { const match = /:(?:track|clip_slot|clip|arrangement_clip|device|chain|drum_pad|routing_choice|take_lane|mixer):(\d+)/.exec(ref); return match ? Number(match[1]) : undefined; };
+  /**
+   * A reference whose position now holds something else (or nothing): its lease and its short
+   * name go, so whatever is there next gets a new name and an old name can't reach it.
+   */
+  const unname = (ref: string) => { const short = shortRefs.get(ref); if (short !== undefined) { shortRefs.delete(ref); longRefs.delete(short); } };
+  const retire = (ref: string) => { refs.delete(ref); known.delete(ref); unname(ref); };
+  /** Changes that shift devices along a chain: their track's device, parameter and chain references move. */
+  const DEVICE_SHIFTS = new Set(["move_device", "move_device_to", "delete_device"]);
   /** The scene a reference is in: a scene, or a Session slot or clip. */
   const sceneIndexOf = (ref: string) => { const match = /:scene:(\d+)|:(?:clip_slot|clip):\d+:(\d+)/.exec(ref); return match ? Number(match[1] ?? match[2]) : undefined; };
   /** Whether the connected bridge is new enough for this tool (see `since`). */
@@ -624,7 +632,9 @@ export function createAbletonIntegration(options: Options): Integration {
     let wake: (() => void) | undefined;
     const nudge = () => { const resolve = wake; wake = undefined; resolve?.(); };
     const until = async (ready: () => boolean) => { while (!ready()) await new Promise<void>((resolve) => { wake = resolve; }); };
-    const known = (index: number) => steps.length > index || closed || failure !== undefined || abandoned;
+    // A cancelled turn wakes the plan too, so it stops (and stops what it started) rather than wait for steps that won't come.
+    const known = (index: number) => steps.length > index || closed || failure !== undefined || abandoned || signal.aborted;
+    signal.addEventListener("abort", nudge, { once: true });
     const made = new Map<string, string>();
     const done: JsonObject[] = [];
     // Steps in a row on one device become one change, in one Live request, when the bridge can:
@@ -660,8 +670,8 @@ export function createAbletonIntegration(options: Options): Integration {
       for (let index = 0; ;) {
         await until(() => known(index));
         if (abandoned) return undefined;
-        if (index >= steps.length) return failure?.at === index ? { step: index + 1, tool: null, error: failure.error } : undefined;
         signal.throwIfAborted();
+        if (index >= steps.length) return failure?.at === index ? { step: index + 1, tool: null, error: failure.error } : undefined;
         const step = index + 1;
         const raw = steps[index];
         const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
@@ -671,7 +681,7 @@ export function createAbletonIntegration(options: Options): Integration {
         const device = (item.input as JsonObject | undefined)?.deviceRef;
         let run = 1;
         // A step that could join the next one in a single change waits to see it (or the plan's end).
-        if (batches.some((candidate) => batchStep(raw, candidate.tool))) { await until(() => known(index + 1)); if (abandoned) return undefined; }
+        if (batches.some((candidate) => batchStep(raw, candidate.tool))) { await until(() => known(index + 1)); if (abandoned) return undefined; signal.throwIfAborted(); }
         const batch = batches.find((candidate) => batchStep(raw, candidate.tool) && batchStep(steps[index + 1], candidate.tool, device));
         if (batch) {
           // A rack loaded just now changed the bridge's tools; read them again before asking.
@@ -680,6 +690,7 @@ export function createAbletonIntegration(options: Options): Integration {
             while (run < batch.most) {
               await until(() => known(index + run));
               if (abandoned) return undefined;
+              signal.throwIfAborted();
               if (index + run < steps.length && batchStep(steps[index + run], batch.tool, device)) run++; else break;
             }
           }
@@ -717,9 +728,12 @@ export function createAbletonIntegration(options: Options): Integration {
         }
         if (action) {
           const outcome = await act(action, stepInput, signal);
+          // A start Live didn't confirm may still have happened: the cleanup stops it either way.
+          if (!outcome.isError || outcome.maybe) {
+            if (outcome.done?.playing !== undefined) running.playing = outcome.done.playing || running.playing === true && outcome.maybe === true;
+            if (outcome.done?.recording !== undefined) running.recording = outcome.done.recording ? String(stepInput.lane ?? "arrangement") : outcome.maybe ? running.recording : undefined;
+          }
           if (outcome.isError) return stop(outcome.text);
-          if (outcome.done?.playing !== undefined) running.playing = outcome.done.playing;
-          if (outcome.done?.recording !== undefined) running.recording = outcome.done.recording ? String(stepInput.lane ?? "arrangement") : undefined;
           done.push({ step, changed: outcome.done?.title ?? null, change: null });
           index++;
           continue;
@@ -738,7 +752,11 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!running.recording && !running.playing) return undefined;
       const settle = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]);
       const what = running.recording ? "the recording and playback" : "playback";
-      if (!await stopEverything(settle)) return `The plan didn't finish and Live may still be ${running.recording ? "recording" : "playing"}; tell the producer.`;
+      if (!await stopEverything(settle)) {
+        // Said in NOW as well as to the model: after a cancel there's no model to tell the producer.
+        try { options.onAction?.({ title: `Live may still be ${running.recording ? "recording" : "playing"}: press space in Live, or /stop` }); } catch { /* a listener failure must not affect Live */ }
+        return `The plan didn't finish and Live may still be ${running.recording ? "recording" : "playing"}; tell the producer.`;
+      }
       try { options.onAction?.({ title: running.recording ? "Recording stopped" : "Stopped", playing: false, recording: false }); } catch { /* a listener failure must not affect Live */ }
       return `Kumi stopped ${what}, since the plan didn't finish.`;
     };
@@ -749,12 +767,15 @@ export function createAbletonIntegration(options: Options): Integration {
         finished = !outcome && !abandoned;
         return outcome;
       } finally {
+        signal.removeEventListener("abort", nudge);
         if (!finished) {
           const note = await quiet().catch(() => undefined);
           if (note && outcome) outcome.error = `${outcome.error} ${note}`.slice(0, 800);
         }
       }
     })();
+    // A cancelled plan rejects here; whoever asks for the result (or abandons it) still sees that.
+    void settled.catch(() => {});
     return {
       get started() { return started; },
       get failed() { return failure !== undefined; },
@@ -840,6 +861,8 @@ export function createAbletonIntegration(options: Options): Integration {
       const field = kind.family === "rename" ? "name" : kind.family === "color" ? "color" : undefined;
       const replaced = field && typeof args.ref === "string" ? known.get(args.ref) : undefined;
       remember(record, transactionId, field && replaced ? { ref: args.ref as string, field, ...(replaced[field] !== undefined ? { value: replaced[field] } : {}) } : undefined);
+      // A later wait in beats counts at the new tempo.
+      if (kind.tool === "set_tempo" && record.state === "applied" && typeof args.tempo === "number") currentTempo = args.tempo;
       // A renamed track keeps its new name in later HISTORY entries.
       if (kind.family === "rename" && summary.track && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, name: summary.track.name });
       // Likewise its new colour.
@@ -853,11 +876,12 @@ export function createAbletonIntegration(options: Options): Integration {
         const tracksAt = at(/:track:(\d+)$/); const scenesAt = at(/:scene:(\d+)$/);
         if (kind.tool === "add_tracks_and_scenes" && created.length && tracksAt.length + scenesAt.length === created.length) {
           const fromTrack = tracksAt.length ? Math.min(...tracksAt) : Infinity; const fromScene = scenesAt.length ? Math.min(...scenesAt) : Infinity;
-          for (const ref of [...refs.keys()]) {
+          for (const ref of new Set([...refs.keys(), ...shortRefs.keys()])) {
             const track = trackIndexOf(ref); const scene = sceneIndexOf(ref);
-            if ((track !== undefined && track >= fromTrack) || (scene !== undefined && scene >= fromScene)) { refs.delete(ref); known.delete(ref); }
+            if ((track !== undefined && track >= fromTrack) || (scene !== undefined && scene >= fromScene)) retire(ref);
           }
-        } else { refs.clear(); known.clear(); }
+        } else { refs.clear(); known.clear(); shortRefs.clear(); longRefs.clear(); }
+        for (const item of created) if (typeof item.ref === "string") retire(item.ref);
         for (const item of created) {
           const created = item && typeof item === "object" ? item as JsonObject : {};
           if (typeof created.ref === "string" && created.ref.length <= 256 && (created.kind === "track" || created.kind === "scene")) {
@@ -866,13 +890,26 @@ export function createAbletonIntegration(options: Options): Integration {
           }
         }
       }
+      // A device moved or deleted shifts the ones after it: on the tracks involved, earlier device,
+      // parameter and chain references (and their short names) are retired.
+      const shifted = DEVICE_SHIFTS.has(kind.tool);
+      if (shifted) {
+        const tracks = new Set([args.deviceRef, args.ref, args.targetTrackRef, args.targetChainRef].filter((value): value is string => typeof value === "string")
+          .map((ref) => trackIndexOf(ref)).filter((index): index is number => index !== undefined));
+        for (const ref of new Set([...refs.keys(), ...shortRefs.keys()])) {
+          if (/:(?:device|parameter|chain|drum_pad):/.test(ref) && !/:mixer:/.test(ref) && tracks.has(trackIndexOf(ref) ?? -1)) retire(ref);
+        }
+      }
       // What the change made (a new track, a loaded device) is usable at once, without discovering it.
       const produced = kind.produces?.(result);
+      // Something new at a position gets a name of its own, not the one its old occupant had.
+      if (produced && produced.ref.length <= 256 && !kind.restructures) unname(produced.ref);
       if (produced && produced.ref.length <= 256) refs.set(produced.ref, produced.kind);
       const { lines } = settledSummary;
       const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: shortRef(produced.ref) } : {}), ...(lines?.length ? { lines } : {}),
         ...(kind.restructures ? { note: kind.tool === "add_tracks_and_scenes" ? "Tracks and scenes after the new ones moved (return tracks among them): discover those again; earlier references still work, and the new ones in live.created are current."
-          : "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
+          : "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}),
+        ...(shifted ? { note: "Devices on the tracks involved moved along their chains: discover them (and their parameters) again before using earlier references." } : {}) };
       const full = JSON.stringify({ ...reply, live: shorten(result) });
       return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" && !permanent };
     } catch (error) {
@@ -883,7 +920,7 @@ export function createAbletonIntegration(options: Options): Integration {
    * Something that isn't a change to the Set (playing, launching, recording, selecting, showing):
    * the same preview and apply as a change, with the same checks, but no HISTORY entry or undo.
    */
-  async function act(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup = false): Promise<{ text: string; isError: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
+  async function act(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup = false): Promise<{ text: string; isError: boolean; maybe?: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
     const outcome = await actOnce(kind, named, originalSignal, cleanup);
     // Stopping must work whatever Live is doing: when the ordinary stop is refused, stop everything.
     const stopping = (kind.tool === "play" && named.action === "stop") || (kind.tool === "record" && named.action === "stop");
@@ -893,7 +930,7 @@ export function createAbletonIntegration(options: Options): Integration {
     try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
     return { text: JSON.stringify({ done: done.title, note: "Live's ordinary stop was refused, so Kumi stopped clips, the transport and recording together." }), isError: false, done };
   }
-  async function actOnce(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup: boolean): Promise<{ text: string; isError: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
+  async function actOnce(kind: ActionKind, named: JsonObject, originalSignal: AbortSignal, cleanup: boolean): Promise<{ text: string; isError: boolean; maybe?: boolean; done?: ReturnType<ActionKind["summarize"]> }> {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
     const input = lengthen(named) as JsonObject;
     const lease = observationGeneration;
@@ -911,8 +948,12 @@ export function createAbletonIntegration(options: Options): Integration {
       const preview = payload(previewed);
       const { transactionId, confirmation } = preview;
       if (typeof transactionId !== "string" || !transactionId || typeof confirmation !== "string" || !confirmation) throw new ObservationError("The bridge's preview was malformed; nothing happened");
-      const applied = await tools.call(kind.apply, { transactionId, confirmation, idempotencyKey: randomUUID() }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
-      if (applied.isError) return { text: JSON.stringify(applied), isError: true };
+      // Once sent, Live may have done it even when it doesn't say so: said as such, and kept for the cleanup.
+      const unsure = { text: "Live didn't confirm this, so it may have happened: check Live (/stop stops it) before trying again.", isError: true, maybe: true, done: kind.summarize(preview, prepared, knownTrack) };
+      let applied: CallToolResult;
+      try { applied = await tools.call(kind.apply, { transactionId, confirmation, idempotencyKey: randomUUID() }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true }); }
+      catch { return unsure; }
+      if (applied.isError) return uncertain(applied) ? unsure : { text: JSON.stringify(applied), isError: true };
       const done = kind.summarize(preview, prepared, knownTrack);
       try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
       return { text: JSON.stringify({ done: done.title, live: shorten(payload(applied)) }), isError: false, done };
@@ -989,16 +1030,22 @@ export function createAbletonIntegration(options: Options): Integration {
     try {
       if (!available || lost || !tools) return false;
       await ensureCatalog(signal);
-      if (!tools.has(EMERGENCY_STOP) || !tools.has("live_snapshot")) return false;
-      const playback = object(object(payload(await tools.call("live_snapshot", {}, signal, { host: true })).snapshot).playback);
-      const transport = object(playback.transport);
-      const targets = [...(Array.isArray(playback.firedTargets) ? playback.firedTargets : []), ...(Array.isArray(playback.playingTargets) ? playback.playingTargets : [])].map((target) => object(target));
-      const expectedTargets = [...new Set(targets.map((target) => `${String(target.trackRef)}|${String(target.clipSlotRef)}|${String(target.sceneRef)}`))].sort();
-      const session = transport.sessionRecord === true; const arrangement = transport.arrangementRecord === true;
-      const expectedRecording = session && arrangement ? "both" : session ? "session" : arrangement ? "arrangement" : "stopped";
-      if (transport.playing !== true && !expectedTargets.length && expectedRecording === "stopped") return true;
-      const result = await tools.call(EMERGENCY_STOP, { confirmation: "emergency-stop", expectedTargets, expectedRecording, idempotencyKey: randomUUID() }, signal, { host: true });
-      return !result.isError;
+      if (!tools.has(EMERGENCY_STOP) || !tools.has("live_discover")) return false;
+      // The playback row alone (not the whole Set, which a big one makes slow or too large); read
+      // again once if what's playing changed between the read and the stop.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const read = payload(await tools.call("live_discover", { kind: "session-playback", limit: 1 }, signal, { host: true }));
+        const playback = object((Array.isArray(read.items) ? read.items : [])[0] ?? {});
+        const transport = object(playback.transport ?? {});
+        const targets = [...(Array.isArray(playback.firedTargets) ? playback.firedTargets : []), ...(Array.isArray(playback.playingTargets) ? playback.playingTargets : [])].map((target) => object(target));
+        const expectedTargets = [...new Set(targets.map((target) => `${String(target.trackRef)}|${String(target.clipSlotRef)}|${String(target.sceneRef)}`))].sort();
+        const session = transport.sessionRecord === true; const arrangement = transport.arrangementRecord === true;
+        const expectedRecording = session && arrangement ? "both" : session ? "session" : arrangement ? "arrangement" : "stopped";
+        if (transport.playing !== true && !expectedTargets.length && expectedRecording === "stopped") return true;
+        const result = await tools.call(EMERGENCY_STOP, { confirmation: "emergency-stop", expectedTargets, expectedRecording, idempotencyKey: randomUUID() }, signal, { host: true });
+        if (!result.isError) return true;
+      }
+      return false;
     } catch { return false; }
   }
 

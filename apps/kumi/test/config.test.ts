@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findBridgeConfig, loadConfig, loadInferenceConfig, readSettings, safeError, writeSettings } from "../src/config.js";
+import { findBridgeConfig, liveUserLibrary, loadConfig, loadInferenceConfig, readSettings, remoteScriptsDir, safeError, writeSettings } from "../src/config.js";
 
 // Never read the developer's own ~/.kumi settings or installed bridge.
 const isolated = { KUMI_SETTINGS_FILE: "/nonexistent-kumi-test/settings.json", KUMI_REMOTE_SCRIPTS_DIR: "/nonexistent-kumi-test/Remote Scripts" };
@@ -130,4 +130,19 @@ test("redacts known keys and credential headers before sanitizing and bounding e
   assert(result.includes("[redacted]"));
   assert(safeError(new Error("a".repeat(10_000))).length <= 1024);
   assert.equal(safeError({ arbitrary: "do not serialize" }), "Unexpected failure");
+});
+
+test("Live's Remote Scripts folder is in the User Library Live's own preferences name, wherever it was moved", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kumi-live-prefs-"));
+  try {
+    const preferences = process.platform === "win32" ? join(dir, "Ableton", "Live 12.4.1", "Preferences") : join(dir, "Library", "Preferences", "Ableton", "Live 12.4.1");
+    mkdirSync(preferences, { recursive: true });
+    const moved = join(dir, "Big Drive", "Music & Samples");
+    writeFileSync(join(preferences, "Library.cfg"), `<?xml version="1.0"?><Ableton><ContentLibrary><UserLibrary><LibraryProject Id="0"><ProjectLocation /><ProjectName Value="User Library" /><ProjectPath Value="${moved.replace(/&/g, "&amp;")}" /></LibraryProject></UserLibrary></ContentLibrary></Ableton>`);
+    const env = process.platform === "win32" ? { APPDATA: dir } : { HOME: dir };
+    assert.equal(liveUserLibrary(env), join(moved, "User Library"));
+    assert.equal(remoteScriptsDir(env), join(moved, "User Library", "Remote Scripts"));
+    assert.equal(remoteScriptsDir({ ...env, KUMI_REMOTE_SCRIPTS_DIR: "/chosen/Remote Scripts" }), "/chosen/Remote Scripts", "an explicit folder wins");
+    assert.equal(liveUserLibrary(process.platform === "win32" ? { APPDATA: join(dir, "none") } : { HOME: join(dir, "none") }), undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

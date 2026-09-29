@@ -27,7 +27,7 @@ export function bridge(options: Options = {}) {
     ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
     ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
-  const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0 };
+  const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
   let drumRack = false;
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: name === "live_session_structure_preview"
@@ -55,6 +55,9 @@ export function bridge(options: Options = {}) {
         transport.playing = false; transport.sessionRecord = false; transport.arrangementRecord = false; transport.emergencyStops++;
         return wrap({ stopped: true, stoppedTargets: args.expectedTargets ?? [], recordingStopped: expected !== "stopped" });
       }
+      if (name === "live_discover" && args.kind === "session-playback") return wrap({ epoch, kind: args.kind, revision: "r1", truncated: false, items: [{ ref: "7:session_playback:0",
+        transport: { playing: transport.playing, sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, firedTargets: [],
+        playingTargets: transport.playing ? [{ trackRef: "7:track:0", clipSlotRef: "7:clip_slot:0:0", sceneRef: "7:scene:0" }] : [] }] });
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo };
         const items = args.kind === "set" ? [set] : args.kind === "track"
@@ -110,6 +113,8 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_recording_preview") {
           const on = transaction.args.action === "start";
           if (transaction.args.lane === "arrangement") transport.arrangementRecord = on; else transport.sessionRecord = on;
+          // Like the bridge when Live doesn't confirm in time: it happened, but the answer can't say so.
+          if (transport.recordUnsure) return refusal("Recording state is uncertain; perform fresh discovery.", { state: "uncertain" });
           return wrap({ transactionId: args.transactionId, state: "applied", recording: on });
         }
         if (transaction.name === "live_session_structure_preview") {

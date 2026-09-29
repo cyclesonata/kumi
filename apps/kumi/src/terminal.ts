@@ -166,6 +166,8 @@ export function createTerminal(options: Options): Terminal {
     if (command === "/help") { notice(HELP); return; }
     if (command === "/stop") {
       if (!controller.stopLive) { notice("[stop] Kumi can't stop Live here."); return; }
+      // An answer in progress stops too, so its later steps can't start Live again.
+      if (busy()) await Promise.resolve(controller.cancel()).catch(() => {});
       // A stop shows as the "[live] Stopped" event.
       if (!await controller.stopLive()) notice("[stop] Kumi couldn't stop Live just now; press space in Live.");
       return;

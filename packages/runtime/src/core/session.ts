@@ -38,7 +38,7 @@ interface Operation {
   isTurn: boolean;
   phase: "start" | "refresh" | "inference" | "undo";
   /** The turn moved on (text, a tool step): its no-progress timer starts over. */
-  progress?: () => void;
+  progress?: (event?: { type: string }) => void;
 }
 /** "3 minutes", "1 second". */
 const span = (ms: number) => {
@@ -219,7 +219,7 @@ export function createSession(options: Options): SessionController {
     await integration.start(op.controller.signal); assertCurrent(op);
     await observe(op); started = true;
   }
-  function perform(isTurn: boolean, phase: Operation["phase"], work: (op: Operation) => Promise<TurnResult | undefined>): Promise<void> {
+  function perform(isTurn: boolean, phase: Operation["phase"], work: (op: Operation) => Promise<TurnResult | undefined>, limitMs = timeoutMs): Promise<void> {
     if (state === "closed") return Promise.reject(new Error("Session is closed"));
     if (active) return Promise.reject(new Error("Session is busy; cancel first"));
     const op: Operation = { id: ++nextOperation, controller: new AbortController(), done: Promise.resolve(), isTurn, phase };
@@ -235,9 +235,20 @@ export function createSession(options: Options): SessionController {
     op.controller.signal.addEventListener("abort", onAbort, { once: true });
     // A turn runs while it makes progress, up to its limit; anything else gets timeoutMs.
     const stop = (why: "quiet" | "limit") => { timedOut ??= why; op.controller.abort(); };
-    let timeout = setTimeout(() => stop("quiet"), isTurn ? idleMs : timeoutMs);
+    let timeout = setTimeout(() => stop("quiet"), isTurn ? idleMs : limitMs);
     const limit = isTurn ? setTimeout(() => stop("limit"), turnLimitMs) : undefined;
-    if (isTurn) op.progress = () => { if (!op.controller.signal.aborted) { clearTimeout(timeout); timeout = setTimeout(() => stop("quiet"), idleMs); } };
+    if (isTurn) {
+      // While a tool works (a plan recording for minutes, a long listen) the answer is making
+      // progress: the quiet timer waits for it to end. The turn's own limit still holds.
+      let working = 0;
+      op.progress = (event) => {
+        if (op.controller.signal.aborted) return;
+        if (event?.type === "tool-start") working++;
+        if (event?.type === "tool-end") working = Math.max(0, working - 1);
+        clearTimeout(timeout);
+        if (working === 0) timeout = setTimeout(() => stop("quiet"), idleMs);
+      };
+    }
     op.done = (async () => {
       try {
         const working = Promise.resolve().then(() => work(op)).finally(() => { workSettled = true; });
@@ -259,7 +270,7 @@ export function createSession(options: Options): SessionController {
           if (timedOut && isTurn) {
             emit({ type: "error", message: timedOut === "limit" ? `Kumi stopped: this answer had run for ${span(turnLimitMs)}. Anything it changed is in HISTORY; ask it to carry on.`
               : `Kumi stopped after ${span(idleMs)} without progress. Anything it changed is in HISTORY; ask it to carry on.` });
-          } else if (timedOut) emit({ type: "error", message: `Kumi stopped waiting after ${span(timeoutMs)}.` });
+          } else if (timedOut) emit({ type: "error", message: `Kumi stopped waiting after ${span(limitMs)}.` });
           if (isTurn) {
             emit({ type: "turn-complete", result: { stopReason: "cancelled", ...(settledResult?.usage ? { usage: settledResult.usage } : {}) }, elapsedMs: Math.round(performance.now() - startedAt) });
             if (workSettled) saveConversation();
@@ -304,7 +315,7 @@ export function createSession(options: Options): SessionController {
         const snapshot = await observe(op); assertCurrent(op);
         op.phase = "inference";
         return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
-          (event) => { if (current(op)) { op.progress?.(); emit(event); } });
+          (event) => { if (current(op)) { op.progress?.(event); emit(event); } });
       });
     },
     refresh() {
@@ -347,13 +358,14 @@ export function createSession(options: Options): SessionController {
       if (!run) return { text: "Kumi keeps no recipes here.", isError: true };
       let outcome = { text: "", isError: true };
       // A fresh look at the Set first, as for an answer: the recipe's steps need current references.
+      // A recipe may record or wait, so it has as long as an answer does.
       await perform(false, "refresh", async (op) => {
         await observe(op);
         const result = await run.execute({ name, with: {}, final: true }, op.controller.signal);
         outcome = { text: result.reply ?? result.text, isError: Boolean(result.isError) };
         return undefined;
-      });
-      return outcome;
+      }, turnLimitMs);
+      return outcome.text ? outcome : { text: "it didn't finish; anything it changed is in HISTORY.", isError: true };
     },
     async forgetRecipe(name) {
       const recipe = await options.recipes?.get(name);

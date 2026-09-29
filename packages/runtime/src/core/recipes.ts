@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonObject, KernelTool, RecipeEvent } from "./contracts.js";
+import { suspectNote } from "./memory.js";
 
 export interface RecipeParam { name: string; about: string }
 export interface Recipe {
@@ -34,6 +35,24 @@ export const MAX_RECIPES = 64;
 export const MAX_RECIPE_STEPS = 40;
 const PARAM = /^[a-z][a-z0-9_]{0,31}$/;
 
+/**
+ * A recipe's words as the model may read them in its instructions: one line, without control
+ * characters or markup (a file could hold anything), bounded.
+ */
+const words = (text: unknown, max: number) => (typeof text === "string" ? text : "").replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+  .replace(/</g, "‹").replace(/>/g, "›").replace(/\s+/g, " ").trim().slice(0, max);
+/** Words that read as orders to the assistant, or hold a secret: not a producer's recipe, and not loaded. */
+const suspect = (recipe: Pick<Recipe, "name" | "about" | "params">) => [recipe.name, recipe.about, ...recipe.params.map((param) => param.about)].some((text) => suspectNote(text));
+/** A key of a step's input that names something in Live. */
+const REF_KEY = /^ref$|Refs?$/;
+/** The first literal reference in the steps: one that means something only in this session, not a $blank or an earlier step's @name. */
+function literalRef(value: unknown, key = ""): { key: string; value: string } | undefined {
+  if (typeof value === "string") return REF_KEY.test(key) && !/^[$@]/.test(value) ? { key, value } : undefined;
+  if (Array.isArray(value)) { for (const item of value) { const found = literalRef(item, key); if (found) return found; } return undefined; }
+  if (value && typeof value === "object") { for (const [child, item] of Object.entries(value)) { const found = literalRef(item, child); if (found) return found; } }
+  return undefined;
+}
+
 /** "Resample twice!" → "resample-twice": the recipe's file name and how it's matched. */
 export const slug = (name: string) => name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 
@@ -44,11 +63,13 @@ export function createRecipeStore(directory: string): RecipeStore {
     try {
       const value = JSON.parse(await readFile(path, "utf8")) as Partial<Recipe>;
       if (value.version !== 1 || typeof value.name !== "string" || !Array.isArray(value.steps)) return undefined;
-      return { version: 1, name: value.name.slice(0, 80), about: typeof value.about === "string" ? value.about.slice(0, 300) : "",
-        params: Array.isArray(value.params) ? value.params.filter((param): param is RecipeParam => Boolean(param) && typeof param.name === "string" && PARAM.test(param.name)).map((param) => ({ name: param.name, about: typeof param.about === "string" ? param.about.slice(0, 160) : "" })) : [],
+      const recipe: Recipe = { version: 1, name: words(value.name, 80), about: words(value.about, 300),
+        params: Array.isArray(value.params) ? value.params.filter((param): param is RecipeParam => Boolean(param) && typeof param.name === "string" && PARAM.test(param.name)).map((param) => ({ name: param.name, about: words(param.about, 160) })) : [],
         steps: value.steps.filter((step): step is JsonObject => Boolean(step) && typeof step === "object" && !Array.isArray(step)).slice(0, MAX_RECIPE_STEPS),
         created: typeof value.created === "number" ? value.created : 0, used: typeof value.used === "number" ? value.used : 0,
         ...(typeof value.lastUsed === "number" ? { lastUsed: value.lastUsed } : {}) };
+      // A file whose words read as instructions (copied in, or edited) isn't one of the producer's recipes.
+      return recipe.name && !suspect(recipe) ? recipe : undefined;
     } catch { return undefined; }
   }
   return {
@@ -129,7 +150,7 @@ export function recipeTools(options: { store: RecipeStore; plan: () => KernelToo
         steps: { type: "array", minItems: 1, maxItems: MAX_RECIPE_STEPS, items: { type: "object", required: ["tool", "input"], properties: {
           tool: { type: "string" }, input: { type: "object" }, as: { type: "string" }, each: { type: "object" } } } } } },
       async execute(input) {
-        const name = typeof input.name === "string" ? input.name.trim().slice(0, 80) : "";
+        const name = words(input.name, 80);
         if (!slug(name)) return { text: "Give the recipe a name with letters or numbers in it.", isError: true };
         const steps = (Array.isArray(input.steps) ? input.steps : []).filter((step): step is JsonObject => Boolean(step) && typeof step === "object" && !Array.isArray(step));
         if (!steps.length || steps.length > MAX_RECIPE_STEPS) return { text: `A recipe has 1 to ${MAX_RECIPE_STEPS} steps.`, isError: true };
@@ -142,11 +163,15 @@ export function recipeTools(options: { store: RecipeStore; plan: () => KernelToo
           .map((param) => ({ name: param.name, about: typeof param.about === "string" ? param.about.slice(0, 160) : "" }));
         const undeclared = [...blanks(steps)].filter((blank) => !params.some((param) => param.name === blank));
         if (undeclared.length) return { text: `The steps use $${undeclared[0]}, which params doesn't declare.`, isError: true };
+        // A recipe runs in any Set, any day: a reference from now would point at whatever sits there then.
+        const literal = literalRef(steps.map((step) => ({ input: step.input ?? {}, each: step.each ?? {} })));
+        if (literal) return { text: `${literal.key} is ${JSON.stringify(literal.value.slice(0, 64))}, which means something only in this session: use a $blank (declared in params) for what's chosen when the recipe runs, or @name for what an earlier step makes.`, isError: true };
         const existing = await options.store.get(name);
         const recipes = await options.store.list();
         if (!existing && recipes.length >= MAX_RECIPES) return { text: `${MAX_RECIPES} recipes are kept; ask the producer which one to forget first.`, isError: true };
-        const recipe: Recipe = { version: 1, name, about: typeof input.about === "string" ? input.about.trim().slice(0, 300) : "", params, steps,
+        const recipe: Recipe = { version: 1, name, about: words(input.about, 300), params: params.map((param) => ({ ...param, about: words(param.about, 160) })), steps,
           created: existing?.created ?? Date.now(), used: existing?.used ?? 0, ...(existing?.lastUsed ? { lastUsed: existing.lastUsed } : {}) };
+        if (suspect(recipe)) return { text: "That recipe's name or description reads like instructions to an assistant, or holds a secret, so it isn't kept.", isError: true };
         await options.store.save(recipe);
         options.onEvent({ type: "recipe", action: existing ? "updated" : "saved", name, steps: steps.length });
         return quiet({ saved: name, steps: steps.length });

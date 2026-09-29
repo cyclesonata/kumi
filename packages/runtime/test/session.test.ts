@@ -387,3 +387,27 @@ test("what Kumi remembers goes into each new conversation's instructions, with t
   assert.ok(h.events.some((event) => event.type === "forgot"));
   await h.session.close();
 });
+
+test("a tool that works longer than the quiet timer (a plan recording) doesn't get the answer stopped; silence without one does", async () => {
+  const long = harness({ idleTimeoutMs: 40, run: async (_input, _signal, emit) => {
+    emit({ type: "tool-start", id: "t1", name: "make_changes" });
+    await delay(120);
+    emit({ type: "tool-end", id: "t1", name: "make_changes", elapsedMs: 120, isError: false });
+    emit({ type: "text", text: "Recorded." });
+    return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+  } });
+  await long.session.start();
+  await long.session.submit("bounce it");
+  assert(!long.events.some((event) => event.type === "error"), JSON.stringify(long.events.filter((event) => event.type === "error")));
+  assert.equal((long.events.find((event) => event.type === "turn-complete") as { result: TurnResult } | undefined)?.result.stopReason, "completed");
+  await long.session.close();
+
+  const quiet = harness({ idleTimeoutMs: 40, run: async (_input, signal) => {
+    await new Promise((resolve, reject) => { const timer = setTimeout(resolve, 400); signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); }, { once: true }); });
+    return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+  } });
+  await quiet.session.start();
+  await quiet.session.submit("hello");
+  assert(quiet.events.some((event) => event.type === "error" && /without progress/.test(event.message)), "silence still stops an answer");
+  await quiet.session.close();
+});

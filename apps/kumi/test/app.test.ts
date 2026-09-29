@@ -828,7 +828,7 @@ test("/stop stops Live any time, even while Kumi answers, and NOW shows it", asy
   await delay(10);
   assert.equal(stops, 1, "not refused as busy");
   assert.ok(has(h.screen(), "■ Stopped"));
-  assert.ok(!h.calls.includes("cancel"), "the answer carries on");
+  assert.ok(h.calls.includes("cancel"), "the answer in progress stops too, so its later steps can't start Live again");
   h.emit({ type: "state", state: "idle" });
   works = false;
   await h.type("/stop\r");

@@ -126,3 +126,76 @@ test("listen can name an audio clip in the Set by its clipRef: Kumi finds the fi
     await assert.rejects(b.integration.audioFile!(midi, signal()), /MIDI clip, which has no sound of its own/);
   } finally { await b.integration.close(); }
 });
+
+test("cancelling a plan while the model is still writing it stops the recording and playback it started", async () => {
+  const b = await opened({ transport: true, version: FIXED_BRIDGE });
+  try {
+    const turn = new AbortController();
+    const call = tool(b.tools, "make_changes").stream!(turn.signal, () => {});
+    const text = JSON.stringify({ steps: [{ tool: "record", input: { action: "start", lane: "arrangement" } }, { tool: "play", input: { action: "continue" } }, { tool: "wait", input: { seconds: 30 } }] });
+    call.push(text.slice(0, text.indexOf("{\"tool\":\"wait\"")));
+    for (let waited = 0; !(b.transport.playing && b.transport.arrangementRecord) && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual([b.transport.playing, b.transport.arrangementRecord], [true, true], "recording and playing while the model writes on");
+    turn.abort();
+    for (let waited = 0; b.transport.emergencyStops === 0 && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(b.transport.emergencyStops, 1, "the cancelled plan stopped what it started");
+    assert.deepEqual([b.transport.playing, b.transport.arrangementRecord], [false, false]);
+    assert.deepEqual(b.actions.at(-1), { title: "Recording stopped", playing: false, recording: false });
+  } finally { await b.integration.close(); }
+});
+
+test("a recording Live didn't confirm may have started: the producer is told so, and the plan's cleanup stops it", async () => {
+  const b = await opened({ transport: true, version: FIXED_BRIDGE });
+  try {
+    b.transport.recordUnsure = true;
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "record", input: { action: "start", lane: "arrangement" } }, { tool: "play", input: { action: "continue" } }] }, signal());
+    assert.equal(plan.isError, true);
+    const reply = JSON.parse(plan.text) as { stopped: JsonObject };
+    assert.match(String(reply.stopped.error), /may have happened: check Live/);
+    assert.match(String(reply.stopped.error), /Kumi stopped the recording and playback/);
+    assert.equal(b.transport.arrangementRecord, false);
+    assert.equal(b.transport.emergencyStops, 1);
+  } finally { await b.integration.close(); }
+});
+
+test("a wait in beats counts at the tempo an earlier step of the plan set", async () => {
+  const b = await opened({ transport: true, version: FIXED_BRIDGE });
+  try {
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: { tempo: 240 } }, { tool: "wait", input: { beats: 1 } }] }, signal());
+    assert.equal(plan.isError, false, plan.text);
+    assert.equal((JSON.parse(plan.text) as { done: JsonObject[] }).done[1]!.changed, "waited 0.3 s", "a beat at 240 BPM, not at the 120 the turn began with");
+  } finally { await b.integration.close(); }
+});
+
+test("a track put first retires the short names after it: a plan's later step can't reach the new track by an old name", async () => {
+  const b = await opened();
+  try {
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Intro", kind: "midi", index: 0 }], scenes: [] } },
+      { tool: "set_mixer", input: { trackRef: "track:1", volume: 0.5 } },
+    ] }, signal());
+    assert.equal(plan.isError, true, "track:1 was Fixture Bass, which moved; it isn't Intro now");
+    const reply = JSON.parse(plan.text) as { done: JsonObject[]; stopped: JsonObject };
+    assert.match(String(reply.stopped.error), /discovery in this turn/);
+    assert.notEqual(reply.done[0]!.ref, "track:1", "the new track gets a name of its own");
+    assert(!b.requests.some((request) => request.name === "live_mixer_preview"), "nothing reached Live for the stale name");
+  } finally { await b.integration.close(); }
+});
+
+test("moving a device retires its track's device references, so a later step can't hit the wrong device", async () => {
+  const b = await opened({ racks: true, version: FIXED_BRIDGE });
+  try {
+    const devices = JSON.parse((await tool(b.tools, "live_discover").execute({ kind: "device", parent: "track:1" }, signal())).text) as { live?: { items: JsonObject[] }; items?: JsonObject[] };
+    const rows = devices.live?.items ?? devices.items ?? [];
+    const reverb = String(rows.find((row) => row.name === "Reverb")!.ref); const rack = String(rows.find((row) => row.name === "Instrument Rack")!.ref);
+    const plan = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "move_device", input: { deviceRef: reverb, index: 0 } },
+      { tool: "switch_device", input: { deviceRef: rack, enabled: false } },
+    ] }, signal());
+    assert.equal(plan.isError, true, "the rack's old position now holds the Reverb");
+    const reply = JSON.parse(plan.text) as { done: JsonObject[]; stopped: JsonObject };
+    assert.equal(reply.done.length, 1);
+    assert.match(String(reply.stopped.error), /discovery in this turn/);
+    assert.equal(b.requests.filter((request) => request.name === "live_device_preview").length, 1, "only the move reached Live");
+  } finally { await b.integration.close(); }
+});

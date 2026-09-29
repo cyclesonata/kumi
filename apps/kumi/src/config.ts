@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -77,9 +77,36 @@ export function loadInferenceConfig(env: Env = process.env): InferenceConfig {
   return { ...(model ? { model } : {}), authFile: loadAuthFile(env) };
 }
 
-/** Live's Remote Scripts folder: KUMI_REMOTE_SCRIPTS_DIR, or where Live keeps the User Library's. */
+/**
+ * Where Live keeps the User Library, as its newest preferences say (Library.cfg names the folder
+ * that holds it, and its name): a library the producer moved, or Documents redirected to OneDrive,
+ * is found where it is. Undefined when Live's preferences don't say.
+ */
+export function liveUserLibrary(env: Env = process.env): string | undefined {
+  const home = env.HOME ?? homedir();
+  const preferences = process.platform === "win32" ? join(env.APPDATA ?? join(home, "AppData", "Roaming"), "Ableton") : join(home, "Library", "Preferences", "Ableton");
+  try {
+    const configs = readdirSync(preferences).filter((name) => name.startsWith("Live "))
+      .map((name) => join(preferences, name, ...(process.platform === "win32" ? ["Preferences"] : []), "Library.cfg"))
+      .filter((file) => existsSync(file)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    for (const file of configs) {
+      const block = /<UserLibrary>([\s\S]*?)<\/UserLibrary>/.exec(readFileSync(file, "utf8"))?.[1] ?? "";
+      const value = (field: string) => new RegExp(`<${field} Value="([^"]*)"`).exec(block)?.[1]?.replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      const folder = value("ProjectPath"); const name = value("ProjectName") || "User Library";
+      if (folder && isAbsolute(folder)) return join(folder, name);
+    }
+  } catch { /* no preferences to read */ }
+  return undefined;
+}
+
+/** Live's Remote Scripts folder: KUMI_REMOTE_SCRIPTS_DIR, else in the User Library Live's preferences name, else where Live keeps it by default. */
 export function remoteScriptsDir(env: Env = process.env): string {
-  return env.KUMI_REMOTE_SCRIPTS_DIR ?? join(homedir(), process.platform === "win32" ? "Documents" : "Music", "Ableton", "User Library", "Remote Scripts");
+  if (env.KUMI_REMOTE_SCRIPTS_DIR) return env.KUMI_REMOTE_SCRIPTS_DIR;
+  const library = liveUserLibrary(env);
+  if (library) return join(library, "Remote Scripts");
+  const home = homedir();
+  const documents = process.platform === "win32" ? [join(home, "OneDrive", "Documents"), join(home, "Documents")].find((folder) => existsSync(join(folder, "Ableton"))) ?? join(home, "Documents") : join(home, "Music");
+  return join(documents, "Ableton", "User Library", "Remote Scripts");
 }
 
 /** The bridge configuration Live itself uses, named by the installed Remote Script's reference file. */

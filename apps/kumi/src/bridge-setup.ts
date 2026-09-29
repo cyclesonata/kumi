@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -69,14 +69,13 @@ async function ask(io: BridgeSetupIo, question: string): Promise<boolean> {
   try { return /^y(es)?$/i.test((await reader.question(`${question} [y/N] `)).trim()); } finally { reader.close(); }
 }
 
-/** The lifecycle's JSON answer, or its refusal in words. */
+/** The lifecycle's JSON answer (on stdout, or its refusal on stderr), or what went wrong in words. */
 function lifecycleAnswer(ran: Ran): { ok: true; value: Record<string, unknown> } | { ok: false; reason: string } {
-  const text = ran.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
-  try {
-    const value = JSON.parse(text) as Record<string, unknown>;
-    if (String(value.version ?? "").includes("error") || ran.code !== 0) return { ok: false, reason: String(value.reason ?? "the bridge's installer refused") };
-    return { ok: true, value };
-  } catch { return { ok: false, reason: (ran.stderr || ran.stdout).trim().split("\n").at(-1)?.slice(0, 300) || "the bridge's installer failed" }; }
+  const json = (text: string) => { try { return JSON.parse(text.trim().split("\n").filter(Boolean).at(-1) ?? "") as Record<string, unknown>; } catch { return undefined; } };
+  const value = json(ran.stdout) ?? json(ran.stderr);
+  if (!value) return { ok: false, reason: (ran.stderr || ran.stdout).trim().split("\n").at(-1)?.slice(0, 300) || "the bridge's installer failed" };
+  if (String(value.version ?? "").includes("error") || ran.code !== 0) return { ok: false, reason: String(value.reason ?? "the bridge's installer refused").slice(0, 400) };
+  return { ok: true, value };
 }
 
 const activated = (value: Record<string, unknown>) => {
@@ -112,6 +111,14 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
     return 1;
   }
   if (!io.yes && !await ask(io, "Is Live closed, with your work saved?")) { say("Nothing was changed. Quit Live, then run: npm run kumi -- bridge"); return 1; }
+  // The Remote Script goes in the User Library's Remote Scripts folder, which Live doesn't always make.
+  if (!existsSync(scripts)) {
+    if (basename(scripts) !== "Remote Scripts" || !existsSync(dirname(scripts))) {
+      say(`Kumi couldn't find Live's User Library (it looked for ${tilde(dirname(scripts))}). Open Live once so it makes one, or set KUMI_REMOTE_SCRIPTS_DIR to your User Library's Remote Scripts folder (Live's Settings → Library shows where it is).`);
+      return 1;
+    }
+    mkdirSync(scripts);
+  }
 
   // The bridge's own package, as a tarball the lifecycle verifies byte for byte.
   const folder = join(io.home ?? join(homedir(), ".kumi"), "bridge", `${bundled}-${Date.now()}`);

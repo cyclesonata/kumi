@@ -562,10 +562,12 @@ export class TuiApp {
       await this.openMemory().catch((error: unknown) => this.panelFailed(error));
       return;
     }
-    // Stopping Live works any time, even while Kumi answers (a plan recording, say).
+    // Stopping Live works any time. An answer in progress (a plan recording, say) stops too, so
+    // its later steps can't start Live again.
     if (command === "/stop" && controller.stopLive) {
       this.editor.clear();
       if (this.connection !== "connected") { this.notice("Live isn't connected, so there's nothing for Kumi to stop.", "info"); return; }
+      if (this.busy) await controller.cancel().catch(() => {});
       if (!await controller.stopLive()) this.notice("Kumi couldn't stop Live just now; press space in Live to stop it.", "warn");
       return;
     }

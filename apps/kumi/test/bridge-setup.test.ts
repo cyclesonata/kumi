@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -93,7 +93,8 @@ test("a first install packs Kumi's bridge, then has its lifecycle plan and apply
 test("an update keeps the installed bridge's state, and the installer's refusal is said as it is", async () => {
   const w = world({ bundled: "1.0.34", installed: "1.0.33" });
   try {
-    w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle-error/v1", reason: "private build is dirty; pass --allow-dirty-private-build" }, 1));
+    // Like the real lifecycle, a refusal is JSON on stderr.
+    w.lifecycle.push({ code: 1, stdout: "", stderr: `${JSON.stringify({ version: "ableton-mcp-lifecycle-error/v1", reason: "private build is dirty; pass --allow-dirty-private-build" })}\n` });
     assert.equal(await setupBridge(w.io()), 1);
     const plan = w.calls.find((call) => call.command === process.execPath)!;
     assert.equal(plan.args[1], "upgrade");
@@ -115,5 +116,21 @@ test("after installing, Kumi waits for Live to connect through the new bridge", 
     assert(activations.every((call) => call.args.includes("--allow-dirty-private-build")), "a developer's flag goes to every step");
     assert.match(w.out, /Now open Live\. Kumi connects on its own/);
     assert.match(w.out, /Live is connected through the new bridge/);
+  } finally { w.done(); }
+});
+
+test("a User Library without a Remote Scripts folder gets one; without a User Library, Kumi says where it looked", async () => {
+  const w = world({ bundled: "1.0.34" });
+  try {
+    const library = join(w.root, "Library Moved", "User Library"); mkdirSync(library, { recursive: true });
+    w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle/v1", state: "planned" }), answer({ version: "ableton-mcp-lifecycle/v1", state: "installed-restart-required" }));
+    assert.equal(await setupBridge(w.io({ env: { KUMI_REMOTE_SCRIPTS_DIR: join(library, "Remote Scripts") } })), 0, w.out);
+    assert.equal(existsSync(join(library, "Remote Scripts")), true, "made for the Remote Script");
+    const lost = world({ bundled: "1.0.34" });
+    try {
+      assert.equal(await setupBridge(lost.io({ env: { KUMI_REMOTE_SCRIPTS_DIR: join(lost.root, "Nowhere", "User Library", "Remote Scripts") } })), 1);
+      assert.match(lost.out, /couldn't find Live's User Library \(it looked for .*Nowhere.*User Library\)/);
+      assert.equal(lost.calls.length, 0, "nothing was packed or installed");
+    } finally { lost.done(); }
   } finally { w.done(); }
 });
