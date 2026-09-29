@@ -869,8 +869,6 @@ export class TuiApp {
     const focus = this.focus;
     if (!focus?.trackRef) return;
     this.pinned = { trackRef: focus.trackRef, ref: row.ref, node: row.node, name: row.name, trail: row.trail, siblings: row.siblings, kind: row.kind, ...(focus.track ? { track: focus.track.name } : {}) };
-    // Live shows it too, where it can (a device from bridge 1.0.42, a chain always).
-    void this.options.controller.selectInLive?.(row.ref).catch(() => false);
     this.scheduler.request();
   }
 

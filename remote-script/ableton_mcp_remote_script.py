@@ -5390,28 +5390,19 @@ class LiveObjectMapper:
         if not proposals: raise ValueError("selection mutation has no fields")
         def identity_of(value: Any) -> str | None:
             return None if value is None else self._capture_object_identity(value)
-        # A device is selected through Song.View.select_device (Live has no settable selected_device), which
-        # also selects its track and shows its chain; it's read back from the selected track's view.
-        def read(attribute: str) -> Any:
-            return self._selected_device(view) if attribute == "selected_device" else self._read_attr(view, attribute)
-        def write(attribute: str, value: Any) -> None:
-            if attribute != "selected_device": setattr(view, attribute, value); return
-            select = getattr(view, "select_device", None)
-            if not callable(select): raise ValueError("device selection is unavailable")
-            if value is not None: select(value)
         assignments = []
         try:
             for attribute, value in proposals:
-                prior = read(attribute)
-                write(attribute, value)
+                prior = self._read_attr(view, attribute)
+                setattr(view, attribute, value)
                 assignments.append((attribute, prior))
             for attribute, value in proposals:
-                observed = read(attribute)
+                observed = self._read_attr(view, attribute)
                 if identity_of(observed) != identity_of(value): raise ValueError("selection change was not confirmed")
         except BaseException as error:
             rollback_failed = False
             for attribute, prior in reversed(assignments):
-                try: write(attribute, prior)
+                try: setattr(view, attribute, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._bounded_canonical(self._selection_state()) != self._bounded_canonical(before_state): raise ValueError("selection change failed and exact rollback failed") from error
             raise

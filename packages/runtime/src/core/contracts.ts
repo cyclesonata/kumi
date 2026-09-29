@@ -162,8 +162,6 @@ export interface Integration {
   sessionStrip?(trackRef: string, scene: number, signal: AbortSignal): Promise<SessionStrip | undefined>;
   /** The Arrangement at a glance (length, playhead, loop, locators), for FOCUS. */
   arrangementStrip?(signal: AbortSignal): Promise<ArrangementStrip | undefined>;
-  /** Select a device or a chain in Live (what the producer pointed at in Kumi); false when Live can't. */
-  selectInLive?(ref: string, signal: AbortSignal): Promise<boolean>;
 }
 
 /** A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data. */
@@ -235,7 +233,7 @@ export interface LiveFocus {
   slotRef?: string;
   /** The selected scene's position (0 is the first), for FOCUS's Session strip. */
   sceneIndex?: number;
-  /** The selected device's reference (bridge 1.0.42), for FOCUS's tree to mark exactly that one. */
+  /** The selected device's reference (from bridge 1.0.45), for FOCUS's tree to mark exactly that one. */
   deviceRef?: string;
   scene?: string;
   /** The clip in the Clip view; "" when it has no name. */
@@ -461,8 +459,6 @@ export interface SessionController {
   /** A track's Session slots around a scene, and the Arrangement at a glance, for FOCUS (while connected). */
   sessionStrip?(trackRef: string, scene: number): Promise<SessionStrip | undefined>;
   arrangementStrip?(): Promise<ArrangementStrip | undefined>;
-  /** Select what the producer pointed at in Kumi in Live too, when Live can. */
-  selectInLive?(ref: string): Promise<boolean>;
   /**
    * The model changed (a new one chosen, a sign-in, a new effort): the next turn or refresh builds
    * the kernel afresh through the factory, continuing this conversation. Safe during a turn.

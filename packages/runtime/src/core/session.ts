@@ -591,10 +591,6 @@ export function createSession(options: Options): SessionController {
       emit({ type: "recipe", action: "forgotten", name: recipe.name, steps: recipe.steps.length });
       return true;
     },
-    async selectInLive(ref) {
-      if (!integration?.selectInLive || connection !== "connected") return false;
-      return integration.selectInLive(ref, AbortSignal.timeout(10_000)).catch(() => false);
-    },
     async sessionStrip(trackRef, scene) {
       if (!integration?.sessionStrip || connection !== "connected") return undefined;
       return integration.sessionStrip(trackRef, scene, AbortSignal.timeout(10_000)).catch(() => undefined);

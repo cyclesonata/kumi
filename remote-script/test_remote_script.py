@@ -4268,11 +4268,7 @@ class SelectionViewExpansionTests(unittest.TestCase):
     def test_selection_set_assigns_song_view_selections(self):
         song = FakeSong()
         track = song.tracks[0]; scene = song.scenes[0]; slot = track.clip_slots[0]; device = track.devices[0]; parameter = device.parameters[0]
-        # As in Live: the Song's view selects a device (and its track) with select_device; the track's view holds it.
-        track.view = type("TrackView", (), {"selected_device": None})()
-        def select_device(chosen): song.view.selected_track = track; track.view.selected_device = chosen
-        song.view = type("SongView", (), {"selected_track": None, "selected_scene": None, "highlighted_clip_slot": None, "detail_clip": None, "selected_parameter": None, "selected_chain": None})()
-        song.view.select_device = select_device
+        song.view = type("SongView", (), {"selected_track": None, "selected_scene": None, "highlighted_clip_slot": None, "detail_clip": None, "selected_device": None, "selected_parameter": None, "selected_chain": None})()
         clip = FakeClip(4.0); slot.clip = clip
         mapper = LiveObjectMapper(song)
         self.assertTrue(mapper._operation_supported("selection.set"))
@@ -4284,8 +4280,10 @@ class SelectionViewExpansionTests(unittest.TestCase):
         self.assertTrue(result["changed"]); validate_operation_payload("selection.set", "result", result)
         self.assertIs(song.view.selected_track, track); self.assertIs(song.view.selected_scene, scene)
         self.assertIs(song.view.highlighted_clip_slot, slot); self.assertIs(song.view.detail_clip, clip)
-        self.assertIs(track.view.selected_device, device); self.assertIs(song.view.selected_parameter, parameter)
-        self.assertEqual(mapper.snapshot()["selection"]["deviceRef"], device_ref, "read back from the selected track")
+        self.assertIs(song.view.selected_parameter, parameter)
+        # Live keeps the selected device on the selected track's view: that's what the snapshot and the focus feed name.
+        track.view = type("TrackView", (), {"selected_device": device})()
+        self.assertEqual(mapper.snapshot()["selection"]["deviceRef"], device_ref, "read from the selected track")
         self.assertEqual(mapper.discover("selection")["items"][0]["selectedDeviceRef"], device_ref, "the focus feed names the selected device")
         # Live's device type goes on each device row.
         device.type = 2; self.assertEqual(mapper.snapshot()["tracks"][0]["devices"][0]["deviceType"], "audio_effect")

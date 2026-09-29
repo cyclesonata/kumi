@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.42.
+The first release for producers to use day to day. Ships with bridge 1.0.45.
 
 ### Changes to the Set
 
@@ -67,9 +67,11 @@ The first release for producers to use day to day. Ships with bridge 1.0.42.
   bridge used to refuse it as unconfirmed right after the call (bridge 1.0.40).
   An empty scene, which would only stop what's playing, says it has no clips
   to play and launches nothing (bridge 1.0.41).
-- `select` selects a device in Live (with its track, and its rack's chain
-  shown), through Live's own select_device (bridge 1.0.42). Each device row
-  says whether it's an instrument, an audio effect or a MIDI effect.
+- Each device row says whether it's an instrument, an audio effect or a MIDI
+  effect, and Live's selected device is named exactly, so FOCUS draws its
+  icons and marks the right one of two same-named devices (bridge 1.0.45).
+  Selecting a device in Live from Kumi was tried and left out: on real Live it
+  lagged or landed elsewhere, so pointing at one stays inside Kumi.
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 
