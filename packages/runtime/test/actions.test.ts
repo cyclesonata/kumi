@@ -223,3 +223,19 @@ test("recording starts after Kumi disarms any other armed track, each a change w
     assert.doesNotMatch(again.text, /disarmedFirst/);
   } finally { await b.integration.close(); }
 });
+
+test("Back to Arrangement is pressed through play, and an older bridge says it needs updating", async () => {
+  const current = await opened({ transport: true, version: "1.0.35" });
+  try {
+    const pressed = await tool(current.tools, "play").execute({ action: "back-to-arrangement" }, signal());
+    assert.equal(pressed.isError, false, pressed.text);
+    assert.equal(JSON.parse(pressed.text).done, "Back to the Arrangement");
+  } finally { await current.integration.close(); }
+  const older = await opened({ transport: true, version: FIXED_BRIDGE });
+  try {
+    const refused = await tool(older.tools, "play").execute({ action: "back-to-arrangement" }, signal());
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /needs the Ableton bridge 1\.0\.35 or later/);
+    assert.ok(!older.requests.some((request) => request.name === "live_transport_action_preview"), "nothing reached Live");
+  } finally { await older.integration.close(); }
+});

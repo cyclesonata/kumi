@@ -1278,6 +1278,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (action === "stop") { transport.playing = false; this.state.set.playing = false; }
         else if (action === "force-link-beat-time") { if (typeof args.beatTime !== "number" || !Number.isFinite(args.beatTime)) throw new RangeError("beatTime is required for force-link-beat-time"); transport.position = args.beatTime; this.state.set.position = args.beatTime; }
         else if (action === "stop-all-clips") { for (const track of this.state.tracks) { track.playingSlotIndex = null; track.firedSlotIndex = null; } transport.playing = false; this.state.set.playing = false; }
+        else if (action === "back-to-arrangement") { for (const track of this.state.tracks) track.backToArranger = false; if (this.state.song) this.state.song.backToArranger = false; }
         else if (action === "scrub") { if (typeof args.beatTime !== "number" || !Number.isFinite(args.beatTime)) throw new RangeError("beatTime distance is required for scrub"); transport.position = (transport.position ?? 0) + args.beatTime; }
         else if (!["tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record"].includes(action as string)) throw new RangeError("transport action is invalid");
         this.state.playback.revision = `${this.epoch}:transport:${++this.sequence}`;

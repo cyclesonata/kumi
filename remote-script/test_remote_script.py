@@ -619,7 +619,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "ec919fd1a550c84eb920092fd963e4df923aa1facd0dc58793c1eb2b6ff0ff95")
+        self.assertEqual(digest, "20a6ce82d25e2b2c1cedf213bdd20e8b19c2a99e8db232262a5186c9a2021953")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -3951,6 +3951,13 @@ class SongTransportLinkTests(unittest.TestCase):
         stale = fences(); stale["expectedRevision"] = "stale"
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("transport.action", {**stale, "action": "start"})
         with self.assertRaisesRegex(ValueError, "invalid"): mapper.invoke("transport.action", {**fences(), "action": "detonate"})
+        # Back to Arrangement: the lit button reads true, and writing false presses it.
+        song.back_to_arranger = True
+        request = {**fences(), "action": "back-to-arrangement"}; validate_operation_payload("transport.action", "request", request)
+        result = mapper.invoke("transport.action", request)
+        self.assertTrue(result["done"]); validate_operation_payload("transport.action", "result", result); self.assertIs(song.back_to_arranger, False)
+        del song.back_to_arranger
+        with self.assertRaisesRegex(ValueError, "back-to-arrangement is unavailable"): mapper.invoke("transport.action", {**fences(), "action": "back-to-arrangement"})
 
     def test_locator_jump_to_specific_cue(self):
         song = FakeArrangementSong()

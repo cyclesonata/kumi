@@ -963,7 +963,7 @@ const toolDescriptors = [
   {
     name: "live_transport_action_preview",
     description: "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). Audible actions are fenced but not undoable; emergency stop stays separate.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips"] }, beatTime: { type: "number" } }, required: ["action"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"] }, beatTime: { type: "number" } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {

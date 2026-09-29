@@ -2710,6 +2710,11 @@ test("song state reads, time conversion, transport actions, and exact cue jumps"
   await call(9, "live_transport_action_apply", { transactionId: linkPreview.transactionId, confirmation: "apply", idempotencyKey: "action-link-1" });
   assert.equal((simulator as any).state.playback.transport.position, 8);
   assert.equal(((await call(10, "live_transport_action_preview", { action: "force-link-beat-time" })) as any).error.code, -32602);
+  // Back to Arrangement: tracks that followed their Session clips play the Arrangement again.
+  (simulator as any).state.tracks[0].backToArranger = true;
+  const backPreview = JSON.parse(((await call(40, "live_transport_action_preview", { action: "back-to-arrangement" })) as any).result.content[0].text);
+  const back = JSON.parse(((await call(41, "live_transport_action_apply", { transactionId: backPreview.transactionId, confirmation: "apply", idempotencyKey: "action-back-1" })) as any).result.content[0].text);
+  assert.equal(back.state, "applied"); assert.equal((simulator as any).state.tracks[0].backToArranger, false);
   (simulator as any).state.playback.transport.position = 0; (simulator as any).state.set.position = 0;
   (simulator as any).state.arrangement.locators.push({ ref: "locator:locator-2", objectIdentity: "simulator:locator:locator-2", name: "B", position: 16 });
   const jumpPreview = JSON.parse(((await call(11, "live_locator_jump_preview", { ref: "locator:locator-2" })) as any).result.content[0].text);

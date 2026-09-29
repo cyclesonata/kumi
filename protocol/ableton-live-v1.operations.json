@@ -12540,7 +12540,8 @@
        "re-enable-automation",
        "trigger-session-record",
        "force-link-beat-time",
-       "stop-all-clips"
+       "stop-all-clips",
+       "back-to-arrangement"
       ]
      },
      "beatTime": {

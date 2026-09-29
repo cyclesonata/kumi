@@ -4999,7 +4999,7 @@ export class McpHost {
   }
 
   private async liveTransportActionPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const actions = ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips"] as const;
+    const actions = ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"] as const;
     const audible = ["start", "continue", "play-selection", "scrub", "trigger-session-record", "force-link-beat-time"];
     if (!isObject(params) || !hasOnly(params, ["action", "beatTime"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     if ((params.action === "force-link-beat-time" || params.action === "scrub") && (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime))) return error(id, -32602, `beatTime is required for ${params.action === "scrub" ? "the scrub distance" : "force-link-beat-time"}`);

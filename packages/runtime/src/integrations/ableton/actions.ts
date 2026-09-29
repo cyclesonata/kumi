@@ -6,7 +6,7 @@
  */
 import type { JsonObject } from "../../core/contracts.js";
 import type { KnownTrack } from "./changes.js";
-import { FIXED_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, FIXED_BRIDGE } from "./bridge-version.js";
 import { bars } from "./more-changes.js";
 
 export interface ActionKind {
@@ -18,6 +18,8 @@ export interface ActionKind {
   inputSchema?: JsonObject;
   /** The first bridge version this works with in real Live; older bridges don't get the tool. */
   since?: string;
+  /** Actions (by their `action` value) that need a later bridge than the tool does. */
+  newer?: Record<string, string>;
   prepare?(input: JsonObject): JsonObject | string;
   /** What happened, for NOW and the answer; `playing` when the transport is now running, false when stopped. */
   summarize(preview: JsonObject, input: JsonObject, track: (ref: unknown) => KnownTrack | undefined): { title: string; playing?: boolean; recording?: boolean };
@@ -28,19 +30,21 @@ const REF = { type: "string", minLength: 1, maxLength: 256 } as const;
 /** The bridge wants a word that the output is safe to play; Kumi gives it only because the producer asked to hear it. */
 const SAFETY = { safe: true, provenance: "The producer asked Kumi to play this in their own Set.", scope: "open Set" };
 
-const TRANSPORT = ["start", "continue", "stop", "play-selection", "stop-all-clips", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record"] as const;
+const TRANSPORT = ["start", "continue", "stop", "play-selection", "stop-all-clips", "back-to-arrangement", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record"] as const;
 const WORDS: Record<string, { title: string; playing?: boolean; recording?: boolean }> = {
   start: { title: "Playing from the start marker", playing: true }, continue: { title: "Playing on from where it stopped", playing: true },
   stop: { title: "Stopped", playing: false }, "play-selection": { title: "Playing the selection", playing: true },
   "stop-all-clips": { title: "Stopped all clips" }, "tap-tempo": { title: "Tapped the tempo" }, "nudge-up": { title: "Nudged ahead" }, "nudge-down": { title: "Nudged back" },
   "re-enable-automation": { title: "Automation back on" }, "trigger-session-record": { title: "Session recording", recording: true },
+  "back-to-arrangement": { title: "Back to the Arrangement" },
 };
 
 export const ACTIONS: readonly ActionKind[] = [
   {
     tool: "play", since: FIXED_BRIDGE, preview: "live_transport_action_preview", apply: "live_transport_action_apply",
-    description: "Play, stop and the like: start (from the start marker; set it first with set_transport's position), continue (from where it stopped), stop, play-selection, stop-all-clips, tap-tempo, nudge-up and nudge-down, re-enable-automation, trigger-session-record. Only when the producer asks to hear or stop something.",
+    description: "Play, stop and the like: start (from the start marker; set it first with set_transport's position), continue (from where it stopped), stop, play-selection, stop-all-clips, back-to-arrangement (Live's Back to Arrangement button: tracks that followed their Session clips play the Arrangement again), tap-tempo, nudge-up and nudge-down, re-enable-automation, trigger-session-record. Only when the producer asks to hear or stop something, or before recording from the Arrangement.",
     inputSchema: { type: "object", additionalProperties: false, required: ["action"], properties: { action: { type: "string", enum: [...TRANSPORT] } } },
+    newer: { "back-to-arrangement": ARRANGEMENT_BRIDGE },
     summarize(_preview, input) { return WORDS[String(input.action)] ?? { title: "Transport" }; },
   },
   {

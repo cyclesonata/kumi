@@ -40,6 +40,13 @@ The first release for producers to use day to day. Ships with bridge 1.0.35.
 - A plan that started playback or recording and then stopped short stops them
   again. `/stop` stops Live at any time. When Live refuses the ordinary stop,
   Kumi uses the bridge's emergency stop.
+- Before recording, Kumi disarms any other armed track (Live 12.4 arms a MIDI
+  track when it's made, and the bridge records onto one armed track only), each
+  a change with its undo. A Session clip is launched, then recorded at once.
+  `play back-to-arrangement` (bridge 1.0.35) presses Back to Arrangement, so a
+  track that followed its Session clips plays the Arrangement again.
+- The bridge says why it refused ("recording start requires the exact
+  destination to be the only armed track") instead of "adapter request failed".
 
 ### Listening
 

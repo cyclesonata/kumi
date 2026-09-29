@@ -3,6 +3,9 @@
 /** The bridge release with the fixes the newer tools need (1.0.33 refused them in real Live). */
 export const FIXED_BRIDGE = "1.0.34";
 
+/** The bridge release that can press Live's Back to Arrangement (play's back-to-arrangement). */
+export const ARRANGEMENT_BRIDGE = "1.0.35";
+
 /** Whether `version` ("1.0.34", "1.0.34-beta.1") is `minimum` or later; an unknown version counts as later. */
 export function atLeast(version: string | undefined, minimum: string): boolean {
   if (!version) return true;

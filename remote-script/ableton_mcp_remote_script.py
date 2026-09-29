@@ -4939,7 +4939,7 @@ class LiveObjectMapper:
         state = self._song_state()
         return {**state, "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
 
-    _TRANSPORT_ACTIONS = {"start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips"}
+    _TRANSPORT_ACTIONS = {"start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"}
 
     def _transport_action(self, args: dict[str, Any]) -> dict[str, Any]:
         set_ref = args.get("setRef"); action = args.get("action")
@@ -4966,6 +4966,13 @@ class LiveObjectMapper:
             except BaseException as error: raise ValueError(f"transport action {action} is unavailable on this Live shape") from error
             return {"done": True, "revision": str(self._playback()["revision"])}
         elif action == "stop-all-clips": method, call_args = getattr(song, "stop_all_clips", None), ()
+        elif action == "back-to-arrangement":
+            # Live's Back to Arrangement button: back_to_arranger reads true while it's lit, and writing
+            # false presses it, so every track plays the Arrangement again instead of its Session clips.
+            if self._read_attr(song, "back_to_arranger") is None: raise ValueError("transport action back-to-arrangement is unavailable on this Live shape")
+            try: setattr(song, "back_to_arranger", False)
+            except BaseException as error: raise ValueError("transport action back-to-arrangement is unavailable on this Live shape") from error
+            return {"done": True, "revision": str(self._playback()["revision"])}
         elif action == "re-enable-automation": method, call_args = getattr(song, "re_enable_automation", None), ()
         elif action == "trigger-session-record": method, call_args = getattr(song, "trigger_session_record", None), ()
         else:

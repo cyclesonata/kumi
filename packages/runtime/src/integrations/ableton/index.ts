@@ -983,6 +983,8 @@ export function createAbletonIntegration(options: Options): Integration {
       await ensureCatalog(signal); if (!cleanup) assertLease(lease, signal);
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError("Live doesn't offer that for the open Set right now");
       if (!supported(kind) && !cleanup) throw new ObservationError(tooOld(kind));
+      const newer = kind.newer?.[String(input.action)];
+      if (newer && !cleanup && !supported({ since: newer })) throw new ObservationError(tooOld({ since: newer }));
       if (!cleanup) requireFreshReferences(input);
       const prepared = kind.prepare ? kind.prepare(input) : input;
       if (typeof prepared === "string") return { text: prepared, isError: true };
