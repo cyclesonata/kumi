@@ -677,3 +677,89 @@ scenes, 0 locators".
 This verifies small-Set inspection, basic focus, catching up, reconnecting and
 all nine kinds of change with their undo on one macOS/Live/model setup, not musical usefulness, listening,
 large Sets, Windows, or adversarial robustness.
+
+## Kumi 1.0: the rest of Live's API, on bridge 1.0.33
+
+Kumi 1.0 adds the rest of what the bridge exposes: change kinds, actions (play,
+record, launch, select, show), `watch_me` and listening to Set clips. Each new
+tool was run on real Live 12.4.15b4 against the testbed Set, with bridge 1.0.33's
+host and Remote Script. Unmasked bridge errors came from a scratch copy of the
+host; the installed bridge was untouched. Drivers are in `.pi/kumi-evidence/kernel`:
+`coverage-sweep.mjs` and `coverage-sweep2.mjs`, then undo of everything.
+
+With Live stopped, these worked:
+- set_scene, set_clip, duplicate_clip (also into the Arrangement),
+  add_arrangement_clip and set_automation;
+- change_structure (a return track added, a track duplicated), switch_device,
+  move_device_to, set_chain, import_audio;
+- edit_clip (doubling a loop), delete_notes, launch_clip, jump_to_locator and
+  show.
+
+Refused, or not confirmed, by bridge 1.0.33:
+- set_transport, set_song, set_mixer_options, set_audio_clip ("ArgumentError"),
+  set_groove ("response contract failed") and capture_scene;
+- set_routing when arming, and so every recording;
+- change_notes and transform_midi ("note update failed and exact rollback
+  failed"), and edit_notes quantize;
+- edit_rack store and randomize ("rack state changed since preview");
+- select, play (a schema mismatch on `expectedRevision`), fire_scene (it fires,
+  but isn't confirmed);
+- deleting a return track or an existing device ("destructive cleanup lacks
+  transaction-owned authority");
+- several undos (a duplicated track, a device moved across tracks).
+
+Kumi marks these with `since: "1.0.34"`, so an older bridge doesn't offer them.
+
+The same runs found five bridge faults that matter more than any one tool:
+
+1. **While Live plays, almost every change fails.** The fence between a
+   mutation's preflight and its prepare includes the Set's song position and
+   clips' play positions, which move every display tick. Even `play stop` and
+   the `song.read` behind `live_song_state` failed at 1272 beats into playback.
+   Only the bridge's emergency stop (no refs in its arguments) could stop Live.
+   So Kumi's stop now falls back to it, and a plan that stops short uses it to
+   stop the recording or playback it started.
+2. **One created return track blocks every later track.** Adding a regular track
+   at the end would shift the positional refs of return tracks the bridge created
+   earlier and still owns for undo. The Remote Script refuses the insertion,
+   across sessions.
+3. **Explicit deletions are refused.** Deleting a device or return track is
+   documented as supported. It needs a cleanup-ownership token that only the
+   creating transaction has, so it can't work for the producer's own devices.
+4. **The Set's export fails for any Set with a rack.** A rack without variations
+   reports `selectedVariationIndex: -1`, which the semantic snapshot's validation
+   rejects. That breaks catching up, per-Set memory and `watch_me` on most real
+   Sets.
+5. **Arming isn't confirmed**, so no recording, and so no resampling, could run.
+
+Bridge 1.0.34 carries the fixes, with a simulator test for each (see its
+changelog).
+
+## How the model uses 1.0's tools
+
+`npm run eval:changes --workspace @kumi/app` now also covers playing from a bar,
+stopping, resampling, comparing a mix with a reference, and learning a routine
+with `watch_me`. It uses a synthetic Set with the bridge's schemas for all 119
+tools Kumi uses. With `openai-codex/gpt-6-astra` (UTC `2026-09-29T04:3xZ`),
+15 of 16 passed:
+
+- **tempo** 3.6 s; **resample** 32.7 s, as one plan: new audio track, route from
+  Bass Post FX, arm, playhead, record, play, wait, stop, disarm.
+- **compare to a reference** 11.4 s: "much heavier lows and less top-end sparkle
+  in your mix … 20–250 Hz roughly 13 dB stronger".
+- **watch me** 33.3 s: saved "usual pad routine" as add a track, set its
+  routing, set the mixer, load a device, set a parameter, including the
+  Saturator's 18 dB drive.
+
+The one miss is a producer's naming habit ("Names new tracks in capital
+letters") against a name given in lower case. It passes about four times in five.
+
+The eval also found four faults in Kumi, fixed with tests:
+
+- appending a track retired every reference, so a resampling plan lost the clip
+  slot it had just found;
+- a Session clip asked for under its track said the parent was stale, rather
+  than that it takes a clip slot;
+- notes framed only as "context, not instructions" kept a naming habit from
+  applying;
+- `watch_me` asked before saving.
