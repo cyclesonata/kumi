@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.34.
+The first release for producers to use day to day. Ships with bridge 1.0.35.
 
 ### Changes to the Set
 

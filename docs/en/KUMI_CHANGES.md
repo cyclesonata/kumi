@@ -130,7 +130,7 @@ differs each time. Nothing in Live changes while Kumi watches.
 
 ## Bridge versions
 
-Kumi 1.0 works with the bridge it ships with (1.0.34). On bridge 1.0.33 in real
+Kumi 1.0 works with the bridge it ships with (1.0.35). On bridge 1.0.33 in real
 Live, the tools marked ¹ above were refused, not confirmed, or couldn't be
 tested. Two examples: the transport refused changes while Live played, and arming a
 track wasn't confirmed. Kumi reads the bridge's version when it connects and
