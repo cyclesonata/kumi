@@ -2475,6 +2475,15 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "state changed"):
             mapper.invoke("routing.set", routing_args)
 
+    def test_a_routing_live_no_longer_offers_is_refused_with_nothing_changed(self):
+        song = FakeSong(); track = song.tracks[0]
+        track.available_input_routing_types = [FakeRouteChoice("Ext. In")]; track.available_input_routing_channels = [FakeRouteChoice("1")]; track.available_output_routing_types = [FakeRouteChoice("Main")]; track.available_output_routing_channels = [FakeRouteChoice("1")]; track.input_routing_type = track.available_input_routing_types[0]; track.input_routing_channel = track.available_input_routing_channels[0]; track.output_routing_type = track.available_output_routing_types[0]; track.output_routing_channel = track.available_output_routing_channels[0]; track.can_be_armed = True
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]; routing = row["routing"]
+        state = {"inputType": routing["inputType"], "inputSubRouting": routing["inputSubRouting"], "outputType": routing["outputType"], "outputSubRouting": routing["outputSubRouting"], "arm": row["armed"], "monitoring": row["monitoringState"]}
+        args = {"ref": row["ref"], "inputType": "Kumi Pad", "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+        with self.assertRaisesRegex(ValueError, "^Live doesn't offer Kumi Pad for this track now; nothing changed$"): mapper.invoke("routing.set", args)
+        self.assertEqual(mapper.snapshot()["tracks"][0]["routing"]["inputType"], "Ext. In")
+
     def test_mixer_multi_field_failure_rolls_back_exact_prior_state(self):
         class FailingPan(FakeParameter):
             def __init__(self): self._value = 0.0; self.reject = False; super().__init__(); self._value = 0.0; self.reject = True

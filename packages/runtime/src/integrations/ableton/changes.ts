@@ -482,6 +482,7 @@ export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "par
 export function undoNote(message: string): string {
   if (/created Session structure was modified|Session structure changed before deletion/i.test(message)) return "It changed after Kumi made it (something recorded, loaded or routed on it), so Kumi left it: deleting it would lose that. Delete it in Live if you don't need it.";
   if (/epoch|connection/i.test(message)) return "Live restarted or reconnected since, so Kumi can't undo this.";
+  if (/doesn't offer/i.test(message)) return "Live doesn't offer what it was routed from before any more (an input with no audio device, or a track that no longer makes sound), so Kumi left it. Change it in Live if you need to.";
   if (/highest positional authority/i.test(message)) return "A track Kumi made after it is still there, so Kumi left this one. Delete it in Live if you don't need it.";
   if (/stop playback first/i.test(message)) return "Stop playback, then undo it: putting the playhead back while playing would be heard.";
   if (/unknown|expired|not found/i.test(message)) return "Kumi can't undo this anymore.";

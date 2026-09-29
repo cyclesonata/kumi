@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.38.
+The first release for producers to use day to day. Ships with bridge 1.0.39.
 
 ### Changes to the Set
 
@@ -56,6 +56,10 @@ The first release for producers to use day to day. Ships with bridge 1.0.38.
 - A loop or playhead change undoes after playing or recording since; the
   playhead goes back only while stopped. A routing change on a track that had
   No Input undoes too (bridge 1.0.38).
+- When Live no longer offers what a track was routed from (an input with no
+  audio device, a track that no longer makes sound), its undo is refused with
+  that reason and nothing changed, instead of an undo Kumi couldn't confirm
+  (bridge 1.0.39).
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 

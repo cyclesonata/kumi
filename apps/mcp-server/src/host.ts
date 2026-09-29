@@ -7634,7 +7634,7 @@ export class McpHost {
    * lacking ownership of an object later changes moved): noted for live_undo to report as a refusal. */
   private noteUndoRefusal(record: object, cause: unknown, context: LiveOperationContext): void {
     const plan = this.undoRecoveryPlans.get(record);
-    if (cause instanceof LiveMutationNotDispatchedError && plan?.priorState === "applied" && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: cause.message });
+    if ((cause instanceof LiveMutationNotDispatchedError || nothingChanged(cause)) && plan?.priorState === "applied" && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: (cause as Error).message });
   }
 
   private async replayUndoRecovery(record: object, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {

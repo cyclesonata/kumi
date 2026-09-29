@@ -111,6 +111,22 @@ test("routing a No Input track and undoing it puts No Input back without writing
   assert.deepEqual([(simulator as any).state.tracks[0].routing.inputType, (simulator as any).state.tracks[0].routing.inputSubRouting], ["No Input", null]);
 });
 
+test("an undo Live can't carry out because it no longer offers the old routing is a refusal, not uncertain", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { call, apply, undo } = hostFor(simulator);
+  const routed = await call("live_routing_preview", { trackRef: "track:track-1", inputType: "Resampling" });
+  assert.equal((await apply(routed, "route-resampling")).body.state, "applied");
+  const invoke = simulator.invokeAsync.bind(simulator); let refuse = true;
+  simulator.invokeAsync = async (invocation: LiveInvocation) => {
+    if (refuse && invocation.operation === "routing.set") throw new Error("request failed: Live doesn't offer Ext. In for this track now; nothing changed");
+    return invoke(invocation);
+  };
+  const refused = await undo(routed, "route-resampling-undo");
+  assert.equal(refused.isError, true);
+  assert.match(refused.body.reason, /^Undo refused before anything changed in Live: request failed: Live doesn't offer Ext. In/);
+  refuse = false;
+  assert.equal((await undo(routed, "route-resampling-undo-again")).body.state, "undone");
+});
+
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, apply, undo } = hostFor(simulator);
   const created = await call("live_track_structure_preview", { action: "create-return", name: "Sweep Return" });

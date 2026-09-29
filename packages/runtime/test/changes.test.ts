@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { JsonObject } from "../src/core/contracts.js";
-import { CHANGES, HOST_TOOLS, UNDO_TOOL } from "../src/integrations/ableton/changes.js";
+import { CHANGES, HOST_TOOLS, UNDO_TOOL, undoNote } from "../src/integrations/ableton/changes.js";
 import { bridge, opened, signal, tool } from "./fixtures/synthetic-bridge.js";
 
 test("a change tool previews and applies in one step, keeps confirmations away from the model and records the change", async () => {
@@ -654,4 +654,11 @@ test("a parameter named past the device's first page of parameters is found", as
     assert.equal(set.isError, false, set.text);
     assert.equal(b.requests.filter((request) => request.name === "live_device_parameter_preview").at(-1)!.args.parameterRef, "7:parameter:149");
   } finally { await b.integration.close(); }
+});
+
+test("an undo the bridge refused says the real reason in HISTORY", () => {
+  assert.match(undoNote("Undo refused before anything changed in Live: request failed: Live doesn't offer Ext. In for this track now; nothing changed"), /^Live doesn't offer what it was routed from/);
+  assert.match(undoNote("Undo refused before anything changed in Live: request failed: transaction-owned structure cleanup must proceed from the highest positional authority"), /^A track Kumi made after it is still there/);
+  assert.match(undoNote("transport undo refused while playing: only the playhead changed; stop playback first"), /^Stop playback, then undo it/);
+  assert.equal(undoNote("routing changed after apply; undo refused"), "It changed in Live since, so Kumi left it as it is.");
 });
