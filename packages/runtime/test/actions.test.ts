@@ -117,6 +117,9 @@ test("listen can name an audio clip in the Set by its clipRef: Kumi finds the fi
     assert.deepEqual([read.args.kind, read.args.parent], ["session-clip", "7:clip_slot:0:0"], "a Session clip is found under its slot");
     assert.equal(await b.integration.audioFile!("~/Music/reference.wav", signal()), undefined, "a path is left to the listen tool");
     await assert.rejects(b.integration.audioFile!("clip:99", signal()), /this turn's discovery/);
+    const wrongParent = await tool(b.tools, "live_discover").execute({ kind: "session-clip", parent: "track:1" }, signal());
+    assert.equal(wrongParent.isError, true);
+    assert.match(wrongParent.text, /session-clip takes a clip-slot as its parent, not a track: discover the track's clip-slots/, "a current parent of the wrong kind says which kind, not that it's stale");
     const arrangement = JSON.parse((await tool(b.tools, "live_discover").execute({ kind: "arrangement-clip", parent: "track:2" }, signal())).text) as { live?: { items: JsonObject[] }; items?: JsonObject[] };
     const midi = String((arrangement.live?.items ?? arrangement.items ?? [])[0]?.ref);
     await assert.rejects(b.integration.audioFile!(midi, signal()), /MIDI clip, which has no sound of its own/);

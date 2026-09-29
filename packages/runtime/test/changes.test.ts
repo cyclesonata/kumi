@@ -462,7 +462,7 @@ test("an apply Live didn't confirm is recorded as unsure, and the model is told 
   }
 });
 
-test("new tracks go after the last one, and a structure change retires earlier references", async () => {
+test("new tracks go after the last one; references after a new track are retired, earlier ones stay good", async () => {
   const b = await opened();
   try {
     await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
@@ -473,11 +473,21 @@ test("new tracks go after the last one, and a structure change retires earlier r
     const previews = b.requests.filter((request) => request.name === "live_session_structure_preview");
     assert.equal((previews.at(-1)!.args.tracks as JsonObject[])[0]!.index, 2, "placed after the two existing tracks");
     assert.equal(b.records.at(-1)!.title, "Added MIDI track “Pad”");
-    const old = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.7 }, signal());
-    assert.equal(old.isError, true, "positions moved, so earlier references need fresh discovery");
+    assert.match(result.text, /earlier references still work/);
+    const before = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.7 }, signal());
+    assert.equal(before.isError, false, "a track before the new one didn't move, so its reference is still good");
     const created = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:2", volume: 0.7 }, signal());
     assert.equal(created.isError, false, "the new track's own reference is current");
     assert.equal(b.records.at(-1)!.track?.name, "Pad");
+    // A track put first moves every track after it.
+    const first = await tool(b.tools, "add_tracks_and_scenes").execute({ tracks: [{ name: "Intro", kind: "midi", index: 0 }], scenes: [] }, signal());
+    assert.equal(first.isError, false, first.text);
+    const moved = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:1", volume: 0.6 }, signal());
+    assert.equal(moved.isError, true, "positions after the new track moved, so those references need fresh discovery");
+    assert.match(moved.text, /discovery in this turn/);
+    const intro = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.6 }, signal());
+    assert.equal(intro.isError, false, "the new track's reference is current");
+    assert.equal(b.records.at(-1)!.track?.name, "Intro");
   } finally { await b.integration.close(); }
 });
 

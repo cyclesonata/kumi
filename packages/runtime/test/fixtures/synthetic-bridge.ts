@@ -113,9 +113,14 @@ export function bridge(options: Options = {}) {
           return wrap({ transactionId: args.transactionId, state: "applied", recording: on });
         }
         if (transaction.name === "live_session_structure_preview") {
-          const added = (transaction.args.tracks as JsonObject[]).map((item) => ({ name: String(item.name), color: 0 }));
-          tracks = [...tracks, ...added];
-          return wrap({ transactionId: args.transactionId, state: "applied", created: added.map((item, index) => ({ kind: "track", ref: `7:track:${tracks.length - added.length + index}`, name: item.name })) });
+          // Like Live, each new track goes where its index says.
+          const created: JsonObject[] = [];
+          for (const item of transaction.args.tracks as JsonObject[]) {
+            const at = typeof item.index === "number" ? Math.min(item.index, tracks.length) : tracks.length;
+            tracks = [...tracks.slice(0, at), { name: String(item.name), color: 0 }, ...tracks.slice(at)];
+            created.push({ kind: "track", ref: `7:track:${at}`, name: String(item.name) });
+          }
+          return wrap({ transactionId: args.transactionId, state: "applied", created });
         }
         if (transaction.name === "live_mixer_preview" && transaction.args.volume === 0.4) return wrap({ transactionId: args.transactionId, state: "applied", display: { volume: "-9.3 dB", pan: "25L" } });
         if (transaction.name === "live_drum_pad_preview" && transaction.args.action === "load-samples") return wrap({ transactionId: args.transactionId, state: "applied", result: { pads: (transaction.args.pads as JsonObject[]).map((pad) => ({ ref: `7:drum_pad:0:0:${String(pad.note)}`, route: "hotswap" })) } });

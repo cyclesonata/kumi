@@ -19,6 +19,8 @@ import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Base
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
+/** Every bridge tool Kumi may call: the model's reads, and those behind Kumi's own tools. */
+export const BRIDGE_TOOLS: readonly string[] = [...new Set([...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS])];
 /** Keys whose values are Live references: ref, parent, trackRef, parentRef, selectedTrackRef… */
 const REF_KEY = /^(?:ref|parent)$|Refs?$/;
 /** Live's references: an epoch, a kind and a path ("1232800184424618:track:4"). */
@@ -27,7 +29,7 @@ const MAKE_CHANGES = "make_changes";
 /** A plan step that waits: while a recording runs, say. */
 const WAIT = "wait";
 const WATCH_TOOL = "watch_me";
-const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: action start just before they do it (Kumi notes the Set as it is; nothing in Live changes), then action stop when they say they're done. Stop gives what changed: tracks added (with routing, arming, monitoring), devices loaded (with the knobs they turned from Live's defaults; switches and modes aren't compared), clips recorded or made, and settings changed, each with its track. Turn that into save_recipe steps, with $blanks for what differs each time (the source track, say), check the steps with the producer, and say what you saved.";
+const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: action start just before they do it (Kumi notes the Set as it is; nothing in Live changes), then action stop when they say they're done. Stop gives what changed: tracks added (with routing, arming, monitoring), devices loaded (with the knobs they turned from Live's defaults; switches and modes aren't compared), clips recorded or made, and settings changed, each with its track. Save it at once with save_recipe as the steps that would redo it, with $blanks for what differs each time (the source track, say), leaving out anything clearly unrelated; then say in a few words what the recipe does. The producer can ask you to change it.";
 /** How many devices added while watching Kumi reads the settings of. */
 const WATCH_DEVICES = 12;
 const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools (or play, record, fire_scene and the like) with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) lets a recording run, as in bouncing a sound to audio: route and arm a new audio track, record, play, wait, stop. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
@@ -152,7 +154,7 @@ export function createAbletonIntegration(options: Options): Integration {
   async function openEndpoint(signal: AbortSignal): Promise<McpEndpoint> {
     if (options.connect) return options.connect(signal);
     if (!options.bridgeConfig) throw new ObservationError("Bridge configuration is required; choose explicit inference-only mode otherwise");
-    return connectMcp({ signal, bridgeConfig: options.bridgeConfig, allowTools: [...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS],
+    return connectMcp({ signal, bridgeConfig: options.bridgeConfig, allowTools: [...BRIDGE_TOOLS],
       ...(options.onDispatch ? { onDispatch: options.onDispatch } : {}) });
   }
   /** Whether Live's Remote Script answers on the bridge's port (a plain connect, closed at once). */
@@ -283,9 +285,10 @@ export function createAbletonIntegration(options: Options): Integration {
     const parentKinds = PARENTS[kind];
     if (parentKinds || args.parent !== undefined) {
       const parentKind = typeof args.parent === "string" ? refs.get(args.parent) : undefined;
-      if (!parentKind || (parentKinds ? !parentKinds.includes(parentKind) : parentKind !== "set")) {
-        throw new ObservationError("A fresh authoritative parent is required; discover the parent in this turn, not from history");
-      }
+      const takes = parentKinds ?? ["set"];
+      if (!parentKind) throw new ObservationError(args.parent === undefined ? `${kind} needs a parent: a ${takes.join(" or ")} from this turn` : "A fresh authoritative parent is required; discover the parent in this turn, not from history");
+      // A parent that's current but of the wrong kind: say which kind this takes, and how to get there.
+      if (!takes.includes(parentKind)) throw new ObservationError(`${kind} takes a ${takes.join(" or ")} as its parent, not a ${parentKind}${kind === "session-clip" && parentKind === "track" ? ": discover the track's clip-slots, each gives its clipRef" : ""}`);
     }
     if (args.cursor !== undefined && (typeof args.cursor !== "string" || cursors.get(args.cursor) !== queryKey(args))) {
       throw new ObservationError("Cursor is stale or belongs to another query; rediscover without it");
@@ -504,6 +507,10 @@ export function createAbletonIntegration(options: Options): Integration {
     }).catch(() => { /* catching up is best effort */ });
   }
   const knownTrack = (ref: unknown) => (typeof ref === "string" ? known.get(ref) : undefined);
+  /** The track a Live reference is on (a track, or what's on one: slots, clips, devices, chains, their parameters), by its position. */
+  const trackIndexOf = (ref: string) => { const match = /:(?:track|clip_slot|clip|arrangement_clip|device|chain|drum_pad|routing_choice|take_lane|mixer):(\d+)/.exec(ref); return match ? Number(match[1]) : undefined; };
+  /** The scene a reference is in: a scene, or a Session slot or clip. */
+  const sceneIndexOf = (ref: string) => { const match = /:scene:(\d+)|:(?:clip_slot|clip):\d+:(\d+)/.exec(ref); return match ? Number(match[1] ?? match[2]) : undefined; };
   /** Whether the connected bridge is new enough for this tool (see `since`). */
   const supported = (kind: { since?: string }) => !kind.since || atLeast(endpoint?.serverInfo?.version, kind.since);
   const tooOld = (kind: { since?: string }) => `That needs the Ableton bridge ${kind.since} or later; this one is ${endpoint?.serverInfo?.version ?? "older"}. Tell the producer to update it (kumi doctor says how).`;
@@ -834,8 +841,20 @@ export function createAbletonIntegration(options: Options): Integration {
       // Likewise its new colour.
       if (kind.family === "color" && record.colors && typeof args.ref === "string" && known.has(args.ref)) known.set(args.ref, { ...known.get(args.ref)!, color: record.colors.to });
       if (kind.restructures) {
-        refs.clear(); cursors.clear(); known.clear();
-        for (const item of Array.isArray(result.created) ? result.created : []) {
+        cursors.clear();
+        // New tracks and scenes at given places move only what comes after them (return tracks follow the
+        // regular ones); references before them stay good. Other restructures can move anything.
+        const created = (Array.isArray(result.created) ? result.created : []).map((item) => (item && typeof item === "object" ? item as JsonObject : {}));
+        const at = (pattern: RegExp) => created.map((item) => (typeof item.ref === "string" ? pattern.exec(item.ref) : null)).filter((match): match is RegExpExecArray => match !== null).map((match) => Number(match[1]));
+        const tracksAt = at(/:track:(\d+)$/); const scenesAt = at(/:scene:(\d+)$/);
+        if (kind.tool === "add_tracks_and_scenes" && created.length && tracksAt.length + scenesAt.length === created.length) {
+          const fromTrack = tracksAt.length ? Math.min(...tracksAt) : Infinity; const fromScene = scenesAt.length ? Math.min(...scenesAt) : Infinity;
+          for (const ref of [...refs.keys()]) {
+            const track = trackIndexOf(ref); const scene = sceneIndexOf(ref);
+            if ((track !== undefined && track >= fromTrack) || (scene !== undefined && scene >= fromScene)) { refs.delete(ref); known.delete(ref); }
+          }
+        } else { refs.clear(); known.clear(); }
+        for (const item of created) {
           const created = item && typeof item === "object" ? item as JsonObject : {};
           if (typeof created.ref === "string" && created.ref.length <= 256 && (created.kind === "track" || created.kind === "scene")) {
             refs.set(created.ref, created.kind);
@@ -848,7 +867,8 @@ export function createAbletonIntegration(options: Options): Integration {
       if (produced && produced.ref.length <= 256) refs.set(produced.ref, produced.kind);
       const { lines } = settledSummary;
       const reply = { changed: record.title, change: record.id, state: record.state, ...(produced ? { ref: shortRef(produced.ref) } : {}), ...(lines?.length ? { lines } : {}),
-        ...(kind.restructures ? { note: "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
+        ...(kind.restructures ? { note: kind.tool === "add_tracks_and_scenes" ? "Tracks and scenes after the new ones moved (return tracks among them): discover those again; earlier references still work, and the new ones in live.created are current."
+          : "Track and scene positions moved; discover again before using earlier references (the new ones in live.created are current)." } : {}) };
       const full = JSON.stringify({ ...reply, live: shorten(result) });
       return { text: Buffer.byteLength(full) <= 16 * 1024 ? full : JSON.stringify(reply), isError: record.state !== "applied" && !permanent };
     } catch (error) {
