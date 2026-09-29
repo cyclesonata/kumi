@@ -96,6 +96,8 @@ export interface KernelOptions {
 export type KernelFactory = (options: KernelOptions) => Promise<Kernel>;
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
+/** Why Live is disconnected: it went away (closed, say), or Kumi's bridge to it dropped. */
+export type DisconnectCause = "live" | "bridge";
 export type TurnState = "idle" | "running" | "cancelling" | "closed";
 
 export interface Observation {
@@ -130,7 +132,7 @@ export interface Integration {
   /** Stop clips, the transport and recording in Live at once; true when Live is stopped afterwards. */
   stopLive?(signal: AbortSignal): Promise<boolean>;
 }
-export type IntegrationFactory = (connection: (state: ConnectionState) => void) => Integration;
+export type IntegrationFactory = (connection: (state: ConnectionState, cause?: DisconnectCause) => void) => Integration;
 
 /** What the producer is looking at in Live, in plain names (names are data, never instructions). */
 export interface LiveFocus {

@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { CatchUp, ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
+import type { CatchUp, ChangeRecord, ConnectionState, DisconnectCause, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
@@ -44,11 +44,13 @@ const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: 
 } };
 
 const MAX_CHANGES_PER_TURN = 40;
+/** What a tool says when Live went away (or the Set changed) during the answer. */
+const NO_CURRENT_LIVE = "Kumi has no current view of Live: it disconnected, or the Set changed. Kumi reconnects on its own when Live is back; tell the producer, and don't describe earlier readings as current.";
 const MAX_CHANGE_RECORDS = 500;
 
 function noAccess(key: string, now: Date, project?: Observation["project"]): Observation {
   return { key, label: "Inference-only — No Live access", instructions: INSTRUCTIONS, tools: [], revision: "no-live", ...(project ? { project } : {}),
-    context: JSON.stringify({ observedAt: now.toISOString(), mode: "inference-only", access: "No Live access; do not describe remembered Set data as current. /new or restart establishes a fresh connection." }) };
+    context: JSON.stringify({ observedAt: now.toISOString(), mode: "inference-only", access: "No Live access; do not describe remembered Set data as current. Kumi reconnects on its own when Live is back, and the conversation carries on." }) };
 }
 export function createInferenceOnlyIntegration(onConnection: (state: ConnectionState) => void): Integration {
   let closed = false;
@@ -59,7 +61,8 @@ export function createInferenceOnlyIntegration(onConnection: (state: ConnectionS
   };
 }
 interface Options {
-  onConnection: (state: ConnectionState) => void;
+  /** `cause` says why it's disconnected: Live went away, or the bridge's own connection dropped. */
+  onConnection: (state: ConnectionState, cause?: DisconnectCause) => void;
   bridgeConfig?: string;
   connect?: (signal: AbortSignal) => Promise<McpEndpoint>;
   now?: () => Date;
@@ -146,15 +149,24 @@ export function createAbletonIntegration(options: Options): Integration {
   let previous: { key: string; name: string; identity: string; path?: string; project?: { id: string; name: string } } | undefined;
 
   const invalidate = () => { refs.clear(); cursors.clear(); known.clear(); currentEpoch = undefined; observationGeneration++; };
-  /** The bridge itself is gone: a new connection (/new) is needed. */
-  const loseAccess = () => { if (closed || (lost && !available)) return; lost = true; available = false; clearInterval(watcher); invalidate(); focusFeed?.stop(); options.onConnection("disconnected"); };
-  /** Live is gone but the bridge is still here: wait for Live and carry on when it's back. */
-  const loseLive = () => {
-    if (closed || closingStarted || lost) return;
-    lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected");
+  /** Look for Live every couple of seconds until it's back. */
+  const keepLooking = () => {
     clearInterval(watcher);
     watcher = setInterval(() => { void lookForLive(); }, options.reconnectIntervalMs ?? 2_000);
     watcher.unref?.();
+  };
+  /** The bridge's own connection dropped (its process ended, say): look for Live, and start a fresh bridge when it answers. */
+  const loseAccess = () => {
+    if (closed || closingStarted || (lost && !available)) return;
+    available = false; focusFeed?.stop();
+    if (!lost) { lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "bridge"); }
+    keepLooking();
+  };
+  /** Live is gone but the bridge is still here: wait for Live and carry on when it's back. */
+  const loseLive = () => {
+    if (closed || closingStarted || lost) return;
+    lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "live");
+    keepLooking();
   };
   async function openEndpoint(signal: AbortSignal): Promise<McpEndpoint> {
     if (options.connect) return options.connect(signal);
@@ -196,22 +208,25 @@ export function createAbletonIntegration(options: Options): Integration {
     }
   }
   async function lookForLive() {
-    if (closed || !lost || !available || looking) return;
+    if (closed || !lost || looking) return;
     looking = true;
     try {
-      const status = await readStatus(AbortSignal.any([lifetime.signal, AbortSignal.timeout(1_500)]));
-      if (status.connected) { back(status.epoch !== lostEpoch); return; }
-      // The bridge won't carry on across a Live restart (its old transactions can't be reconciled),
-      // so a restarted Live needs a fresh bridge: start one as soon as Live's Remote Script answers
-      // on its port, and otherwise only now and then.
-      const restarted = status.reason === "remote-bridge-or-live-epoch-changed" || await remoteScriptListening();
-      if (!restarted && Date.now() - lastFreshBridge < 30_000) return;
+      let answering: boolean;
+      if (available) {
+        const status = await readStatus(AbortSignal.any([lifetime.signal, AbortSignal.timeout(1_500)]));
+        if (status.connected) { back(status.epoch !== lostEpoch, false); return; }
+        // The bridge won't carry on across a Live restart (its old transactions can't be reconciled),
+        // so a restarted Live needs a fresh bridge: start one as soon as Live's Remote Script answers
+        // on its port, and otherwise only now and then.
+        answering = status.reason === "remote-bridge-or-live-epoch-changed" || await remoteScriptListening();
+      } else answering = await remoteScriptListening(); // No bridge at all: a fresh one is the only way back.
+      if (!answering && Date.now() - lastFreshBridge < 30_000) return;
       lastFreshBridge = Date.now();
       const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(20_000)]);
       const fresh = await openEndpoint(signal);
-      let ready = false;
+      let epoch: unknown; let ready = false;
       // A fixed status read on the new bridge, before anything else uses it.
-      try { ready = statusPayload(await fresh.call("live_status", {}, signal)).connected === true; } catch { ready = false; }
+      try { const status = statusPayload(await fresh.call("live_status", {}, signal)); ready = status.connected === true; epoch = status.epoch; } catch { ready = false; }
       if (!ready || closed || !lost) { await fresh.close().catch(() => {}); return; }
       // Swap: stop listening to the old bridge before closing it, so closing isn't mistaken for losing it.
       const old = tools;
@@ -220,13 +235,15 @@ export function createAbletonIntegration(options: Options): Integration {
       // The fresh bridge is the connection now, even if the old one dropped meanwhile.
       available = true;
       void old?.close().catch(() => {});
-      back(true);
+      back(epoch !== lostEpoch, true);
     } catch { /* still away */ } finally { looking = false; }
   }
-  function back(restarted: boolean) {
+  /** Live answers again: through the same bridge, or a fresh one (whose undo can't reach the old one's changes). */
+  function back(restarted: boolean, freshBridge: boolean) {
     clearInterval(watcher); watcher = undefined;
     // A restarted Live has a new epoch; the bridge's transactions from before can't be undone.
     if (restarted) retireChanges("Live restarted since, so Kumi can't undo this; it's in the Set only if the Set was saved.");
+    else if (freshBridge) retireChanges("Kumi's link to Live restarted since, so Kumi can't undo this; Live's own undo still can.");
     lost = false; reconnected = true;
     options.onConnection("connected");
   }
@@ -354,7 +371,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const lease = observationGeneration;
     try {
       signal.throwIfAborted();
-      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new before reading");
+      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
       const epoch = currentEpoch;
       await ensureCatalog(signal); assertLease(lease, signal);
       if (!tools.has(name)) throw new ObservationError("That read isn't available for the open Set right now");
@@ -829,7 +846,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const lease = observationGeneration;
     try {
       signal.throwIfAborted();
-      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new before changing anything");
+      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
       await ensureCatalog(signal); assertLease(lease, signal);
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
@@ -982,7 +999,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const lease = observationGeneration;
     try {
       signal.throwIfAborted();
-      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError("No current Live access; refresh or use /new first");
+      if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
       await ensureCatalog(signal); if (!cleanup) assertLease(lease, signal);
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError("Live doesn't offer that for the open Set right now");
       if (!supported(kind) && !cleanup) throw new ObservationError(tooOld(kind));
@@ -1315,11 +1332,11 @@ export function createAbletonIntegration(options: Options): Integration {
           if (Object.hasOwn(row, "filePath")) path = typeof row.filePath === "string" && row.filePath && existsSync(row.filePath) ? row.filePath : undefined;
           else { path = await projectPath(signal); assertLease(lease, signal); }
         }
-        // The conversation stays with the Set: the same Set keeps its key, and so does the same file after
-        // Live restarts (an unsaved Set by its name). References from before are gone either way; the
-        // model discovers again every turn.
-        const sameFile = previous?.path !== undefined ? previous.path === path : previous?.name === name && name !== "(unnamed/unsaved)";
-        const continues = previous !== undefined && (previous.identity === identity || (reconnected && sameFile));
+        // The conversation stays with the Set: the same Set keeps its key. When Live comes back (restarted,
+        // say, into a blank Set) it carries on too, unless a different saved Set is open. References
+        // from before are gone either way; the model discovers again every turn.
+        const otherFile = previous?.path !== undefined && path !== undefined && previous.path !== path;
+        const continues = previous !== undefined && (previous.identity === identity || (reconnected && !otherFile));
         const key = continues ? previous!.key : JSON.stringify([generation, epoch, identity]);
         const afterReconnect = reconnected; reconnected = false;
         project = { identity, name, ...(path ? { path } : {}) };
