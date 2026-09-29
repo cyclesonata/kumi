@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -1943,6 +1944,16 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaises(ValueError): mapper.invoke("recording.session", authority)
         stopped_recording = mapper.invoke("session.emergency-stop", {"expectedTargets": [], "expectedRecording": "session"})
         self.assertTrue(stopped_recording["recordingStopped"]); self.assertFalse(song.session_record)
+
+    def test_a_track_live_cannot_arm_any_more_is_not_armed_and_does_not_block_recording(self):
+        # Live keeps arm on for a track whose input became No Input (its source track deleted), but
+        # can't arm or disarm it, and it records nothing.
+        song = FakeAuditionSong(); song.tracks[0].arm = True
+        orphan = copy.copy(song.tracks[0]); orphan.name = "Old Bounce"; orphan.arm = True; orphan.can_be_armed = False; song.tracks.append(orphan)
+        mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"]
+        self.assertEqual([row["armed"] for row in rows], [True, False])
+        authority = {"action": "start", "expectedSessionRecord": False, "expectedArrangementRecord": False, "destinationTrackRef": rows[0]["ref"], "destinationTrackIdentity": rows[0]["objectIdentity"], "outputSafety": {"safe": True, "provenance": "operator-observed"}}
+        self.assertEqual(mapper.invoke("recording.session", authority)["recording"], True)
 
     def test_unknown_monitoring_and_arm_remain_unavailable(self):
         song = FakeSong()

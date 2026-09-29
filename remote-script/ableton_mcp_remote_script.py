@@ -1711,7 +1711,7 @@ class LiveObjectMapper:
                     if value is not None or key not in clip_row: clip_row[key] = value
                 clips.append(clip_row)
                 slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)})
-            armed_value = self._read_attr(track, "arm", "armed")
+            armed_value = self._armed(track)
             track_rows.append({
                 "ref": track_ref, "parentRef": self.refs.put("set", self.song, "song"), "objectIdentity": self._capture_object_identity(track),
                 "name": str(getattr(track, "name", f"Track {index + 1}")), "kind": track_kind,
@@ -2337,6 +2337,13 @@ class LiveObjectMapper:
                 if past is not None: raise past from error
             raise
         return {"changed": True, "revision": after_revision}
+
+    def _armed(self, track: Any) -> bool | None:
+        """Whether a track is armed to record. Live keeps a track's arm on when its input becomes No Input
+        (its source track was deleted) but then can't arm or disarm it, and it records nothing: not armed."""
+        armed = self._read_attr(track, "arm", "armed")
+        if armed is True and self._read_attr(track, "can_be_armed") is False: return False
+        return armed if isinstance(armed, bool) else None
 
     def _past_end(self, *beats: float | None) -> ValueError | None:
         """Live refuses (with a RuntimeError) a playhead or loop past the end of the Set's arrangement.
@@ -7951,7 +7958,7 @@ class LiveObjectMapper:
             raise ValueError("capture requires stopped, non-recording, empty playback state")
         baseline_tracks = []
         for index, track in enumerate(self._items(getattr(self.song, "tracks", []))):
-            armed = self._read_attr(track, "arm")
+            armed = self._armed(track)
             monitoring = self._monitoring_state(self._read_attr(track, "current_monitoring_state"))
             if armed is not False:
                 raise ValueError("capture requires every track to be authoritatively unarmed")
@@ -8443,7 +8450,7 @@ class LiveObjectMapper:
         expected_identity = args.get("expectedObjectIdentity"); tracks = self._all_track_objects(); track_index = self._capture_index(tracks, track, expected_identity if isinstance(expected_identity, str) else None)
         if not isinstance(expected_identity, str) or track_index is None or reference != f"{self.refs.epoch}:track:{track_index}" or not hmac.compare_digest(self._capture_object_identity(track), expected_identity):
             raise ValueError("routing track identity changed since preview")
-        routing_before = self._routing_row(track); state = {"inputType": routing_before.get("inputType"), "inputSubRouting": routing_before.get("inputSubRouting"), "outputType": routing_before.get("outputType"), "outputSubRouting": routing_before.get("outputSubRouting"), "arm": self._read_attr(track, "arm"), "monitoring": self._monitoring_state(self._read_attr(track, "current_monitoring_state"))}; expected_state = args.get("expectedStateRevision"); state_revision = hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()
+        routing_before = self._routing_row(track); state = {"inputType": routing_before.get("inputType"), "inputSubRouting": routing_before.get("inputSubRouting"), "outputType": routing_before.get("outputType"), "outputSubRouting": routing_before.get("outputSubRouting"), "arm": self._armed(track), "monitoring": self._monitoring_state(self._read_attr(track, "current_monitoring_state"))}; expected_state = args.get("expectedStateRevision"); state_revision = hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()
         if not isinstance(expected_state, str) or not hmac.compare_digest(state_revision, expected_state): raise ValueError("routing state changed since preview")
         allowed = {"ref", "inputType", "inputSubRouting", "outputType", "outputSubRouting", "arm", "monitoring", "expectedObjectIdentity", "expectedStateRevision"}
         if set(args) - allowed:
@@ -8546,7 +8553,7 @@ class LiveObjectMapper:
         elif action == "start" or destination_identity is not None:
             raise ValueError("recording start requires an exact destination track identity")
         if action == "start":
-            armed_tracks = [track for track in tracks if self._read_attr(track, "arm") is True]
+            armed_tracks = [track for track in tracks if self._armed(track) is True]
             armed_matches = [track for track in armed_tracks if self._capture_same_object(track, destination, str(destination_identity))]
             if destination is None or self._read_attr(destination, "arm") is not True or len(armed_tracks) != 1 or len(armed_matches) != 1:
                 raise ValueError("recording destination must be the only unambiguous armed track")

@@ -27,6 +27,8 @@ const records = new Map();
 const signal = () => AbortSignal.timeout(120_000);
 /** Where the Arrangement changes go (beat 16, bar 5): inside any Set, since Live refuses a spot past its end. */
 const SPOT = 16;
+/** Its own tracks, named for this run: an earlier run's may still be in the Set. */
+const runId = Date.now().toString(36).slice(-4); const PAD = `Kumi Pad ${runId}`; const BOUNCE = `Kumi Bounce ${runId}`;
 let stopping = false;
 process.once("SIGINT", () => { stopping = true; process.stdout.write("\nStopping: undoing what was changed so far…\n"); });
 
@@ -46,7 +48,7 @@ async function run(name, input) {
   try {
     const result = await found.execute(input, signal());
     let body; try { body = JSON.parse(result.text); } catch { body = undefined; }
-    return { ok: !result.isError, ms: performance.now() - t0, body, error: result.isError ? result.text.replace(/\s+/g, " ").slice(0, 240) : undefined };
+    return { ok: !result.isError, ms: performance.now() - t0, body, error: result.isError ? result.text.replace(/\s+/g, " ").slice(0, 240) : undefined, stopped: result.isError ? body?.stopped : undefined };
   } catch (error) { return { ok: false, ms: performance.now() - t0, error: String(error?.message ?? error).slice(0, 240) }; }
 }
 /** A read's payload, as Kumi gives it to the model. */
@@ -83,18 +85,18 @@ async function acceptOneDotZero(change, target) {
   await maybe("set_song", { swingAmount: 0.2 });
   const scene = (await all("scene", { fields: ["name"] })).items[0];
   if (scene) await maybe("set_scene", { ref: scene.ref, tempo: 121, tempoEnabled: true });
-  const pad = tracks.filter((row) => row.name === "Kumi Pad").at(-1);
+  const pad = tracks.filter((row) => row.name === PAD).at(-1);
   const slot = pad ? (await all("clip-slot", { parent: pad.ref, fields: ["clipRef"] })).items.find((row) => row.clipRef) : undefined;
   if (slot) {
     await maybe("set_clip", { clipRef: slot.clipRef, looping: true, loopStart: 0, loopEnd: 4 });
-    const notes = contentOf((await run("live_note_read", { clipRef: slot.clipRef, selected: false, noteIds: [0, 1, 2, 3] })).body).notes ?? [];
+    const notes = (await all("note", { parent: slot.clipRef })).items;
     if (notes[0]) await maybe("change_notes", { clipRef: slot.clipRef, notes: [{ id: notes[0].id, velocity: 80 }] });
     await maybe("transform_midi", { clipRef: slot.clipRef, transform: "transpose", params: { semitones: 2 }, scope: "in-place" });
     // The chord goes into the Arrangement too, where the bounce below records it from.
     await maybe("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: SPOT });
   }
   tracks = await fresh();
-  const padNow = tracks.filter((row) => row.name === "Kumi Pad").at(-1);
+  const padNow = tracks.filter((row) => row.name === PAD).at(-1);
   const drift = padNow ? (await all("device", { parent: padNow.ref, fields: ["name"] })).items[0] : undefined;
   if (drift) { await maybe("switch_device", { deviceRef: drift.ref, enabled: false }); await maybe("switch_device", { deviceRef: drift.ref, enabled: true }); }
   if (stopping || !padNow) return;
@@ -103,8 +105,8 @@ async function acceptOneDotZero(change, target) {
   if (!tool("record") || !tool("set_routing")) { skip("record"); }
   else {
     const plan = await run("make_changes", { steps: [
-      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kumi Bounce", kind: "audio" }], scenes: [] }, as: "bounce" },
-      { tool: "set_routing", input: { trackRef: "@bounce", inputType: "Kumi Pad", inputSubRouting: "Post FX", arm: true, monitoring: "off" } },
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: BOUNCE, kind: "audio" }], scenes: [] }, as: "bounce" },
+      { tool: "set_routing", input: { trackRef: "@bounce", inputType: PAD, inputSubRouting: "Post FX", arm: true, monitoring: "off" } },
       { tool: "set_transport", input: { position: SPOT, loopEnabled: false } },
       { tool: "record", input: { action: "start", lane: "arrangement", destinationTrackRef: "@bounce" } },
       { tool: "play", input: { action: "continue" } },
@@ -113,9 +115,9 @@ async function acceptOneDotZero(change, target) {
       { tool: "record", input: { action: "stop", lane: "arrangement" } },
       { tool: "set_routing", input: { trackRef: "@bounce", arm: false } },
     ] });
-    say(plan.ok, plan.ms, plan.ok ? `resampled the pad onto a new audio track, in ${plan.body?.done?.length ?? "?"} steps` : `resampling: ${plan.error}`);
+    say(plan.ok, plan.ms, plan.ok ? `resampled the pad onto a new audio track, in ${plan.body?.done?.length ?? "?"} steps` : `resampling: ${plan.stopped ? `stopped at step ${plan.stopped.step} (${plan.stopped.tool}): ${JSON.stringify(plan.stopped).slice(0, 400)}` : plan.error}`);
     if (plan.ok) {
-      const bounce = (await fresh()).filter((row) => row.name === "Kumi Bounce").at(-1);
+      const bounce = (await fresh()).filter((row) => row.name === BOUNCE).at(-1);
       const clip = bounce ? (await all("arrangement-clip", { parent: bounce.ref, fields: ["isAudio", "length"] })).items.find((row) => row.isAudio) : undefined;
       const t0 = performance.now();
       try {
@@ -186,7 +188,7 @@ try {
         // Live keeps the playhead, loop and locators inside the Set's arrangement, so they go near its start, clear of the Set's own locators.
         const taken = new Set(before.locatorPositions); let start = SPOT; while (taken.has(start) || taken.has(start + 16)) start += 1;
         await change("set_locators", { start, end: start + 16, startName: "Kumi Start", endName: "Kumi End" });
-        const added = await change("add_tracks_and_scenes", { tracks: [{ name: "Kumi Pad", kind: "midi" }], scenes: [] });
+        const added = await change("add_tracks_and_scenes", { tracks: [{ name: PAD, kind: "midi" }], scenes: [] });
         const pad = added?.body?.live?.created?.find((item) => item.kind === "track");
         if (pad && !stopping) {
           await change("write_midi_clip", { trackRef: pad.ref, sceneIndex: 0, name: "Kumi Chord", length: 4, notes: [60, 64, 67].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96 })) });
@@ -196,7 +198,7 @@ try {
           if (loaded?.ok && !stopping) {
             // A device brings its parameter tools; a new look retires earlier references, so find the pad again.
             observation = await integration.observe(signal());
-            const padRow = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === "Kumi Pad").at(-1);
+            const padRow = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === PAD).at(-1);
             const device = padRow ? (await all("device", { parent: padRow.ref, fields: ["name"] })).items[0] : undefined;
             const parameters = device ? (await all("parameter", { parent: device.ref, fields: ["name", "value", "min", "max", "displayValue"] })).items : [];
             const knob = parameters.find((row) => row.name === "LP Freq" || row.name === "Filter Freq") ?? parameters.find((row) => row.max > row.min && row.name !== "Device On");

@@ -186,7 +186,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "change_notes", since: FIXED_BRIDGE, preview: "live_note_update_preview", apply: "live_note_update_apply", family: "clip",
-    description: "Change notes already in a Session clip, by id: pitch, start, duration (beats), velocity, mute, probability, velocityDeviation, releaseVelocity. Read the notes first (live_note_read with the clip's clipRef and noteIds, or selected: true for the ones selected in Live) to get their ids.",
+    description: "Change notes already in a Session clip, by id: pitch, start, duration (beats), velocity, mute, probability, velocityDeviation, releaseVelocity. Get their ids first: live_discover kind note with the clip's clipRef as parent lists its notes, and live_note_read with selected: true gives the ones selected in Live.",
     summarize(preview, input, track) {
       const count = Array.isArray(input.notes) ? input.notes.length : 0;
       const known = ownerTrack(preview.clipRef ?? input.clipRef, track);
@@ -195,7 +195,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "delete_notes", preview: "live_note_delete_preview", apply: "live_note_delete_apply", family: "clip",
-    description: "Delete notes from a Session clip, by id (live_note_read gives the ids).",
+    description: "Delete notes from a Session clip, by id (live_discover kind note with the clip's clipRef as parent lists them with their ids).",
     summarize(preview, input, track) {
       const count = Array.isArray(input.noteIds) ? input.noteIds.length : 0;
       const known = ownerTrack(preview.clipRef ?? input.clipRef, track);
