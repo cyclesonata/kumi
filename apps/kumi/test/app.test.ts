@@ -705,3 +705,32 @@ test("/effort offers the levels the model takes, with its own default first; /lo
   assert.ok(has(h.screen(), "Signed out of ChatGPT."));
   await h.app.close();
 });
+
+test("NOW follows a plan: writing it, then each change as it lands while the rest is written, with a count", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("build me a pad\r");
+  h.emit({ type: "state", state: "running" });
+  let lines = h.screen();
+  assert.ok(has(lines, "thinking"));
+  h.emit({ type: "tool-input", id: "p1", name: "make_changes" });
+  assert.ok(has(h.screen(), "writing the plan"));
+  h.emit({ type: "tool-start", id: "p1", name: "make_changes" });
+  lines = h.screen();
+  assert.ok(has(lines, "making changes") && !has(lines, "writing the plan"));
+  h.emit({ type: "change", change: { id: "c1", family: "structure", title: "Added track Pad", state: "applied", at: 1 } });
+  lines = h.screen();
+  assert.ok(has(lines, "✓ Added track Pad"), "each change shows as it lands, though the plan is still running");
+  assert.ok(has(lines, "working · 1 change"));
+  h.emit({ type: "change", change: { id: "c2", family: "device", title: "Loaded Wavetable on Pad", state: "applied", at: 2 } });
+  lines = h.screen();
+  assert.ok(has(lines, "✓ Loaded Wavetable on Pad") && has(lines, "working · 2 changes"));
+  h.emit({ type: "tool-end", id: "p1", name: "make_changes", isError: false, elapsedMs: 2400 });
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 5200 });
+  h.emit({ type: "state", state: "idle" });
+  lines = h.screen();
+  assert.ok(!has(lines, "working ·"), "the count is for the answer under way");
+  await h.app.close();
+});

@@ -539,6 +539,28 @@ Two defects came up on the way:
   another 21 s to stream 127 tokens. Kumi can't help that; its own time
   stayed the same.
 
+### Plans that start while they're written, and a one-wave observation
+
+On real Live 12.4.15b4, bridge 1.0.33, `openai-codex/gpt-6-astra`, the Kumi
+Focus Demo Set, 2026-09-28 (every change undone afterwards; the Set's eight
+tracks checked):
+
+- "Add a MIDI track called Stream Pad with Wavetable on it, then
+  Chorus-Ensemble, Reverb and Delay after it, and set its volume to -6 dB":
+  six changes in one plan. Run whole, the model wrote the plan from 7.3 s to
+  12.2 s and the changes ran from 12.3 s to 22.0 s. With the steps starting
+  as they're written, the plan started at 7.8 s, two changes had landed
+  before the model finished writing it at 11.6 s, and the answer was done at
+  16.7 s. Each device load took about 1.5 s.
+- The observation's reads (status, the Set, its tracks, their devices) went
+  one after another: 600–640 ms, 712 ms for a newly seen Set, which also read
+  its file path with a whole-Set snapshot. Sent together, they share display
+  ticks: 296–322 ms, 413 ms for a new Set (its path comes with the Set's
+  row). Live answers every request waiting at a tick within a 50 ms budget,
+  and each discovery walks the whole Set, so the three discoveries still
+  span two or three ticks. One walk per tick for all of them, a Remote Script
+  change, would bring the observation to about one tick.
+
 ## Every Browser device, and racks
 
 On real Live 12.4.15b4 on 2026-09-28, bridge 1.0.28 to 1.0.33, in the

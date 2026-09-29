@@ -143,12 +143,21 @@ built to need as few as possible, and to make each one short.
   `{"note": [36, 37, 38]}`, or lists of one length taken together
   (`{"parameterRef": [...], "value": [...]}`). The plan stops at the first
   failure and says what was done and what was skipped.
+- **Changes start while the plan is written.** A plan's steps run as soon as
+  each is whole, while the model writes the rest: a six-step plan took 16.7 s
+  instead of 22.0 s, two of its changes landing in Live before the model had
+  finished writing it. Pads or parameters on one device still wait for the
+  next step, so they go as one change. A plan written in one piece is checked
+  whole before anything changes; one that streams stops at a step that turns
+  out invalid, after the steps before it. NOW says "writing the plan", then
+  shows each change as it lands, with a count.
 - **No reply to write.** With `final: true`, when every step is done, Kumi
   lists what changed ("Done: …") and the answer ends there. A failure goes
   back to the model. The model is asked to use `make_changes` even for one
   change.
 - **Less to discover.** Each turn's observation lists the Set's tracks and the
-  devices on them, with references usable at once. Kumi reads up to three
+  devices on them, with references usable at once. Its reads go to Live
+  together, so they share display ticks: about 300 ms, down from 600 ms. Kumi reads up to three
   pages of a discovery before answering, so a big device's parameters come
   in one answer.
 - **Less to read and write.** The model sees short names for Live's

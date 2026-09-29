@@ -1,19 +1,41 @@
 import type { FailureKind } from "./errors.js";
 export type JsonObject = Record<string, unknown>;
 
+/**
+ * `reply`, from a tool that finished what the producer asked, is the answer: when every call in
+ * the step succeeded and no guidance is waiting, the turn ends there without another model call.
+ */
+export interface ToolResult { text: string; isError?: boolean; reply?: string }
+
 export interface KernelTool {
   name: string;
   description: string;
   inputSchema: JsonObject;
+  execute(input: JsonObject, signal: AbortSignal): Promise<ToolResult>;
   /**
-   * `reply`, from a tool that finished what the producer asked, is the answer: when every call in
-   * the step succeeded and no guidance is waiting, the turn ends there without another model call.
+   * Start while the model is still writing the call: a plan's first steps run as its later ones are
+   * written. Offered for a model reply's first call only, since calls run in order. `onStart` says
+   * the work has begun (the call then shows as running).
    */
-  execute(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError?: boolean; reply?: string }>;
+  stream?(signal: AbortSignal, onStart: () => void): StreamingCall;
+}
+
+/** A tool call under way while its input streams in. */
+export interface StreamingCall {
+  /** The next piece of the input, as the model writes it. */
+  push(delta: string): void;
+  /** The whole input (undefined when it isn't a JSON object): settles as `execute` would. */
+  finish(input: JsonObject | undefined): Promise<ToolResult>;
+  /** The model's reply broke off: start nothing more; settles once the work under way has. */
+  abandon(): Promise<void>;
+  /** Some of the work has begun, so the reply can't be asked for again. */
+  readonly started: boolean;
 }
 
 export type KernelEvent =
   | { type: "text"; text: string }
+  /** The model began writing a call (a plan, say); "tool-start" follows once it runs. */
+  | { type: "tool-input"; id: string; name: string }
   | { type: "tool-start"; id: string; name: string }
   | { type: "tool-end"; id: string; name: string; isError: boolean; elapsedMs: number }
   /** Guidance accepted mid-turn; it entered the conversation at a model boundary. */

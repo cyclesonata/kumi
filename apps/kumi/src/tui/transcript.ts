@@ -6,6 +6,8 @@ import { wrap, type Span } from "./wrap.js";
 
 export interface Step {
   id: string;
+  /** The tool it ran, for what NOW says while it runs. */
+  tool?: string;
   label: string;
   state: "running" | "done" | "error";
   ms?: number;
@@ -53,7 +55,29 @@ const STEP_LABELS: Record<string, string> = {
   set_locators: "set locators",
   set_track_color: "changed a track colour",
   undo_change: "undid a change",
+  make_changes: "made changes",
+  find_samples: "looked for samples",
+  load_sample: "loaded a sample",
+  load_sample_to_pad: "loaded a pad",
+  edit_rack: "edited a rack",
+  set_chain_mixer: "changed a rack chain",
 };
+
+/** What NOW says while a step runs: what Kumi is doing, not what it did. */
+const DOING: Record<string, string> = {
+  live_status: "checking Live",
+  live_discover: "looking at your Set",
+  live_snapshot: "reading your whole Set",
+  live_browser_search: "searching the Browser",
+  live_note_read: "reading notes",
+  make_changes: "making changes",
+  find_samples: "looking for samples",
+  undo_change: "undoing a change",
+};
+
+export function doingLabel(tool: string | undefined, fallback: string): string {
+  return (tool && DOING[tool]) ?? fallback;
+}
 
 export function stepLabel(tool: string): string {
   return STEP_LABELS[tool] ?? tool.replace(/^live_/, "").replaceAll("_", " ");

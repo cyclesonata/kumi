@@ -5,7 +5,7 @@ import type {
   LanguageModelV4Message, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolCall, LanguageModelV4ToolResultPart,
   LanguageModelV4Usage, SharedV4ProviderMetadata,
 } from "@ai-sdk/provider";
-import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
+import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, StreamingCall, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
 import { DEFAULT_BUDGET, fit, OBSERVATION_MARKER, SHORTENED, type ContextBudget } from "./budget.js";
 import { describeFailure, retryDelayMs } from "./failure.js";
@@ -106,6 +106,8 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     // A stopped turn (cancelled, timed out or failed) keeps the steps it finished, each model reply
     // with all its tool results, so the conversation says what those steps changed in Live. The
     // step in progress goes; a turn that finished no tool round leaves no trace.
+    // A call already running while the model writes it (a plan whose first steps are under way).
+    let early = new Map<string, Early>();
     const keepFinished = () => {
       let end = messages.length;
       const last = messages[end - 1];
@@ -125,11 +127,12 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
           messages.splice(0, messages.length, ...withoutReasoning(fitted.turn));
         }
         const request = binding.prepare({ instructions, messages: [...earlier, ...messages], tools: specs, sessionId });
-        const result = await stream(request, abort, (text) => { spoke = true; deliver({ type: "text", text }); });
+        early = new Map();
+        const result = await stream(request, abort, (text) => { spoke = true; deliver({ type: "text", text }); }, early, deliver);
         add(usage, result.usage); reported = true;
         if (result.content.length) messages.push({ role: "assistant", content: result.content });
         if (result.calls.length) {
-          const { results, reply } = await execute(result.calls, abort, deliver);
+          const { results, reply } = await execute(result.calls, abort, deliver, early);
           messages.push({ role: "tool", content: results });
           // The tools finished the request and said so: their reply is the answer, with no model call to write one.
           if (reply !== undefined && !steering.length) {
@@ -142,6 +145,8 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         for (const text of steering.splice(0)) { messages.push(user(text)); deliver({ type: "steer", text }); }
       }
     } catch (error) {
+      // A reply that broke off mid-plan: nothing more starts, and what's under way finishes first.
+      if (!abort.aborted) await Promise.all([...early.values()].map((entry) => entry.call.abandon().catch(() => {})));
       keepFinished();
       if (signal.aborted || lifetime.signal.aborted) return settled("cancelled");
       if (failed.signal.aborted) throw new KumiError("output", "Inference output could not be delivered; the rest of the answer was dropped.");
@@ -149,36 +154,72 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     }
   }
 
-  /** One model call. Retries once, only before any output has escaped this step. */
-  async function stream(request: LanguageModelV4CallOptions, abort: AbortSignal, onText: (text: string) => void): Promise<StepResult> {
+  /**
+   * One model call. Retries once, only before any output has escaped this step: text shown, or a
+   * streaming call's work begun. A reply's first call whose tool can stream starts as it's written.
+   */
+  async function stream(request: LanguageModelV4CallOptions, abort: AbortSignal, onText: (text: string) => void,
+    early: Map<string, Early>, deliver: (event: KernelEvent) => void): Promise<StepResult> {
     for (let attempt = 0; ; attempt++) {
       let delivered = false;
+      let calls = 0;
+      const input: InputStream = {
+        start(id, name) {
+          const tool = tools.get(name);
+          if (calls++ === 0 && tool?.stream) {
+            const entry: Early = { name, begun: 0, call: undefined as unknown as StreamingCall };
+            entry.call = tool.stream(abort, () => {
+              if (entry.begun) return;
+              entry.begun = performance.now();
+              deliver({ type: "tool-start", id, name });
+            });
+            early.set(id, entry);
+          }
+          deliver({ type: "tool-input", id, name });
+        },
+        delta(id, delta) { early.get(id)?.call.push(delta); },
+      };
       try {
         const { stream: parts } = await binding.model.doStream({ ...request, abortSignal: abort });
-        return await consume(parts, abort, (text) => { delivered = true; onText(text); });
+        const result = await consume(parts, abort, (text) => { delivered = true; onText(text); }, input);
+        // A call that began but never arrived whole is settled, not left running.
+        for (const [id, entry] of early) {
+          if (result.calls.some(({ call }) => call.toolCallId === id)) continue;
+          await entry.call.abandon().catch(() => {});
+          early.delete(id);
+        }
+        return result;
       } catch (error) {
-        const wait = attempt === 0 && !delivered && !abort.aborted ? retryDelayMs(error) : undefined;
+        const escaped = delivered || [...early.values()].some((entry) => entry.call.started);
+        const wait = attempt === 0 && !escaped && !abort.aborted ? retryDelayMs(error) : undefined;
         if (wait === undefined) throw error;
+        // Nothing began, so the retry starts clean.
+        await Promise.all([...early.values()].map((entry) => entry.call.abandon().catch(() => {})));
+        early.clear();
         await delay(wait, undefined, { signal: abort });
       }
     }
   }
 
-  /** Runs a step's calls in order; `reply` is set when all succeeded and some finished the request. */
-  async function execute(calls: StepResult["calls"], abort: AbortSignal, deliver: (event: KernelEvent) => void): Promise<{ results: LanguageModelV4ToolResultPart[]; reply?: string }> {
+  /**
+   * Runs a step's calls in order; `reply` is set when all succeeded and some finished the request.
+   * A call that started while it was written finishes with its whole input.
+   */
+  async function execute(calls: StepResult["calls"], abort: AbortSignal, deliver: (event: KernelEvent) => void, early: Map<string, Early>): Promise<{ results: LanguageModelV4ToolResultPart[]; reply?: string }> {
     const results: LanguageModelV4ToolResultPart[] = [];
     const replies: string[] = []; let failed = false;
     for (const { call, input } of calls) {
       abort.throwIfAborted();
-      const started = performance.now();
-      deliver({ type: "tool-start", id: call.toolCallId, name: call.toolName });
+      const streamed = early.get(call.toolCallId);
+      const started = streamed?.begun || performance.now();
+      if (!streamed?.begun) deliver({ type: "tool-start", id: call.toolCallId, name: call.toolName });
       const tool = tools.get(call.toolName);
       let outcome: { text: string; isError: boolean };
       if (!tool) outcome = { text: `Unknown tool ${JSON.stringify(call.toolName.slice(0, 64))}; use only the supplied tools.`, isError: true };
-      else if (!input) outcome = { text: "Tool arguments must be a JSON object.", isError: true };
+      else if (!input && !streamed) outcome = { text: "Tool arguments must be a JSON object.", isError: true };
       else {
         try {
-          const result = await untilAborted(tool.execute(input, abort), abort);
+          const result = await untilAborted(streamed ? streamed.call.finish(input) : tool.execute(input!, abort), abort);
           outcome = { text: result.text, isError: Boolean(result.isError) };
           if (!outcome.isError && typeof result.reply === "string" && result.reply.trim()) replies.push(result.reply.trim().slice(0, MAX_REPLY));
         } catch (error) {
@@ -230,7 +271,12 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
 }
 
 /** Assemble one streamed response into replayable assistant content, preserving provider metadata. */
-async function consume(stream: ReadableStream<LanguageModelV4StreamPart>, abort: AbortSignal, onText: (text: string) => void): Promise<StepResult> {
+/** A call's input as the model writes it. */
+interface InputStream { start(id: string, name: string): void; delta(id: string, delta: string): void }
+/** A reply's first call, running while it's written; `begun` is when its work started (0 before). */
+interface Early { name: string; begun: number; call: StreamingCall }
+
+async function consume(stream: ReadableStream<LanguageModelV4StreamPart>, abort: AbortSignal, onText: (text: string) => void, input?: InputStream): Promise<StepResult> {
   type Block = { type: "text" | "reasoning"; text: string; metadata?: SharedV4ProviderMetadata } | { type: "tool-call"; call: LanguageModelV4ToolCall };
   const blocks: Block[] = [];
   const open = new Map<string, Extract<Block, { text: string }>>();
@@ -258,6 +304,8 @@ async function consume(stream: ReadableStream<LanguageModelV4StreamPart>, abort:
         }
         case "reasoning-start": case "reasoning-end": block("reasoning", part.id, part.providerMetadata); break;
         case "reasoning-delta": block("reasoning", part.id, part.providerMetadata).text += part.delta; break;
+        case "tool-input-start": if (!part.providerExecuted) input?.start(part.id, part.toolName); break;
+        case "tool-input-delta": if (part.delta) input?.delta(part.id, part.delta); break;
         case "tool-call": if (!part.providerExecuted) blocks.push({ type: "tool-call", call: part }); break;
         case "finish": finish = { usage: part.usage, finishReason: part.finishReason }; break;
         case "error": throw part.error ?? new KumiError("provider", "The provider reported a stream error.");

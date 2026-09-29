@@ -1,4 +1,4 @@
-export type { CatchUp, ChangeFamily, ChangeRecord, ClipNote, DevicePlacement, ConversationStore, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, TurnResult, TurnState, Usage } from "./core/contracts.js";
+export type { CatchUp, ChangeFamily, ChangeRecord, ClipNote, DevicePlacement, ConversationStore, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, KernelTool, LiveFocus, Observation, SessionController, SessionEvent, SessionStatus, StreamingCall, ToolResult, TurnResult, TurnState, Usage } from "./core/contracts.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";

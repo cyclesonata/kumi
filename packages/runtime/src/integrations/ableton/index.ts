@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { CatchUp, ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation } from "../../core/contracts.js";
+import type { CatchUp, ChangeRecord, ConnectionState, Integration, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
-import { discoveryArgs, discoveryPayload, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
+import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { defaultSampleFolders, findSamples, folderPath, type Sample } from "./samples.js";
 import { CHANGES, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
+import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
@@ -514,27 +515,88 @@ export function createAbletonIntegration(options: Options): Integration {
     };
   }
 
+  /** A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it;
+   * with several lists of one length (parameterRef and value), the i-th run takes the i-th of each. */
+  function expandStep(raw: unknown, index: number): unknown[] | string {
+    const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
+    const each = item.each && typeof item.each === "object" && !Array.isArray(item.each) ? Object.entries(item.each as JsonObject) : [];
+    if (!each.length) return [raw];
+    const runs = Array.isArray(each[0]![1]) ? (each[0]![1] as unknown[]).length : -1;
+    if (runs < 0 || each.some(([, values]) => !Array.isArray(values) || values.length !== runs)) return `Step ${index + 1}: each gives input fields lists of one length, one value per run.`;
+    const base = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
+    return Array.from({ length: Math.min(runs, MAX_CHANGES_PER_TURN + 1) }, (_, run) => ({ tool: item.tool, input: { ...base, ...Object.fromEntries(each.map(([field, values]) => [field, (values as unknown[])[run]])) } }));
+  }
+
   /**
    * Several changes in one call: each step runs exactly as its own tool would (the same checks,
    * HISTORY entry and undo), in order, and stops at the first that fails. "@name" in a step's
    * input stands for what an earlier step marked `as: "name"` made. One call instead of a model
-   * round trip per change, which is most of the time a multi-step request takes.
+   * round trip per change, which is most of the time a multi-step request takes. A plan that isn't
+   * valid throughout changes nothing.
    */
   async function makeChanges(input: JsonObject, signal: AbortSignal): Promise<{ text: string; isError: boolean; reply?: string }> {
-    // A step with `each: { note: [36, 37, 38] }` runs once per value, with that input field set to it;
-    // with several lists of one length (parameterRef and value), the i-th run takes the i-th of each.
     const steps: unknown[] = [];
     for (const [index, raw] of (Array.isArray(input.steps) ? input.steps : []).entries()) {
-      const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
-      const each = item.each && typeof item.each === "object" && !Array.isArray(item.each) ? Object.entries(item.each as JsonObject) : [];
-      if (!each.length) { steps.push(raw); continue; }
-      const runs = Array.isArray(each[0]![1]) ? (each[0]![1] as unknown[]).length : -1;
-      if (runs < 0 || each.some(([, values]) => !Array.isArray(values) || values.length !== runs)) return { text: `Step ${index + 1}: each gives input fields lists of one length, one value per run.`, isError: true };
-      const base = item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input as JsonObject : {};
-      for (let run = 0; run < runs; run++) steps.push({ tool: item.tool, input: { ...base, ...Object.fromEntries(each.map(([field, values]) => [field, (values as unknown[])[run]])) } });
+      const expanded = expandStep(raw, index);
+      if (typeof expanded === "string") return { text: expanded, isError: true };
+      steps.push(...expanded);
       if (steps.length > MAX_CHANGES_PER_TURN) break;
     }
     if (!steps.length || steps.length > MAX_CHANGES_PER_TURN) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
+    const plan = runPlan(signal);
+    plan.add(steps); plan.close();
+    return plan.result(input.final === true);
+  }
+
+  /**
+   * make_changes while the model is still writing it: each step starts as soon as it's whole, so
+   * the changes happen alongside the writing rather than after it. (A step found invalid stops the
+   * plan there; the steps before it have happened.)
+   */
+  function streamChanges(signal: AbortSignal, onStart: () => void): StreamingCall {
+    const plan = runPlan(signal, onStart);
+    const received: unknown[] = [];
+    const take = (raw: unknown) => {
+      const index = received.length; received.push(raw);
+      if (plan.failed) return;
+      const expanded = expandStep(raw, index);
+      if (typeof expanded === "string") plan.fail(expanded);
+      else if (plan.count + expanded.length > MAX_CHANGES_PER_TURN) plan.fail(`Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`);
+      else plan.add(expanded);
+    };
+    const scan = stepScanner(take);
+    return {
+      get started() { return plan.started; },
+      push: scan,
+      async finish(input) {
+        // Nothing arrived early (the provider sent the input whole): the plan is checked whole, as ever.
+        if (!received.length) { void plan.abandon(); return input ? makeChanges(input, signal) : { text: "Tool arguments must be a JSON object.", isError: true }; }
+        if (!input) plan.fail("The rest of the plan wasn't valid JSON, so it stopped there.");
+        else {
+          const all = Array.isArray(input.steps) ? input.steps : [];
+          if (received.some((raw, index) => JSON.stringify(raw) !== JSON.stringify(all[index]))) plan.fail("The plan's steps changed as they were written, so it stopped there.");
+          else for (const raw of all.slice(received.length)) take(raw);
+        }
+        plan.close();
+        return plan.result(input?.final === true);
+      },
+      abandon: () => plan.abandon(),
+    };
+  }
+
+  /**
+   * A plan's steps run in order as they arrive (all at once, or one by one as the model writes
+   * them). Steps in a row on one device wait for the next to arrive, so they still become one
+   * change in one Live request. `close` says no more are coming.
+   */
+  function runPlan(signal: AbortSignal, onStart?: () => void) {
+    const steps: unknown[] = [];
+    let closed = false; let abandoned = false; let started = false;
+    let failure: { at: number; error: string } | undefined;
+    let wake: (() => void) | undefined;
+    const nudge = () => { const resolve = wake; wake = undefined; resolve?.(); };
+    const until = async (ready: () => boolean) => { while (!ready()) await new Promise<void>((resolve) => { wake = resolve; }); };
+    const known = (index: number) => steps.length > index || closed || failure !== undefined || abandoned;
     const made = new Map<string, string>();
     const done: JsonObject[] = [];
     // Steps in a row on one device become one change, in one Live request, when the bridge can:
@@ -543,10 +605,10 @@ export function createAbletonIntegration(options: Options): Integration {
     const batches = [
       { tool: "load_sample_to_pad", kind: CHANGES.find((kind) => kind.tool === "load_samples_to_pads")!, most: 16, what: "pads",
         offered: (kind: ChangeKind) => { const action = object(schemaOf(kind).action ?? {}); return Array.isArray(action.enum) && action.enum.includes("load-samples"); },
-        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, pads: steps.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null, ...(step.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) })) }) },
+        input: (group: JsonObject[]) => ({ deviceRef: group[0]!.deviceRef ?? null, pads: group.map((step) => ({ note: step.note ?? null, sample: step.sample ?? null, ...(step.instrument === "Drum Sampler" ? { instrument: "Drum Sampler" } : {}) })) }) },
       { tool: "set_device_parameter", kind: CHANGES.find((kind) => kind.tool === "set_device_parameters")!, most: 64, what: "parameters",
         offered: (kind: ChangeKind) => "values" in schemaOf(kind),
-        input: (steps: JsonObject[]) => ({ deviceRef: steps[0]!.deviceRef ?? null, values: steps.map((step) => ({ parameterRef: step.parameterRef ?? null, value: step.value ?? null })) }) },
+        input: (group: JsonObject[]) => ({ deviceRef: group[0]!.deviceRef ?? null, values: group.map((step) => ({ parameterRef: step.parameterRef ?? null, value: step.value ?? null })) }) },
     ];
     const batchStep = (value: unknown, tool: string, device?: unknown) => {
       const item = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
@@ -563,52 +625,89 @@ export function createAbletonIntegration(options: Options): Integration {
       if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item, step)]));
       return value;
     };
-    for (let index = 0; index < steps.length;) {
-      const step = index + 1;
-      const raw = steps[index];
-      const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
-      const stop = (error: string) => ({ text: JSON.stringify({ done, stopped: { step, tool: item.tool ?? null, error: error.slice(0, 600) }, ...(steps.length > step ? { skipped: steps.length - step } : {}) }), isError: true });
-      // Earlier steps of this plan just confirmed Live is the same, so later ones skip that check.
-      const settled = done.length > 0;
-      let run = 1;
-      const batch = batches.find((candidate) => batchStep(raw, candidate.tool) && batchStep(steps[index + 1], candidate.tool, (item.input as JsonObject).deviceRef));
-      if (batch) {
-        // A rack loaded just now changed the bridge's tools; read them again before asking.
-        try { await ensureCatalog(signal); } catch { signal.throwIfAborted(); }
-        if (batch.offered(batch.kind)) while (run < batch.most && index + run < steps.length && batchStep(steps[index + run], batch.tool, (item.input as JsonObject).deviceRef)) run++;
-      }
-      if (batch && run > 1) {
-        let inputs: JsonObject[];
-        try { inputs = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
+    type Stop = { step: number; tool: unknown; error: string };
+    const settled = (async (): Promise<Stop | undefined> => {
+      for (let index = 0; ;) {
+        await until(() => known(index));
+        if (abandoned) return undefined;
+        if (index >= steps.length) return failure?.at === index ? { step: index + 1, tool: null, error: failure.error } : undefined;
+        signal.throwIfAborted();
+        const step = index + 1;
+        const raw = steps[index];
+        const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as JsonObject : {};
+        const stop = (error: string): Stop => ({ step, tool: item.tool ?? null, error: error.slice(0, 600) });
+        // Earlier steps of this plan just confirmed Live is the same, so later ones skip that check.
+        const confirmed = done.length > 0;
+        const device = (item.input as JsonObject | undefined)?.deviceRef;
+        let run = 1;
+        // A step that could join the next one in a single change waits to see it (or the plan's end).
+        if (batches.some((candidate) => batchStep(raw, candidate.tool))) { await until(() => known(index + 1)); if (abandoned) return undefined; }
+        const batch = batches.find((candidate) => batchStep(raw, candidate.tool) && batchStep(steps[index + 1], candidate.tool, device));
+        if (batch) {
+          // A rack loaded just now changed the bridge's tools; read them again before asking.
+          try { await ensureCatalog(signal); } catch { signal.throwIfAborted(); }
+          if (batch.offered(batch.kind)) {
+            while (run < batch.most) {
+              await until(() => known(index + run));
+              if (abandoned) return undefined;
+              if (index + run < steps.length && batchStep(steps[index + run], batch.tool, device)) run++; else break;
+            }
+          }
+        }
+        if (!started) { started = true; onStart?.(); }
+        if (batch && run > 1) {
+          let inputs: JsonObject[];
+          try { inputs = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
+          catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
+          const outcome = await change(batch.kind, batch.input(inputs), signal, confirmed);
+          let reply: JsonObject = {};
+          try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
+          if (outcome.isError) return stop(`${batch.what} ${step}–${step + run - 1}, as one change: ${outcome.text}`);
+          const lines = Array.isArray(reply.lines) ? reply.lines : [];
+          for (let offset = 0; offset < run; offset++) done.push({ step: step + offset, changed: typeof lines[offset] === "string" ? lines[offset] : reply.changed ?? null, change: reply.change ?? null });
+          index += run;
+          continue;
+        }
+        const kind = CHANGES.find((candidate) => candidate.tool === item.tool && !candidate.internal);
+        if (!kind) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
+        let stepInput: JsonObject;
+        try { stepInput = resolve(item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {}, step) as JsonObject; }
         catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
-        const outcome = await change(batch.kind, batch.input(inputs), signal, settled);
+        const outcome = await change(kind, stepInput, signal, confirmed);
         let reply: JsonObject = {};
         try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
-        if (outcome.isError) return stop(`${batch.what} ${step}–${step + run - 1}, as one change: ${outcome.text}`);
-        const lines = Array.isArray(reply.lines) ? reply.lines : [];
-        for (let offset = 0; offset < run; offset++) done.push({ step: step + offset, changed: typeof lines[offset] === "string" ? lines[offset] : reply.changed ?? null, change: reply.change ?? null });
-        index += run;
-        continue;
+        if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
+        if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
+        done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}), ...(Array.isArray(reply.lines) ? { lines: reply.lines } : {}) });
+        index++;
       }
-      const kind = CHANGES.find((candidate) => candidate.tool === item.tool && !candidate.internal);
-      if (!kind) return stop(`${String(item.tool).slice(0, 64)} isn't one of Kumi's change tools`);
-      let stepInput: JsonObject;
-      try { stepInput = resolve(item.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {}, step) as JsonObject; }
-      catch (error) { return stop(error instanceof Error ? error.message : "a reference didn't resolve"); }
-      const outcome = await change(kind, stepInput, signal, settled);
-      let reply: JsonObject = {};
-      try { reply = JSON.parse(outcome.text) as JsonObject; } catch { reply = {}; }
-      if (outcome.isError) return stop(typeof reply.changed === "string" ? `${reply.changed}: ${outcome.text}` : outcome.text);
-      if (typeof item.as === "string" && typeof reply.ref === "string") made.set(item.as, reply.ref);
-      done.push({ step, changed: reply.changed ?? null, change: reply.change ?? null, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}), ...(Array.isArray(reply.lines) ? { lines: reply.lines } : {}) });
-      index++;
-    }
-    const text = JSON.stringify({ done });
-    if (input.final !== true) return { text, isError: false };
-    // The plan finished the request: Kumi says what changed, sparing the producer a model reply.
-    // A line for each thing changed: a change of several parameters gives one for each.
-    const lines = done.flatMap((item) => Array.isArray(item.lines) ? item.lines : [item.changed]).filter((line): line is string => typeof line === "string" && line.length > 0);
-    return { text, isError: false, reply: lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}` };
+    })();
+    return {
+      get started() { return started; },
+      get failed() { return failure !== undefined; },
+      get count() { return steps.length; },
+      add(more: unknown[]) { if (!closed && !failure) { steps.push(...more); nudge(); } },
+      /** The plan can't go on past the steps it has: `error` says why, at the next step. */
+      fail(error: string) { if (!failure) { failure = { at: steps.length, error }; nudge(); } },
+      close() { closed = true; nudge(); },
+      abandon() { abandoned = true; nudge(); return settled.then(() => {}, () => {}); },
+      async result(final: boolean): Promise<{ text: string; isError: boolean; reply?: string }> {
+        const stopped = await settled;
+        await until(() => closed || abandoned);
+        if (stopped) {
+          // A plan refused before anything happened says only why.
+          if (!done.length && failure?.at === 0) return { text: failure.error, isError: true };
+          return { text: JSON.stringify({ done, stopped, ...(steps.length > stopped.step ? { skipped: steps.length - stopped.step } : {}) }), isError: true };
+        }
+        if (!done.length) return { text: `Give 1 to ${MAX_CHANGES_PER_TURN} steps in all.`, isError: true };
+        const text = JSON.stringify({ done });
+        if (!final) return { text, isError: false };
+        // The plan finished the request: Kumi says what changed, sparing the producer a model reply.
+        // A line for each thing changed: a change of several parameters gives one for each.
+        const lines = done.flatMap((item) => Array.isArray(item.lines) ? item.lines : [item.changed]).filter((line): line is string => typeof line === "string" && line.length > 0);
+        return { text, isError: false, reply: lines.length === 1 ? `Done: ${lines[0]}.` : `Done:\n${lines.map((line) => `- ${line}`).join("\n")}` };
+      },
+    };
   }
 
   /** `settled`: an earlier change in the same plan just confirmed Live's epoch, so it isn't read again. */
@@ -764,7 +863,7 @@ export function createAbletonIntegration(options: Options): Integration {
           as: { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,31}$", description: "Name what this step makes (a new track, a loaded device) for later steps" },
           each: { type: "object", description: "Repeat this step: each field's list gives that input field its value run by run, e.g. {\"note\": [36, 37, 38, 39]}, or several lists of one length, e.g. {\"parameterRef\": [\"parameter:3\", \"parameter:9\"], \"value\": [0.5, 1]}", additionalProperties: { type: "array", maxItems: 40 } } } } },
         final: { type: "boolean", description: "These changes complete the request: Kumi says what changed and you aren't called again. Leave it out to see the results and carry on." } } },
-      execute: (input, signal) => makeChanges(input, signal) }] : [];
+      execute: (input, signal) => makeChanges(input, signal), stream: (signal, onStart) => streamChanges(signal, onStart) }] : [];
     return [...reads, sampleSearch, ...edits, ...batch, ...undo];
   }
   return {
@@ -793,38 +892,48 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!available || lost) return away();
       try {
         await tools!.refresh(signal); assertLease(lease, signal);
-        const status = await readStatus(signal); assertLease(lease, signal);
-        if (!status.connected) { loseLive(); return away(); }
-        // Checked straight after reading the list: later notifications can't interleave with synchronous code.
         await ensureCatalog(signal); assertLease(lease, signal);
-        if (!tools!.has("live_discover")) throw new ObservationError("Required Set discovery capability is unavailable");
+        if (!tools!.has("live_status")) throw new ObservationError("Live status capability is unavailable");
+        // Live answers the requests waiting at each display tick (about every 100 ms) together, one
+        // after another on its own thread. Sent together, the reads below arrive in one tick instead
+        // of one tick each, and the Set can't change between them; each carries the epoch, checked
+        // against the status's.
+        const setArgs = discoveryArgs({ kind: "set", fields: [...FIELDS.set!, "filePath"] });
+        const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: 100 });
+        const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: 100 });
+        const settle = <T>(work: Promise<T>): Promise<{ value: T } | { error: unknown }> => work.then((value) => ({ value }), (error: unknown) => ({ error }));
+        const discover = tools!.has("live_discover");
+        const read = (args: JsonObject) => settle(discover ? tools!.call("live_discover", args, signal, { host: true }) : Promise.reject(new ObservationError("Required Set discovery capability is unavailable")));
+        const [statusRead, setRead, tracksRead, devicesRead] = await Promise.all([
+          settle(tools!.call("live_status", {}, signal, { host: true }).then(statusPayload)), read(setArgs), read(trackArgs), read(deviceArgs)]);
+        assertLease(lease, signal);
+        if ("error" in statusRead) throw statusRead.error;
+        const status = statusRead.value;
+        if (!status.connected) { loseLive(); return away(); }
+        if (!discover) throw new ObservationError("Required Set discovery capability is unavailable");
+        if ("error" in setRead) throw setRead.error;
         const epoch = status.epoch as number;
-        const args = discoveryArgs({ kind: "set" });
-        const result = await tools!.call("live_discover", args, signal, { host: true }); assertLease(lease, signal);
-        assertEpoch(payload(result).epoch, epoch);
-        const page = discoveryPayload(result, "set", epoch);
+        assertEpoch(payload(setRead.value).epoch, epoch);
+        const page = discoveryPayload(setRead.value, "set", epoch);
         if (page.items.length !== 1) throw new ObservationError("Current Set discovery did not return one authoritative Set");
         const row = page.items[0]!;
         const identity = setIdentity(row);
-        await guardEpoch(signal, epoch, lease);
         currentEpoch = epoch; currentSet = identity; lastEpoch = epoch;
-        registerRows("set", page.items, args, page.nextCursor);
+        registerRows("set", page.items, setArgs, page.nextCursor);
         // The Set's tracks, with references usable in this turn: most requests then need no discovery first.
         let trackList: JsonObject[] | undefined; let moreTracks = false; let moreDevices = false;
         try {
-          const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: 100 });
-          const tracksRead = await tools!.call("live_discover", trackArgs, signal, { host: true }); assertLease(lease, signal);
-          if (!tracksRead.isError) {
-            const trackPage = discoveryPayload(tracksRead, "track", epoch);
+          if ("error" in tracksRead) throw tracksRead.error;
+          if (!tracksRead.value.isError) {
+            const trackPage = discoveryPayload(tracksRead.value, "track", epoch);
             registerRows("track", trackPage.items, trackArgs, trackPage.nextCursor);
             trackList = trackPage.items.map((item) => ({ ref: typeof item.ref === "string" ? shortRef(item.ref) : null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null }));
             moreTracks = Boolean(trackPage.nextCursor) || trackPage.truncated === true;
             // And the devices on them, so a request about a track's sound goes straight to its parameters.
             try {
-              const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: 100 });
-              const devicesRead = await tools!.call("live_discover", deviceArgs, signal, { host: true }); assertLease(lease, signal);
-              if (!devicesRead.isError) {
-                const devicePage = discoveryPayload(devicesRead, "device", epoch);
+              if ("error" in devicesRead) throw devicesRead.error;
+              if (!devicesRead.value.isError) {
+                const devicePage = discoveryPayload(devicesRead.value, "device", epoch);
                 registerRows("device", devicePage.items, deviceArgs);
                 // Devices by what holds them: a track, or a rack's chain. A rack lists its chains, empty ones too,
                 // each with its devices, so a request about a layer or a parallel chain goes straight to it.
@@ -855,7 +964,11 @@ export function createAbletonIntegration(options: Options): Integration {
         // newly seen Set, and again when the name changes: Save As, or an unsaved Set's first save.
         const newSet = project?.identity !== identity;
         let path = newSet ? undefined : project!.path;
-        if (newSet || project!.name !== name) { path = await projectPath(signal); assertLease(lease, signal); }
+        if (newSet || project!.name !== name) {
+          // The Set's row says where its file is (an unsaved Set has none); an older bridge is asked.
+          if (Object.hasOwn(row, "filePath")) path = typeof row.filePath === "string" && row.filePath && existsSync(row.filePath) ? row.filePath : undefined;
+          else { path = await projectPath(signal); assertLease(lease, signal); }
+        }
         // The conversation stays with the Set: the same Set keeps its key, and so does the same file after
         // Live restarts (an unsaved Set by its name). References from before are gone either way; the
         // model discovers again every turn.

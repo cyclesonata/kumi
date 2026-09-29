@@ -445,3 +445,72 @@ test("rejects empty instructions, invalid or duplicate tool names, and a budget 
     assert.throws(() => harness(() => [], { budget }), /context budget/);
   }
 });
+
+/** A tool whose calls can start while they're written: work begins once a whole step ("}") has arrived. */
+function streamingTool() {
+  const calls: { pushes: string[]; finished?: unknown; abandoned: boolean }[] = [];
+  let executed = 0;
+  const planTool: KernelTool = {
+    ...tool("plan", async () => { executed++; return { text: "never" }; }),
+    stream(_signal, onStart) {
+      const record: (typeof calls)[number] = { pushes: [], abandoned: false };
+      calls.push(record);
+      let started = false;
+      return {
+        get started() { return started; },
+        push(delta) { record.pushes.push(delta); if (!started && record.pushes.join("").includes("}")) { started = true; onStart(); } },
+        async finish(input) { record.finished = input; return { text: "planned", reply: "Done: Tempo 120 → 126 BPM." }; },
+        async abandon() { record.abandoned = true; },
+      };
+    },
+  };
+  return { planTool, calls, get executed() { return executed; } };
+}
+const planParts = (whole: boolean): LanguageModelV4StreamPart[] => [
+  { type: "tool-input-start", id: "c1", toolName: "plan" },
+  { type: "tool-input-delta", id: "c1", delta: whole ? "{\"steps\":[{\"tool\":\"set_tempo\"}" : "{\"steps\":[{\"tool\":" },
+];
+const overloaded = () => new APICallError({ message: "down", url: "u", requestBodyValues: {}, statusCode: 503, isRetryable: true, responseHeaders: { "retry-after-ms": "1" } });
+
+test("a plan starts while the model is still writing it, and finishes with the whole of it", async () => {
+  const fixture = streamingTool();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const h = harness(() => new ReadableStream({ async start(controller) {
+    for (const part of planParts(true)) controller.enqueue(part);
+    await held;
+    controller.enqueue({ type: "tool-input-delta", id: "c1", delta: "]}" });
+    controller.enqueue({ type: "tool-input-end", id: "c1" });
+    controller.enqueue(call("plan", "{\"steps\":[{\"tool\":\"set_tempo\"}]}"));
+    controller.enqueue(finish("tool-calls")); controller.close();
+  } }), { tools: [fixture.planTool] });
+  const { events, emit } = collect();
+  const running = h.kernel.run("go", new AbortController().signal, emit);
+  await delay(10);
+  assert.deepEqual(events.map((event) => event.type), ["tool-input", "tool-start"], "running before the model finished writing it");
+  release();
+  assert.equal((await running).stopReason, "completed");
+  assert.deepEqual(fixture.calls[0]!.finished, { steps: [{ tool: "set_tempo" }] });
+  assert.equal(fixture.calls[0]!.pushes.join(""), "{\"steps\":[{\"tool\":\"set_tempo\"}]}");
+  assert.equal(fixture.executed, 0, "not run a second time");
+  assert.deepEqual(events.map((event) => event.type), ["tool-input", "tool-start", "tool-end", "text"], "its reply ends the turn");
+  assert.equal(h.requests.length, 1);
+  await h.kernel.close();
+});
+
+test("a reply that breaks off after its plan began isn't asked for again; one that broke off before is, afresh", async () => {
+  const begun = streamingTool();
+  let attempts = 0;
+  const failing = harness(() => { attempts++; return [...planParts(true), { type: "error", error: overloaded() }]; }, { tools: [begun.planTool] });
+  await assert.rejects(failing.kernel.run("go", new AbortController().signal, () => {}), /overloaded/);
+  assert.equal(attempts, 1, "its first step ran, so the reply isn't asked for again");
+  assert.equal(begun.calls[0]!.abandoned, true, "and nothing more of the plan starts");
+  await failing.kernel.close();
+
+  const early = streamingTool();
+  const retried = harness((_options, n) => n === 1 ? [...planParts(false), { type: "error", error: overloaded() }] : [...text("ok"), finish()], { tools: [early.planTool] });
+  assert.equal((await retried.kernel.run("go", new AbortController().signal, () => {})).stopReason, "completed");
+  assert.equal(retried.requests.length, 2, "nothing had begun, so the reply was asked for again");
+  assert.equal(early.calls[0]!.abandoned, true);
+  await retried.kernel.close();
+});

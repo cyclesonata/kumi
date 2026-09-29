@@ -17,7 +17,7 @@ import { Renderer, type Cursor } from "./render.js";
 import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
-import { stepLabel, Transcript, type Entry, type Row } from "./transcript.js";
+import { doingLabel, stepLabel, Transcript, type Entry, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { textWidth, truncate } from "./width.js";
 import { wrap } from "./wrap.js";
@@ -198,6 +198,10 @@ export class TuiApp {
   private queued: string | undefined;
   private activity = "connecting to Live";
   private panel: Panel | undefined;
+  /** The model is writing a plan of changes (the call's id), which starts running as it's written. */
+  private planning: string | undefined;
+  /** Changes Kumi made in the answer under way, for NOW. */
+  private turnChanges = 0;
   /** The last message sent, to send again after a sign-in it was waiting for. */
   private lastSent: string | undefined;
   private readonly done: Promise<number>;
@@ -262,6 +266,7 @@ export class TuiApp {
             this.suppress = false; this.failed = false; this.bytes = 0; this.stream.discard();
             this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running" }) as Assistant;
             this.scroll = 0;
+            this.planning = undefined; this.turnChanges = 0;
           }
         } else if (event.state === "cancelling") {
           this.suppress = true; this.stream.discard();
@@ -306,6 +311,7 @@ export class TuiApp {
         else {
           this.changes.push(event.change);
           if (this.changes.length > 500) this.changes.shift();
+          if (this.current) this.turnChanges++;
           this.lastChange = { id: event.change.id, at: performance.now() };
           // NOW shows the change for a moment, then one more frame puts it back.
           setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
@@ -332,9 +338,14 @@ export class TuiApp {
         this.current.text += this.stream.push(event.text);
         this.transcript.touch(this.current);
         break;
+      case "tool-input":
+        // A plan takes seconds to write; its changes start as it's written.
+        if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
+        break;
       case "tool-start":
+        if (this.planning === event.id) this.planning = undefined;
         if (!this.current || this.suppress) break;
-        this.current.steps.push({ id: event.id, label: stepLabel(event.name), state: "running" });
+        this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running" });
         this.transcript.touch(this.current);
         break;
       case "tool-end": {
@@ -1017,9 +1028,14 @@ export class TuiApp {
     const flash = this.lastChange && performance.now() - this.lastChange.at < CHANGE_FLASH_MS ? this.changes.find((change) => change.id === this.lastChange!.id) : undefined;
     if (state === "running") {
       const blink = Math.floor(performance.now() / 500) % 2 === 0;
-      const step = this.current?.steps.at(-1);
-      if (flash && step?.state !== "running") return { dot: blink ? st.accent : st.pulse, label: "working", detail: `✓ ${flash.title}`, detailStyle: st.bright };
-      return { dot: blink ? st.accent : st.pulse, label: "working", detail: step?.state === "running" ? step.label : this.current ? "thinking" : this.activity, detailStyle: st.dim };
+      const dot = blink ? st.accent : st.pulse;
+      const running = this.current?.steps.at(-1)?.state === "running" ? this.current.steps.at(-1) : undefined;
+      // How many changes this answer has made so far; a plan's show one by one as they land.
+      const label = this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
+      if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `✓ ${flash.title}`, detailStyle: st.bright };
+      if (running) return { dot, label, detail: doingLabel(running.tool, running.label), detailStyle: st.dim };
+      if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
+      return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }
     if (flash) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
     return { label: "", detail: "Ready", detailStyle: st.faint };

@@ -678,3 +678,69 @@ test("a device parameter's title uses Live's own text on both sides when the bri
   assert.deepEqual([summary.from, summary.to, summary.range, summary.track], [0.6, 0.45, [0, 1], { name: "Bass" }], "the picture still has the numbers");
   assert.equal(kind.summarize(preview, {}, bass).title, "Auto Filter · Frequency 0.6 → 0.45", "without Live's text for the new value, plain numbers");
 });
+
+test("make_changes starts while the model is still writing it: each step runs once it's whole, and the result is the same", async () => {
+  const b = await opened();
+  try {
+    let began = 0;
+    const call = tool(b.tools, "make_changes").stream!(signal(), () => { began++; });
+    const input = { steps: [
+      { tool: "set_tempo", input: { tempo: 126 } },
+      { tool: "set_mixer", input: { trackRef: "track:1", volume: 0.6 } },
+      { tool: "rename", input: { kind: "track", ref: "track:2", name: "Drums {bus}" } },
+    ], final: true };
+    const text = JSON.stringify(input);
+    const cut = text.indexOf("{\"tool\":\"set_mixer\"") + 12;
+    call.push(text.slice(0, cut));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(b.tempo, 126, "the first step ran while the rest was being written");
+    assert.equal(began, 1); assert.equal(call.started, true);
+    assert.ok(!b.requests.some((request) => request.name === "live_mixer_preview"), "a step runs only once it's whole");
+    call.push(text.slice(cut));
+    const result = await call.finish(input);
+    assert.equal(result.isError, false, result.text);
+    assert.deepEqual((JSON.parse(result.text) as { done: { step: number }[] }).done.map((step) => step.step), [1, 2, 3]);
+    assert.match(result.reply ?? "", /^Done:\n- Tempo 120 → 126 BPM\n- Fixture Bass volume down\n- /);
+    assert.equal(b.records.length, 3, "each with its own HISTORY entry and undo");
+  } finally { await b.integration.close(); }
+});
+
+test("a streamed plan still sends a rack's pads as one change, and stops where a step turns out invalid", async () => {
+  const b = await opened({ padBatches: true });
+  const folder = mkdtempSync(join(tmpdir(), "kumi-stream-kit-"));
+  try {
+    for (const name of ["Kick.wav", "Snare.wav"]) writeFileSync(join(folder, name), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const sample = { random: true, folders: [folder] };
+    const kit = { steps: [
+      { tool: "add_tracks_and_scenes", input: { tracks: [{ name: "Kit", kind: "midi" }], scenes: [] }, as: "track" },
+      { tool: "load_device", input: { trackRef: "@track", itemId: "instruments/Drum Rack" }, as: "rack" },
+      { tool: "load_sample_to_pad", input: { deviceRef: "@rack", note: 36, sample } },
+      { tool: "load_sample_to_pad", input: { deviceRef: "@rack", note: 37, sample } },
+    ] };
+    const call = tool(b.tools, "make_changes").stream!(signal(), () => {});
+    const text = JSON.stringify(kit);
+    const padsFrom = text.indexOf("{\"tool\":\"load_sample_to_pad\"");
+    const secondPad = text.indexOf("{\"tool\":\"load_sample_to_pad\"", padsFrom + 1);
+    call.push(text.slice(0, secondPad));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(b.requests.some((request) => request.name === "live_browser_load_preview"), "the rack loaded while the pads were being written");
+    assert.ok(!b.requests.some((request) => request.name === "live_drum_pad_preview"), "the first pad waits to see whether the next joins it");
+    call.push(text.slice(secondPad));
+    const result = await call.finish(kit);
+    assert.equal(result.isError, false, result.text);
+    const pads = b.requests.filter((request) => request.name === "live_drum_pad_preview");
+    assert.equal(pads.length, 1); assert.equal(pads[0]!.args.action, "load-samples", "both pads in one Live request");
+
+    const uneven = { steps: [{ tool: "set_tempo", input: { tempo: 128 } }, { tool: "set_mixer", input: {}, each: { trackRef: ["track:1", "track:2"], volume: [0.6] } }] };
+    const later = tool(b.tools, "make_changes").stream!(signal(), () => {});
+    later.push(JSON.stringify(uneven));
+    const stopped = await later.finish(uneven);
+    assert.equal(stopped.isError, true); assert.equal(b.tempo, 128, "the step before the invalid one had happened");
+    assert.deepEqual((JSON.parse(stopped.text) as { stopped: { step: number; error: string } }).stopped.step, 2);
+    assert.match(stopped.text, /lists of one length/);
+    // Written whole (no pieces streamed), an invalid plan changes nothing, as ever.
+    const whole = tool(b.tools, "make_changes").stream!(signal(), () => {});
+    const refused = await whole.finish({ steps: [{ tool: "set_tempo", input: { tempo: 90 } }, uneven.steps[1]] });
+    assert.equal(refused.isError, true); assert.equal(b.tempo, 128);
+  } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
+});
