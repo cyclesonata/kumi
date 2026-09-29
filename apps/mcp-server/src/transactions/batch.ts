@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { ownedTrackFingerprintRow, type AsyncLiveAdapter, type LiveAdapter, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus } from "../live.js";
+import { ownedTrackFingerprintRow, withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus } from "../live.js";
 
 /**
  * Compound batch transactions: one preview/apply/undo cycle over an ordered,
@@ -239,7 +239,7 @@ function trackCreatedFingerprint(snapshot: LiveSnapshot, reference: string): str
   // arm, meters and view changes that Live makes on its own are not edits to the track.
   const ownedTrack = ownedTrackFingerprintRow(track) as unknown as Row;
   const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference);
-  return fingerprint({ track: ownedTrack, arrangementClips });
+  return fingerprint(withoutPlaybackState({ track: ownedTrack, arrangementClips }));
 }
 
 function routingStateRevision(track: Row): string {

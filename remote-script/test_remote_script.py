@@ -3,7 +3,10 @@ import hashlib
 import json
 import os
 import secrets
+import struct
 import subprocess
+import sys
+import types
 import tempfile
 import threading
 import time
@@ -616,7 +619,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "11a6cb04297b8086e24260db083d569b829ca512e5ae665ed79d07a2626adf89")
+        self.assertEqual(digest, "ec919fd1a550c84eb920092fd963e4df923aa1facd0dc58793c1eb2b6ff0ff95")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -1115,6 +1118,78 @@ class ControlSurfaceTests(unittest.TestCase):
         changed = bridge._dispatch_with_holder("preflight", request, holder); song.is_playing = False
         with self.assertRaises(ValueError): bridge._dispatch_with_holder("prepare", {**request, "preflightToken": changed["preflightToken"], "confirmation": changed["confirmation"], "idempotencyKey": "locator-playback-change"}, holder)
 
+    def test_mutations_and_reads_go_through_while_live_plays(self):
+        # While a scene plays, Live moves the playhead (the Set row's position) and each playing clip's
+        # playing_position every display tick, and playing automation moves its parameter. Preflight,
+        # prepare and invoke land on different ticks, so none of that may be part of their fence.
+        song = FakeSong(); song.is_playing = True; song.current_song_time = 1272.0; song.tempo = 120.0
+        clip = FakeClip(4.0); clip.name = "Loop"; clip.playing_position = 0.25; clip.is_playing = True; song.tracks[0].clip_slots[0].clip = clip
+        automated = song.tracks[0].devices[0].parameters[0]; automated.automation_state = "playing"
+        stops = []; song.stop_playing = lambda: stops.append(True)
+        bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song)
+        class ImmediateQueue:
+            def submit(self, action, deadline_ms=None, on_cancel=None): return action()
+        bridge.queue = ImmediateQueue(); bridge._executed_mutations = {}; bridge._executed_lock = threading.Lock(); holder = {}
+        snapshot = bridge.mapper.snapshot(); set_row = snapshot["set"]; track_row = snapshot["tracks"][0]; clip_row = track_row["clips"][0]; parameter_row = track_row["devices"][0]["parameters"][0]
+        def play_on():
+            song.current_song_time += 0.37; clip.playing_position = (clip.playing_position + 0.37) % 4.0; automated.value = (automated.value + 0.1) % 1.0
+        def authorize(request, key):
+            preflight = bridge._dispatch_with_holder("preflight", request, holder); play_on()
+            prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": key}, holder); play_on()
+            return prepared
+        stop = {"operation": "transport.action", "transactionId": "transaction-stop-while-playing", "args": {"setRef": set_row["ref"], "action": "stop", "expectedObjectIdentity": set_row["objectIdentity"], "expectedRevision": str(bridge.mapper._playback()["revision"])}}
+        prepared = authorize(stop, "stop-while-playing")
+        self.assertEqual(bridge._dispatch_with_holder("invoke", {**stop, "authorityToken": prepared["authorityToken"]}, holder)["done"], True); self.assertEqual(stops, [True])
+        # A clip edit names the playing clip, a track edit its track, a parameter edit the automated parameter.
+        for operation, args, key in (("clip.set", {"ref": clip_row["ref"], "name": "Edited"}, "clip-edit-while-playing"), ("track.set", {"ref": track_row["ref"], "colorIndex": 3}, "track-edit-while-playing"), ("device.parameter.set", {"ref": parameter_row["ref"], "value": 0.5}, "automated-parameter-while-playing")):
+            self.assertEqual(authorize({"operation": operation, "transactionId": f"transaction-{key}", "args": args}, key)["operation"], operation)
+        # Reading the song needs no mutation authority at all.
+        song.signature_numerator = 4; song.signature_denominator = 4; song.swing_amount = 0.0
+        state = bridge._dispatch_with_holder("invoke", {"operation": "song.read", "args": {"setRef": set_row["ref"]}}, holder); play_on()
+        self.assertEqual(state["signatureNumerator"], 4)
+        # A real, discrete change between preflight and prepare still refuses.
+        edit = {"operation": "clip.set", "transactionId": "transaction-clip-edit-refused", "args": {"ref": clip_row["ref"], "name": "Edited"}}
+        preflight = bridge._dispatch_with_holder("preflight", edit, holder); clip.name = "Renamed by hand"
+        with self.assertRaisesRegex(ValueError, "mismatched mutation preflight"): bridge._dispatch_with_holder("prepare", {**edit, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": "clip-edit-refused"}, holder)
+        manual = {"operation": "device.parameter.set", "transactionId": "transaction-parameter-refused", "args": {"ref": parameter_row["ref"], "value": 0.5}}
+        automated.automation_state = "none"; preflight = bridge._dispatch_with_holder("preflight", manual, holder); automated.value = 0.9
+        with self.assertRaisesRegex(ValueError, "mismatched mutation preflight"): bridge._dispatch_with_holder("prepare", {**manual, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": "parameter-refused"}, holder)
+
+    def test_playing_mixer_and_tempo_automation_leave_the_authority_fence_alone(self):
+        # Volume, send and tempo automation move those values every tick while Live plays. The Set's and
+        # the track's rows carry the values but not their automation state, which the parameters are asked.
+        song = FakeSong(); song.is_playing = True; song.tempo = 120.0
+        track = song.tracks[0]; track.mixer_device = FakeMixerDevice(); mixer = track.mixer_device
+        master = FakeTrack(); master.mixer_device = FakeMixerDevice(); song.master_track = master; song_tempo = master.mixer_device.song_tempo
+        for parameter in (mixer.volume, mixer.sends[1], song_tempo): parameter.automation_state = "playing"
+        stops = []; song.stop_playing = lambda: stops.append(True)
+        bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song)
+        class ImmediateQueue:
+            def submit(self, action, deadline_ms=None, on_cancel=None): return action()
+        bridge.queue = ImmediateQueue(); bridge._executed_mutations = {}; bridge._executed_lock = threading.Lock(); holder = {}
+        snapshot = bridge.mapper.snapshot(); set_row = snapshot["set"]; track_row = snapshot["tracks"][0]
+        self.assertIsNotNone(track_row["mixer"]["volumeRef"]); self.assertEqual(len(track_row["mixer"]["sendRefs"]), 2)
+        def play_on():
+            song.current_song_time += 0.37; mixer.volume.value = (mixer.volume.value + 0.05) % 1.0; mixer.sends[1].value = (mixer.sends[1].value + 0.07) % 1.0
+            song.tempo += 0.5; song_tempo.value = song.tempo
+        def authorize(request, key):
+            preflight = bridge._dispatch_with_holder("preflight", request, holder); play_on()
+            prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": key}, holder); play_on()
+            return prepared
+        track.color_index = 0; fences = {"expectedObjectIdentity": track_row["objectIdentity"], "expectedStateRevision": hashlib.sha256(bridge.mapper._bounded_canonical(bridge.mapper._track_properties_state(track)).encode("utf-8")).hexdigest()}
+        edit = {"operation": "track.set", "transactionId": "transaction-track-edit-under-automation", "args": {"ref": track_row["ref"], "colorIndex": 3, **fences}}
+        prepared = authorize(edit, "track-edit-under-automation")
+        bridge._dispatch_with_holder("invoke", {**edit, "authorityToken": prepared["authorityToken"]}, holder); self.assertEqual(track.color_index, 3)
+        stop = {"operation": "transport.action", "transactionId": "transaction-stop-under-tempo-automation", "args": {"setRef": set_row["ref"], "action": "stop", "expectedObjectIdentity": set_row["objectIdentity"], "expectedRevision": str(bridge.mapper._playback()["revision"])}}
+        prepared = authorize(stop, "stop-under-tempo-automation")
+        self.assertEqual(bridge._dispatch_with_holder("invoke", {**stop, "authorityToken": prepared["authorityToken"]}, holder)["done"], True); self.assertEqual(stops, [True])
+        # The same values moved by hand, with no automation playing them, are real changes and still refuse.
+        for key, change in (("pan-by-hand", lambda: setattr(mixer.panning, "value", 0.9)), ("tempo-by-hand", lambda: setattr(song, "tempo", 90.0))):
+            if key == "tempo-by-hand": song_tempo.automation_state = "none"
+            request = {"operation": "track.set", "transactionId": f"transaction-{key}", "args": {"ref": track_row["ref"], "colorIndex": 4}}
+            preflight = bridge._dispatch_with_holder("preflight", request, holder); change()
+            with self.assertRaisesRegex(ValueError, "mismatched mutation preflight"): bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": key}, holder)
+
     def test_capture_stop_authority_survives_watchdog_stop_but_not_identity_change(self):
         song = FakeSong(); song.is_playing = True
         bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song)
@@ -1357,6 +1432,31 @@ class ControlSurfaceTests(unittest.TestCase):
         del clip.fade_in_length; row = mapper.get(row["ref"]); state = hashlib.sha256(mapper._bounded_canonical({field: row.get(field) for field in fields}).encode()).hexdigest()
         with self.assertRaises(ValueError): mapper.invoke("audio.clip.set", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": authority, "expectedStateRevision": state, "fadeInLength": 0.1})
 
+    def test_audio_clip_pitch_is_written_as_the_whole_number_live_takes(self):
+        class TypedAudioClip(FakeCapturedAudioClip):
+            """Like Live: pitch_coarse is an int property whose setter refuses a float (Boost ArgumentError)."""
+            @property
+            def pitch_coarse(self): return self.__dict__.get("_pitch_coarse", 0)
+            @pitch_coarse.setter
+            def pitch_coarse(self, value):
+                if not isinstance(value, int) or isinstance(value, bool): raise ArgumentError("Python argument types in None.None(AudioClip, float) did not match C++ signature")
+                self.__dict__["_pitch_coarse"] = value
+            @property
+            def gain(self): return self.__dict__.get("_gain", 1.0)
+            @gain.setter
+            def gain(self, value): self.__dict__["_gain"] = float32(value)
+        song = FakeSong(); clip = TypedAudioClip(); clip.is_recording = False; clip.pitch_fine = 0.0; clip.loop_start = 0.0; clip.loop_end = 2.0; clip.warp_mode = 1; clip.warping = True; clip.fade_in_length = 0.0; clip.fade_out_length = 0.0
+        song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["clips"][0]
+        fields = ("gain", "pitchCoarse", "pitchFine", "loopStart", "loopEnd", "warpMode", "warping", "fadeInLength", "fadeOutLength")
+        def request(**edits):
+            current = mapper.get(row["ref"])
+            return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": hashlib.sha256(mapper._bounded_canonical(mapper._session_clip_authority(row["ref"])).encode()).hexdigest(), "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical({field: current.get(field) for field in fields}).encode()).hexdigest(), **edits}
+        validate_operation_payload("audio.clip.set", "request", request(pitchCoarse=-12, gain=0.6))
+        self.assertTrue(mapper.invoke("audio.clip.set", request(pitchCoarse=-12, gain=0.6))["changed"])
+        self.assertIs(type(clip.pitch_coarse), int); self.assertEqual(clip.pitch_coarse, -12); self.assertAlmostEqual(clip.gain, 0.6, places=6)
+        with self.assertRaisesRegex(ValueError, "pitchCoarse must be a whole number"): mapper.invoke("audio.clip.set", request(pitchCoarse=-11.5))
+        self.assertEqual(clip.pitch_coarse, -12)
+
     def test_audio_multi_field_failure_rolls_back_exact_prior_state(self):
         class FailingAudioClip(FakeCapturedAudioClip):
             def __init__(self): self._fade_out = 0.0; super().__init__()
@@ -1540,8 +1640,13 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shift active transaction-owned reference"): collision_mapper.invoke("track.create", {"name": "Second at zero", "kind": "midi", "index": 0, "expectedStructureRevision": collision_mapper._structure_revision()}, transaction)
         self.assertEqual(len(collision_mapper.song.tracks), 2); self.assertEqual(collision_mapper.invoke("track.delete", {"ref": first["ref"], "expectedStructureRevision": collision_mapper._structure_revision(), "expectedObjectIdentity": first["objectIdentity"]}, transaction, first["ownershipToken"]), {"deleted": first["ref"]}); self.assertEqual(len(collision_mapper.song.tracks), 1)
         shifted_mapper = LiveObjectMapper(FakeSong()); later = shifted_mapper.invoke("track.create", {"name": "Owned later", "kind": "midi", "index": 1, "expectedStructureRevision": shifted_mapper._structure_revision()}, transaction)
-        with self.assertRaisesRegex(ValueError, "shift active transaction-owned reference"): shifted_mapper.invoke("track.create", {"name": "Forbidden before", "kind": "midi", "index": 0, "expectedStructureRevision": shifted_mapper._structure_revision()}, "other-structure-transaction")
-        self.assertEqual(shifted_mapper.invoke("track.delete", {"ref": later["ref"], "expectedStructureRevision": shifted_mapper._structure_revision(), "expectedObjectIdentity": later["objectIdentity"]}, transaction, later["ownershipToken"]), {"deleted": later["ref"]})
+        # Another transaction adding a track before it is not refused: the older creation's reference
+        # moved, so it loses its ownership, and its cleanup is refused instead.
+        before = shifted_mapper.invoke("track.create", {"name": "Added before", "kind": "midi", "index": 0, "expectedStructureRevision": shifted_mapper._structure_revision()}, "other-structure-transaction")
+        self.assertEqual([track.name for track in shifted_mapper.song.tracks], ["Added before", "Drums", "Owned later"])
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): shifted_mapper.invoke("track.delete", {"ref": later["ref"], "expectedStructureRevision": shifted_mapper._structure_revision(), "expectedObjectIdentity": later["objectIdentity"]}, transaction, later["ownershipToken"])
+        self.assertEqual(len(shifted_mapper.song.tracks), 3)
+        self.assertEqual(shifted_mapper.invoke("track.delete", {"ref": before["ref"], "expectedStructureRevision": shifted_mapper._structure_revision(), "expectedObjectIdentity": before["objectIdentity"]}, "other-structure-transaction", before["ownershipToken"]), {"deleted": before["ref"]})
         midi_mapper = LiveObjectMapper(FakeSong(), provenance="real-live"); track_ref = midi_mapper.snapshot()["tracks"][0]["ref"]; midi = midi_mapper.invoke("clip.create", self.clip_creation_args(midi_mapper, track_ref, 0, kind="midi", name="Owned MIDI", length=4), transaction); midi_mapper.invoke("note.add-batch", {"ref": midi["ref"], "notes": [{"pitch": 36, "start": 0, "duration": 0.25, "velocity": 100, "channel": 1}], **self.note_authority(midi_mapper, midi["ref"])}, transaction); self.assertEqual(midi_mapper.invoke("clip.delete", {"ref": midi["ref"], **midi_mapper._session_clip_authority(midi["ref"])}, transaction, midi["ownershipToken"]), {"deleted": midi["ref"]})
 
     def test_an_owned_device_gone_from_the_set_no_longer_blocks_new_tracks(self):
@@ -1552,10 +1657,16 @@ class ControlSurfaceTests(unittest.TestCase):
         kept = song.tracks[0].devices[0]; mapper._owned_cleanup_tokens["kept"] = {"transactionId": "t", "ref": f"{mapper.refs.epoch}:device:0:0", "objectIdentity": mapper._capture_object_identity(kept), "fingerprint": "0" * 64}
         self.assertTrue(mapper._owned_positional_conflict("track", 0))
 
-    def test_scene_capture_cannot_shift_owned_scene_reference(self):
+    def test_scene_capture_before_an_owned_scene_retires_its_ownership_instead_of_refusing(self):
         mapper = LiveObjectMapper(FakeSong()); transaction = "owned-scene-shift-transaction"; owned = mapper.invoke("scene.create", {"name": "Owned later", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, transaction); mapper.song.capture_and_insert_scene = lambda: mapper.song.scenes.insert(0, FakeScene("Captured before"))
-        with self.assertRaisesRegex(ValueError, "shift active transaction-owned"): mapper.invoke("scene.capture", {"expectedStateRevision": mapper._capture_authority_revision()}, "capture-other-transaction")
-        self.assertEqual([scene.name for scene in mapper.song.scenes], ["Scene 1", "Owned later"]); self.assertEqual(mapper.invoke("scene.delete", {"ref": owned["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": owned["objectIdentity"]}, transaction, owned["ownershipToken"]), {"deleted": owned["ref"]})
+        captured = mapper.invoke("scene.capture", {"expectedStateRevision": mapper._capture_authority_revision()}, "capture-other-transaction")
+        self.assertEqual([scene.name for scene in mapper.song.scenes], ["Captured before", "Scene 1", "Owned later"])
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper.invoke("scene.delete", {"ref": owned["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": owned["objectIdentity"]}, transaction, owned["ownershipToken"])
+        self.assertEqual(mapper.invoke("scene.delete", {"ref": captured["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": captured["objectIdentity"]}, "capture-other-transaction", captured["ownershipToken"]), {"deleted": captured["ref"]})
+        # The capturing transaction's own later scene still refuses a capture that would move it.
+        own = mapper.invoke("scene.create", {"name": "Own later", "index": 2, "expectedStructureRevision": mapper._structure_revision()}, "capture-own-transaction")
+        with self.assertRaisesRegex(ValueError, "shift active transaction-owned"): mapper.invoke("scene.capture", {"expectedStateRevision": mapper._capture_authority_revision()}, "capture-own-transaction")
+        self.assertEqual([scene.name for scene in mapper.song.scenes], ["Scene 1", "Owned later", "Own later"]); self.assertTrue(own["ownershipToken"])
 
     def test_session_structure_lifecycle_and_empty_slots_are_authoritative(self):
         mapper = LiveObjectMapper(FakeSong())
@@ -2263,6 +2374,22 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source deletion failed"):
             mapper.invoke("arrangement.clip.move", move_args)
         self.assertEqual(len(track.arrangement_clips), before); self.assertIn(source_object, track.arrangement_clips)
+
+    def test_arrangement_move_fingerprint_is_the_clip_content_not_its_playback(self):
+        # The host fingerprints clips without playback state; a moved clip that plays must still match.
+        song = FakeSong(); track = song.tracks[0]
+        clip = FakeClip(4.0); clip.name = "Moving"; clip.start_time = 8.0; clip.playing_position = 1.5; clip.is_playing = True; track.arrangement_clips = [clip]
+        def duplicate_to_arrangement(source, position):
+            created = FakeClip(source.length); created.name = source.name; created.start_time = position; created.playing_position = 3.25; created.is_playing = True
+            track.arrangement_clips.append(created)
+        track.duplicate_clip_to_arrangement = duplicate_to_arrangement
+        track.delete_clip = lambda candidate: track.arrangement_clips.remove(candidate)
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["arrangement"]["clips"][0]
+        moved = mapper.invoke("arrangement.clip.move", {"ref": row["ref"], "position": 16.0, "expectedObjectIdentity": row["objectIdentity"],
+            "expectedAuthorityRevision": mapper._arrangement_clip_authority_revision(row["ref"]), "expectedContentFingerprint": mapper._mapped_fingerprint(row["ref"])})
+        self.assertEqual(moved["createdFingerprint"], mapper._mapped_fingerprint(moved["ref"]))
+        track.arrangement_clips[0].playing_position = 0.5
+        self.assertEqual(moved["createdFingerprint"], mapper._mapped_fingerprint(moved["ref"]), "playback moving on doesn't change the moved clip's fingerprint")
 
     def test_transport_revision_rejects_observed_aba_state(self):
         song = FakeSong()
@@ -3225,7 +3352,7 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
 
     def _clip_action_fences(self, mapper, row):
         current = mapper.get(row["ref"])
-        state = hashlib.sha256(mapper._bounded_canonical({"isPlaying": current.get("isPlaying"), "playingPosition": current.get("playingPosition"), "length": current.get("length"), "loopStart": current.get("loopStart"), "loopEnd": current.get("loopEnd")}).encode()).hexdigest()
+        state = hashlib.sha256(mapper._bounded_canonical({"isPlaying": current.get("isPlaying"), "length": current.get("length"), "loopStart": current.get("loopStart"), "loopEnd": current.get("loopEnd")}).encode()).hexdigest()
         return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._clip_authority_digest(row["ref"]), "expectedStateRevision": state}
 
     def test_clip_actions_crop_duplicate_and_scrub(self):
@@ -3254,6 +3381,36 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid"): mapper.invoke("clip.action", {**self._clip_action_fences(mapper, row), "action": "detonate"})
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("clip.action", {**self._clip_action_fences(mapper, row), "action": "crop", "expectedContentFingerprint": "0" * 64})
 
+    def test_clip_actions_go_through_while_the_clip_plays(self):
+        # A playing clip's playing_position moves every tick, so a crop previewed on one tick and applied
+        # a few ticks later is the same crop. A loop changed in between is a real change and still refuses.
+        song = FakeSong(); song.is_playing = True; song.current_song_time = 96.0
+        clip = FakeClip(4.0); clip.loop_start = 1.0; clip.loop_end = 3.0; clip.is_playing = True; clip.playing_position = 1.25
+        clip.crop = lambda: setattr(clip, "length", clip.loop_end - clip.loop_start)
+        song.tracks[0].clip_slots[0].clip = clip
+        bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song); mapper = bridge.mapper
+        class ImmediateQueue:
+            def submit(self, action, deadline_ms=None, on_cancel=None): return action()
+        bridge.queue = ImmediateQueue(); bridge._executed_mutations = {}; bridge._executed_lock = threading.Lock(); holder = {}
+        row = mapper.snapshot()["tracks"][0]["clips"][0]
+        def play_on():
+            song.current_song_time += 0.37; clip.playing_position = 1.0 + (clip.playing_position - 1.0 + 0.37) % 2.0
+        def apply(args, key):
+            request = {"operation": "clip.action", "transactionId": f"transaction-{key}", "args": args}
+            preflight = bridge._dispatch_with_holder("preflight", request, holder); play_on()
+            prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": key}, holder); play_on()
+            return bridge._dispatch_with_holder("invoke", {**request, "authorityToken": prepared["authorityToken"]}, holder)
+        crop = {**self._clip_action_fences(mapper, row), "action": "crop", "expectedContentFingerprint": mapper._mapped_fingerprint(row["ref"])}; play_on()
+        self.assertTrue(apply(crop, "crop-while-playing")["changed"]); self.assertEqual(clip.length, 2.0)
+        scrub = {**self._clip_action_fences(mapper, row), "action": "move-playing-position", "offset": 1.0}; play_on()
+        clip.move_playing_pos = lambda offset: setattr(clip, "playing_position", clip.playing_position + offset)
+        self.assertTrue(apply(scrub, "jump-while-playing")["changed"])
+        stale = {**self._clip_action_fences(mapper, row), "action": "crop", "expectedContentFingerprint": mapper._mapped_fingerprint(row["ref"])}; clip.loop_end = 2.5
+        with self.assertRaisesRegex(ValueError, "clip content changed since preview"): apply(stale, "crop-after-loop-change")
+        self.assertEqual(clip.length, 2.0)
+        stopped = {**self._clip_action_fences(mapper, row), "action": "move-playing-position", "offset": 1.0}; clip.is_playing = False
+        with self.assertRaisesRegex(ValueError, "clip state changed since preview"): apply(stopped, "jump-after-clip-stopped")
+
     def test_automation_envelope_clear_counts_and_fences(self):
         song = FakeSong(); clip = FakeClip(4.0)
         envelope = type("Envelope", (), {})()
@@ -3280,18 +3437,18 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
                 copy = dict(note); copy["note_id"] = clip.next_note_id; clip.next_note_id += 1; clip.notes.append(copy)
         clip.duplicate_notes_by_id = duplicate
         def quantize(grid_enum, amount):
-            if isinstance(grid_enum, float): raise TypeError("quantize takes a GridQuantization enum")
+            # Live's RecordingQuantization number for 1/16 (no Live module here, so the bridge passes the number).
+            if grid_enum != 5: raise TypeError("quantize takes a RecordingQuantization enum")
             grid = 0.25
             for note in clip.notes: note["start_time"] = round(note["start_time"] / grid) * grid * amount + note["start_time"] * (1 - amount)
         clip.quantize = quantize
         def quantize_pitch(pitch, grid_enum, amount):
-            if isinstance(grid_enum, float): raise TypeError("quantize_pitch takes a GridQuantization enum")
+            if grid_enum != 5: raise TypeError("quantize_pitch takes a RecordingQuantization enum")
             grid = 0.25
             for note in clip.notes:
                 if note["pitch"] == pitch: note["start_time"] = round(note["start_time"] / grid) * grid
         clip.quantize_pitch = quantize_pitch
-        mapper_enum = lambda name: name
-        song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); mapper._grid_quantization_enum = mapper_enum; row = mapper.snapshot()["tracks"][0]["clips"][0]
+        song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["clips"][0]
         read = mapper.invoke("note.read-by-id", {"ref": row["ref"], "noteIds": [1]})
         self.assertEqual([note["pitch"] for note in read["notes"]], [60]); validate_operation_payload("note.read-by-id", "result", read)
         selected = mapper.invoke("note.read-selected", {"ref": row["ref"]})
@@ -3545,8 +3702,27 @@ class GroovePoolTests(unittest.TestCase):
         result = mapper.invoke("groove.edit", {**fences(), "name": "MPC 57", "timingAmount": 0.57, "velocityAmount": 0.3})
         self.assertTrue(result["changed"]); validate_operation_payload("groove.edit", "result", result)
         self.assertEqual((groove.name, groove.timing_amount, groove.velocity_amount), ("MPC 57", 0.57, 0.3))
-        with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("groove.edit", {**fences(), "timingAmount": 1.5})
+        with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("groove.edit", {**fences(), "timingAmount": 150.0})
+        with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("groove.edit", {**fences(), "velocityAmount": -101.0})
         with self.assertRaisesRegex(ValueError, "no fields"): mapper.invoke("groove.edit", fences())
+
+    def test_grooves_read_and_edit_in_the_units_live_reports(self):
+        # Live's Groove Pool shows (and its API reports) percentages, with velocity from -100 to 100, and
+        # keeps them as 32-bit floats; the Set's groove amount goes to 131.25%. A groove read with
+        # Timing 100% must pass the registry, or the groove preview fails its response contract.
+        class Base(int): pass  # Live's groove base is an enum: an int subclass
+        class Float32Groove(FakeGroove):
+            def __setattr__(self, name, value): object.__setattr__(self, name, float32(value) if name.endswith("_amount") else value)
+        groove = Float32Groove("Swing 16ths 66"); groove.base = Base(3); groove.quantization_amount = 0.0; groove.random_amount = 0.0; groove.timing_amount = 100.0; groove.velocity_amount = -30.0
+        song, mapper = self._mapper_with_groove(); song.groove_pool = FakeGroovePool([groove]); song.groove_amount = 1.3125
+        set_ref = mapper.snapshot()["set"]["ref"]
+        read = mapper.invoke("groove.read", {"setRef": set_ref}); validate_operation_payload("groove.read", "result", read)
+        self.assertEqual((read["grooves"][0]["timingAmount"], read["grooves"][0]["velocityAmount"], read["grooveAmount"]), (100.0, -30.0, 1.3125))
+        edit = {"ref": read["grooves"][0]["ref"], "timingAmount": 66.6, "velocityAmount": -12.5, "expectedObjectIdentity": mapper._capture_object_identity(groove), "expectedRevision": mapper._groove_revision()}
+        validate_operation_payload("groove.edit", "request", edit)
+        self.assertTrue(mapper.invoke("groove.edit", edit)["changed"])
+        self.assertNotEqual(groove.timing_amount, 66.6, "the fake keeps 32-bit floats like Live"); self.assertAlmostEqual(groove.timing_amount, 66.6, places=4)
+        validate_operation_payload("groove.set", "request", {"setRef": set_ref, "grooveAmount": 1.3125, "expectedObjectIdentity": mapper.snapshot()["set"]["objectIdentity"], "expectedRevision": mapper._groove_revision()})
 
     def test_clip_groove_assignment_and_has_groove(self):
         song, mapper = self._mapper_with_groove()
@@ -3620,6 +3796,37 @@ class SceneSlotExpansionTests(unittest.TestCase):
                     "expectedStateRevision": hashlib.sha256(mapper2._bounded_canonical(mapper2._scene_state_fields(failing)).encode()).hexdigest(), "tempo": 60.0, "colorIndex": 9}
         with self.assertRaisesRegex(RuntimeError, "tempo rejected"): mapper2.invoke("scene.set", bad_args)
         self.assertEqual(failing.tempo, 120.0); self.assertEqual(failing.color_index, 1)
+
+    def test_a_switched_off_scene_tempo_reads_minus_one_and_is_restored_by_its_switch(self):
+        class SwitchedScene(FakeScene):
+            """Like Live: a scene's tempo reads -1 while its tempo is switched off, and -1 can't be written."""
+            def __init__(self, name="Scene 1", refuse_enable=False): super().__init__(name); self._tempo = 120.0; self.refuse_enable = refuse_enable; self._enabled = False; self.color_index = 1; self.time_signature_numerator = 4; self.time_signature_denominator = 4; self.time_signature_enabled = False
+            @property
+            def tempo(self): return self._tempo if self._enabled else -1.0
+            @tempo.setter
+            def tempo(self, value):
+                if not 20 <= value <= 999: raise RuntimeError("Invalid tempo")
+                self._tempo = value
+            @property
+            def tempo_enabled(self): return self._enabled
+            @tempo_enabled.setter
+            def tempo_enabled(self, value): self._enabled = bool(value) and not self.refuse_enable
+        song = FakeSong(); scene = SwitchedScene(); song.scenes = [scene]; mapper = LiveObjectMapper(song)
+        def authority():
+            row = mapper.snapshot()["scenes"][0]
+            return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._scene_collection_revision(), "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(mapper._scene_state_fields(scene)).encode()).hexdigest()}
+        before = mapper.snapshot()["scenes"][0]; self.assertEqual((before["tempo"], before["tempoEnabled"]), (-1.0, False))
+        self.assertTrue(mapper.invoke("scene.set", {**authority(), "tempo": 122.0, "tempoEnabled": True})["changed"])
+        self.assertEqual((scene.tempo, scene.tempo_enabled), (122.0, True))
+        # The prior -1 is outside what can be written: restoring it means switching the tempo off.
+        with self.assertRaises(ValueError): validate_operation_payload("scene.set", "request", {**authority(), "tempo": -1.0, "tempoEnabled": False})
+        restore = {**authority(), "tempoEnabled": False}; validate_operation_payload("scene.set", "request", restore)
+        self.assertTrue(mapper.invoke("scene.set", restore)["changed"])
+        after = mapper.snapshot()["scenes"][0]; self.assertEqual((after["tempo"], after["tempoEnabled"]), (before["tempo"], before["tempoEnabled"]))
+        # A failed change rolls back to the switched-off tempo by its switch, never by writing -1.
+        refusing = SwitchedScene("Scene 2", refuse_enable=True); song.scenes = [refusing]; mapper = LiveObjectMapper(song); scene = refusing
+        with self.assertRaisesRegex(ValueError, "scene change was not confirmed"): mapper.invoke("scene.set", {**authority(), "tempo": 122.0, "tempoEnabled": True})
+        self.assertEqual((refusing.tempo, refusing.tempo_enabled), (-1.0, False))
 
     def test_scene_fire_selected_requires_confirmation(self):
         song, scene, slot, mapper = self._mapper_with_scene()
@@ -3727,7 +3934,11 @@ class SongTransportLinkTests(unittest.TestCase):
         self.assertTrue(mapper._operation_supported("transport.action"))
         def fences(): return {"setRef": set_ref, "expectedObjectIdentity": identity, "expectedRevision": str(mapper._playback()["revision"])}
         for action in ("start", "continue", "stop", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "stop-all-clips"):
-            result = mapper.invoke("transport.action", {**fences(), "action": action})
+            # The fence is the Set's playback revision ("<epoch>:playback:<n>:<digest>"), as transport.set's is:
+            # the registry must let it through on both sides, not only a 64-hex digest.
+            request = {**fences(), "action": action}; self.assertRegex(request["expectedRevision"], r"^\d+:playback:\d+:[0-9a-f]{16}$")
+            validate_operation_payload("transport.action", "request", request)
+            result = mapper.invoke("transport.action", request)
             self.assertTrue(result["done"]); validate_operation_payload("transport.action", "result", result)
         self.assertEqual(calls, ["start", "continue", "stop", "tap", "reenable", "record", "stop-all"])
         self.assertEqual((song.nudge_up, song.nudge_down), (True, True))
@@ -3939,6 +4150,90 @@ class TrackStructureExpansionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no fields"): mapper.invoke("track.view.set", fences())
 
 
+class OwnershipAcrossTransactionsTests(unittest.TestCase):
+    """Real-Live ownership rules: creations are cleaned up only with their transaction's token, later
+    structure changes move positional references, and explicit deletions carry exact identity fences."""
+
+    @staticmethod
+    def song_with_returns():
+        song = FakeSong()
+        def create_return_track():
+            track = FakeTrack(); track.name = f"Return {len(song.return_tracks)}"; song.return_tracks.append(track); return track
+        song.create_return_track = create_return_track
+        song.delete_return_track = lambda index: song.return_tracks.pop(index)
+        return song
+
+    def test_a_return_made_earlier_no_longer_blocks_adding_tracks(self):
+        # Returns' references follow every regular track's: a return Kumi made must not stop it from
+        # ever adding a track again in that Live session.
+        song = self.song_with_returns(); mapper = LiveObjectMapper(song, provenance="real-live")
+        made = mapper.invoke("track.create-return", {"name": "Sweep Return", "expectedStructureRevision": mapper._structure_revision()}, "transaction-made-return")
+        appended = mapper.invoke("track.create", {"name": "Bounce", "kind": "audio", "index": len(song.tracks), "expectedStructureRevision": mapper._structure_revision()}, "transaction-appended-track")
+        self.assertEqual(([track.name for track in song.tracks], appended["index"]), (["Drums", "Bounce"], 1))
+        again = mapper.invoke("track.create", {"name": "Bounce 2", "kind": "audio", "index": len(song.tracks), "expectedStructureRevision": mapper._structure_revision()}, "transaction-appended-again")
+        self.assertEqual(again["name"], "Bounce 2")
+        # The moved return's own undo is refused before anything changes, and the return stays.
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"):
+            mapper.invoke("track.delete-return", {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-made-return", made["ownershipToken"])
+        self.assertEqual([track.name for track in song.return_tracks], ["Sweep Return"])
+        # The newest creation keeps its undo; undoing newest first moves the return back where it was
+        # made, which gives it its ownership (and its undo) back.
+        self.assertEqual(mapper.invoke("track.delete", {"ref": again["ref"], "expectedObjectIdentity": again["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-appended-again", again["ownershipToken"]), {"deleted": again["ref"]})
+        self.assertEqual(mapper.invoke("track.delete", {"ref": appended["ref"], "expectedObjectIdentity": appended["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-appended-track", appended["ownershipToken"]), {"deleted": appended["ref"]})
+        self.assertEqual(mapper.invoke("track.delete-return", {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-made-return", made["ownershipToken"]), {"deleted": made["ref"]})
+        self.assertEqual((len(song.tracks), song.return_tracks), (1, []))
+
+    def test_a_duplicated_track_is_undone_with_its_ownership_even_while_its_clip_plays(self):
+        song = FakeSong(); clip = FakeClip(4.0); clip.name = "Loop"; clip.playing_position = 0.0; clip.is_playing = False; song.tracks[0].clip_slots[0].clip = clip
+        def duplicate_track(index):
+            original = song.tracks[index]; copy = FakeTrack(); copy.name = f"{original.name} copy"; copy.devices = []
+            copied = FakeClip(4.0); copied.name = original.clip_slots[0].clip.name; copied.playing_position = 0.0; copied.is_playing = False; copy.clip_slots[0].clip = copied
+            song.tracks.insert(index + 1, copy); return copy
+        song.duplicate_track = duplicate_track
+        mapper = LiveObjectMapper(song, provenance="real-live"); row = mapper.snapshot()["tracks"][0]
+        duplicated = mapper.invoke("track.duplicate", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-duplicate")
+        self.assertEqual(duplicated["createdFingerprint"], mapper._ownership_fingerprint(duplicated["ref"]))
+        # The copy's clip plays when the undo comes: its playback is not an edit.
+        copied = song.tracks[1].clip_slots[0].clip; copied.is_playing = True; copied.playing_position = 2.75
+        deleted = mapper.invoke("track.delete", {"ref": duplicated["ref"], "expectedObjectIdentity": duplicated["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}, "transaction-duplicate", duplicated["ownershipToken"])
+        self.assertEqual((deleted, [track.name for track in song.tracks]), ({"deleted": duplicated["ref"]}, ["Drums"]))
+
+    def test_explicit_deletion_of_an_existing_device_and_return_uses_exact_identity_not_ownership(self):
+        song = self.song_with_returns(); keep = FakeTrack(); keep.name = "A-Reverb"; song.return_tracks.append(keep)
+        second = FakeDevice(); second.name = "Delay"; song.tracks[0].devices.append(second); song.tracks[0].delete_device = lambda index: song.tracks[0].devices.pop(index)
+        mapper = LiveObjectMapper(song, provenance="real-live"); snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; device = track["devices"][1]; siblings = [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in track["devices"]]
+        delete_device = {"ref": device["ref"], "expectedObjectIdentity": device["objectIdentity"], "expectedOwnerRef": track["ref"], "expectedOwnerIdentity": track["objectIdentity"], "expectedSiblings": siblings, "expectedTrackRef": track["ref"], "expectedTrackIdentity": track["objectIdentity"]}
+        # Without the explicit authority a deletion of something no transaction made is still refused.
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper.invoke("device.delete", delete_device, "transaction-foreign-delete")
+        self.assertEqual(len(song.tracks[0].devices), 2)
+        validate_operation_payload("device.delete", "request", {**delete_device, "explicitDeletion": True})
+        # With it, the exact identity fences decide: a stale sibling fence refuses...
+        with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("device.delete", {**delete_device, "expectedSiblings": siblings[:1], "explicitDeletion": True}, "transaction-stale-delete")
+        # ...and the exact one deletes that one device.
+        self.assertEqual(mapper.invoke("device.delete", {**delete_device, "explicitDeletion": True}, "transaction-device-delete"), {"deleted": device["ref"]})
+        self.assertEqual([item.name for item in song.tracks[0].devices], ["Utility"])
+        returned = next(row for row in mapper.snapshot()["tracks"] if row["name"] == "A-Reverb")
+        delete_return = {"ref": returned["ref"], "expectedObjectIdentity": returned["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper.invoke("track.delete-return", delete_return, "transaction-foreign-return")
+        validate_operation_payload("track.delete-return", "request", {**delete_return, "explicitDeletion": True})
+        with self.assertRaisesRegex(ValueError, "identity changed"): mapper.invoke("track.delete-return", {**delete_return, "expectedObjectIdentity": "live:replacement", "explicitDeletion": True}, "transaction-stale-return")
+        self.assertEqual(mapper.invoke("track.delete-return", {**delete_return, "explicitDeletion": True}, "transaction-return-delete"), {"deleted": returned["ref"]})
+        self.assertEqual(song.return_tracks, [])
+        # The authority is only for those two: any other deletion still needs its creation's token.
+        clip_ref = f"{mapper.refs.epoch}:clip:0:0"
+        self.assertFalse(remote_module._explicit_deletion("clip.delete", {"ref": clip_ref, "explicitDeletion": True}))
+
+    def test_an_explicitly_deleted_creation_loses_its_ownership(self):
+        song = self.song_with_returns(); mapper = LiveObjectMapper(song, provenance="real-live")
+        made = mapper.invoke("track.create-return", {"name": "Made", "expectedStructureRevision": mapper._structure_revision()}, "transaction-made")
+        later = mapper.invoke("track.create-return", {"name": "Later", "expectedStructureRevision": mapper._structure_revision()}, "transaction-later")
+        mapper.invoke("track.delete-return", {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"], "expectedStructureRevision": mapper._structure_revision(), "explicitDeletion": True}, "transaction-explicit")
+        self.assertEqual([track.name for track in song.return_tracks], ["Later"])
+        # The deleted return's own undo and the moved later return's undo are refused before anything changes.
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper._require_cleanup_ownership("track.delete-return", {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"]}, "transaction-made", made["ownershipToken"])
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper._require_cleanup_ownership("track.delete-return", {"ref": later["ref"], "expectedObjectIdentity": later["objectIdentity"]}, "transaction-later", later["ownershipToken"])
+
+
 class SelectionViewExpansionTests(unittest.TestCase):
     def test_selection_set_assigns_song_view_selections(self):
         song = FakeSong()
@@ -3960,6 +4255,21 @@ class SelectionViewExpansionTests(unittest.TestCase):
         self.assertTrue(cleared["changed"]); self.assertIsNone(song.view.detail_clip)
         stale = dict(args, expectedStateRevision="0" * 64)
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("selection.set", stale)
+
+    def test_the_snapshot_names_the_selection_the_host_fences_selection_changes_on(self):
+        # The host previews from the snapshot: its selectionRevision hashes snapshot.selection. The bridge
+        # must check that same state, named by the snapshot's own references.
+        song = FakeSong(); second = FakeTrack(); second.name = "Reese Bass"; song.tracks.append(second); scene = song.scenes[0]
+        volume = FakeParameter(); song.tracks[0].mixer_device = type("Mixer", (), {"volume": volume, "panning": FakeParameter(), "sends": []})()
+        song.view = type("SongView", (), {"selected_track": song.tracks[0], "selected_scene": scene, "highlighted_clip_slot": song.tracks[0].clip_slots[0], "detail_clip": None, "selected_parameter": volume, "selected_chain": None})()
+        mapper = LiveObjectMapper(song); snapshot = mapper.snapshot()
+        validate_operation_payload("snapshot", "result", snapshot)
+        self.assertEqual(snapshot["selection"], {"trackRef": snapshot["tracks"][0]["ref"], "sceneRef": snapshot["scenes"][0]["ref"], "slotRef": snapshot["tracks"][0]["clipSlots"][0]["ref"], "detailClipRef": None, "deviceRef": None, "parameterRef": snapshot["tracks"][0]["mixer"]["volumeRef"], "chainRef": None})
+        host_revision = hashlib.sha256(mapper._bounded_canonical({key: snapshot["selection"].get(key) for key in ("trackRef", "sceneRef", "slotRef", "detailClipRef", "deviceRef", "parameterRef", "chainRef")}).encode()).hexdigest()
+        request = {"trackRef": snapshot["tracks"][1]["ref"], "expectedStateRevision": host_revision}
+        validate_operation_payload("selection.set", "request", request)
+        self.assertTrue(mapper.invoke("selection.set", request)["changed"])
+        self.assertIs(song.view.selected_track, second); self.assertEqual(mapper.snapshot()["selection"]["trackRef"], snapshot["tracks"][1]["ref"])
 
     def test_selection_set_rejects_draw_mode_and_other_non_selection_fields(self):
         song = FakeSong()
@@ -4136,6 +4446,19 @@ class MixerRoutingExpansionTests(unittest.TestCase):
         self.assertEqual((mixer.left_split_stereo.value, mixer.right_split_stereo.value), (-0.25, 0.25))
         with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("mixer.extended.set", {**fences(), "crossfader": 2.0})
         with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("mixer.extended.set", {**fences(), "crossfadeAssign": 3})
+
+    def test_the_snapshot_mixer_row_carries_the_extended_mixer_authority_the_host_previews(self):
+        # The host previews from the snapshot alone: the track mixer row must name the mixer itself and
+        # the values it edits (chain mixers already do), or the preview refuses as not authoritative.
+        song, mapper = self._mapper_with_mixer()
+        track_row = mapper.snapshot()["tracks"][0]; row = track_row["mixer"]
+        self.assertEqual(row["mixerIdentity"], mapper._capture_object_identity(song.tracks[0].mixer_device))
+        self.assertEqual((row["trackActivator"], row["crossfader"], row["panningLeft"], row["panningRight"]), (True, 0.0, 0.0, 0.0))
+        state = {"crossfadeAssign": row["crossfadeAssign"], "panningMode": row["panningMode"]}
+        request = {"ref": track_row["ref"], "trackActivator": False, "expectedObjectIdentity": track_row["objectIdentity"], "expectedMixerIdentity": row["mixerIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+        validate_operation_payload("mixer.extended.set", "request", request)
+        self.assertTrue(mapper.invoke("mixer.extended.set", request)["changed"])
+        self.assertIs(mapper.snapshot()["tracks"][0]["mixer"]["trackActivator"], False)
 
     def test_mixer_extended_resolves_return_and_main_tracks(self):
         song = FakeSong()
@@ -4353,6 +4676,55 @@ class FakeRackDevice:
     def store_variation(self): self.variation_count += 1
     def recall_selected_variation(self): pass
     def delete_selected_variation(self): self.variation_count -= 1
+
+
+def host_rack_state_revision(device_row):
+    """The host's rackStateRevision (host.ts), from a snapshot rack row: what rack edits are fenced on."""
+    state = {"visibleMacroCount": device_row.get("visibleMacroCount"), "selectedVariationIndex": device_row.get("selectedVariationIndex"), "variationCount": device_row.get("variationCount"),
+             "macros": [macro["objectIdentity"] for macro in device_row.get("macros") or []], "chains": [chain["objectIdentity"] for chain in device_row.get("chains") or []], "drumPads": [pad["objectIdentity"] for pad in device_row.get("drumPads") or []]}
+    return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(state).encode()).hexdigest()
+
+
+def host_capture_authority_revision(snapshot):
+    """The host's captureAuthorityRevision (host.ts), over the snapshot as the host receives it."""
+    snapshot = json.loads(json.dumps(snapshot))
+    authority = {"tracks": [{"ref": track["ref"], "objectIdentity": track["objectIdentity"], "clips": [{"ref": clip["ref"], "objectIdentity": clip["objectIdentity"], "notesRevision": clip["notesRevision"]} for clip in track["clips"]]} for track in snapshot["tracks"]],
+                 "scenes": [{"ref": scene["ref"], "objectIdentity": scene["objectIdentity"], "index": scene["index"]} for scene in snapshot["scenes"]], "playbackRevision": snapshot["playback"]["revision"]}
+    return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(authority).encode()).hexdigest()
+
+
+class CaptureAuthorityAgreementTests(unittest.TestCase):
+    def test_scene_capture_is_fenced_on_the_state_the_host_previews(self):
+        song = FakeSong(); clip = FakeClip(4.0); clip.name = "Loop"; clip.playing_position = 1.0; clip.is_playing = True; song.tracks[0].clip_slots[0].clip = clip; song.is_playing = True
+        song.capture_and_insert_scene = lambda: song.scenes.insert(1, FakeScene("Captured"))
+        mapper = LiveObjectMapper(song, provenance="real-live")
+        request = {"expectedStateRevision": host_capture_authority_revision(mapper.snapshot())}
+        clip.playing_position = 2.5  # the clip plays on between preview and apply
+        validate_operation_payload("scene.capture", "request", request)
+        captured = mapper.invoke("scene.capture", request, "transaction-scene-capture")
+        self.assertEqual(([scene.name for scene in song.scenes], captured["captured"]), (["Scene 1", "Captured"], True))
+        clip.add_new_notes([{"pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 100}])
+        with self.assertRaisesRegex(ValueError, "changed since capture preview"): mapper.invoke("scene.capture", request, "transaction-stale-capture")
+
+
+class RackStateAgreementTests(unittest.TestCase):
+    def test_a_drum_racks_state_is_fenced_on_the_pads_its_row_lists(self):
+        # A Drum Rack has 128 drum_pads, and its snapshot row lists the 16 Live shows: the bridge's fence
+        # must be the one the host computes from that row, or every rack edit was "changed since preview".
+        song = FakeSong(); rack = FakeRackDevice(); rack.name = "Drum Rack"; rack.can_have_drum_pads = True
+        rack.drum_pads = [type("Pad", (), {"name": f"Pad {index}", "note": index, "chains": [], "mute": False, "solo": False})() for index in range(128)]
+        rack.visible_drum_pads = rack.drum_pads[36:52]; song.tracks[0].devices = [rack]
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual(len(row["drumPads"]), 16)
+        for action in ("store-variation", "randomize-macros"):
+            row = mapper.snapshot()["tracks"][0]["devices"][0]
+            request = {"ref": row["ref"], "action": action, "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": host_rack_state_revision(row)}
+            validate_operation_payload("rack.action", "request", request)
+            self.assertTrue(mapper.invoke("rack.action", request)["done"])
+        self.assertEqual(rack.variation_count, 2)
+        # An instrument rack (no pads) agrees too.
+        instrument = FakeRackDevice(); song.tracks[0].devices = [instrument]; row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertTrue(mapper.invoke("rack.set", {"ref": row["ref"], "selectedVariationIndex": 0, "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": host_rack_state_revision(row)})["changed"])
 
 
 class BrowserChainLoadTests(unittest.TestCase):
@@ -5038,6 +5410,29 @@ class Float32ConfirmationTests(unittest.TestCase):
         self.assertNotEqual(volume.value, 0.6, "the fake really rounds like Live")
         self.assertAlmostEqual(volume.value, 0.6, places=6); self.assertAlmostEqual(send.value, 0.3, places=6)
 
+    def test_song_swing_that_live_rounds_to_a_32_bit_float_is_confirmed(self):
+        class Float32SwingSong(FakeSong):
+            @property
+            def swing_amount(self): return self.__dict__.get("_swing", 0.0)
+            @swing_amount.setter
+            def swing_amount(self, value): self.__dict__["_swing"] = struct.unpack("f", struct.pack("f", float(value)))[0]
+        song = Float32SwingSong(); song.signature_numerator = 4; song.signature_denominator = 4; song.swing_amount = 0.0; song.clip_trigger_quantization = 4; song.midi_recording_quantization = 0
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["set"]
+        request = {"setRef": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(mapper._song_settings_state()).encode()).hexdigest(), "swingAmount": 0.15}
+        result = mapper.invoke("song.set", request); validate_operation_payload("song.set", "result", result)
+        self.assertNotEqual(song.swing_amount, 0.15, "the fake really rounds like Live"); self.assertAlmostEqual(song.swing_amount, 0.15, places=6)
+        # A whole-number setting Live doesn't take is still refused exactly, and the swing rolls back.
+        class RefusingNumeratorSong(Float32SwingSong):
+            @property
+            def signature_numerator(self): return 4
+            @signature_numerator.setter
+            def signature_numerator(self, value): pass
+        refusing = RefusingNumeratorSong(); refusing.signature_denominator = 4; refusing.swing_amount = 0.0; refusing.clip_trigger_quantization = 4; refusing.midi_recording_quantization = 0
+        other = LiveObjectMapper(refusing); row = other.snapshot()["set"]
+        with self.assertRaisesRegex(ValueError, "song settings change was not confirmed"):
+            other.invoke("song.set", {"setRef": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(other._bounded_canonical(other._song_settings_state()).encode()).hexdigest(), "swingAmount": 0.15, "signatureNumerator": 7})
+        self.assertEqual(refusing.swing_amount, 0.0)
+
 
 class DeviceOwnershipFingerprintTests(unittest.TestCase):
     def test_a_reverted_parameter_tweak_keeps_a_created_device_fingerprint(self):
@@ -5104,6 +5499,195 @@ class LazyPlayheadTests(unittest.TestCase):
         song.tick()
         self.assertEqual(mapper.invoke("arrangement.locator.delete", delete_args), {"deleted": intro["ref"]})
         self.assertEqual([item["name"] for item in mapper.discover("locator")["items"]], ["Drop"])
+
+
+class ArgumentError(TypeError):
+    """Boost.Python's error when a call's Python arguments don't match Live's C++ signature."""
+
+
+def float32(value):
+    return struct.unpack("f", struct.pack("f", float(value)))[0]
+
+
+class FakeMidiNote:
+    """Live 12's MidiNote: attributes, with its values kept as 32-bit floats."""
+    FLOATS = ("start_time", "duration", "velocity", "probability", "velocity_deviation", "release_velocity")
+
+    def __init__(self, note_id, pitch, start_time, duration, velocity=100.0, mute=False, probability=1.0, velocity_deviation=0.0, release_velocity=64.0):
+        self.note_id = note_id; self.pitch = pitch; self.start_time = start_time; self.duration = duration; self.velocity = velocity
+        self.mute = mute; self.probability = probability; self.velocity_deviation = velocity_deviation; self.release_velocity = release_velocity
+
+    def __setattr__(self, name, value):
+        if name == "pitch" and not isinstance(value, int): raise ArgumentError("pitch takes an int")
+        object.__setattr__(self, name, float32(value) if name in self.FLOATS else value)
+
+    def copy(self):
+        return FakeMidiNote(self.note_id, self.pitch, self.start_time, self.duration, self.velocity, self.mute, self.probability, self.velocity_deviation, self.release_velocity)
+
+
+class FakeMidiNoteVector:
+    """Live's MidiNoteVector: iterating gives its own notes, which edits change in place."""
+
+    def __init__(self, notes): self._notes = list(notes)
+    def __iter__(self): return iter(self._notes)
+    def __len__(self): return len(self._notes)
+
+
+class FakeNoteClip(FakeClip):
+    """A MIDI clip with Live 12's note API: reads hand out copies of the notes in a MidiNoteVector, and
+    apply_note_modifications takes exactly such a vector back (a Python list is an ArgumentError)."""
+
+    def __init__(self, length=4.0, notes=()):
+        super().__init__(length); self.is_audio_clip = False; self.stored = {note.note_id: note for note in notes}; self.refuse = False
+
+    def get_all_notes_extended(self): return FakeMidiNoteVector(note.copy() for note in sorted(self.stored.values(), key=lambda note: note.note_id))
+    def get_notes_extended(self, *_): return self.get_all_notes_extended()
+    def get_notes_by_id(self, ids): return FakeMidiNoteVector(self.stored[note_id].copy() for note_id in ids if note_id in self.stored)
+
+    def apply_note_modifications(self, notes):
+        if not isinstance(notes, FakeMidiNoteVector): raise ArgumentError("Python argument types in Clip.apply_note_modifications(Clip, list) did not match C++ signature")
+        if self.refuse: raise RuntimeError("Live refused the modification")
+        for note in notes:
+            if note.note_id in self.stored: self.stored[note.note_id] = note.copy()
+
+
+class NoteModificationTests(unittest.TestCase):
+    def clip_mapper(self, clip):
+        song = FakeSong(); song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song, provenance="real-live")
+        row = mapper.snapshot()["tracks"][0]["clips"][0]
+        return mapper, row["ref"]
+
+    def update(self, mapper, reference, notes):
+        request = {"ref": reference, "notes": notes, "expectedClipAuthority": mapper._session_clip_authority(reference), "expectedNotesRevision": hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(mapper.refs.get(reference))).encode()).hexdigest()}
+        validate_operation_payload("note.update", "request", request)
+        result = mapper.invoke("note.update", request); validate_operation_payload("note.update", "result", result)
+        return result
+
+    def test_note_update_hands_lives_own_note_vector_back(self):
+        clip = FakeNoteClip(4.0, [FakeMidiNote(1, 60, 0.0, 1.0, 100.0), FakeMidiNote(2, 64, 1.0, 1.0, 80.0, probability=0.5)])
+        mapper, reference = self.clip_mapper(clip)
+        self.assertEqual(self.update(mapper, reference, [{"id": 1, "velocity": 90}]), {"updated": 1})
+        self.assertEqual((clip.stored[1].velocity, clip.stored[2].velocity), (90.0, 80.0))
+        # A transpose in place moves every note's pitch; a 32-bit float field (0.7) is confirmed within its precision.
+        self.update(mapper, reference, [{"id": 1, "pitch": 62}, {"id": 2, "pitch": 66, "probability": 0.7}])
+        self.assertEqual((clip.stored[1].pitch, clip.stored[2].pitch), (62, 66)); self.assertNotEqual(clip.stored[2].probability, 0.7); self.assertAlmostEqual(clip.stored[2].probability, 0.7, places=6)
+
+    def quantize_fixture(self, swing=0.0):
+        class RecordingQuantization(int): pass  # Live's enum members are int subclasses
+        members = {name: RecordingQuantization(number) for number, name in enumerate(("rec_q_no_q", "rec_q_quarter", "rec_q_eight", "rec_q_eight_triplet", "rec_q_eight_eight_triplet", "rec_q_sixtenth", "rec_q_sixtenth_triplet", "rec_q_sixtenth_sixtenth_triplet", "rec_q_thirtysecond"))}
+        live = types.SimpleNamespace(Song=types.SimpleNamespace(RecordingQuantization=types.SimpleNamespace(**members)))
+        clip = FakeNoteClip(4.0, [FakeMidiNote(1, 60, 0.1, 0.5), FakeMidiNote(2, 64, 0.3, 0.5)]); mapper, reference = self.clip_mapper(clip); mapper.song.swing_amount = swing; grids = []
+        def quantize(grid, amount):
+            grids.append(grid)
+            if not isinstance(grid, RecordingQuantization): raise ArgumentError("Clip.quantize takes a RecordingQuantization")
+            step = {1: 1.0, 2: 0.5, 3: 1.0 / 3.0, 5: 0.25, 6: 1.0 / 6.0, 8: 0.125}[int(grid)]
+            for note in clip.stored.values():
+                index = round(note.start_time / step); note.start_time = index * step + (step * swing / 2 if index % 2 else 0.0)  # Live swings every other step
+        clip.quantize = quantize
+        def request(grid):
+            return {"ref": reference, "grid": grid, "amount": 1.0, "expectedClipAuthority": mapper._session_clip_authority(reference), "expectedNotesRevision": hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(clip)).encode()).hexdigest()}
+        return live, members, clip, mapper, request, grids
+
+    def test_quantize_passes_lives_recording_quantization_for_the_grid(self):
+        live, members, clip, mapper, request, grids = self.quantize_fixture()
+        with patch.dict(sys.modules, {"Live": live}):
+            validate_operation_payload("note.quantize", "request", request(0.25))
+            self.assertTrue(mapper.invoke("note.quantize", request(0.25))["changed"])
+            self.assertIs(grids[-1], members["rec_q_sixtenth"])
+            self.assertTrue(mapper.invoke("note.quantize", request(0.3333))["changed"]); self.assertIs(grids[-1], members["rec_q_eight_triplet"])
+            with self.assertRaisesRegex(ValueError, "supported quantization grid"): mapper.invoke("note.quantize", request(2.0))
+        self.assertEqual([note.start_time for note in clip.stored.values()], [0.0, float32(1.0 / 3.0)])
+
+    def test_quantize_with_the_sets_swing_is_confirmed_and_a_wrong_result_is_put_back(self):
+        live, members, clip, mapper, request, grids = self.quantize_fixture(swing=0.2)
+        with patch.dict(sys.modules, {"Live": live}):
+            self.assertTrue(mapper.invoke("note.quantize", request(0.25))["changed"])
+        self.assertEqual([note.start_time for note in clip.stored.values()], [0.0, float32(0.275)])
+        # A result quantizing doesn't produce (here a pitch changed) is refused, and the notes go back exactly.
+        before = [(note.pitch, note.start_time) for note in clip.stored.values()]
+        def wrong(grid, amount):
+            for note in clip.stored.values(): note.start_time = 0.5; note.pitch = 70
+        clip.quantize = wrong
+        with patch.dict(sys.modules, {"Live": live}), self.assertRaisesRegex(ValueError, "^quantization was not confirmed$"): mapper.invoke("note.quantize", request(0.25))
+        self.assertEqual([(note.pitch, note.start_time) for note in clip.stored.values()], before)
+
+    def test_a_note_update_live_refuses_reports_that_error_not_a_failed_rollback(self):
+        clip = FakeNoteClip(4.0, [FakeMidiNote(1, 60, 0.0, 1.0)]); clip.refuse = True
+        mapper, reference = self.clip_mapper(clip)
+        with self.assertRaisesRegex(RuntimeError, "Live refused the modification"): self.update(mapper, reference, [{"id": 1, "velocity": 90}])
+        self.assertEqual(clip.stored[1].velocity, 100.0)
+
+
+def defer_writes(obj, *names):
+    """Make obj apply writes to names on Live's next tick (obj.tick()), as Live 12.4 does for the
+    transport and a track's arm: reading right after the write still gives the old value."""
+    values = {name: getattr(obj, name) for name in names}; pending = []
+    properties = {name: property(lambda self, name=name: values[name], lambda self, value, name=name: pending.append((name, value))) for name in names}
+    obj.__class__ = type(f"Deferred{type(obj).__name__}", (type(obj),), properties)
+    def tick():
+        for name, value in pending: values[name] = value
+        pending.clear()
+    obj.tick = tick
+    return obj
+
+
+class DeferredLiveWriteTests(unittest.TestCase):
+    """A write Live applies on its next tick reads as before right after it: that is pending, not a
+    failure (the host confirms it in fresh state). Any other readback still refuses and rolls back."""
+
+    def transport_song(self):
+        song = FakeSong(); song.loop = False; song.loop_start = 8.0; song.loop_length = 16.0; song.metronome = False; song.punch_in = False; song.punch_out = False; song.current_song_time = 4096.0; song.count_in_duration = 0
+        return song
+
+    def transport_request(self, mapper, **fields):
+        snapshot = mapper.snapshot()
+        return {"setRef": snapshot["set"]["ref"], "expectedObjectIdentity": snapshot["set"]["objectIdentity"], "expectedRevision": snapshot["playback"]["revision"], **fields}
+
+    def routing_request(self, mapper, **fields):
+        row = mapper.snapshot()["tracks"][0]; routing = row["routing"]
+        state = {"inputType": routing["inputType"], "inputSubRouting": routing["inputSubRouting"], "outputType": routing["outputType"], "outputSubRouting": routing["outputSubRouting"], "arm": row["armed"], "monitoring": row["monitoringState"]}
+        return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest(), **fields}
+
+    def test_loop_and_metronome_that_live_applies_on_its_next_tick_are_accepted(self):
+        song = defer_writes(self.transport_song(), "loop", "loop_start", "loop_length", "metronome", "current_song_time"); mapper = LiveObjectMapper(song)
+        request = self.transport_request(mapper, loopEnabled=True, loopStart=16.0, loopLength=16.0, metronome=True)
+        validate_operation_payload("transport.set", "request", request)
+        result = mapper.invoke("transport.set", request); validate_operation_payload("transport.set", "result", result)
+        self.assertEqual((song.loop, song.loop_start, song.loop_length, song.metronome), (False, 8.0, 16.0, False), "nothing applied before Live's tick")
+        song.tick()
+        transport = mapper.snapshot()["playback"]["transport"]
+        self.assertEqual((transport["loop"], transport["metronome"]), ({"enabled": True, "start": 16.0, "length": 16.0}, True))
+
+    def test_a_transport_value_live_changed_to_something_else_still_refuses_and_rolls_back(self):
+        class ClampingSong(FakeSong):
+            @property
+            def loop_start(self): return self.__dict__.get("_loop_start", 0.0)
+            @loop_start.setter
+            def loop_start(self, value): self.__dict__["_loop_start"] = min(float(value), 12.0)
+        song = ClampingSong(); song.loop = True; song.loop_start = 8.0; song.loop_length = 16.0; song.metronome = False; song.punch_in = False; song.punch_out = False; song.current_song_time = 0.0
+        mapper = LiveObjectMapper(song)
+        with self.assertRaisesRegex(ValueError, "transport change was not confirmed by fresh state"): mapper.invoke("transport.set", self.transport_request(mapper, loopStart=16.0, metronome=True))
+        self.assertEqual((song.loop_start, song.metronome), (8.0, False))
+
+    def test_arming_a_track_that_live_applies_on_its_next_tick_is_accepted(self):
+        song = FakeSong(); track = song.tracks[0]; track.can_be_armed = True; track.arm = False; track.current_monitoring_state = 2
+        defer_writes(track, "arm", "current_monitoring_state"); mapper = LiveObjectMapper(song)
+        request = self.routing_request(mapper, arm=True); validate_operation_payload("routing.set", "request", request)
+        self.assertTrue(mapper.invoke("routing.set", request)["changed"])
+        self.assertFalse(track.arm, "not armed before Live's tick"); track.tick(); self.assertTrue(track.arm)
+        request = self.routing_request(mapper, arm=False, monitoring="auto")
+        self.assertTrue(mapper.invoke("routing.set", request)["changed"]); track.tick()
+        self.assertEqual((track.arm, mapper.snapshot()["tracks"][0]["monitoringState"]), (False, "auto"))
+
+    def test_a_monitoring_state_live_did_not_take_still_refuses_and_rolls_back(self):
+        class StubbornTrack(FakeTrack):
+            @property
+            def current_monitoring_state(self): return self.__dict__.get("_monitoring", 2)
+            @current_monitoring_state.setter
+            def current_monitoring_state(self, value): self.__dict__["_monitoring"] = 0 if value == 1 else value
+        song = FakeSong(); track = StubbornTrack(); track.can_be_armed = True; song.tracks = [track]; mapper = LiveObjectMapper(song)
+        with self.assertRaisesRegex(ValueError, "routing change was not confirmed by fresh state"): mapper.invoke("routing.set", self.routing_request(mapper, arm=True, monitoring="auto"))
+        self.assertEqual((track.arm, track.current_monitoring_state), (False, 2))
 
 
 class MainThreadTransportTests(unittest.TestCase):

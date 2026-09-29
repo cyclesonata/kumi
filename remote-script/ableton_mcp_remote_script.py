@@ -249,10 +249,17 @@ def _debug_trace(context: str) -> None:
         sink.record(context)
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "subscribe", "reconnect", "retire"}
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect"}
+# Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
+_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
+# Deletions of an existing object the producer previewed and confirmed, never an undo or a cleanup:
+# they name explicitDeletion instead of presenting a creating transaction's ownership token, and are
+# held to the exact identity fences in their arguments (device: itself, its owner, siblings and track;
+# return track: itself and the Session structure). Mirrors EXPLICIT_DELETIONS in the host adapter.
+_EXPLICIT_DELETIONS = {"device.delete", "track.delete-return"}
+def _explicit_deletion(operation: str, args: Any) -> bool: return operation in _EXPLICIT_DELETIONS and isinstance(args, dict) and args.get("explicitDeletion") is True
 def _mutation_authority_required(operation: str) -> bool: return operation not in _READ_ONLY_INVOKES
 
 def _require_output_safety(args: dict[str, Any]) -> None:
@@ -398,6 +405,9 @@ _VOLATILE_TRACK_FIELDS = frozenset({"armed", "implicitArm", "isSelected", "isVis
 # How many routing choices a track offers depends on the other tracks (a new MIDI track is a new MIDI source), not on the track.
 _VOLATILE_ROUTING_FIELDS = frozenset({"availableInputTypes", "availableInputChannels", "availableOutputTypes", "availableOutputChannels"})
 _VOLATILE_SLOT_FIELDS = frozenset({"playingStatus", "willRecordOnStart", "fireButtonState"})
+# A clip's playback state moves while the Set plays (its position every tick): a created track's or
+# scene's clips are fingerprinted without it, so its undo works while the song plays. Mirrored in the host.
+_VOLATILE_CLIP_FIELDS = frozenset({"playingPosition", "isPlaying", "isTriggered", "fireButtonState", "willRecordOnStart"})
 
 
 def _owned_device_row(value: Any) -> Any:
@@ -407,15 +417,74 @@ def _owned_device_row(value: Any) -> Any:
     return {key: _owned_device_row(item) for key, item in value.items() if key != "revision" and not (key == "view" and "canHaveChains" in value)}
 
 
-# Values that move continuously on their own (CPU impact, meters): excluded from the short-lived
-# preflight->apply authority digest, or it would almost never match on a track with signal.
-_CONTINUOUS_FIELDS = frozenset({"performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel"})
+# Values that move continuously on their own (CPU impact, meters, and while Live plays the Set's
+# playhead and a playing clip's position): excluded from the short-lived preflight->apply authority
+# digest, or it would almost never match on a track with signal or while the song plays. Preflight
+# and prepare land on different display ticks; the operations' own fences still check what they need.
+_CONTINUOUS_FIELDS = frozenset({"performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel", "position", "playingPosition"})
+# A parameter whose automation is playing moves on its own too: its value, not the parameter, is excluded.
+_AUTOMATED_VALUE_FIELDS = frozenset({"value", "displayValue"})
 
 
 def _without_fields(value: Any, fields: frozenset) -> Any:
     if isinstance(value, dict): return {key: _without_fields(child, fields) for key, child in value.items() if key not in fields}
     if isinstance(value, list): return [_without_fields(child, fields) for child in value]
     return value
+
+
+def _automation_playing(state: Any) -> bool:
+    """Whether a parameter row's automationState (Live's AutomationState name, or its number) is playing."""
+    return isinstance(state, str) and state.rsplit(".", 1)[-1].strip().lower() in {"playing", "1"}
+
+
+def _authority_row(value: Any, mapper: Any = None) -> Any:
+    """A row as the preflight->apply authority digest binds it: without what moves on its own while
+    Live plays (see _CONTINUOUS_FIELDS), nor the value of a parameter whose automation is playing
+    (with the mapper, a track's or chain's mixer values too, whose rows don't carry that state)."""
+    if isinstance(value, dict):
+        automated = "automationState" in value and _automation_playing(value.get("automationState"))
+        row = {key: _authority_row(child, mapper) for key, child in value.items() if key not in _CONTINUOUS_FIELDS and not (automated and key in _AUTOMATED_VALUE_FIELDS)}
+        if mapper is not None and isinstance(row.get("mixer"), dict): row["mixer"] = _without_playing_mixer_automation(mapper, row["mixer"])
+        return row
+    if isinstance(value, list): return [_authority_row(child, mapper) for child in value]
+    return value
+
+
+# A mixer row's values with the refs of the parameters behind them (track mixers say panRef, chain
+# mixers panningRef): the rows carry no automation state, so the parameter is asked.
+_MIXER_AUTOMATABLE = (("volume", "volumeDisplay", "volumeRef"), ("pan", "panDisplay", "panRef"), ("pan", None, "panningRef"), ("cueVolume", "cueVolumeDisplay", "cueRef"), ("crossfader", None, "crossfaderRef"), ("panningLeft", None, "panningLeftRef"), ("panningRight", None, "panningRightRef"), ("trackActivator", None, "trackActivatorRef"), ("chainActivator", None, "chainActivatorRef"))
+
+
+def _parameter_automation_playing(mapper: Any, parameter: Any) -> bool:
+    return parameter is not None and _automation_playing(str(mapper._read_attr(parameter, "automation_state") or "none"))
+
+
+def _referenced_automation_playing(mapper: Any, reference: Any) -> bool:
+    if not isinstance(reference, str): return False
+    try: return _parameter_automation_playing(mapper, mapper.refs.get(reference))
+    except (KeyError, ValueError): return False
+
+
+def _without_playing_mixer_automation(mapper: Any, mixer: dict[str, Any]) -> dict[str, Any]:
+    """A mixer row without the values (volume, pan, sends...) that playing automation moves on its own."""
+    mixer = dict(mixer)
+    for value_key, display_key, ref_key in _MIXER_AUTOMATABLE:
+        if ref_key in mixer and _referenced_automation_playing(mapper, mixer.get(ref_key)):
+            mixer.pop(value_key, None)
+            if display_key: mixer.pop(display_key, None)
+    send_refs = mixer.get("sendRefs")
+    if isinstance(send_refs, list):
+        automated = [_referenced_automation_playing(mapper, send) for send in send_refs]
+        if any(automated):
+            for key in ("sends", "sendDisplays"):
+                if isinstance(mixer.get(key), list): mixer[key] = [None if index < len(automated) and automated[index] else item for index, item in enumerate(mixer[key])]
+    return mixer
+
+
+def _tempo_automation_playing(mapper: Any) -> bool:
+    master = mapper._read_attr(mapper.song, "master_track")
+    mixer = mapper._read_attr(master, "mixer_device") if master is not None else None
+    return _parameter_automation_playing(mapper, mapper._read_attr(mixer, "song_tempo") if mixer is not None else None)
 
 
 # Live applies playhead moves on its next tick; operations that need the playhead somewhere ask for a retry.
@@ -650,6 +719,10 @@ class LiveObjectMapper:
         self.provenance = provenance
         self._capture_state: dict[str, Any] | None = None
         self._owned_cleanup_tokens: dict[str, dict[str, Any]] = {}
+        # The transaction whose operation is running (set by invoke), for ownership bookkeeping.
+        self._invoking_transaction: str | None = None
+        # Ownership of objects a later insertion moved, by token, until that insertion is undone.
+        self._moved_ownership: dict[str, dict[str, Any]] = {}
         self._playback_state_digest: str | None = None
         self._playback_revision_counter = 0
         # Set while reads share one snapshot (see _shared_reads).
@@ -1413,9 +1486,13 @@ class LiveObjectMapper:
             })
         return rows
 
+    def _rack_pads(self, device: Any) -> list[Any]:
+        """A Drum Rack's pads as snapshots list them: the 16 Live shows (visible_drum_pads), else all."""
+        return self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or [])
+
     def _drum_pad_rows(self, device: Any, device_ref: str, track_index: int, path: str, traversal: dict[str, Any], depth: int, known: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        pads = self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or [])
+        pads = self._rack_pads(device)
         if len(pads) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("drum-pad collection exceeds its bound")
         for pad_index, pad in enumerate(pads):
             pad_ref = self.refs.put("drum_pad", pad, f"{path}:{pad_index}")
@@ -1631,7 +1708,7 @@ class LiveObjectMapper:
             })
         scene_rows = [self._scene_row(scene, i) for i, scene in enumerate(scenes)]
         locators = self._locator_items()
-        return {"set": set_row, "tracks": track_rows, "scenes": scene_rows, "arrangement": {"locators": locators, "locatorRevision": hashlib.sha256(self._bounded_canonical(locators).encode("utf-8")).hexdigest(), "clips": self._arrangement_clip_items()}, "playback": self._playback(track_rows, scene_rows), "epoch": self.refs.epoch}
+        return {"set": set_row, "tracks": track_rows, "scenes": scene_rows, "arrangement": {"locators": locators, "locatorRevision": hashlib.sha256(self._bounded_canonical(locators).encode("utf-8")).hexdigest(), "clips": self._arrangement_clip_items()}, "playback": self._playback(track_rows, scene_rows), "selection": self._selection_row(track_rows, scene_rows), "epoch": self.refs.epoch}
 
     def _read_notes(self, clip: Any) -> list[dict[str, Any]]:
         if self._read_attr(clip, "is_audio_clip") is True:
@@ -2023,7 +2100,11 @@ class LiveObjectMapper:
             raise ValueError("note patches are invalid")
         if not callable(getattr(clip, "get_notes_extended", None)) or not callable(getattr(clip, "apply_note_modifications", None)) or not callable(getattr(clip, "get_all_notes_extended", None)):
             raise ValueError("note modification is unavailable on this Live shape")
-        extended = list(clip.get_all_notes_extended())
+        # Live's own note vector: its notes are edited in place and the vector itself goes back to
+        # apply_note_modifications, as Live's scripts do. A Python list of those notes is refused by Live
+        # (Boost.Python ArgumentError), which failed every update and then its rollback.
+        notes_vector = clip.get_all_notes_extended()
+        extended = list(notes_vector)
         if len(extended) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("MIDI note collection exceeds its authoritative bound")
         by_id = {}
         for candidate in extended:
@@ -2071,26 +2152,50 @@ class LiveObjectMapper:
                 if field not in patch: continue
                 value = bool(patch[field]) if field == "mute" else int(patch[field]) if field == "pitch" else float(patch[field]); setattr(target, attribute, value)
                 expected[field] = int(value) if field == "velocity" and float(value).is_integer() else value
-        canonical_rows = lambda rows: self._bounded_canonical(sorted(rows, key=lambda row: int(row["id"])))
         try:
-            clip.apply_note_modifications(extended); after_rows = self._read_notes(clip)
-            if canonical_rows(after_rows) != canonical_rows(list(expected_by_id.values())): raise ValueError("note update did not produce the exact complete expected state")
+            clip.apply_note_modifications(notes_vector); after_rows = self._read_notes(clip)
+            if not self._same_note_rows(after_rows, list(expected_by_id.values())): raise ValueError("note update did not produce the exact complete expected state")
         except BaseException as error:
-            rollback_failed = False
-            try:
-                current = list(clip.get_all_notes_extended()); current_by_id = {int(candidate.note_id): candidate for candidate in current}
-                if len(current_by_id) != len(before_by_id) or set(current_by_id) != set(before_by_id): raise ValueError("note identity set changed")
-                for note_id, prior in before_by_id.items():
-                    candidate = current_by_id[int(note_id)]
-                    for field, attribute in field_attributes.items():
-                        value = prior.get(field)
-                        if value is not None: setattr(candidate, attribute, value)
-                clip.apply_note_modifications(current)
-                if canonical_rows(self._read_notes(clip)) != canonical_rows(before_rows): rollback_failed = True
-            except BaseException: rollback_failed = True
-            if rollback_failed: raise ValueError("note update failed and exact rollback failed") from error
+            if not self._restore_notes(clip, before_rows): raise ValueError("note update failed and exact rollback failed") from error
             raise
         return {"updated": len(targets)}
+
+    _NOTE_FIELD_ATTRIBUTES = {"pitch": "pitch", "start": "start_time", "duration": "duration", "velocity": "velocity", "mute": "mute", "probability": "probability", "velocityDeviation": "velocity_deviation", "releaseVelocity": "release_velocity"}
+
+    @staticmethod
+    def _same_note_rows(observed: list[dict[str, Any]], expected: list[dict[str, Any]]) -> bool:
+        """The same notes by id with every field as expected. Live keeps note values as 32-bit floats
+        (a probability of 0.7 reads back 0.699999988), so numbers compare within that precision."""
+        if len(observed) != len(expected): return False
+        expected_by = {row.get("id"): row for row in expected}
+        if len(expected_by) != len(expected): return False
+        for row in observed:
+            wanted = expected_by.get(row.get("id"))
+            if wanted is None or set(row) != set(wanted): return False
+            for key, value in row.items():
+                other = wanted[key]
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and isinstance(other, (int, float)) and not isinstance(other, bool):
+                    if not _same_number(value, other): return False
+                elif value != other: return False
+        return True
+
+    def _restore_notes(self, clip: Any, before_rows: list[dict[str, Any]]) -> bool:
+        """Put a clip's notes back exactly as before_rows by their ids, through Live's own note vector.
+        Nothing to do when Live left them untouched. Whether they are exactly as before afterwards."""
+        try:
+            if self._same_note_rows(self._read_notes(clip), before_rows): return True
+            before_by_id = {row["id"]: row for row in before_rows}
+            current_vector = clip.get_all_notes_extended(); current_by_id = {int(candidate.note_id): candidate for candidate in list(current_vector)}
+            if len(current_by_id) != len(before_by_id) or set(current_by_id) != set(before_by_id): return False
+            for note_id, prior in before_by_id.items():
+                candidate = current_by_id[int(note_id)]
+                for field, attribute in self._NOTE_FIELD_ATTRIBUTES.items():
+                    value = prior.get(field)
+                    if value is not None: setattr(candidate, attribute, value)
+            clip.apply_note_modifications(current_vector)
+            return self._same_note_rows(self._read_notes(clip), before_rows)
+        except BaseException:
+            return False
 
     def _note_delete(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
@@ -2181,17 +2286,22 @@ class LiveObjectMapper:
             for attribute, value, prior in assignments:
                 applied.append((attribute, prior)); setattr(self.song, attribute, value)
             transport = self._transport_dict(); loop = transport["loop"]; checks = []
-            # Every requested field is synchronously exact here; Host also
-            # performs fresh position readback to account for later playhead motion.
-            # Live applies playhead moves on its next tick, so the position may still read as before here.
-            prior_position = next((prior for attribute, _, prior in assignments if attribute == "current_song_time"), None)
-            if position is not None: checks.append(isinstance(transport["position"], (int, float)) and (_same_number(transport["position"], position) or (prior_position is not None and _same_number(transport["position"], prior_position))))
-            if loop_enabled is not None: checks.append(loop["enabled"] is loop_enabled)
-            if loop_start is not None: checks.append(isinstance(loop["start"], (int, float)) and _same_number(loop["start"], loop_start))
-            if loop_length is not None: checks.append(isinstance(loop["length"], (int, float)) and _same_number(loop["length"], loop_length))
-            if metronome is not None: checks.append(transport["metronome"] is metronome)
-            if punch_in is not None: checks.append(transport["punchIn"] is punch_in)
-            if punch_out is not None: checks.append(transport["punchOut"] is punch_out)
+            # Live applies transport writes on its next tick: the playhead always, and on current builds
+            # the loop and metronome too, so right after the write a field may still read as before.
+            # Each field must read as requested or as it was (still pending); anything else (a value Live
+            # clamped or moved) refuses and rolls back. The host confirms every requested field in fresh
+            # state once Live has applied it.
+            priors = {attribute: prior for attribute, _, prior in assignments}
+            def settled(observed: Any, requested: Any, attribute: str) -> bool:
+                if isinstance(requested, bool): return observed is requested or observed is priors[attribute]
+                return isinstance(observed, (int, float)) and not isinstance(observed, bool) and (_same_number(observed, requested) or _same_number(observed, priors[attribute]))
+            if position is not None: checks.append(settled(transport["position"], position, "current_song_time"))
+            if loop_enabled is not None: checks.append(settled(loop["enabled"], loop_enabled, "loop"))
+            if loop_start is not None: checks.append(settled(loop["start"], loop_start, "loop_start"))
+            if loop_length is not None: checks.append(settled(loop["length"], loop_length, "loop_length"))
+            if metronome is not None: checks.append(settled(transport["metronome"], metronome, "metronome"))
+            if punch_in is not None: checks.append(settled(transport["punchIn"], punch_in, "punch_in"))
+            if punch_out is not None: checks.append(settled(transport["punchOut"], punch_out, "punch_out"))
             if not all(checks): raise ValueError("transport change was not confirmed by fresh state")
             after_revision = self._playback()["revision"]
         except BaseException as error:
@@ -2298,11 +2408,12 @@ class LiveObjectMapper:
         return {"stopped": True}
 
     def _capture_authority_revision(self) -> str:
-        snapshot = self.snapshot(); tracks = []
-        for track in snapshot.get("tracks", []):
-            slots = [{key: slot.get(key) for key in ("ref", "objectIdentity", "sceneIndex", "clipRef", "empty")} for slot in track.get("clipSlots", [])]
-            tracks.append({"ref": track.get("ref"), "objectIdentity": track.get("objectIdentity"), "slots": slots, "clips": track.get("clips", [])})
-        authority = {"tracks": tracks, "scenes": [{"ref": scene.get("ref"), "objectIdentity": scene.get("objectIdentity"), "name": scene.get("name"), "index": scene.get("index")} for scene in snapshot.get("scenes", [])], "playbackRevision": snapshot.get("playback", {}).get("revision")}
+        """Byte for byte the host's captureAuthorityRevision (and the simulator's): the host previews a
+        capture with it, so any other formula refused every capture as changed since preview. Clips are
+        bound by identity and note content, not playback state, so it holds while Live plays."""
+        snapshot = self.snapshot()
+        authority = {"tracks": [{"ref": track.get("ref"), "objectIdentity": track.get("objectIdentity"), "clips": [{"ref": clip.get("ref"), "objectIdentity": clip.get("objectIdentity"), "notesRevision": clip.get("notesRevision")} for clip in track.get("clips", [])]} for track in snapshot.get("tracks", [])],
+                     "scenes": [{"ref": scene.get("ref"), "objectIdentity": scene.get("objectIdentity"), "index": scene.get("index")} for scene in snapshot.get("scenes", [])], "playbackRevision": snapshot.get("playback", {}).get("revision")}
         return hashlib.sha256(self._bounded_canonical(authority).encode("utf-8")).hexdigest()
 
     def _capture_midi(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2361,10 +2472,11 @@ class LiveObjectMapper:
             if capture_error is not None: raise capture_error
             if len(after_scenes) != len(before_scenes) + 1 or len(created) != 1: raise ValueError("scene capture did not produce one identity-distinct scene")
             inserted, scene, identity = created[0]
-            if self._owned_positional_conflict("scene", inserted): raise ValueError("scene capture would shift active transaction-owned reference authority")
+            if self._own_insertion_conflict("scene", inserted): raise ValueError("scene capture would shift active transaction-owned reference authority")
             expected_identity_order = list(before_identity_order); expected_identity_order.insert(inserted, identity)
             if [self._capture_object_identity(candidate) for candidate in after_scenes] != expected_identity_order: raise ValueError("scene capture reordered pre-existing scenes")
             created_ref = self.refs.put("scene", scene, str(inserted)); fingerprint = self._ownership_fingerprint(created_ref)
+            self._retire_moved_ownership("scene", inserted, identity)
             return {"captured": True, "ref": created_ref, "objectIdentity": identity, "createdFingerprint": fingerprint}
         except BaseException as error:
             rollback_failed = False; deleter = getattr(self.song, "delete_scene", None); current = self._items(getattr(self.song, "scenes", [])); owned = [(index, scene) for index, scene in enumerate(current) if self._capture_object_identity(scene) not in before_identities]
@@ -2384,7 +2496,8 @@ class LiveObjectMapper:
         if enforce_ownership and operation in _TRANSACTION_CREATIONS:
             reserve = 256 if operation == "session.capture-midi" else 1
             if len(self._owned_cleanup_tokens) + reserve > 4096: raise ValueError("transaction-owned cleanup ledger is full")
-        if enforce_ownership and operation in _TRANSACTION_DELETIONS: self._require_cleanup_ownership(operation, args, str(transaction_id), ownership_token)
+        explicit_deletion = _explicit_deletion(operation, args)
+        if enforce_ownership and operation in _TRANSACTION_DELETIONS and not explicit_deletion: self._require_cleanup_ownership(operation, args, str(transaction_id), ownership_token)
         consumed_move_ownership: str | None = None
         if enforce_ownership and operation in {"clip.move", "arrangement.clip.move"} and isinstance(args.get("ref"), str):
             active = [(token, row) for token, row in self._owned_cleanup_tokens.items() if row.get("ref") == args["ref"] and row.get("deleted") is not True]
@@ -2403,7 +2516,9 @@ class LiveObjectMapper:
                 owned_content = matches[0]
                 if not hmac.compare_digest(self._ownership_fingerprint(args["ref"]), owned_content["fingerprint"]): raise ValueError("transaction-owned content changed before mutation")
         try:
-            result = self._invoke_operation(operation, args)
+            self._invoking_transaction = transaction_id
+            try: result = self._invoke_operation(operation, args)
+            finally: self._invoking_transaction = None
             if owned_content is not None: owned_content["fingerprint"] = self._ownership_fingerprint(str(args["ref"]))
         except BaseException:
             if owned_content is not None:
@@ -2425,8 +2540,11 @@ class LiveObjectMapper:
                 self._owned_cleanup_tokens = ownership_checkpoint
                 raise error
         if consumed_move_ownership is not None: self._owned_cleanup_tokens.pop(consumed_move_ownership, None)
-        if enforce_ownership and operation in _TRANSACTION_DELETIONS and isinstance(ownership_token, str): self._owned_cleanup_tokens[ownership_token]["deleted"] = True
-        if operation == "session.reconnect": self._owned_cleanup_tokens.clear()
+        if enforce_ownership and operation in _TRANSACTION_DELETIONS and isinstance(ownership_token, str) and not explicit_deletion:
+            self._owned_cleanup_tokens[ownership_token]["deleted"] = True
+            self._restore_moved_ownership(self._owned_cleanup_tokens[ownership_token].get("objectIdentity"))
+        if explicit_deletion: self._retire_explicitly_deleted_ownership(operation, args)
+        if operation == "session.reconnect": self._owned_cleanup_tokens.clear(); self._moved_ownership.clear()
         return result
 
     def _invoke_operation(self, operation: str, args: dict[str, Any]) -> Any:
@@ -2845,7 +2963,10 @@ class LiveObjectMapper:
         except BaseException:
             return True
 
-    def _owned_positional_conflict(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> bool:
+    def _owned_positions(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+        """The transaction-owned objects whose positional reference sits at or after (strict: after)
+        index on the track or scene axis, so a change there moves them."""
+        found = []
         for token, row in self._owned_cleanup_tokens.items():
             if token == exclude_token or row.get("deleted") is True: continue
             reference = str(row.get("ref", "")); parts = reference.split(":")
@@ -2855,8 +2976,37 @@ class LiveObjectMapper:
             if axis == "track" and kind in {"track", "clip", "arrangement_clip", "device"} and path and path[0].isdigit(): position = int(path[0])
             if axis == "scene" and kind == "scene" and path and path[0].isdigit(): position = int(path[0])
             if axis == "scene" and kind == "clip" and len(path) >= 2 and path[1].isdigit(): position = int(path[1])
-            if position is not None and (position > index if strict else position >= index): return True
-        return False
+            if position is not None and (position > index if strict else position >= index): found.append((token, row))
+        return found
+
+    def _owned_positional_conflict(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> bool:
+        return bool(self._owned_positions(axis, index, strict, exclude_token))
+
+    def _own_insertion_conflict(self, axis: str, index: int) -> bool:
+        """Whether an insertion at index would move an object the inserting transaction itself made
+        (its cleanup and compensation depend on those references), which is still refused."""
+        transaction_id = self._invoking_transaction
+        return any(row.get("transactionId") == transaction_id for _, row in self._owned_positions(axis, index)) if transaction_id is not None else False
+
+    def _retire_moved_ownership(self, axis: str, index: int, cause_identity: str) -> None:
+        """After an insertion at index, objects other transactions made at or after it have new
+        references: their ownership ends here (their undo is then refused honestly for lacking it)
+        rather than the insertion being refused. A return track, whose reference follows every
+        regular track's, would otherwise block adding any track for the rest of the session.
+        Undoing the inserted object (cause_identity) moves them back, and gives their ownership back."""
+        transaction_id = self._invoking_transaction
+        for token, row in self._owned_positions(axis, index):
+            if row.get("transactionId") != transaction_id:
+                moved = self._owned_cleanup_tokens.pop(token, None)
+                if moved is not None: self._moved_ownership[token] = {**moved, "movedBy": cause_identity}
+        while len(self._moved_ownership) > 4096: self._moved_ownership.pop(next(iter(self._moved_ownership)))
+
+    def _restore_moved_ownership(self, deleted_identity: Any) -> None:
+        """The inserted object that moved others was cleaned up (its undo): they are back where they
+        were made, and own their references again. Their cleanup still checks identity and content."""
+        for token, row in list(self._moved_ownership.items()):
+            if row.get("movedBy") == deleted_identity and len(self._owned_cleanup_tokens) < 4096:
+                self._moved_ownership.pop(token, None); self._owned_cleanup_tokens[token] = {key: value for key, value in row.items() if key != "movedBy"}
 
     def _structure_create_atomic(self, kind: str, index: int, name: str, creator: Callable[[int], Any]) -> dict[str, Any]:
         attribute = "tracks" if kind == "track" else "scenes"; before = self._items(getattr(self.song, attribute, [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology()
@@ -2901,20 +3051,25 @@ class LiveObjectMapper:
             if any(str(getattr(track, "name", "")) == name for track in tracks): raise ValueError("track name already exists")
             if index is None: index = len(tracks)
             if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= len(tracks): raise ValueError("track index is invalid")
-            if self._owned_positional_conflict("track", index): raise ValueError("track insertion would shift active transaction-owned reference authority")
+            if self._own_insertion_conflict("track", index): raise ValueError("track insertion would shift active transaction-owned reference authority")
             creator = getattr(self.song, "create_midi_track" if kind == "midi" else "create_audio_track", None)
             if not callable(creator): raise ValueError("track creation is unavailable")
-            return {**self._structure_create_atomic("track", index, name, creator), "kind": kind}
+            created = {**self._structure_create_atomic("track", index, name, creator), "kind": kind}
+            # Rows keep the references objects had when made: those at or after index moved one on.
+            self._retire_moved_ownership("track", index, created["objectIdentity"])
+            return created
         if operation == "scene.create":
             name, index = args.get("name"), args.get("index")
             scenes = self._items(getattr(self.song, "scenes", []))
             if not isinstance(name, str) or not 1 <= len(name) <= 128 or any(str(getattr(scene, "name", "")) == name for scene in scenes): raise ValueError("scene name is invalid or already exists")
             if index is None: index = len(scenes)
             if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= len(scenes): raise ValueError("scene index is invalid")
-            if self._owned_positional_conflict("scene", index): raise ValueError("scene insertion would shift active transaction-owned reference authority")
+            if self._own_insertion_conflict("scene", index): raise ValueError("scene insertion would shift active transaction-owned reference authority")
             creator = getattr(self.song, "create_scene", None)
             if not callable(creator): raise ValueError("scene creation is unavailable")
-            return self._structure_create_atomic("scene", index, name, creator)
+            created = self._structure_create_atomic("scene", index, name, creator)
+            self._retire_moved_ownership("scene", index, created["objectIdentity"])
+            return created
         reference = args.get("ref")
         if not isinstance(reference, str): raise ValueError("object reference is required")
         kind = "track" if operation == "track.delete" else "scene"
@@ -3174,7 +3329,8 @@ class LiveObjectMapper:
         row = self.get(reference)
         if not isinstance(row, dict): raise ValueError("created object fingerprint is unavailable")
         if reference.split(":")[1:2] == ["device"]: row = _owned_device_row(row)
-        return hashlib.sha256(self._bounded_canonical(row).encode("utf-8")).hexdigest()
+        # A clip's content, not where its playback is: the host fingerprints clips the same way.
+        return hashlib.sha256(self._bounded_canonical(_without_fields(row, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
 
     def _ownership_fingerprint(self, reference: str) -> str:
         if not reference.startswith(f"{self.refs.epoch}:"): raise ValueError("created object reference is malformed")
@@ -3183,14 +3339,14 @@ class LiveObjectMapper:
             track = next((row for row in snapshot["tracks"] if row["ref"] == reference), None)
             if track is None: raise ValueError("created track fingerprint is unavailable")
             owned_track = {**{key: value for key, value in track.items() if key not in _VOLATILE_TRACK_FIELDS}, **({"routing": {key: value for key, value in track["routing"].items() if key not in _VOLATILE_ROUTING_FIELDS}} if isinstance(track.get("routing"), dict) else {}), "clipSlots": [{key: value for key, value in slot.items() if key not in _VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}; arrangement_clips = [clip for clip in snapshot.get("arrangement", {}).get("clips", []) if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
-            return hashlib.sha256(self._bounded_canonical({"track": owned_track, "arrangementClips": arrangement_clips}).encode("utf-8")).hexdigest()
+            return hashlib.sha256(self._bounded_canonical(_without_fields({"track": owned_track, "arrangementClips": arrangement_clips}, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
         if f":scene:" not in reference: return self._mapped_fingerprint(reference)
         scene = next((row for row in snapshot["scenes"] if row["ref"] == reference), None)
         if scene is None: raise ValueError("created scene fingerprint is unavailable")
         scene_identity = {key: scene.get(key) for key in ("ref", "parentRef", "objectIdentity", "name", "triggerable")}; contents = []
         for track in snapshot["tracks"]:
             slot = next((row for row in track.get("clipSlots", []) if row.get("sceneIndex") == scene["index"]), None); clip = next((row for row in track.get("clips", []) if slot is not None and row.get("ref") == slot.get("clipRef")), None); owned_slot = {key: slot.get(key) for key in ("ref", "parentRef", "trackRef", "objectIdentity", "clipRef", "empty")} if slot is not None else None
-            contents.append({"trackRef": track.get("ref"), "trackIdentity": track.get("objectIdentity"), "slot": owned_slot, "clip": clip})
+            contents.append({"trackRef": track.get("ref"), "trackIdentity": track.get("objectIdentity"), "slot": owned_slot, "clip": _without_fields(clip, _VOLATILE_CLIP_FIELDS)})
         return hashlib.sha256(self._bounded_canonical({"scene": scene_identity, "contents": contents}).encode("utf-8")).hexdigest()
 
     def _creation_topology(self) -> str:
@@ -3286,9 +3442,24 @@ class LiveObjectMapper:
             axis = "track" if operation == "track.delete" else "scene"
             if self._owned_positional_conflict(axis, int(target_text), strict=True, exclude_token=ownership_token): raise ValueError("transaction-owned structure cleanup must proceed from the highest positional authority")
 
+    def _retire_explicitly_deleted_ownership(self, operation: str, args: dict[str, Any]) -> None:
+        """After an explicit deletion, a transaction that made the deleted object no longer owns it,
+        and for a return track, what followed it on the track axis has moved: those lose their
+        ownership too, so their undo is refused for lacking it instead of mistaking the objects."""
+        identity = args.get("expectedObjectIdentity")
+        for token, row in list(self._owned_cleanup_tokens.items()):
+            if row.get("objectIdentity") == identity and row.get("deleted") is not True: self._owned_cleanup_tokens.pop(token, None)
+        if operation == "track.delete-return":
+            parts = str(args.get("ref")).split(":")
+            if len(parts) == 3 and parts[1] == "track" and parts[2].isdigit():
+                for token, _ in self._owned_positions("track", int(parts[2]), strict=True): self._owned_cleanup_tokens.pop(token, None)
+
     def retire_transaction_ownership(self, transaction_id: str, terminal: bool = False) -> None:
         for token, row in list(self._owned_cleanup_tokens.items()):
             if row.get("transactionId") == transaction_id and (terminal or row.get("deleted") is True): self._owned_cleanup_tokens.pop(token, None)
+        if terminal:
+            for token, row in list(self._moved_ownership.items()):
+                if row.get("transactionId") == transaction_id: self._moved_ownership.pop(token, None)
 
     def _clip_duplicate(self, args: dict[str, Any], delete_source: bool = False) -> dict[str, Any]:
         reference = args.get("ref")
@@ -3485,7 +3656,7 @@ class LiveObjectMapper:
             if len(clips_after) != len(before_clips) + 1 or len(created_rows) != 1: raise ValueError("arrangement clip move did not produce one identity-distinct duplicate")
             created_pre_index, created = created_rows[0]; actual_start = self._read_attr(created, "start_time", "start")
             if self._clip_content_fingerprint(created) != source_content_fingerprint or not isinstance(actual_start, (int, float)) or not _same_number(actual_start, position): raise ValueError("Arrangement move did not preserve exact clip content and requested position")
-            created_identity = self._capture_object_identity(created); final_index = created_pre_index - 1 if source_index < created_pre_index else created_pre_index; projected_row = self._arrangement_clip_row(owner, created, track_index, final_index); created_ref = projected_row["ref"]; fingerprint = hashlib.sha256(self._bounded_canonical(projected_row).encode("utf-8")).hexdigest()
+            created_identity = self._capture_object_identity(created); final_index = created_pre_index - 1 if source_index < created_pre_index else created_pre_index; projected_row = self._arrangement_clip_row(owner, created, track_index, final_index); created_ref = projected_row["ref"]; fingerprint = hashlib.sha256(self._bounded_canonical(_without_fields(projected_row, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
         except BaseException as error:
             rollback_failed = False; current = self._items(self._read_attr(owner, "arrangement_clips") or []); owned = [candidate for candidate in current if self._capture_object_identity(candidate) not in before_identities]
             for candidate in owned:
@@ -3537,7 +3708,13 @@ class LiveObjectMapper:
             if field in args:
                 value = args[field]
                 if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not minimum <= float(value) <= maximum: raise ValueError(f"{field} is invalid")
-                proposals.append((field, attribute, float(value)))
+                # Live's setters are typed: a whole-number property (pitch_coarse, in semitones) refuses a
+                # float with Boost's ArgumentError, so it gets an int; the rest take floats.
+                present = self._read_attr(clip, attribute)
+                if field == "pitchCoarse" or (isinstance(present, int) and not isinstance(present, bool)):
+                    if not float(value).is_integer(): raise ValueError(f"{field} must be a whole number")
+                    proposals.append((field, attribute, int(value)))
+                else: proposals.append((field, attribute, float(value)))
         if "warpMode" in args:
             value = args["warpMode"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 16: raise ValueError("warpMode is invalid")
@@ -4042,7 +4219,9 @@ class LiveObjectMapper:
             fingerprint = self._mapped_fingerprint(reference)
             if not isinstance(args.get("expectedContentFingerprint"), str) or not hmac.compare_digest(fingerprint, args["expectedContentFingerprint"]):
                 raise ValueError("clip content changed since preview")
-        state_revision = hashlib.sha256(self._bounded_canonical({"isPlaying": current.get("isPlaying"), "playingPosition": current.get("playingPosition"), "length": current.get("length"), "loopStart": current.get("loopStart"), "loopEnd": current.get("loopEnd")}).encode("utf-8")).hexdigest()
+        # Not the playing position: it moves every tick while the clip plays (and only then can it be moved),
+        # so fencing it refused every action on a playing clip. Content actions are fenced by content.
+        state_revision = hashlib.sha256(self._bounded_canonical({"isPlaying": current.get("isPlaying"), "length": current.get("length"), "loopStart": current.get("loopStart"), "loopEnd": current.get("loopEnd")}).encode("utf-8")).hexdigest()
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]):
             raise ValueError("clip state changed since preview")
         before_length = self._read_attr(clip, "length"); loop_start = self._read_attr(clip, "loop_start"); loop_end = self._read_attr(clip, "loop_end")
@@ -4183,24 +4362,19 @@ class LiveObjectMapper:
             return {"duplicated": len(note_ids), "notesRevision": hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()}
         raise ValueError("note duplication was not confirmed") from duplicate_error
 
-    _GRID_QUANTIZATION_BY_BEATS = (
-        (0.125, "grid_thirtysecond"), (1.0 / 12.0, "grid_thirtysecond_triplet"),
-        (0.25, "grid_sixteenth"), (1.0 / 6.0, "grid_sixteenth_triplet"),
-        (0.5, "grid_eighth"), (1.0 / 3.0, "grid_eighth_triplet"),
-        (1.0, "grid_quarter"), (2.0 / 3.0, "grid_quarter_triplet"),
-        (2.0, "grid_half"), (4.0 / 3.0, "grid_half_triplet"),
-        (4.0, "grid_whole"), (8.0 / 3.0, "grid_whole_triplet"),
-    )
+    # Clip.quantize and quantize_pitch take a Live.Song.RecordingQuantization member, as Live's own
+    # scripts pass them: the grid in beats, that member's name, and its number (0 is no quantization).
+    _QUANTIZE_GRIDS = ((1.0, "rec_q_quarter", 1), (0.5, "rec_q_eight", 2), (1.0 / 3.0, "rec_q_eight_triplet", 3), (0.25, "rec_q_sixtenth", 5), (1.0 / 6.0, "rec_q_sixtenth_triplet", 6), (0.125, "rec_q_thirtysecond", 8))
 
-    def _grid_quantization_enum(self, name: str) -> Any:
+    def _recording_quantization(self, name: str, number: int) -> Any:
+        """Live's RecordingQuantization member by name, or its number where Live exposes no such enum."""
         try:
             import Live  # type: ignore[import-not-found]
-            enum = getattr(getattr(Live, "Clip", None), "GridQuantization", None)
-        except Exception as error:
-            raise ValueError("the quantization grid enum is unavailable") from error
-        value = getattr(enum, name, None)
-        if value is None: raise ValueError("the quantization grid enum is unavailable")
-        return value
+            enum = getattr(getattr(Live, "Song", None), "RecordingQuantization", None)
+        except Exception:
+            enum = None
+        value = getattr(enum, name, None) if enum is not None else None
+        return value if value is not None else number
 
     def _note_quantize(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
@@ -4208,10 +4382,11 @@ class LiveObjectMapper:
         if not isinstance(grid, (int, float)) or isinstance(grid, bool) or not math.isfinite(float(grid)) or not 0 < float(grid) <= 1000000: raise ValueError("grid is invalid")
         if not isinstance(amount, (int, float)) or isinstance(amount, bool) or not math.isfinite(float(amount)) or not 0 <= float(amount) <= 1: raise ValueError("amount is invalid")
         if pitch is not None and (not isinstance(pitch, int) or isinstance(pitch, bool) or not 0 <= pitch <= 127): raise ValueError("pitch is invalid")
-        grid_name = next((name for beats, name in self._GRID_QUANTIZATION_BY_BEATS if abs(float(grid) - beats) <= 1e-9), None)
-        if grid_name is None: raise ValueError("grid does not match a supported quantization grid")
-        enum_value = self._grid_quantization_enum(grid_name)
-        grid_beats = float(grid)
+        # A grid within 0.1% of one Live quantizes to (1/3 written as 0.3333 is the 1/8 triplet).
+        match = next(((beats, name, number) for beats, name, number in self._QUANTIZE_GRIDS if abs(float(grid) - beats) <= 1e-3 * beats), None)
+        if match is None: raise ValueError("grid does not match a supported quantization grid (1/4, 1/8, 1/8T, 1/16, 1/16T or 1/32 of a bar's beat)")
+        grid_beats, grid_name, grid_number = match
+        enum_value = self._recording_quantization(grid_name, grid_number)
         before_rows = self._read_notes(clip)
         if pitch is not None:
             method = getattr(clip, "quantize_pitch", None)
@@ -4221,9 +4396,20 @@ class LiveObjectMapper:
             method = getattr(clip, "quantize", None)
             if not callable(method): raise ValueError("quantization is unavailable on this Live shape")
             call = lambda: method(enum_value, float(amount))
+        targets = lambda rows: [row for row in rows if pitch is None or row.get("pitch") == pitch]
         def aligned(rows: list[dict[str, Any]]) -> bool:
-            targets = [row for row in rows if pitch is None or row.get("pitch") == pitch]
-            return all(isinstance(row.get("start"), (int, float)) and abs(float(row["start"]) / grid_beats - round(float(row["start"]) / grid_beats)) <= 1e-6 for row in targets)
+            return all(isinstance(row.get("start"), (int, float)) and abs(float(row["start"]) / grid_beats - round(float(row["start"]) / grid_beats)) <= 1e-6 for row in targets(rows))
+        def only_starts_moved_within_a_step(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> bool:
+            # Live quantizes with the Set's swing, which moves every other grid step off the grid: then
+            # the confirmation is that the same notes moved only in time, each by at most one step.
+            by_id = {row.get("id"): row for row in before}
+            for row in after:
+                prior = by_id.get(row.get("id"))
+                if prior is None or {key: value for key, value in row.items() if key != "start"} != {key: value for key, value in prior.items() if key != "start"}: return False
+                if not isinstance(row.get("start"), (int, float)) or abs(float(row["start"]) - float(prior["start"])) > grid_beats + 1e-6: return False
+            return len(after) == len(by_id)
+        swing = self._read_attr(self.song, "swing_amount")
+        swung = isinstance(swing, (int, float)) and not isinstance(swing, bool) and float(swing) > 1e-6
         before_aligned = aligned(before_rows)
         quantize_error: BaseException | None = None
         try: call()
@@ -4232,11 +4418,14 @@ class LiveObjectMapper:
         except BaseException as error:
             if quantize_error is None: quantize_error = error
             after_rows = []
+        changed = self._bounded_canonical(after_rows) != self._bounded_canonical(before_rows)
         if quantize_error is None and len(after_rows) == len(before_rows):
-            if aligned(after_rows):
-                return {"changed": True, "notesRevision": hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()}
-            if float(amount) < 1 and not before_aligned and self._bounded_canonical(after_rows) != self._bounded_canonical(before_rows):
-                return {"changed": True, "notesRevision": hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()}
+            if swung: confirmed = only_starts_moved_within_a_step(before_rows, after_rows)
+            elif float(amount) >= 1: confirmed = aligned(after_rows)
+            else: confirmed = aligned(after_rows) or (changed and not before_aligned and only_starts_moved_within_a_step(before_rows, after_rows))
+            if confirmed: return {"changed": True, "notesRevision": hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()}
+        # Not what quantizing does: put the notes back exactly rather than leave them changed.
+        if changed and not self._restore_notes(clip, before_rows): raise ValueError("quantization was not confirmed and exact note rollback failed") from quantize_error
         raise ValueError("quantization was not confirmed") from quantize_error
 
     def _arrangement_envelope_read(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4518,7 +4707,8 @@ class LiveObjectMapper:
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(self.song), args["expectedObjectIdentity"]): raise ValueError("Set identity changed since preview")
         if not isinstance(args.get("expectedRevision"), str) or not hmac.compare_digest(self._groove_revision(), args["expectedRevision"]): raise ValueError("groove state changed since preview")
         value = args.get("grooveAmount")
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1.3: raise ValueError("grooveAmount is invalid")
+        # Live's Groove Pool amount goes to 131.25%.
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1.3125: raise ValueError("grooveAmount is invalid")
         prior = self._read_attr(self.song, "groove_amount")
         if not isinstance(prior, (int, float)) or isinstance(prior, bool): raise ValueError("groove amount is unavailable")
         try:
@@ -4528,7 +4718,8 @@ class LiveObjectMapper:
         except BaseException as error:
             try: self.song.groove_amount = prior
             except BaseException: raise ValueError("groove amount change failed and exact rollback failed") from error
-            if self._read_attr(self.song, "groove_amount") != prior: raise ValueError("groove amount change failed and exact rollback failed") from error
+            restored = self._read_attr(self.song, "groove_amount")
+            if not isinstance(restored, (int, float)) or not _same_number(restored, prior): raise ValueError("groove amount change failed and exact rollback failed") from error
             raise
         return {"changed": True, "revision": self._groove_revision()}
 
@@ -4548,10 +4739,11 @@ class LiveObjectMapper:
             value = args["base"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 16: raise ValueError("base is invalid")
             proposals.append(("base", value))
+        # Live keeps a groove's amounts as its Groove Pool shows them: percentages, and velocity from -100 to 100.
         for field, attr in (("quantizationAmount", "quantization_amount"), ("randomAmount", "random_amount"), ("timingAmount", "timing_amount"), ("velocityAmount", "velocity_amount")):
             if field in args:
-                value = args[field]
-                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1: raise ValueError(f"{field} is invalid")
+                value = args[field]; minimum = -100 if field == "velocityAmount" else 0
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not minimum <= float(value) <= 100: raise ValueError(f"{field} is invalid")
                 proposals.append((attr, float(value)))
         if not proposals: raise ValueError("groove mutation has no fields")
         for attr, _ in proposals:
@@ -4562,7 +4754,9 @@ class LiveObjectMapper:
             for attr, value, _ in assignments: setattr(groove, attr, value)
             for attr, value, _ in assignments:
                 observed = self._read_attr(groove, attr)
-                if self._bounded_canonical(observed) != self._bounded_canonical(value): raise ValueError(f"groove field {attr} was not confirmed")
+                # The amounts are 32-bit floats in Live: compare within that precision; name and base exactly.
+                confirmed = _same_number(observed, value) if isinstance(value, float) and isinstance(observed, (int, float)) and not isinstance(observed, bool) else self._bounded_canonical(observed) == self._bounded_canonical(value)
+                if not confirmed: raise ValueError(f"groove field {attr} was not confirmed")
         except BaseException as error:
             rollback_failed = False
             for attr, _, prior in reversed(assignments):
@@ -4621,7 +4815,13 @@ class LiveObjectMapper:
                 elif not isinstance(observed_value, (int, float)) or isinstance(observed_value, bool) or not _same_number(observed_value, value): raise ValueError("scene change was not confirmed")
         except BaseException as error:
             rollback_failed = False
-            for _, attribute, _, prior in reversed(assignments):
+            for field, attribute, _, prior in reversed(assignments):
+                if field in ("tempo", "signatureNumerator", "signatureDenominator") and isinstance(prior, (int, float)) and not isinstance(prior, bool) and prior < (20 if field == "tempo" else 1):
+                    # Live reads a switched-off scene tempo or time signature as -1, which can't be written:
+                    # it is restored by switching it off again.
+                    try: setattr(scene, "tempo_enabled" if field == "tempo" else "time_signature_enabled", False)
+                    except BaseException: rollback_failed = True
+                    continue
                 try: setattr(scene, attribute, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._bounded_canonical(self._scene_state_fields(scene)) != self._bounded_canonical(before): raise ValueError("scene change failed and exact rollback failed") from error
@@ -4906,6 +5106,8 @@ class LiveObjectMapper:
             regular = len(self._items(getattr(self.song, "tracks", [])))
             reference = self.refs.put("track", created_track, str(regular + position))
             fingerprint = self._ownership_fingerprint(reference)
+            # What came after it on the track axis (later returns, the main track) moved one on.
+            self._retire_moved_ownership("track", regular + position, identity)
             return {"ref": reference, "objectIdentity": identity, "name": str(getattr(created_track, "name", "")), "index": position, "createdFingerprint": fingerprint}
         except BaseException as error:
             rollback_failed = False; deleter = getattr(self.song, "delete_return_track", None)
@@ -4924,7 +5126,7 @@ class LiveObjectMapper:
 
     def _track_delete_return(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
-        if not isinstance(reference, str) or set(args) - {"ref", "expectedObjectIdentity", "expectedStructureRevision"}: raise ValueError("return-track deletion authority is invalid")
+        if not isinstance(reference, str) or set(args) - {"ref", "expectedObjectIdentity", "expectedStructureRevision", "explicitDeletion"}: raise ValueError("return-track deletion authority is invalid")
         parts = reference.split(":")
         if len(parts) != 3 or parts[0] != str(self.refs.epoch) or parts[1] not in {"track", "return_track"} or not parts[2].isdigit(): raise ValueError("return-track deletion authority is invalid")
         if not isinstance(args.get("expectedStructureRevision"), str) or not hmac.compare_digest(self._structure_revision(), args["expectedStructureRevision"]): raise ValueError("structure changed since preview")
@@ -4956,7 +5158,10 @@ class LiveObjectMapper:
         after = self._items(getattr(self.song, "tracks", []))
         if len(after) != before + 1: raise ValueError("track duplication was not confirmed")
         created = after[index + 1]; reference_new = self.refs.put("track", created, str(index + 1)); identity = self._capture_object_identity(created)
-        fingerprint = hashlib.sha256(self._bounded_canonical({"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1}).encode("utf-8")).hexdigest()
+        # The fingerprint the copy's cleanup checks (as for every creation): the copy's content, not
+        # just its name and place, or its undo was refused as "changed" every time.
+        fingerprint = self._ownership_fingerprint(reference_new)
+        self._retire_moved_ownership("track", index + 1, identity)
         return {"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1, "createdFingerprint": fingerprint}
 
     def _scene_duplicate(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4974,7 +5179,8 @@ class LiveObjectMapper:
         after = self._items(getattr(self.song, "scenes", []))
         if len(after) != before + 1: raise ValueError("scene duplication was not confirmed")
         created = after[index + 1]; reference_new = self.refs.put("scene", created, str(index + 1)); identity = self._capture_object_identity(created)
-        fingerprint = hashlib.sha256(self._bounded_canonical({"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1}).encode("utf-8")).hexdigest()
+        fingerprint = self._ownership_fingerprint(reference_new)
+        self._retire_moved_ownership("scene", index + 1, identity)
         return {"ref": reference_new, "objectIdentity": identity, "name": str(getattr(created, "name", "")), "index": index + 1, "createdFingerprint": fingerprint}
 
     def _track_properties_state(self, track: Any) -> dict[str, Any]:
@@ -5066,22 +5272,41 @@ class LiveObjectMapper:
         selector()
         return {"done": True}
 
-    def _selection_state(self) -> dict[str, Any]:
+    def _selection_row(self, track_rows: list[dict[str, Any]], scene_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """What Live has selected, named by the snapshot's own references (matched by object identity):
+        the snapshot carries it, so the host fences a selection change on the very state the bridge
+        checks. None where nothing is selected or the object is not among the snapshot's rows."""
         view = getattr(self.song, "view", None)
-        def ref_or_none(value: Any, kind: str, key: str) -> str | None:
-            return self.refs.put(kind, value, key) if value is not None else None
-        track = self._read_attr(view, "selected_track"); scene = self._read_attr(view, "selected_scene")
-        slot = self._read_attr(view, "highlighted_clip_slot"); detail_clip = self._read_attr(view, "detail_clip")
-        device = self._read_attr(view, "selected_device"); parameter = self._read_attr(view, "selected_parameter"); chain = self._read_attr(view, "selected_chain")
-        return {
-            "trackRef": ref_or_none(track, "track", "selected") if track is not None else None,
-            "sceneRef": ref_or_none(scene, "scene", "selected") if scene is not None else None,
-            "slotRef": ref_or_none(slot, "clip_slot", "highlighted") if slot is not None else None,
-            "detailClipRef": ref_or_none(detail_clip, "clip", "detail") if detail_clip is not None else None,
-            "deviceRef": ref_or_none(device, "device", "selected") if device is not None else None,
-            "parameterRef": ref_or_none(parameter, "parameter", "selected") if parameter is not None else None,
-            "chainRef": ref_or_none(chain, "chain", "selected") if chain is not None else None,
-        }
+        known: dict[tuple[str, str], str] = {}; budget = [0]
+        def note(kind: str, row: Any, ref_key: str = "ref", identity_key: str = "objectIdentity") -> None:
+            if isinstance(row, dict) and isinstance(row.get(ref_key), str) and isinstance(row.get(identity_key), str): known.setdefault((kind, row[identity_key]), row[ref_key])
+        def devices(rows: Any, depth: int = 0) -> None:
+            for device in rows or []:
+                budget[0] += 1
+                if depth > 32 or budget[0] > 16384 or not isinstance(device, dict): return
+                note("device", device)
+                for parameter in list(device.get("parameters") or []) + list(device.get("macros") or []): note("parameter", parameter)
+                for chain in device.get("chains") or []: note("chain", chain); devices(chain.get("devices") if isinstance(chain, dict) else None, depth + 1)
+                for pad in device.get("drumPads") or []:
+                    for chain in (pad.get("chains") if isinstance(pad, dict) else None) or []: note("chain", chain); devices(chain.get("devices") if isinstance(chain, dict) else None, depth + 1)
+        for track in track_rows:
+            note("track", track)
+            for slot in track.get("clipSlots") or []: note("clip_slot", slot)
+            for clip in track.get("clips") or []: note("clip", clip)
+            mixer = track.get("mixer") if isinstance(track.get("mixer"), dict) else {}
+            for ref_key, identity_key in (("volumeRef", "volumeIdentity"), ("panRef", "panIdentity"), ("cueRef", "cueIdentity")): note("parameter", mixer, ref_key, identity_key)
+            for send_ref, send_identity in zip(mixer.get("sendRefs") or [], mixer.get("sendIdentities") or []): note("parameter", {"ref": send_ref, "objectIdentity": send_identity})
+            devices(track.get("devices"))
+        for scene in scene_rows: note("scene", scene)
+        def selected(kind: str, attribute: str) -> str | None:
+            value = self._read_attr(view, attribute) if view is not None else None
+            return known.get((kind, self._capture_object_identity(value))) if value is not None else None
+        return {"trackRef": selected("track", "selected_track"), "sceneRef": selected("scene", "selected_scene"), "slotRef": selected("clip_slot", "highlighted_clip_slot"),
+                "detailClipRef": selected("clip", "detail_clip"), "deviceRef": selected("device", "selected_device"), "parameterRef": selected("parameter", "selected_parameter"), "chainRef": selected("chain", "selected_chain")}
+
+    def _selection_state(self) -> dict[str, Any]:
+        """The selection as the snapshot reports it: the host previews selection changes from that."""
+        return dict(self.snapshot()["selection"])
 
     def _selection_revision(self) -> str:
         return hashlib.sha256(self._bounded_canonical(self._selection_state()).encode("utf-8")).hexdigest()
@@ -5199,7 +5424,9 @@ class LiveObjectMapper:
             observed_state = self._song_settings_state()
             for field, _, value, _ in assignments:
                 observed = observed_state.get(field)
-                if not isinstance(observed, (int, float)) or isinstance(observed, bool) or float(observed) != float(value): raise ValueError("song settings change was not confirmed")
+                # Swing is a 32-bit float in Live (0.15 reads back as 0.15000000596): compare within its
+                # precision, as every numeric readback does; the whole-number settings stay exact.
+                if not isinstance(observed, (int, float)) or isinstance(observed, bool) or not (_same_number(observed, value) if field == "swingAmount" else float(observed) == float(value)): raise ValueError("song settings change was not confirmed")
         except BaseException as error:
             rollback_failed = False
             for _, attribute, _, prior in reversed(assignments):
@@ -5900,13 +6127,16 @@ class LiveObjectMapper:
         return {"pads": loaded}
 
     def _rack_state(self, device: Any) -> dict[str, Any]:
+        """The rack state its edits fence on, exactly as the host computes it from the snapshot's rack row:
+        its pads are the ones that row lists (a Drum Rack's visible 16, not all 128 drum_pads, which
+        never matched), and only a rack that can have pads lists them."""
         visible = self._read_attr(device, "visible_macro_count"); selected = self._read_attr(device, "selected_variation_index")
         return {"visibleMacroCount": int(visible) if isinstance(visible, int) and not isinstance(visible, bool) else None,
                 "selectedVariationIndex": int(selected) if isinstance(selected, int) and not isinstance(selected, bool) else None,
                 "variationCount": int(self._read_attr(device, "variation_count")) if isinstance(self._read_attr(device, "variation_count"), int) and not isinstance(self._read_attr(device, "variation_count"), bool) else None,
                 "macros": [self._capture_object_identity(macro) for macro in self._items(self._read_attr(device, "macros") or [])],
                 "chains": [self._capture_object_identity(chain) for chain in self._items(self._read_attr(device, "chains") or [])],
-                "drumPads": [self._capture_object_identity(pad) for pad in self._items(self._read_attr(device, "drum_pads") or [])]}
+                "drumPads": [self._capture_object_identity(pad) for pad in self._rack_pads(device)] if self._read_attr(device, "can_have_drum_pads") is True else []}
 
     def _rack_set(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
@@ -6598,19 +6828,30 @@ class LiveObjectMapper:
 
     def _mixer_extended_fields(self, mixer: Any, track: Any, track_index: int) -> dict[str, Any]:
         if mixer is None:
-            return {"trackActivatorRef": None, "crossfaderRef": None, "crossfadeAssign": None, "panningMode": None, "panningLeftRef": None, "panningRightRef": None}
+            return {"mixerIdentity": None, "trackActivatorRef": None, "crossfaderRef": None, "crossfadeAssign": None, "panningMode": None, "panningLeftRef": None, "panningRightRef": None, "trackActivator": None, "crossfader": None, "panningLeft": None, "panningRight": None}
         def param_ref(name: str, key: str) -> str | None:
             parameter = self._read_attr(mixer, name)
             return self.refs.put("parameter", parameter, key) if parameter is not None else None
+        def param_value(name: str) -> float | None:
+            parameter = self._read_attr(mixer, name); value = self._read_attr(parameter, "value") if parameter is not None else None
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         assign = self._read_attr(mixer, "crossfade_assign")
         mode = self._read_attr(mixer, "panning_mode")
+        activator = param_value("track_activator")
         return {
+            # The mixer itself, which mixer.extended.set checks (as chain mixers carry theirs), and the
+            # values the extended mixer edits, so a preview has their prior state and apply can confirm.
+            "mixerIdentity": self._capture_object_identity(mixer),
             "trackActivatorRef": param_ref("track_activator", f"mixer:{track_index}:activator"),
             "crossfaderRef": param_ref("crossfader", f"mixer:{track_index}:crossfader"),
             "crossfadeAssign": int(assign) if isinstance(assign, int) and not isinstance(assign, bool) else None,
             "panningMode": int(mode) if isinstance(mode, int) and not isinstance(mode, bool) else None,
             "panningLeftRef": param_ref("left_split_stereo", f"mixer:{track_index}:panning_left"),
             "panningRightRef": param_ref("right_split_stereo", f"mixer:{track_index}:panning_right"),
+            "trackActivator": activator >= 0.5 if activator is not None else None,
+            "crossfader": param_value("crossfader"),
+            "panningLeft": param_value("left_split_stereo"),
+            "panningRight": param_value("right_split_stereo"),
         }
 
     def _chain_mixer_fields(self, chain: Any, chain_key: str) -> dict[str, Any]:
@@ -8216,8 +8457,13 @@ class LiveObjectMapper:
             if args.get("inputSubRouting") is not None: checks.append(row["inputSubRouting"] == args["inputSubRouting"])
             if args.get("outputType") is not None: checks.append(row["outputType"] == args["outputType"])
             if args.get("outputSubRouting") is not None: checks.append(row["outputSubRouting"] == args["outputSubRouting"])
-            if arm is not None: checks.append(self._read_attr(track, "arm") is arm)
-            if monitoring is not None: checks.append(self._monitoring_state(self._read_attr(track, "current_monitoring_state")) == monitoring)
+            # Live arms a track (and switches its monitoring) on its next tick on current builds, so right
+            # after the write it may still read as before: that is pending, not refused. Any other state
+            # refuses and rolls back; the host confirms arm and monitoring in fresh state once applied.
+            prior_arm = next((prior for _, name, _, prior in extra_assignments if name == "arm"), None)
+            prior_monitoring = next((self._monitoring_state(prior) for _, name, _, prior in extra_assignments if name == "current_monitoring_state"), None)
+            if arm is not None: checks.append(self._read_attr(track, "arm") in (arm, prior_arm) and isinstance(self._read_attr(track, "arm"), bool))
+            if monitoring is not None: checks.append(self._monitoring_state(self._read_attr(track, "current_monitoring_state")) in (monitoring, prior_monitoring))
             if not all(checks): raise ValueError("routing change was not confirmed by fresh state")
         except BaseException as error:
             rollback_failed = False
@@ -9076,6 +9322,8 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> s
             references.append(value)
     collect(args)
     observed = []
+    # Playing tempo automation moves the tempo every tick, as playing mixer automation moves its values.
+    tempo_automated = _tempo_automation_playing(mapper)
     attributes = ("name", "value", "min", "max", "is_enabled", "is_automatable", "arm", "mute", "solo", "current_monitoring_state", "input_routing_type", "input_routing_channel", "output_routing_type", "output_routing_channel", "gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode", "fade_in_length", "fade_out_length", "loop_start", "loop_end", "start_time", "length", "is_playing", "is_triggered", "is_recording")
     for reference in sorted(set(references)):
         try:
@@ -9084,12 +9332,13 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> s
                 obj = mapper.refs.get(reference)
                 if isinstance(obj, dict): row = {key: value for key, value in obj.items() if isinstance(value, (str, int, float, bool, type(None)))}
                 else: row = {attribute: mapper._read_attr(obj, attribute) for attribute in attributes if isinstance(mapper._read_attr(obj, attribute), (str, int, float, bool, type(None)))}
-            observed.append([reference, revision, _without_fields(row, _CONTINUOUS_FIELDS)])
+            if tempo_automated and isinstance(row, dict) and mapper.refs.get(reference) is mapper.song: row = {key: value for key, value in row.items() if key != "tempo"}
+            observed.append([reference, revision, _authority_row(row, mapper)])
         except (KeyError, ValueError, StopIteration): observed.append([reference, None, None])
     playback = mapper._playback()
     playback_transport = dict(playback.get("transport", {})); playback_transport.pop("position", None)
     playback = {**playback, "transport": playback_transport}
-    song_state = {key: mapper._read_attr(mapper.song, key) for key in ("tempo", "loop", "loop_start", "loop_length", "is_playing", "record_mode", "session_record")}
+    song_state = {key: mapper._read_attr(mapper.song, key) for key in ("tempo", "loop", "loop_start", "loop_length", "is_playing", "record_mode", "session_record") if not (key == "tempo" and tempo_automated)}
     locator_items = mapper._locator_items(); arrangement_items = mapper._arrangement_clip_items()
     if len(locator_items) > 256 or len(arrangement_items) > 256: raise ValueError("mutation authority collection exceeds its complete-state bound")
     locators = [{key: row.get(key) for key in ("ref", "name", "position")} for row in locator_items]
@@ -9304,7 +9553,7 @@ class AbletonMcpBridge:
             def preflight() -> dict[str, Any]:
                 operation = str(request["operation"]); args = dict(request.get("args", {})); transaction_id = request.get("transactionId"); ownership_token = request.get("ownershipToken"); now = int(time.time() * 1000); preflights = holder.setdefault("preflights", {})
                 if not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128: raise ValueError("mutation transaction identity is required")
-                if operation in _TRANSACTION_DELETIONS: self.mapper._require_cleanup_ownership(operation, args, transaction_id, ownership_token)
+                if operation in _TRANSACTION_DELETIONS and not _explicit_deletion(operation, args): self.mapper._require_cleanup_ownership(operation, args, transaction_id, ownership_token)
                 for key, row in list(preflights.items()):
                     if row["expiresAt"] <= now: preflights.pop(key, None)
                 if len(preflights) >= 64: raise ValueError("too many pending mutation preflights")

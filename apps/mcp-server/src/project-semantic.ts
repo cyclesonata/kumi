@@ -236,14 +236,16 @@ function deviceSemanticState(device: Device): { schemaHash: string; stateHash: s
     looper: device.looper ? { overdubAfterRecord: device.looper.overdubAfterRecord ?? null, recordLengthIndex: device.looper.recordLengthIndex ?? null, loopLength: device.looper.loopLength ?? null, tempo: device.looper.tempo ?? null, state: device.looper.state ?? null } : null,
     maxDevice: device.maxDevice ? { audioIns: device.maxDevice.audioIns?.length ?? null, audioOuts: device.maxDevice.audioOuts?.length ?? null, midiIns: device.maxDevice.midiIns?.length ?? null, midiOuts: device.maxDevice.midiOuts?.length ?? null } : null,
   };
+  // Live reports "none selected" as -1: a rack without variations, a plug-in without a preset.
+  const selectedIndex = (value: number | null | undefined): SemanticJson => (typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null);
   const visible: Record<string, SemanticJson> = {
     enabled: device.enabled ?? null,
     latencySamples: device.latencySamples ?? null,
     parameterCount: parameters.length,
-    pluginPresetIndex: device.plugin?.selectedPresetIndex ?? null,
+    pluginPresetIndex: selectedIndex(device.plugin?.selectedPresetIndex),
     pluginPresetCount: device.plugin?.presets?.length ?? null,
     rackVariationCount: device.variationCount ?? null,
-    selectedVariationIndex: device.selectedVariationIndex ?? null,
+    selectedVariationIndex: selectedIndex(device.selectedVariationIndex),
     specializedHash: digest(specialized),
   };
   return { schemaHash: digest(parameterSchema), stateHash: digest({ parameters, visible }), visible };

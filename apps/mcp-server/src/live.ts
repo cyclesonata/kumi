@@ -180,6 +180,12 @@ export interface AsyncLiveAdapter extends LiveAdapter {
   close(): Promise<void>;
 }
 
+/** A mutation the bridge refused before dispatching it to Live (at its authority preflight or
+ * prepare, or for lacking cleanup ownership): nothing in Live changed. */
+export class LiveMutationNotDispatchedError extends Error {
+  public constructor(message: string) { super(message); this.name = "LiveMutationNotDispatchedError"; }
+}
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const ref = (kind: LiveObjectKind, id: string): LiveRef => `${kind}:${id}`;
 const simulatorCanonical = (value: unknown): string => {
@@ -189,6 +195,8 @@ const simulatorCanonical = (value: unknown): string => {
   throw new Error("unsupported simulator authority value");
 };
 const simulatorRevision = (value: unknown): string => createHash("sha256").update(simulatorCanonical(value)).digest("hex");
+/** A created clip's fingerprint, as the host and the Remote Script take it: its content, not its playback state. */
+const clipRevision = (row: unknown): string => simulatorRevision(withoutPlaybackState(row));
 
 function createSimulatorState(): LiveSnapshot {
   const initialNotes: Note[] = [{ pitch: 36, start: 0, duration: 0.25, velocity: 110, channel: 1, id: 1, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 }];
@@ -220,11 +228,21 @@ const VOLATILE_TRACK_FIELDS = new Set(["armed", "implicitArm", "isSelected", "is
 const VOLATILE_SLOT_FIELDS = new Set(["playingStatus", "willRecordOnStart", "fireButtonState"]);
 /** How many routing choices a track offers depends on the other tracks (a new MIDI track is a new MIDI source), not on the track. */
 const VOLATILE_ROUTING_FIELDS = new Set(["availableInputTypes", "availableInputChannels", "availableOutputTypes", "availableOutputChannels"]);
+/** A clip's playback state moves while the Set plays (its position every tick): content fingerprints
+ * of clips, and of the tracks and scenes that hold them, leave it out, so edits and undo work while the
+ * song plays. Mirrors _VOLATILE_CLIP_FIELDS in the Remote Script, which fingerprints the same way. */
+const VOLATILE_CLIP_FIELDS = new Set(["playingPosition", "isPlaying", "isTriggered", "fireButtonState", "willRecordOnStart"]);
+export function withoutPlaybackState<T>(value: T, depth = 0): T {
+  if (depth > 64) return value;
+  if (Array.isArray(value)) return value.map((item) => withoutPlaybackState(item, depth + 1)) as unknown as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !VOLATILE_CLIP_FIELDS.has(key)).map(([key, item]) => [key, withoutPlaybackState(item, depth + 1)])) as T;
+}
 export function ownedTrackFingerprintRow(track: Track): Record<string, unknown> {
   const keep = (row: object, volatile: Set<string>) => Object.fromEntries(Object.entries(row).filter(([key]) => !volatile.has(key)));
   const row = keep(track, VOLATILE_TRACK_FIELDS);
   if (track.routing && typeof track.routing === "object") row.routing = keep(track.routing, VOLATILE_ROUTING_FIELDS);
-  return { ...row, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) };
+  return withoutPlaybackState({ ...row, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) });
 }
 
 /** A device row for ownership checks: parameter edit counters and a rack's view (UI selection) are not content. */
@@ -401,7 +419,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const slot = { ref: ref("clip-slot", `${track.ref}:${sceneIndex}`), parentRef: track.ref, objectIdentity: `sim-object:clip-slot:${this.sequence}`, sceneIndex, clipRef: clip.ref, empty: false };
         track.clipSlots = [...(track.clipSlots ?? []), slot];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } });
-        return { captured: true, clips: [clip.ref], clipIdentities: [{ ref: clip.ref, objectIdentity: clip.objectIdentity, createdFingerprint: simulatorRevision(clip) }] };
+        return { captured: true, clips: [clip.ref], clipIdentities: [{ ref: clip.ref, objectIdentity: clip.objectIdentity, createdFingerprint: clipRevision(clip) }] };
       }
       case "scene.capture": {
         if (args.expectedStateRevision !== captureAuthorityRevision()) throw new Error("Session state changed since capture preview");
@@ -484,7 +502,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (!slot || !scene || args.expectedTrackIdentity !== track.objectIdentity || args.expectedSlotRef !== slot.ref || args.expectedSlotIdentity !== slot.objectIdentity || args.expectedSceneRef !== scene.ref || args.expectedSceneIdentity !== scene.objectIdentity || slot.clipRef) throw new Error("clip creation target identity changed since preview");
         const clipIdentity = `simulator:clip:clip-${track.clips.length + 1}-${this.sequence + 1}`;
         const clip: Clip = { ref: ref("clip", `clip-${track.clips.length + 1}-${this.sequence + 1}`), objectIdentity: clipIdentity, name: typeof args.name === "string" && args.name.length > 0 ? args.name : "New Clip", kind, start, length, notes: [], notesRevision: simulatorRevision([]), warp: false, takes: [], automation: [], isAudio: kind === "audio", gain: kind === "audio" ? 1 : null, pitchCoarse: kind === "audio" ? 0 : null, pitchFine: kind === "audio" ? 0 : null, warpMode: kind === "audio" ? 0 : null, loopStart: kind === "audio" ? start : null, loopEnd: kind === "audio" ? start + length : null, warping: kind === "audio" ? true : null, fadeInLength: kind === "audio" ? 0 : null, fadeOutLength: kind === "audio" ? 0 : null, availableAudioFields: kind === "audio" ? ["gain", "pitchCoarse", "pitchFine", "warpMode", "warping", "fadeInLength", "fadeOutLength", "loopStart", "loopEnd"] : [] };
-        track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false; this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } }); return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, createdFingerprint: simulatorRevision(clip) };
+        track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false; this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } }); return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, createdFingerprint: clipRevision(clip) };
       }
       case "clip.delete": {
         const clipRef = objectRef("ref");
@@ -824,7 +842,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           const clip: Clip = { ...structuredClone(found.clip), ref: ref("arrangement-clip", `${found.track.ref}:${args.arrangementPosition}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, start: args.arrangementPosition };
           this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: found.track.ref }];
           this.emit({ type: "object", ref: found.track.ref, payload: { operation, clip } });
-          return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+          return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
         }
         if (args.expectedTargetCollectionRevision !== null) throw new Error("Session duplication cannot carry Arrangement collection authority");
         const targetTrack = this.findTrack(objectRef("targetTrackRef"));
@@ -843,7 +861,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           found.track.clips = found.track.clips.filter((candidate) => candidate !== found.clip); sourceSlot.clipRef = null; sourceSlot.empty = true;
         }
         this.emit({ type: "object", ref: targetTrack.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: simulatorRevision(clip) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: clipRevision(clip) };
       }
       case "arrangement.clip.create": {
         const track = this.findTrack(objectRef("trackRef"));
@@ -853,7 +871,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("arrangement-clip", `${track.ref}:${position}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, name, kind: "midi", start: position, length, notes: [], notesRevision: simulatorRevision([]), warp: false, takes: [], automation: [] };
         this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: track.ref }];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name, start: position, length, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name, start: position, length, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
       }
       case "arrangement.clip.delete": {
         const clipRef = objectRef("ref");
@@ -872,7 +890,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (typeof position !== "number" || !Number.isFinite(position) || position < 0) throw new RangeError("position is invalid");
         item.clip.start = position;
         this.emit({ type: "object", ref: clipRef, payload: { operation } });
-        return { ref: clipRef, objectIdentity: item.clip.objectIdentity, start: position, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clipRef)) };
+        return { ref: clipRef, objectIdentity: item.clip.objectIdentity, start: position, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clipRef)) };
       }
       case "arrangement.audio-clip.create": {
         const track = this.findTrack(objectRef("trackRef"));
@@ -885,7 +903,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("arrangement-clip", `${track.ref}:${position}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, name: clipName, kind: "audio", start: position, length: 4, notes: [], notesRevision: simulatorRevision([]), warp: true, takes: [], automation: [], filePath, isAudio: true, muted: false };
         this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: track.ref }];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length: clip.length, filePath, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length: clip.length, filePath, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
       }
       case "clip.set": {
         const clip = this.findClip(objectRef("ref"));
@@ -979,17 +997,17 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("clip", `${track.ref}:${sceneIndex}`), objectIdentity: `simulator:clip:${this.sequence + 1}`, name: (name as string | undefined) ?? filePath.split("/").pop() ?? "Audio Clip", kind: "audio", start: (sceneIndex as number) * 4, length: 4, notes: [], notesRevision: simulatorRevision([]), warp: true, takes: [], automation: [], isAudio: true, filePath, muted: false, warpMarkers: [{ beatTime: 1, sampleTime: 44100 }] };
         track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false;
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, filePath, createdFingerprint: simulatorRevision(clip) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, filePath, createdFingerprint: clipRevision(clip) };
       }
       case "clip.action": {
         const clip = this.findClip(objectRef("ref"));
         if (clip.objectIdentity !== args.expectedObjectIdentity) throw new Error("clip identity changed since preview");
         const clipAuthorityRevision = clip.ref.startsWith("arrangement-clip:") ? arrangementAuthorityRevision(clip.ref) : simulatorRevision(this.sessionClipAuthority(clip.ref));
         if (args.expectedAuthorityRevision !== clipAuthorityRevision) throw new Error("clip hierarchy changed since preview");
-        const clipStateRevision = simulatorRevision({ isPlaying: clip.isPlaying ?? null, playingPosition: clip.playingPosition ?? null, length: clip.length ?? null, loopStart: clip.loopStart ?? null, loopEnd: clip.loopEnd ?? null });
+        const clipStateRevision = simulatorRevision({ isPlaying: clip.isPlaying ?? null, length: clip.length ?? null, loopStart: clip.loopStart ?? null, loopEnd: clip.loopEnd ?? null });
         if (args.expectedStateRevision !== clipStateRevision) throw new Error("clip state changed since preview");
         const action = args.action;
-        if (["crop", "duplicate-loop", "duplicate-region"].includes(action as string) && args.expectedContentFingerprint !== simulatorRevision(clip)) throw new Error("clip content changed since preview");
+        if (["crop", "duplicate-loop", "duplicate-region"].includes(action as string) && args.expectedContentFingerprint !== simulatorRevision(withoutPlaybackState(clip))) throw new Error("clip content changed since preview");
         if (action === "crop") { clip.length = (clip.loopEnd ?? clip.length) - (clip.loopStart ?? 0); }
         else if (action === "duplicate-loop") { clip.length = clip.length + ((clip.loopEnd ?? clip.length) - (clip.loopStart ?? 0)); }
         else if (action === "duplicate-region") {
@@ -1118,7 +1136,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("take-lane-clip", `${found.lane.ref}:${position}`), objectIdentity: `simulator:take-lane-clip:${this.sequence + 1}`, name: clipName, kind: audio ? "audio" : "midi", start: position, length, notes: [], notesRevision: simulatorRevision([]), warp: audio, takes: [], automation: [], isAudio: audio, ...(audio ? { filePath } : {}), muted: false, isTakeLaneClip: true };
         found.lane.clips.push(clip);
         this.emit({ type: "object", ref: found.lane.ref, payload: { operation, clip } });
-        const result: Record<string, unknown> = { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length, createdFingerprint: simulatorRevision(clip) };
+        const result: Record<string, unknown> = { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length, createdFingerprint: clipRevision(clip) };
         if (audio) result.filePath = filePath;
         return result;
       }

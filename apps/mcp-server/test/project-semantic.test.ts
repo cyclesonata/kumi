@@ -7,6 +7,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { DeterministicLiveSimulator, type LiveSnapshot } from "../src/live.js";
 import { projectSourceEvidence } from "../src/project.js";
+import { diffSemanticProjectSnapshots } from "../src/project-semantic-diff.js";
 import {
   SEMANTIC_PROJECT_MAX_BUNDLE_BYTES,
   SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES,
@@ -64,6 +65,27 @@ test("Live's unset scene tempo and time signature (-1) export as unset instead o
   Object.assign(snapshot.scenes[0]!, { tempo: 96, tempoEnabled: true, signatureNumerator: 7, signatureDenominator: 8 });
   const set = createSemanticProjectSnapshot(snapshot, options()).records.find((record) => record.kind === "scene")!;
   assert.deepEqual([set.data.tempo, set.data.signatureNumerator, set.data.signatureDenominator], [96, 7, 8], "a scene's own tempo and signature are kept");
+});
+
+test("Live's 'none selected' -1 on racks without variations and plug-ins without a preset exports, pages and diffs as unset", () => {
+  // Every Drum Rack and Instrument Rack in a normal Set reports selectedVariationIndex -1 with no variations.
+  const snapshot = new DeterministicLiveSimulator().snapshot();
+  const nested: any = { ref: "device:nested-rack", parentRef: "chain:rack-1:0", name: "Audio Effect Rack", kind: "rack", className: "AudioEffectGroupDevice", objectIdentity: "simulator:device:nested-rack", parameters: [], canHaveChains: true, chains: [], variationCount: 0, selectedVariationIndex: -1 };
+  const rack: any = { ref: "device:rack-1", parentRef: snapshot.tracks[0]!.ref, name: "Drum Rack", kind: "rack", className: "DrumGroupDevice", objectIdentity: "simulator:device:rack-1", parameters: [], canHaveChains: true, variationCount: 0, selectedVariationIndex: -1,
+    chains: [{ ref: "chain:rack-1:0", parentRef: "device:rack-1", objectIdentity: "simulator:chain:rack-1:0", index: 0, name: "Kick", mute: false, solo: false, devices: [nested] }] };
+  const plugin: any = { ref: "device:plugin-1", parentRef: snapshot.tracks[0]!.ref, name: "Synth", kind: "plugin", className: "PluginDevice", objectIdentity: "simulator:device:plugin-1", parameters: [], plugin: { presets: [], selectedPresetIndex: -1 } };
+  snapshot.tracks[0]!.devices.push(rack, plugin);
+  const artifact = createSemanticProjectSnapshot(snapshot, options());
+  validateSemanticProjectArtifact(artifact);
+  const devices = artifact.records.filter((record) => record.kind === "device").map((record) => record.data.state as Record<string, unknown>);
+  assert.equal(devices.filter((state) => state.selectedVariationIndex === null && state.rackVariationCount === 0).length, 2);
+  assert.ok(devices.some((state) => state.pluginPresetIndex === null && state.pluginPresetCount === 0));
+  const assembled = assembleSemanticProjectPages(pagesFor(artifact, 5));
+  validateSemanticProjectArtifact(assembled);
+  const again = structuredClone(snapshot); (again.tracks[0]!.devices.find((device) => device.ref === "device:rack-1") as any).selectedVariationIndex = 0; (again.tracks[0]!.devices.find((device) => device.ref === "device:rack-1") as any).variationCount = 1;
+  const changed = createSemanticProjectSnapshot(again, options()); validateSemanticProjectArtifact(changed);
+  assert.equal(diffSemanticProjectSnapshots(artifact, createSemanticProjectSnapshot(structuredClone(snapshot), options())).summary.changed, false);
+  assert.ok(diffSemanticProjectSnapshots(artifact, changed).items.some((item) => item.section === "devices" && item.type === "change"));
 });
 
 test("bundle and combined diff-input bounds reserve space below the transport frame", () => {

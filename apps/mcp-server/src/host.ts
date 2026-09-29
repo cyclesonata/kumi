@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, UnavailableLiveAdapter, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -409,6 +409,33 @@ function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { m
   return typeof observed === "number" && Number.isInteger(observed) && Number.isInteger(parameter.min) && Number.isInteger(parameter.max) && Math.abs(observed - proposed) <= 0.5 + 1e-9 ? observed : undefined;
 }
 
+/** An adapter failure as a tool may show it: bounded bridge and host messages, anything else generic.
+ * "request failed: ..." carries the Remote Script's bounded validation message or exception type. */
+function adapterReason(raw: string): string {
+  return /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+}
+
+/** Live reads a switched-off scene tempo or time signature as -1 (outside what can be written): such a
+ * prior is restored by switching it off again, not by writing -1. Undefined when it can't be exact. */
+function sceneRestoreFields(prior: Record<string, unknown>): Record<string, unknown> | undefined {
+  const within = (value: unknown, min: number, max: number): boolean => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  const restore: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(prior)) {
+    if (value === null) return undefined;
+    if (field === "tempo" && !within(value, 20, 999)) { if (prior.tempoEnabled === true) return undefined; restore.tempoEnabled = false; }
+    else if ((field === "signatureNumerator" || field === "signatureDenominator") && !(Number.isInteger(value) && within(value, 1, 99))) { if (prior.timeSignatureEnabled === true) return undefined; restore.timeSignatureEnabled = false; }
+    else restore[field] = value;
+  }
+  return restore;
+}
+
+/** Whether a scene reads back as its prior state; a switched-off tempo or signature only has to be off. */
+function sceneFieldRestored(restored: Record<string, unknown>, field: string, value: unknown, prior: Record<string, unknown>): boolean {
+  const off = (field === "tempo" && (typeof value !== "number" || value < 20)) || ((field === "signatureNumerator" || field === "signatureDenominator") && (typeof value !== "number" || value < 1));
+  if (off) return restored[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] === false && prior[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] !== true;
+  return sameLiveValue(restored[field], value);
+}
+
 function sameLiveValue(observed: unknown, expected: unknown): boolean {
   if (typeof observed === "number" && typeof expected === "number") return Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
   if (Array.isArray(observed) && Array.isArray(expected)) return observed.length === expected.length && observed.every((value, index) => sameLiveValue(value, expected[index]));
@@ -460,7 +487,10 @@ export class McpHost {
     if (value.kind === "drum-pad") this.releaseDrumSamplerPresets(value);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
-  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
+  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; priorState?: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
+  /** Undos the bridge refused before dispatching anything to Live, by transaction: live_undo reports
+   * them as refusals and the change stays applied, instead of leaving it uncertain. */
+  private readonly undoRefusals = new Map<string, { record: object; message: string }>();
   private recoveryFinalizationInFlight = false;
   private activeAsyncOperations = 0;
   private toolPolicy: ToolPolicySpec;
@@ -1699,17 +1729,29 @@ export class McpHost {
     } catch (cause) { return this.adapterToolError(id, cause, "Transport preview requires fresh authoritative playback state."); }
   }
 
-  private async confirmTransportPosition(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, proposed: number): Promise<void> {
-    // Live applies playhead moves asynchronously; accept the position once it
-    // lands within tolerance, allowing bounded drift while the transport plays.
-    while (Date.now() < context.deadlineMs - 250) {
+  /** Whether fresh transport state shows a transport field as given: the playhead within tolerance
+   * (with bounded drift while playing), loop bounds within float precision, switches exactly. */
+  private static transportFieldIs(transport: LiveSnapshot["playback"]["transport"], field: string, value: number | boolean): boolean {
+    if (field === "position") {
+      const current = transport.position;
+      if (typeof current !== "number" || typeof value !== "number") return false;
+      return transport.playing === true ? current >= value - 0.26 && current <= value + 2.5 : Math.abs(current - value) <= 0.26;
+    }
+    const observed = field === "loopEnabled" ? transport.loop.enabled : field === "loopStart" ? transport.loop.start : field === "loopLength" ? transport.loop.length : (transport as unknown as JsonObject)[field];
+    return typeof value === "number" ? sameLiveValue(observed, value) : observed === value;
+  }
+
+  /** Live applies transport writes on its next tick (the playhead always; the loop and metronome on
+   * current builds), so the bridge accepts them as pending. Confirm every written field in fresh
+   * playback state, and return that state, whose revision is the one the change left. */
+  private async confirmTransportFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, fields: Record<string, number | boolean>): Promise<LiveSnapshot> {
+    while (true) {
       const after = await adapter.snapshotAsync(context);
-      const current = after.playback.transport.position;
-      const playing = after.playback.transport.playing === true;
-      if (typeof current === "number" && (playing ? (current >= proposed - 0.26 && current <= proposed + 2.5) : Math.abs(current - proposed) <= 0.26)) return;
+      if (Object.entries(fields).every(([field, value]) => McpHost.transportFieldIs(after.playback.transport, field, value))) return after;
+      if (Date.now() >= context.deadlineMs - 250) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error("transport position was not confirmed by fresh playback state");
+    throw new Error("transport change was not confirmed by fresh playback state");
   }
 
   private async liveTransportApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -1730,8 +1772,9 @@ export class McpHost {
       if (!reconciliation && (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity || snapshot.playback.revision !== transaction.playbackRevision)) return this.transactionError(id, "transport Set identity or state changed since preview; preview again");
       const result = await adapter.invokeAsync({ operation: "transport.set", args: { ...transaction.proposed, expectedRevision: transaction.playbackRevision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity } }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true || typeof result.revision !== "string") throw new Error("transport change was not confirmed");
-      if (typeof transaction.proposed.position === "number") await this.confirmTransportPosition(adapter, context, transaction.proposed.position);
-      transaction.appliedRevision = result.revision;
+      const confirmed = await this.confirmTransportFields(adapter, context, transaction.proposed);
+      // The revision of the state the change left, once Live applied it (undo checks nothing changed since).
+      transaction.appliedRevision = confirmed.playback.revision;
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -1765,13 +1808,13 @@ export class McpHost {
       if (!reconciliation && (transaction.appliedRevision === undefined || snapshot.playback.revision !== transaction.appliedRevision)) return this.transactionError(id, "transport state revision changed after apply; undo refused");
       const current = snapshot.playback.transport;
       if (reconciliation) {
-        for (const [field, restored] of Object.entries(restore)) { const observed = field === "loopEnabled" ? current.loop.enabled : field === "loopStart" ? current.loop.start : field === "loopLength" ? current.loop.length : (current as unknown as JsonObject)[field]; if (field === "position" ? (typeof observed !== "number" || typeof restored !== "number" || Math.abs(observed - restored) > 0.26) : observed !== restored) throw new Error("transport undo replay did not restore the exact prior state"); }
+        await this.confirmTransportFields(adapter, context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
       } else {
-        for (const [field, proposed] of Object.entries(transaction.proposed)) { const observed = field === "loopEnabled" ? current.loop.enabled : field === "loopStart" ? current.loop.start : field === "loopLength" ? current.loop.length : (current as unknown as JsonObject)[field]; if (field === "position" ? (typeof observed !== "number" || typeof proposed !== "number" || Math.abs(observed - proposed) > 0.26) : observed !== proposed) return this.transactionError(id, "transport field changed after apply; undo refused"); }
+        for (const [field, proposed] of Object.entries(transaction.proposed)) if (!McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return this.transactionError(id, "transport field changed after apply; undo refused");
         const result = await this.invokeUndoRecovery(transaction, adapter, "transport.set", { ...restore, expectedRevision: snapshot.playback.revision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("transport undo was not confirmed");
       }
-      if (typeof restore.position === "number") await this.confirmTransportPosition(adapter, context, restore.position);
+      await this.confirmTransportFields(adapter, context, restore);
       transaction.undoKey = params.idempotencyKey as string;
       transaction.state = "undone";
       return this.successText(id, { transactionId: transaction.id, state: "undone", restored: restore, idempotent: false });
@@ -2046,14 +2089,32 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "routing.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("routing change was not confirmed");
-      const after = await adapter.snapshotAsync(context); const appliedTrack = (after.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef);
-      if (!appliedTrack || appliedTrack.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("routing target identity changed after apply");
-      const observedRouting = { inputType: (appliedTrack.routing as JsonObject).inputType, inputSubRouting: (appliedTrack.routing as JsonObject).inputSubRouting, outputType: (appliedTrack.routing as JsonObject).outputType, outputSubRouting: (appliedTrack.routing as JsonObject).outputSubRouting, arm: appliedTrack.armed, monitoring: appliedTrack.monitoringState }; for (const key of Object.keys(transaction.prior ?? {})) if (observedRouting[key as keyof typeof observedRouting] !== transaction.payload[key]) throw new Error("routing postcondition was not confirmed");
-      transaction.created = { inputType: (appliedTrack.routing as JsonObject).inputType, inputSubRouting: (appliedTrack.routing as JsonObject).inputSubRouting, outputType: (appliedTrack.routing as JsonObject).outputType, outputSubRouting: (appliedTrack.routing as JsonObject).outputSubRouting, arm: appliedTrack.armed, monitoring: appliedTrack.monitoringState };
+      const expected = Object.fromEntries(Object.keys(transaction.prior ?? {}).map((key) => [key, transaction.payload[key]]));
+      const appliedTrack = await this.confirmRoutingFields(adapter, context, transaction.clipRef as LiveRef, transaction.payload.expectedObjectIdentity as string, expected, "routing postcondition was not confirmed");
+      transaction.created = this.observedRouting(appliedTrack);
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Routing state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  private observedRouting(track: JsonObject): Record<string, unknown> {
+    const routing = (isObject(track.routing) ? track.routing : {}) as JsonObject;
+    return { inputType: routing.inputType, inputSubRouting: routing.inputSubRouting, outputType: routing.outputType, outputSubRouting: routing.outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
+  }
+
+  /** Live arms a track and switches its monitoring on its next tick on current builds, so the bridge
+   * accepts those writes as pending: confirm the routing fields in fresh state, and return that track. */
+  private async confirmRoutingFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, trackRef: LiveRef, identity: string, expected: Record<string, unknown>, failure: string): Promise<JsonObject> {
+    while (true) {
+      const track = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackRef);
+      if (!track || track.objectIdentity !== identity) throw new Error("routing target identity changed after apply");
+      const observed = this.observedRouting(track);
+      if (Object.entries(expected).every(([key, value]) => observed[key] === value)) return track;
+      if (Date.now() >= context.deadlineMs - 250) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(failure);
   }
 
   private eventEmitter: ((value: string) => Promise<void>) | undefined;
@@ -4123,7 +4184,8 @@ export class McpHost {
       const contentActions = ["crop", "duplicate-loop", "duplicate-region"];
       const authority = this.clipPropertiesMutationAuthority(snapshot, params.clipRef as LiveRef);
       payload.expectedObjectIdentity = authority.expectedObjectIdentity; payload.expectedAuthorityRevision = authority.expectedAuthorityRevision;
-      const state = { isPlaying: row.clip.isPlaying ?? null, playingPosition: row.clip.playingPosition ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
+      // Not the playing position: it moves every tick while the clip plays, the only time it can be moved.
+      const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
       payload.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex");
       if (contentActions.includes(params.action as string)) payload.expectedContentFingerprint = this.captureObjectFingerprint(row.clip);
       const prior = { length: row.clip.length, playingPosition: row.clip.playingPosition ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
@@ -4149,7 +4211,7 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
-        const state = { isPlaying: row.clip.isPlaying ?? null, playingPosition: row.clip.playingPosition ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
+        const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
         const contentFingerprint = ["crop", "duplicate-loop", "duplicate-region"].includes(transaction.payload.action as string) ? this.captureObjectFingerprint(row.clip) : null;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, state, contentFingerprint }) !== transaction.fence) return this.transactionError(id, "clip identity, state, or content changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -4279,7 +4341,7 @@ export class McpHost {
       if (isObject(item)) { const keys = Object.keys(item); if (keys.length > 256) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
-    return createHash("sha256").update(canonical(value, 0)).digest("hex");
+    return createHash("sha256").update(canonical(withoutPlaybackState(value), 0)).digest("hex");
   }
 
   /** Digest of the full clip content the snapshot exposes as mutable: name,
@@ -4693,7 +4755,7 @@ export class McpHost {
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown>;
       if (params.action === "set-amount") {
-        if (typeof params.grooveAmount !== "number" || !Number.isFinite(params.grooveAmount) || params.grooveAmount < 0 || params.grooveAmount > 1.3) return error(id, -32602, "grooveAmount must be 0-1.3");
+        if (typeof params.grooveAmount !== "number" || !Number.isFinite(params.grooveAmount) || params.grooveAmount < 0 || params.grooveAmount > 1.3125) return error(id, -32602, "grooveAmount must be 0-1.3125");
         payload = { action: params.action, setRef: snapshot.set.ref, grooveAmount: params.grooveAmount, expectedObjectIdentity: snapshot.set.objectIdentity, expectedRevision: read.revision };
         prior = { grooveAmount: read.grooveAmount ?? null };
       } else {
@@ -4708,7 +4770,8 @@ export class McpHost {
           if (value === undefined) continue;
           if (field === "name" && !isNonEmptyString(value, 256)) return error(id, -32602, "name is invalid");
           if (field === "base" && (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 16)) return error(id, -32602, "base is invalid");
-          if (field !== "name" && field !== "base" && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)) return error(id, -32602, `${field} must be 0-1`);
+          // As Live's Groove Pool shows them: percentages, velocity from -100 to 100.
+          if (field !== "name" && field !== "base" && (typeof value !== "number" || !Number.isFinite(value) || value < (field === "velocityAmount" ? -100 : 0) || value > 100)) return error(id, -32602, field === "velocityAmount" ? "velocityAmount must be -100-100" : `${field} must be 0-100`);
           proposed[field] = value;
         }
         payload = { action: params.action, ref: params.grooveRef, ...proposed, expectedObjectIdentity: groove.objectIdentity, expectedRevision: read.revision };
@@ -4749,11 +4812,11 @@ export class McpHost {
       const snapshot = await adapter.snapshotAsync(context);
       const verified = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>>; revision?: unknown };
       if (action === "set-amount") {
-        if (verified.grooveAmount !== transaction.payload.grooveAmount) throw new Error("groove amount postcondition was not confirmed");
+        if (!sameLiveValue(verified.grooveAmount, transaction.payload.grooveAmount)) throw new Error("groove amount postcondition was not confirmed");
       } else {
         const groove = (verified.grooves ?? []).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!groove) throw new Error("edited groove disappeared after apply");
-        for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (transaction.payload[field] !== undefined && JSON.stringify(groove[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("groove postcondition was not confirmed");
+        for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (transaction.payload[field] !== undefined && !sameLiveValue(groove[field], transaction.payload[field])) throw new Error("groove postcondition was not confirmed");
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -4794,6 +4857,10 @@ export class McpHost {
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
       const prior: Record<string, unknown> = {};
       for (const field of Object.keys(proposed)) prior[field] = scene[field] ?? null;
+      // Live reads a switched-off scene tempo or time signature as -1, which can't be written back:
+      // undo restores those by switching them off again, so the switch belongs to the prior state.
+      if ("tempo" in proposed && !("tempoEnabled" in prior)) prior.tempoEnabled = scene.tempoEnabled ?? null;
+      if (("signatureNumerator" in proposed || "signatureDenominator" in proposed) && !("timeSignatureEnabled" in prior)) prior.timeSignatureEnabled = scene.timeSignatureEnabled ?? null;
       const payload: Record<string, unknown> = { ref: params.ref, ...proposed, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: scene.objectIdentity, state: fields.map((field) => scene[field] ?? null) });
       const transaction: ClipLifecycleTransaction = { id: `sceneset_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "scene-set", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -4987,7 +5054,9 @@ export class McpHost {
         if (params.action === "delete-return") {
           const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref && candidate.kind === "return");
           if (!track || !isNonEmptyString(track.objectIdentity, 256)) return this.transactionError(id, "return-track reference is unknown");
-          payload = { action: params.action, ref: params.ref, expectedObjectIdentity: track.objectIdentity, expectedStructureRevision: structureRevision };
+          // An explicit deletion of an existing return track: no creating transaction owns it, so the
+          // bridge holds it to these exact identity fences instead of an ownership token.
+          payload = { action: params.action, ref: params.ref, expectedObjectIdentity: track.objectIdentity, expectedStructureRevision: structureRevision, explicitDeletion: true };
         } else if (params.action === "duplicate-track") {
           const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref && !["return", "main", "master"].includes(candidate.kind as string));
           if (!track || !isNonEmptyString(track.objectIdentity, 256)) return this.transactionError(id, "track reference is unknown or not a regular track");
@@ -5051,7 +5120,9 @@ export class McpHost {
       if (!(status.operations ?? []).includes("device.delete")) throw new Error("device deletion is unavailable");
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const row = this.deviceRow(snapshot, params.ref as LiveRef);
-      const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity };
+      // An explicit deletion of an existing device (never a cleanup): the bridge holds it to these exact
+      // identity, owner, sibling and track fences instead of a creating transaction's ownership token.
+      const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, explicitDeletion: true };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: row.device.objectIdentity, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, trackRef: row.track.ref, trackIdentity: row.track.objectIdentity });
       const transaction: ClipLifecycleTransaction = { id: `devdel_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "device-delete", fence, payload, prior: { name: row.device.name }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "device delete");
@@ -5277,7 +5348,8 @@ export class McpHost {
       const after = await adapter.snapshotAsync(context);
       if (after.set.ref !== transaction.payload.setRef || after.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply");
       const verified = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
-      for (const field of fields) if (transaction.payload[field] !== undefined && verified[field] !== transaction.payload[field]) throw new Error("song settings postcondition was not confirmed");
+      // Swing is a 32-bit float in Live: numeric settings compare within its precision.
+      for (const field of fields) if (transaction.payload[field] !== undefined && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("song settings postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -5832,7 +5904,8 @@ export class McpHost {
         const targetDevices = ((target.devices as unknown[]) ?? []);
         if ((params.index as number) > targetDevices.length) return error(id, -32602, "index exceeds the exact target sibling collection");
         payload = { action: params.action, ref: params.ref, index: params.index, ...(params.targetTrackRef !== undefined ? { targetTrackRef: params.targetTrackRef } : { targetChainRef: params.targetChainRef }), expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity, priorOwnerRef: row.ownerRef, priorIndex: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
-        prior = { ownerRef: row.ownerRef, index: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
+        // Where the device came from: its owner (a track or a rack chain) by reference and identity, and its place there.
+        prior = { ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, ownerKind: row.ownerRef === row.track.ref ? "track" : "chain", index: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
         impact = "moves-device-cross-target";
       }
       const fence = JSON.stringify({ action: params.action, payload });
@@ -6957,7 +7030,7 @@ export class McpHost {
       const value = params[field];
       if (value === undefined) continue;
       if (field === "warping") { if (typeof value !== "boolean") return error(id, -32602, "warping must be boolean"); proposed[field] = value; continue; }
-      if (typeof value !== "number" || !Number.isFinite(value) || (field === "gain" && value < 0) || (field === "pitchCoarse" && Math.abs(value) > 48) || (field === "pitchFine" && Math.abs(value) > 50) || (["loopStart", "loopEnd", "fadeInLength", "fadeOutLength"].includes(field) && value < 0) || (field === "warpMode" && (!Number.isInteger(value) || value < 0 || value > 16))) return error(id, -32602, `${field} is out of bounds`);
+      if (typeof value !== "number" || !Number.isFinite(value) || (field === "gain" && value < 0) || (field === "pitchCoarse" && (Math.abs(value) > 48 || !Number.isInteger(value))) || (field === "pitchFine" && Math.abs(value) > 50) || (["loopStart", "loopEnd", "fadeInLength", "fadeOutLength"].includes(field) && value < 0) || (field === "warpMode" && (!Number.isInteger(value) || value < 0 || value > 16))) return error(id, -32602, `${field} is out of bounds`);
       proposed[field] = value;
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one audio clip field is required");
@@ -7000,7 +7073,8 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "audio.clip.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("audio clip change was not confirmed");
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && verified[field] !== transaction.payload[field]) throw new Error("audio clip postcondition was not confirmed");
+      // Live keeps gain and the rest as 32-bit floats: numbers compare within that precision.
+      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("audio clip postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -7149,8 +7223,10 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Note-edit undo is uncertain; perform fresh discovery."); }
   }
 
-  private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(value)).digest("hex"); }
+  /** Content fingerprint of a snapshot row: a clip's playback state is not content (see withoutPlaybackState). */
+  private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(withoutPlaybackState(value))).digest("hex"); }
 
+  /** What a MIDI or scene capture is fenced on; the Remote Script's _capture_authority_revision computes the same. */
   private captureAuthorityRevision(snapshot: LiveSnapshot): string {
     const authority = { tracks: snapshot.tracks.map((track) => ({ ref: track.ref, objectIdentity: track.objectIdentity, clips: track.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity, notesRevision: clip.notesRevision })) })), scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, objectIdentity: scene.objectIdentity, index: scene.index })), playbackRevision: snapshot.playback.revision };
     return createHash("sha256").update(canonicalMutationIdentity(authority)).digest("hex");
@@ -7161,7 +7237,8 @@ export class McpHost {
       structure: this.structureRevision(snapshot),
       tracks: snapshot.tracks.map((track) => ({ ref: track.ref, kind: track.kind, clips: track.clips.map((clip) => ({ ref: clip.ref, name: clip.name, length: clip.length, notes: clip.notes })) })),
       scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, name: scene.name, index: scene.index })),
-      playback: { revision: snapshot.playback.revision, firedTargets: snapshot.playback.firedTargets, playingTargets: snapshot.playback.playingTargets, transport: snapshot.playback.transport },
+      // Not the playhead: it moves while Live plays, and capturing what plays is the point.
+      playback: { revision: snapshot.playback.revision, firedTargets: snapshot.playback.firedTargets, playingTargets: snapshot.playback.playingTargets, transport: { ...snapshot.playback.transport, position: null } },
     });
   }
 
@@ -7511,8 +7588,15 @@ export class McpHost {
     const state = (record as { state?: string }).state; const reconciliation = state === "uncertain";
     let plan = this.undoRecoveryPlans.get(record);
     if (plan && plan.idempotencyKey !== idempotencyKey) throw new Error("uncertain undo requires the exact original idempotency key");
-    if (!plan) { plan = { idempotencyKey, steps: [] }; this.undoRecoveryPlans.set(record, plan); }
+    if (!plan) { plan = { idempotencyKey, priorState: state, steps: [] }; this.undoRecoveryPlans.set(record, plan); }
     return { reconciliation, steps: plan.steps };
+  }
+
+  /** An applied change's undo that the bridge refused before its first step reached Live (e.g. for
+   * lacking ownership of an object later changes moved): noted for live_undo to report as a refusal. */
+  private noteUndoRefusal(record: object, cause: unknown, context: LiveOperationContext): void {
+    const plan = this.undoRecoveryPlans.get(record);
+    if (cause instanceof LiveMutationNotDispatchedError && plan?.priorState === "applied" && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: cause.message });
   }
 
   private async replayUndoRecovery(record: object, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
@@ -7523,9 +7607,10 @@ export class McpHost {
   private async invokeUndoRecovery(record: object, adapter: AsyncLiveAdapter, operation: LiveInvocation["operation"], args: Record<string, unknown>, context: LiveOperationContext): Promise<unknown> {
     const plan = this.undoRecoveryPlans.get(record); if (!plan) throw new Error("undo recovery plan was not initialized");
     const existing = plan.steps.find((step) => step.operation === operation && canonicalMutationIdentity(step.args) === canonicalMutationIdentity(args));
-    if (existing) { if (!existing.completed) { existing.result = await adapter.invokeAsync({ operation: existing.operation, args: existing.args }, context); existing.completed = true; } return existing.result; }
+    if (existing) { if (!existing.completed) { try { existing.result = await adapter.invokeAsync({ operation: existing.operation, args: existing.args }, context); } catch (cause) { this.noteUndoRefusal(record, cause, context); throw cause; } existing.completed = true; } return existing.result; }
     const step = { operation, args: structuredClone(args), completed: false, result: undefined as unknown }; plan.steps.push(step);
-    step.result = await adapter.invokeAsync({ operation, args: step.args }, context); step.completed = true; return step.result;
+    try { step.result = await adapter.invokeAsync({ operation, args: step.args }, context); } catch (cause) { this.noteUndoRefusal(record, cause, context); throw cause; }
+    step.completed = true; return step.result;
   }
 
   private async liveRecoveryFinalizeAsync(id: RequestId, params: unknown): Promise<JsonObject> {
@@ -7567,6 +7652,19 @@ export class McpHost {
   }
 
   private async liveUndoAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
+    const transactionId = isObject(params) && typeof params.transactionId === "string" ? params.transactionId : undefined;
+    if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
+    const result = await this.liveUndoDispatchAsync(id, params, signal);
+    const refusal = transactionId === undefined ? undefined : this.undoRefusals.get(transactionId);
+    if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
+    const record = refusal?.record as { state?: string } | undefined;
+    if (!refusal || record?.state !== "uncertain") return result;
+    // Nothing reached Live: the change stays applied, and a later undo starts over.
+    record.state = "applied"; this.undoRecoveryPlans.delete(refusal.record);
+    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo refused before anything changed in Live: ${adapterReason(refusal.message)}`, remediation: "Nothing changed in Live, and the change is still in place. Later changes may have moved or replaced what it made, so its undo can no longer be proven; change it by hand if needed." }) }], isError: true });
+  }
+
+  private async liveUndoDispatchAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validTransactionParams(params, "undo")) return error(id, -32602, "transactionId, confirmation=undo, and idempotencyKey are required");
     const undoOwnerTool = this.transactionOwnerTool(String(params.transactionId));
     if (undoOwnerTool !== undefined && !this.policyAllowsTool(undoOwnerTool)) return this.transactionError(id, "The current deployment policy no longer allows this transaction's tool domain; reconcile manually or restore the policy before undo.");
@@ -7789,13 +7887,16 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === sceneset.payload.ref);
         if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(sceneset.payload)) { if (["ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"].includes(field)) continue; if (scene[field] !== value) return this.transactionError(id, "scene changed after apply; undo refused"); } }
+        if (scene.objectIdentity !== sceneset.payload.expectedObjectIdentity) return this.transactionError(id, "scene identity changed after apply; undo refused");
+        if (!reconciliation) { for (const [field, value] of Object.entries(sceneset.payload)) { if (["ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(scene[field], value)) return this.transactionError(id, "scene changed after apply; undo refused"); } }
+        const prior = sceneset.prior as Record<string, unknown>; const restore = sceneRestoreFields(prior);
+        if (!restore) return this.transactionError(id, "the scene's prior state can't be written back exactly; undo refused");
         sceneset.state = "undoing";
-        const result = await this.invokeUndoRecovery(sceneset, adapter, "scene.set", { ref: sceneset.payload.ref, ...(sceneset.prior as Record<string, unknown>), expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) }, context) as JsonObject;
+        const result = await this.invokeUndoRecovery(sceneset, adapter, "scene.set", { ref: sceneset.payload.ref, ...restore, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("scene restoration was not confirmed");
-        const restored = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === sceneset.payload.ref);
+        const restored = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === sceneset.payload.ref) as unknown as JsonObject | undefined;
         if (!restored) throw new Error("scene disappeared after undo");
-        for (const [field, value] of Object.entries(sceneset.prior)) if ((restored as unknown as JsonObject)[field] !== value) throw new Error("scene exact prior state was not restored");
+        for (const [field, value] of Object.entries(prior)) { if (!sceneFieldRestored(restored, field, value, prior)) throw new Error("scene exact prior state was not restored"); }
         sceneset.state = "undone"; return this.successText(id, { transactionId: sceneset.id, state: "undone", idempotent: false });
       } catch (cause) { sceneset.state = "uncertain"; return this.adapterToolError(id, cause, "Scene undo is uncertain; perform fresh discovery."); }
     }
@@ -7832,14 +7933,14 @@ export class McpHost {
         const snapshot = await adapter.snapshotAsync(context);
         if (snapshot.set.ref !== songset.payload.setRef || snapshot.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply; undo refused");
         const rawSong = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject; const song = this.songSettingsFields(rawSong);
-        if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (song[field] !== value) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(song[field], value)) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
         songset.state = "undoing";
         const result = await this.invokeUndoRecovery(songset, adapter, "song.set", { ...(songset.prior as Record<string, unknown>), setRef: songset.payload.setRef, expectedObjectIdentity: songset.payload.expectedObjectIdentity, expectedStateRevision: this.songSettingsRevision(rawSong) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("song settings restoration was not confirmed");
         const after = await adapter.snapshotAsync(context);
         if (after.set.ref !== songset.payload.setRef || after.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after undo");
         const restored = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
-        for (const [field, value] of Object.entries(songset.prior)) if (restored[field] !== value) throw new Error("song settings exact prior state was not restored");
+        for (const [field, value] of Object.entries(songset.prior)) if (!sameLiveValue(restored[field], value)) throw new Error("song settings exact prior state was not restored");
         songset.state = "undone"; return this.successText(id, { transactionId: songset.id, state: "undone", idempotent: false });
       } catch (cause) { songset.state = "uncertain"; return this.adapterToolError(id, cause, "Song-settings undo is uncertain; perform fresh discovery."); }
     }
@@ -8051,13 +8152,17 @@ export class McpHost {
         const created = devadv.created as Record<string, unknown> | undefined;
         if (!created || !isNonEmptyString(created.ref as string, 256) || !isNonEmptyString(created.objectIdentity as string, 256)) return this.transactionError(id, "device move lacks exact applied identity");
         const row = this.deviceRow(snapshot, created.ref as LiveRef);
-          const prior = devadv.prior as { ownerRef: LiveRef; index: number };
-          const targetRef = devadv.payload.targetTrackRef !== undefined ? devadv.payload.targetTrackRef : devadv.payload.targetChainRef;
-          const target = devadv.payload.targetTrackRef !== undefined ? (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === prior.ownerRef) : this.chainRow(snapshot, prior.ownerRef).chain;
-          if (!target || !isNonEmptyString(target.objectIdentity, 256)) throw new Error("move-back target identity is unavailable");
+          if (row.device.objectIdentity !== created.objectIdentity) return this.transactionError(id, "the moved device changed after apply; undo refused");
+          const prior = devadv.prior as { ownerRef: LiveRef; ownerIdentity?: string; ownerKind?: "track" | "chain"; index: number };
+          // Back to where it came from, by that owner's kind (a track or a rack chain, whatever the move's
+          // target was) and identity: positional references can point elsewhere after later changes.
+          const ownerKind = prior.ownerKind ?? (devadv.payload.expectedOwnerRef === devadv.payload.expectedTrackRef ? "track" : "chain");
+          let target: JsonObject | undefined;
+          try { target = ownerKind === "track" ? (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === prior.ownerRef) : this.chainRow(snapshot, prior.ownerRef).chain; } catch { target = undefined; }
+          if (!target || !isNonEmptyString(target.objectIdentity, 256) || target.objectIdentity !== (prior.ownerIdentity ?? devadv.payload.expectedOwnerIdentity)) return this.transactionError(id, "the device's original track or chain changed after apply; undo refused");
           devadv.state = "undoing";
-          const result = await this.invokeUndoRecovery(devadv, adapter, "device.move", { ref: created.ref, index: prior.index, targetTrackRef: devadv.payload.targetTrackRef !== undefined ? prior.ownerRef : undefined, targetChainRef: devadv.payload.targetTrackRef === undefined ? prior.ownerRef : undefined, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity }, context) as Record<string, unknown>;
-          if (result.index !== prior.index) throw new Error("device move-back was not confirmed");
+          const result = await this.invokeUndoRecovery(devadv, adapter, "device.move", { ref: created.ref, index: prior.index, ...(ownerKind === "track" ? { targetTrackRef: prior.ownerRef } : { targetChainRef: prior.ownerRef }), expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity }, context) as Record<string, unknown>;
+          if (result.index !== prior.index || result.objectIdentity !== created.objectIdentity) throw new Error("device move-back was not confirmed");
         devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
       } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Device-advanced undo is uncertain; perform fresh discovery."); }
     }
@@ -8258,11 +8363,11 @@ export class McpHost {
         const action = groove.payload.action as string;
         if (!reconciliation) {
           const current = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>> };
-          if (action === "set-amount") { if (current.grooveAmount !== groove.payload.grooveAmount) return this.transactionError(id, "groove amount changed after apply; undo refused"); }
+          if (action === "set-amount") { if (!sameLiveValue(current.grooveAmount, groove.payload.grooveAmount)) return this.transactionError(id, "groove amount changed after apply; undo refused"); }
           else {
             const row = (current.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref);
             if (!row) return this.transactionError(id, "edited groove disappeared after apply");
-            for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (groove.payload[field] !== undefined && JSON.stringify(row[field]) !== JSON.stringify(groove.payload[field])) return this.transactionError(id, "groove changed after apply; undo refused");
+            for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (groove.payload[field] !== undefined && !sameLiveValue(row[field], groove.payload[field])) return this.transactionError(id, "groove changed after apply; undo refused");
           }
         }
         const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown };
@@ -8280,8 +8385,8 @@ export class McpHost {
           if (result.changed !== true) throw new Error("groove restoration was not confirmed");
         }
         const verified = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>> };
-        if (action === "set-amount") { if (verified.grooveAmount !== (groove.prior as { grooveAmount: number | null }).grooveAmount) throw new Error("groove amount undo did not restore the exact prior value"); }
-        else { const row = (verified.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref); if (!row) throw new Error("edited groove disappeared after undo"); for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (JSON.stringify(row[field]) !== JSON.stringify((groove.prior as Record<string, unknown>)[field])) throw new Error("groove undo did not restore the exact prior fields"); }
+        if (action === "set-amount") { if (!sameLiveValue(verified.grooveAmount, (groove.prior as { grooveAmount: number | null }).grooveAmount)) throw new Error("groove amount undo did not restore the exact prior value"); }
+        else { const row = (verified.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref); if (!row) throw new Error("edited groove disappeared after undo"); for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (!sameLiveValue(row[field], (groove.prior as Record<string, unknown>)[field])) throw new Error("groove undo did not restore the exact prior fields"); }
         groove.state = "undone"; return this.successText(id, { transactionId: groove.id, state: "undone", idempotent: false });
       } catch (cause) { groove.state = "uncertain"; return this.adapterToolError(id, cause, "Groove undo is uncertain; perform fresh discovery."); }
     }
@@ -8338,9 +8443,9 @@ export class McpHost {
       try {
         this.beginUndoRecovery(audio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, audio.clipRef);
-        const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && row.clip[field] !== value) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
+        const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && !sameLiveValue(row.clip[field], value)) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
         if (!reconciliation) { audio.state = "undoing"; const result = await this.invokeUndoRecovery(audio, adapter, "audio.clip.set", { ref: audio.clipRef, ...audio.prior, ...this.audioClipMutationAuthority(snapshot, audio.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Audio clip restoration was not confirmed"); }
-        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (restoredRow.clip[field] !== value) throw new Error("Audio clip exact prior state was not restored");
+        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
         audio.state = "undone"; return this.successText(id, { transactionId: audio.id, state: "undone", restored: audio.prior, idempotent: false });
       } catch (cause) { audio.state = "uncertain"; return this.adapterToolError(id, cause, "Audio-clip undo is uncertain; inspect the exact clip."); }
     }
@@ -8392,12 +8497,15 @@ export class McpHost {
       if ((routing.state !== "applied" && !reconciliation) || !routing.clipRef || !routing.prior) return this.transactionError(id, "Only an applied or exact-key uncertain routing transaction can be undone");
       try {
         this.beginUndoRecovery(routing, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== routing.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === routing.clipRef);
-        if (!track || track.objectIdentity !== routing.payload.expectedObjectIdentity) return this.transactionError(id, "routing track identity changed after apply; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await adapter.snapshotAsync(context);
+        // The track by identity: its positional reference changes when tracks are added or removed before it.
+        const matches = (snapshot.tracks as unknown as JsonObject[]).filter((candidate) => candidate.objectIdentity === routing.payload.expectedObjectIdentity); const track = matches.length === 1 ? matches[0] : undefined;
+        if (!track || !isNonEmptyString(track.ref, 256)) return this.transactionError(id, "routing track identity changed after apply; undo refused");
+        const trackRef = track.ref as LiveRef;
         const current = { inputType: (track.routing as JsonObject).inputType, inputSubRouting: (track.routing as JsonObject).inputSubRouting, outputType: (track.routing as JsonObject).outputType, outputSubRouting: (track.routing as JsonObject).outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
         const expected = reconciliation ? routing.prior : routing.created; for (const key of Object.keys(routing.prior)) if (current[key as keyof typeof current] !== expected?.[key]) return this.transactionError(id, reconciliation ? "routing undo replay did not restore prior state" : "routing changed after apply; undo refused");
-        if (!reconciliation) { const restore: JsonObject = { ref: routing.clipRef, ...routing.prior, expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, routing.clipRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
-        const afterTrack = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === routing.clipRef); if (!afterTrack) throw new Error("routing track disappeared after undo"); const afterRouting = afterTrack.routing as JsonObject; for (const [key, value] of Object.entries(routing.prior)) { const observed = key === "arm" ? afterTrack.armed : key === "monitoring" ? afterTrack.monitoringState : afterRouting[key]; if (observed !== value) throw new Error("routing exact prior state was not restored"); } routing.state = "undone";
+        if (!reconciliation) { const restore: JsonObject = { ref: trackRef, ...routing.prior, expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, trackRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
+        await this.confirmRoutingFields(adapter, context, trackRef, routing.payload.expectedObjectIdentity as string, routing.prior, "routing exact prior state was not restored"); routing.state = "undone";
         return this.successText(id, { transactionId: routing.id, state: "undone", restored: routing.prior, idempotent: false });
       } catch (cause) { routing.state = "uncertain"; return this.adapterToolError(id, cause, "Routing undo is uncertain; inspect routing and feedback state."); }
     }
@@ -9085,9 +9193,7 @@ export class McpHost {
   private recoveryFinalizeError(id: RequestId, reason: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence." }) }], isError: true }); }
   private successText(id: RequestId, value: unknown): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify(value) }], isError: false }); }
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
-    const raw = cause instanceof Error ? cause.message : "adapter request failed";
-    // "request failed: ..." carries the Remote Script's bounded validation message or exception type.
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240 ? raw : "adapter request failed";
+    const reason = adapterReason(cause instanceof Error ? cause.message : "adapter request failed");
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

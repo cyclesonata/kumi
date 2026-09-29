@@ -5,7 +5,7 @@ import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { expandPadChains, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
-import { LIVE_REGISTRY_HASH } from "../src/live.js";
+import { LIVE_REGISTRY_HASH, LiveMutationNotDispatchedError } from "../src/live.js";
 
 const secret = "0123456789abcdef0123456789abcdef";
 const bridgeEpoch = "bridge-epoch-0123456789abcdef";
@@ -379,4 +379,59 @@ test("read-only invoke classification is identical across the TS adapter and the
   assert.ok(match, "python read-only invoke set not found");
   const pythonSet = new Set([...match[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]));
   assert.deepEqual([...pythonSet].sort(), [...READ_ONLY_INVOKES].sort());
+});
+
+function authorityServer(operations: string[], seen: Record<string, unknown>[], answer: (request: Record<string, unknown>) => unknown) {
+  return framedServer((request, socket) => {
+    seen.push(request);
+    if (request.method === "status") { socket.write(`${JSON.stringify(response(request.id as string, status({ operations: [...requiredOperations, ...operations] })))}\n`); return; }
+    const argsDigest = createHash("sha256").update(canonical(request.args ?? {})).digest("hex");
+    if (request.method === "preflight") socket.write(`${JSON.stringify(response(request.id as string, { preflightToken: "p".repeat(32), confirmation: "c".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), impact: "mutates-live", expiresAt: Date.now() + 5000 }))}\n`);
+    else if (request.method === "prepare") socket.write(`${JSON.stringify(response(request.id as string, { authorityToken: "t".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), expiresAt: Date.now() + 5000 }))}\n`);
+    else socket.write(`${JSON.stringify(response(request.id as string, answer(request)))}\n`);
+  });
+}
+const notDispatched = (pattern?: RegExp) => (error: unknown) => error instanceof LiveMutationNotDispatchedError && (!pattern || pattern.test(error.message));
+
+test("an explicit deletion of an existing device or return goes out with its identity fences and no ownership token; without it, the deletion is refused unsent", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const server = authorityServer(["device.delete", "track.delete-return", "track.delete"], seen, (request) => ({ deleted: (request.args as { ref: string }).ref }));
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  const context = (key: string) => ({ deadlineMs: Date.now() + 5000, idempotencyKey: key, transactionId: `${key}-transaction` });
+  const device = { ref: "1:device:0:1", expectedObjectIdentity: "live:device:eq", expectedOwnerRef: "1:track:0", expectedOwnerIdentity: "live:track:0", expectedSiblings: [{ ref: "1:device:0:0", objectIdentity: "live:device:synth" }, { ref: "1:device:0:1", objectIdentity: "live:device:eq" }], expectedTrackRef: "1:track:0", expectedTrackIdentity: "live:track:0" };
+  const ret = { ref: "1:track:2", expectedObjectIdentity: "live:return:a", expectedStructureRevision: "a".repeat(64) };
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    const before = seen.length;
+    await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: device }, context("unowned-device-delete")), notDispatched(/lacks transaction-owned authority/));
+    await assert.rejects(adapter.invokeAsync({ operation: "track.delete-return", args: ret }, context("unowned-return-delete")), notDispatched(/lacks transaction-owned authority/));
+    assert.equal(seen.length, before, "a deletion no transaction owns, without the explicit authority, never reaches the bridge");
+    assert.deepEqual(await adapter.invokeAsync({ operation: "device.delete", args: { ...device, explicitDeletion: true } }, context("explicit-device-delete")), { deleted: "1:device:0:1" });
+    assert.deepEqual(await adapter.invokeAsync({ operation: "track.delete-return", args: { ...ret, explicitDeletion: true } }, context("explicit-return-delete")), { deleted: "1:track:2" });
+    const sent = seen.slice(before);
+    assert.deepEqual(sent.map((row) => `${String(row.method)} ${String(row.operation)}`), ["preflight device.delete", "prepare device.delete", "invoke device.delete", "preflight track.delete-return", "prepare track.delete-return", "invoke track.delete-return"]);
+    assert.equal(sent.every((row) => row.ownershipToken === undefined && (row.args as Record<string, unknown>).explicitDeletion === true), true);
+    const beforeOthers = seen.length;
+    await assert.rejects(adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0", explicitDeletion: true } }, context("explicit-track-delete")), notDispatched(), "other deletions have no explicit form");
+    await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: { ...device, explicitDeletion: false } }, context("half-explicit-delete")), notDispatched(), "only explicitDeletion: true is the authority");
+    assert.equal(seen.length, beforeOthers);
+  } finally { await adapter?.close(); await close(server); }
+});
+
+test("song.read is one read-only invoke with no authority chain, and mutation arguments the registry refuses are refused before anything is sent", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const song = { visibleTracks: [], appointedDevice: null, songLength: 64, startTime: 0, signatureNumerator: 4, signatureDenominator: 4, swingAmount: 0.25, overdub: false, arrangementOverdub: false, backToArranger: false, canCaptureMidi: false, canUndo: true, canRedo: false, exclusiveArm: true, exclusiveSolo: true, isCountingIn: false, tempoFollowerEnabled: false, reEnableAutomationEnabled: false, sessionRecord: false, sessionAutomationRecord: false, clipTriggerQuantization: null, isAbletonLinkEnabled: false, isAbletonLinkStartStopSyncEnabled: false, tempoFollower: null, revision: "b".repeat(64) };
+  const server = authorityServer(["song.read", "transport.set"], seen, (request) => request.operation === "song.read" ? song : { unexpected: true });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    const before = seen.length;
+    assert.deepEqual(await adapter.invokeAsync({ operation: "song.read", args: { setRef: "1:set" } }, { deadlineMs: Date.now() + 5000 }), song);
+    assert.deepEqual(seen.slice(before).map((row) => `${String(row.method)} ${String(row.operation)}`), ["invoke song.read"]);
+    const beforeInvalid = seen.length; const context = { deadlineMs: Date.now() + 5000, idempotencyKey: "invalid-transport", transactionId: "invalid-transport-transaction" };
+    const fences = { setRef: "1:set", expectedObjectIdentity: "live:set", expectedRevision: "playback-revision-7" };
+    await assert.rejects(adapter.invokeAsync({ operation: "transport.set", args: { ...fences, loopEnabled: true, metronome: undefined } }, context), notDispatched(), "an undefined field is not a wire value");
+    await assert.rejects(adapter.invokeAsync({ operation: "transport.set", args: { ...fences, loopLength: -4 } }, context), notDispatched(), "a value outside the registry's bounds");
+    assert.equal(seen.length, beforeInvalid, "nothing reached the bridge");
+  } finally { await adapter?.close(); await close(server); }
 });

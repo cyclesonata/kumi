@@ -1135,7 +1135,7 @@ class EnvelopeEvent:
     journeyProgress("create-beat-or-song", "arrange-edit", "awaiting_confirmation", { operations: ["arrangement.clip.move", "arrangement.clip.create", "transaction-owned-undo"], mechanism: "fixed-apply-per-preview", retainedArrangementRef: arrangementClips[0].ref });
     journeyProgress("create-beat-or-song", "arrange-edit", "applying", { retainedArrangementRef: arrangementClips[0].ref, idempotencyKeysPresent: true });
     const moved = (await textOf(client, "live_clip_move_apply", { transactionId: movePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-arr-move" })).parsed;
-    assert(moved.state === "applied", "arrangement move failed");
+    assert(moved.state === "applied", `arrangement move failed: ${JSON.stringify(moved).slice(0, 400)}`);
     assert((await textOf(client, "live_discover", { kind: "arrangement-clip", parent: freshTracks[0].ref })).parsed.items[0].start === 16, "arrangement move did not land");
     // Create + transaction-owned cleanup (arbitrary destructive deletion is unavailable).
     const createPreview = (await textOf(client, "live_arrangement_clip_preview", { action: "create", trackRef: freshTracks[0].ref, position: 24, length: 4, name: "Journey Arranged" })).parsed;
