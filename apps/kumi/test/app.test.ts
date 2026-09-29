@@ -858,6 +858,25 @@ test("between \"watch me\" and \"done\", NOW says Kumi is watching", async () =>
 
 // ---- listening and recipes
 
+test("what Kumi heard during an answer goes above the answer, which says what it means", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("compare these\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "text", text: "Your mix is darker than the reference." });
+  h.emit({ type: "heard", file: "mix.wav", summary: "−12.1 LUFS", bands: [-8, -5, -7, -6, -10, -12, -15, -17, -19, -22],
+    compared: { reference: "ref.wav", summary: "−8.4 LUFS", differences: [0.2, 0.4, -0.3, 2.8, 0, -1.1, -2, -1.5, -0.8, 0.5], headlines: [] } });
+  await delay(10);
+  const lines = h.screen();
+  const heard = lines.findIndex((line) => line.includes("Heard mix.wav"));
+  const answer = lines.findIndex((line) => line.includes("Your mix is darker"));
+  assert.ok(heard >= 0 && answer >= 0, lines.join("\n"));
+  assert.ok(heard < answer, "heard first, then the answer");
+  await h.app.close();
+});
+
 test("what Kumi heard shows as a small spectrum, and a comparison as dB over or under the reference", async () => {
   const h = harness();
   void h.app.run();

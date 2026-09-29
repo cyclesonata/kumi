@@ -234,6 +234,13 @@ export class Transcript {
     return entry;
   }
 
+  /** Put `entry` just above `before` (at the end when `before` isn't there). */
+  insertBefore(entry: Entry, before: Entry | undefined): Entry {
+    const at = before ? this.entries.indexOf(before) : -1;
+    if (at < 0) this.entries.push(entry); else this.entries.splice(at, 0, entry);
+    return entry;
+  }
+
   /** Call after changing an entry, so its rows are laid out again. */
   touch(entry: Entry): void {
     this.revisions.set(entry, (this.revisions.get(entry) ?? 0) + 1);

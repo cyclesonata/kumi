@@ -373,8 +373,9 @@ export class TuiApp {
         break;
       }
       case "heard":
-        this.transcript.add({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
-          ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) });
+        // What Kumi heard came first: it goes above the answer that says what it means.
+        this.transcript.insertBefore({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
+          ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) }, this.current);
         break;
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
