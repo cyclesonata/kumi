@@ -514,10 +514,10 @@ export function createSession(options: Options): SessionController {
         return { stopReason: "completed", usage };
       }
       request = heard.request;
-      state = { version: 1, goal: text!, request: { ...request, candidates: [] }, slots: [], generation: 0, rendered: 0, trend: [], elapsedMs: 0, status: "running", ...(heard.best ? { first: heard.best.score } : {}) };
+      state = { version: 1, goal: text!, request: { ...request, candidates: [] }, ...(request.candidates.some((candidate) => candidate.clip) ? { clips: true } : {}), slots: [], generation: 0, rendered: 0, trend: [], elapsedMs: 0, status: "running", ...(heard.best ? { first: heard.best.score } : {}) };
     } else {
       // Picked up again: its candidates by their tracks' names.
-      request = { ...state.request, candidates: state.slots.map((slot) => ({ track: slot.name, label: slot.label })) };
+      request = { ...state.request, candidates: state.slots.map((slot) => ({ track: slot.name, label: slot.label, ...(state!.clips ? { clip: "first" } : {}) })) };
       state.status = "running";
     }
     goalOp = op;
@@ -544,7 +544,7 @@ export function createSession(options: Options): SessionController {
       state!.elapsedMs = Date.now() - started;
     };
     let gaps: string[] = []; let lastLeap = evolution.generation;
-    let keptAt = 0; let keptScore: number | undefined;
+    let silentRuns = 0;
     op.linger = 180_000;
     try {
       sync(); persist(); status("running", evolution);
@@ -555,17 +555,17 @@ export function createSession(options: Options): SessionController {
         const slots = new Map(evolution.slots.map((slot) => [slot.name, slot]));
         const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: slots.get(trial.slot)!.knobs, values: trial.values })), op.controller.signal);
         const { improved } = evolution.scored(trials, result.scores);
+        // Nothing heard twice running: the renders aren't reaching Kumi, and searching on is pointless.
+        silentRuns = result.scores.size ? 0 : silentRuns + 1;
+        if (silentRuns >= 2) { state.status = "paused"; state.why = "nothing came through the last renders; check the candidates play at that spot"; break; }
         // Knobs Live wouldn't set leave the search (after scoring, so each slot's best stays aligned with its knobs).
         for (const [slot, keys] of result.frozen) evolution.freeze(slot, keys);
         if (state.first === undefined && evolution.best !== undefined) state.first = evolution.best;
         const leader = evolution.leader;
         if (leader) gaps = result.gaps.get(leader.name) ?? gaps;
-        // The best so far on its own track as it improves (at most every two minutes: copying takes a while).
-        if (improved && leader && Date.now() - keptAt > 120_000) {
-          keptAt = Date.now();
-          const kept = await rig.keepBest(leader.name, leader.knobs, leader.elite, op.controller.signal).catch(() => "");
-          if (kept.startsWith("Kumi · Goal best")) { state.bestTrack = kept; keptScore = leader.score; }
-        }
+        // The best's values are kept with the goal each generation (a crash loses nothing); its track is made at
+        // the end, since copying a track mid-search moves the render tracks, whose undo is tied to their place.
+        void improved;
         sync(); persist(); status("running", evolution);
         op.progress?.({ type: "tool-end" });
         const stalled = evolution.stalledFor >= goalBudget.stallGenerations;
@@ -574,7 +574,8 @@ export function createSession(options: Options): SessionController {
           heardLast = undefined;
           const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: leader.score } : undefined, gaps.slice(0, 3), stalled));
           if (leap.stopReason === "cancelled" || op.controller.signal.aborted) break;
-          const idea = said.trim().split(/\n+/).filter(Boolean).at(-1)?.slice(0, 200);
+          // What it tried: its "Tried:" line, or its first line.
+          const idea = (/Tried:\s*(.+)/i.exec(said)?.[1] ?? said.trim().split(/\n+/).find(Boolean))?.replace(/[*_`]/g, "").trim().slice(0, 200);
           if (idea) state.idea = idea;
           const offered = (heardLast as AuditionEvent | undefined)?.request?.candidates ?? [];
           for (const candidate of offered) {
@@ -590,14 +591,15 @@ export function createSession(options: Options): SessionController {
       const cleanup = AbortSignal.timeout(150_000);
       if (op.controller.signal.aborted) { state.status = goalStopped ? "done" : "paused"; state.why = goalStopped ? "stopped" : "paused"; }
       const leader = evolution.leader;
-      // The best so far on a track of its own: stopping at any moment leaves a result.
-      if (leader?.score !== undefined && leader.score !== keptScore) {
+      // In this order, so nothing moves a track whose undo is tied to its place: the render tracks go; then
+      // (done, not paused) the top two candidates stay muted for the producer to A/B and the rest go, newest
+      // first; then the best is copied to a track of its own, so stopping at any moment leaves a result.
+      const notes = await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."]);
+      if (state.status === "done") notes.push(...await rig.tidy([...evolution.slots].filter((slot) => slot.score !== undefined).sort((a, b) => b.score! - a.score!).slice(0, 2).map((slot) => slot.name), cleanup).catch(() => [] as string[]));
+      if (leader?.score !== undefined) {
         const kept = await rig.keepBest(leader.name, leader.knobs, leader.elite, cleanup).catch(() => "");
         if (kept && kept.startsWith("Kumi · Goal best")) state.bestTrack = kept;
       }
-      // Done (not paused): the top two candidates stay, muted, for the producer to A/B; the rest go.
-      const tidied = state.status === "done" ? await rig.tidy([...evolution.slots].filter((slot) => slot.score !== undefined).sort((a, b) => b.score! - a.score!).slice(0, 2).map((slot) => slot.name), cleanup).catch(() => [] as string[]) : [];
-      const notes = [...tidied, ...await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."])];
       sync(); persist(); status(state.status, evolution);
       const best = evolution.leader;
       goalOp = undefined; goalStopped = false;

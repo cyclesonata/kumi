@@ -28,7 +28,7 @@ export function bridge(options: Options = {}) {
   const records: ChangeRecord[] = [];
   let tempo = options.tempo ?? 120;
   let live = true; let epoch = 7;
-  let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
+  let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
     ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) }))];
   // Main's fader and the playhead, as auditions use them.
   const main = { volume: 0.85 }; let position = 0; let recordingFrom: number | undefined;
@@ -177,7 +177,7 @@ export function bridge(options: Options = {}) {
           const created: JsonObject[] = [];
           for (const item of transaction.args.tracks as JsonObject[]) {
             const at = typeof item.index === "number" ? Math.min(item.index, tracks.length) : tracks.length;
-            tracks = [...tracks.slice(0, at), { name: String(item.name), color: 0, made: String(args.transactionId) }, ...tracks.slice(at)];
+            tracks = [...tracks.slice(0, at), { name: String(item.name), color: 0, made: String(args.transactionId), madeAt: at }, ...tracks.slice(at)];
             created.push({ kind: "track", ref: `7:track:${at}`, name: String(item.name) });
           }
           return wrap({ transactionId: args.transactionId, state: "applied", created });
@@ -245,6 +245,8 @@ export function bridge(options: Options = {}) {
         if (transaction?.name === "live_session_structure_preview") {
           const made = tracks.filter((track) => track.made === String(args.transactionId));
           if (made.some((track) => track.clips?.length) && args.discard !== true) return refusal("created Session structure was modified after apply; undo refused");
+          // Like the bridge: the undo is tied to where it made them.
+          if (made.some((track) => track.madeAt !== undefined && tracks.indexOf(track) !== track.madeAt)) return refusal("transaction-owned Session structure shifted from its exact reference", { state: "uncertain" });
           tracks = tracks.filter((track) => !made.includes(track));
         }
         return wrap({ transactionId: args.transactionId, state: "undone", idempotent: false });

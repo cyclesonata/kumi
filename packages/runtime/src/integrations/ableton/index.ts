@@ -1363,6 +1363,8 @@ export function createAbletonIntegration(options: Options): Integration {
   interface Rig {
     tag: string;
     sources: { track: string; name: string; scratch: string; label: string }[];
+    /** The candidates play Session clips, copied to a free stretch of the Arrangement at `from`. */
+    clips: boolean;
     from: number; beats: number;
     /** The rig's own changes, undone at close. */
     steps: string[];
@@ -1377,7 +1379,7 @@ export function createAbletonIntegration(options: Options): Integration {
   }
   /** A rig for these candidates: their names checked, Session clips copied into the Arrangement, a scratch track each. */
   async function openRig(candidates: readonly AuditionRequest["candidates"][number][], fromBeat: number | undefined, beats: number | undefined, signal: AbortSignal): Promise<Rig> {
-    const rig: Rig = { tag: randomUUID().slice(0, 4), sources: [], from: fromBeat ?? 0, beats: beats ?? 8, steps: [], notes: [] };
+    const rig: Rig = { tag: randomUUID().slice(0, 4), sources: [], from: fromBeat ?? 0, beats: beats ?? 8, steps: [], notes: [], clips: candidates.some((candidate) => candidate.clip) };
     rig.transport = await transportNow(signal);
     const tracks = await rows("track", { fields: ["name"] }, signal);
     for (const [index, candidate] of candidates.entries()) {
@@ -1389,26 +1391,35 @@ export function createAbletonIntegration(options: Options): Integration {
       rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${index + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}` });
     }
     await quietly(rig.steps, async () => {
-      // Session clips play from a free stretch of the Arrangement, after everything in it.
-      if (candidates.some((candidate) => candidate.clip)) {
+      // Session clips play from a free stretch of the Arrangement, after everything in it. When any
+      // candidate plays one, they all do (each its own, or its first): the stretch is empty otherwise.
+      if (rig.clips) {
         const song = tools!.has("live_song_state") ? payload(await tools!.call("live_song_state", {}, signal, { host: true })) : {};
         const end = typeof song.songLength === "number" ? song.songLength : 0;
         rig.from = (Math.ceil(end / beatsPerBar) + 2) * beatsPerBar;
         let longest = 0;
-        for (const [index, candidate] of candidates.entries()) {
-          if (!candidate.clip) continue;
-          const slots = await rows("clip-slot", { parent: rig.sources[index]!.track, fields: ["clipRef"] }, signal);
-          const slot = slots.find((row) => row.clipRef === candidate.clip);
-          if (!slot) throw new ObservationError(`${candidate.clip} isn't a Session clip on that track; discover its clip slots again.`);
-          const clip = (await rows("session-clip", { parent: slot.ref, fields: ["length"] }, signal))[0];
-          if (typeof clip?.length === "number") longest = Math.max(longest, clip.length);
-          await step("duplicate_clip", { clipRef: candidate.clip, arrangementPosition: rig.from }, signal);
-        }
+        for (const [index, candidate] of candidates.entries()) longest = Math.max(longest, await copyClip(rig, rig.sources[index]!.track, candidate.clip, signal));
         rig.beats = beats ?? Math.min(32, longest || 8);
       }
       await addScratch(rig, rig.sources, signal);
     });
     return rig;
+  }
+  /**
+   * A candidate's Session clip (the one named, or "first": its first) copied to the rig's stretch of the
+   * Arrangement; its length in beats. A track without one plays nothing there, and is said so.
+   */
+  async function copyClip(rig: Rig, track: string, clipRef: string | undefined, signal: AbortSignal): Promise<number> {
+    const slots = await rows("clip-slot", { parent: track, fields: ["clipRef"] }, signal);
+    const slot = clipRef && clipRef !== "first" ? slots.find((row) => row.clipRef === clipRef) : slots.find((row) => typeof row.clipRef === "string");
+    if (!slot || typeof slot.clipRef !== "string") {
+      if (clipRef && clipRef !== "first") throw new ObservationError(`${clipRef} isn't a Session clip on that track; discover its clip slots again.`);
+      rig.notes.push("A candidate has no Session clip to play, so it renders silent.");
+      return 0;
+    }
+    const clip = (await rows("session-clip", { parent: slot.ref, fields: ["length"] }, signal))[0];
+    await step("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: rig.from }, signal);
+    return typeof clip?.length === "number" ? clip.length : 0;
   }
   /** Scratch tracks for these sources, routed from their Post FX and armed. */
   async function addScratch(rig: Rig, sources: Rig["sources"], signal: AbortSignal): Promise<void> {
@@ -1421,9 +1432,12 @@ export function createAbletonIntegration(options: Options): Integration {
     }
   }
   /** A new source for an open rig (a candidate the model built mid-search). */
-  async function addToRig(rig: Rig, candidate: { track: string; name: string; label: string }, signal: AbortSignal): Promise<void> {
+  async function addToRig(rig: Rig, candidate: { track: string; name: string; label: string; clip?: string }, signal: AbortSignal): Promise<void> {
     const source = { ...candidate, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}` };
-    await quietly(rig.steps, () => addScratch(rig, [source], signal));
+    await quietly(rig.steps, async () => {
+      if (rig.clips) await copyClip(rig, candidate.track, candidate.clip ?? "first", signal);
+      await addScratch(rig, [source], signal);
+    });
     rig.sources.push(source);
   }
   /**
@@ -1574,7 +1588,7 @@ export function createAbletonIntegration(options: Options): Integration {
           if (typeof track?.name !== "string") return `${candidate.track} isn't a track in this turn's discovery.`;
           if (slots.some((slot) => slot.name === track.name)) return `“${track.name}” is already in the search.`;
           const label = candidate.label ?? track.name;
-          await addToRig(rig, { track: candidate.track, name: track.name, label }, signal);
+          await addToRig(rig, { track: String(track.ref), name: track.name, label, ...(candidate.clip ? { clip: candidate.clip } : {}) }, signal);
           return await adopt({ name: track.name, label }, signal);
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "It couldn't join the search."; }
       },
@@ -1653,6 +1667,8 @@ export function createAbletonIntegration(options: Options): Integration {
             const copy = after[at + 1];
             if (typeof copy?.ref !== "string") throw new ObservationError("The copy didn't appear.");
             await step("rename", { kind: "track", ref: copy.ref, name: after.some((row) => row.name === name) ? `${name} ${randomUUID().slice(0, 3)}` : name }, signal);
+            // The candidate may be muted (kept for A/B): its copy plays.
+            await step("set_mixer", { trackRef: copy.ref, mute: false }, signal).catch(() => undefined);
           });
           return name;
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "The best couldn't be kept on its own track."; }
@@ -1661,8 +1677,10 @@ export function createAbletonIntegration(options: Options): Integration {
         const signal = AbortSignal.any([given, lifetime.signal]);
         const said: string[] = [];
         const tracks = await rows("track", { fields: ["name"] }, signal).catch(() => [] as JsonObject[]);
-        for (const slot of slots) {
-          const ref = tracks.find((row) => row.name === slot.name)?.ref;
+        // Newest first: removing a later track doesn't move an earlier one.
+        const order = [...slots].sort((a, b) => tracks.findIndex((row) => row.name === b.name) - tracks.findIndex((row) => row.name === a.name));
+        for (const slot of order) {
+          const ref = (await rows("track", { fields: ["name"] }, signal).catch(() => tracks)).find((row) => row.name === slot.name)?.ref;
           if (typeof ref !== "string") continue;
           if (top.includes(slot.name)) { await step("set_mixer", { trackRef: ref, mute: true }, signal).catch(() => undefined); continue; }
           // The rest go, by undoing the change that added each (Kumi's, this session), recorded onto or not.

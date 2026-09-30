@@ -6,7 +6,7 @@ import { createSession } from "../src/core/session.js";
 import { seeded } from "../src/core/evolve.js";
 import type { GoalState, GoalStatus, GoalStore } from "../src/core/goal.js";
 import { bridge, type FixtureDevice } from "./fixtures/synthetic-bridge.js";
-import { saw, wav } from "./fixtures/synthetic-audio.js";
+import { saw, silence, wav } from "./fixtures/synthetic-audio.js";
 
 // The sound to reach: a saw filtered at 2.6 kHz. A candidate's Filter Freq (0–1) sets its cutoff from 200 Hz to 8.2 kHz.
 const reference = wav("goal-reference.wav", saw(1.6, 110, 2600));
@@ -29,12 +29,12 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals()) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
   let session!: ReturnType<typeof createSession>;
-  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: render,
+  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: renderWith,
     extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }, { name: "Kumi · Goal · Bright", devices: operator(0.95) }, { name: "Kumi · Goal · Wide", devices: operator(0.6) }],
     onConnection: (state) => connection?.(state), onAudition: (event) => session.watch?.(event) });
   const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
@@ -122,4 +122,20 @@ test("Esc pauses a goal (kept, the best copied, Live as it was); /goal picks it 
   await again.session.stopGoal!();
   await resumed;
   await again.session.close();
+});
+
+test("a goal whose renders stop coming through pauses and says so, rather than searching blind", async () => {
+  let silent = false;
+  const quiet = wav("goal-silent.wav", silence(1.6));
+  const r = rig(memoryGoals(), (source, devices) => (silent ? quiet : render(source, devices)));
+  await r.session.start();
+  const running = r.session.goal!("make my pad sound like the reference");
+  while ((r.statuses().at(-1)?.generation ?? 0) < 1) await delay(50);
+  silent = true;
+  await running;
+  const last = r.statuses().at(-1)!;
+  assert.equal(last.state, "paused");
+  assert.match(last.why ?? "", /nothing came through the last renders/);
+  assert.equal(r.b.main.volume, 0.85);
+  await r.session.close();
 });
