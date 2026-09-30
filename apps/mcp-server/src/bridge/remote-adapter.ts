@@ -34,7 +34,10 @@ const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "s
 // they carry explicitDeletion instead of a creating transaction's ownership token, and the Remote
 // Script checks the exact identity fences in their arguments. Mirrors _EXPLICIT_DELETIONS there.
 const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return"]);
-function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation); }
+// Changes to Live's own undo history, not to the Set: plain invokes, as the Remote Script's _AUTHORITY_FREE_INVOKES.
+// The step belongs to the connection that opened it; the Remote Script closes it when that connection goes.
+export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end"]);
+function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation) && !AUTHORITY_FREE_INVOKES.has(operation); }
 // The Remote Script keeps every change's reply (its MAX_MUTATION_LEDGER, 65,536) so a lost one can be
 // replayed; a reply the host has seen is only memory there. With single-tick mutations the adapter frees
 // that memory itself, off the path of any change: past this many changed transactions it retires the

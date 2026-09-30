@@ -276,7 +276,7 @@ const MAX_PARAMETER_VALUES = 10_000;
 /** Notifications queued for a slow client before the rest are counted as dropped. */
 const MAX_QUEUED_EVENTS = 65_536;
 /** Tools only the asynchronous request path runs (the synchronous one refuses them): the newer ones. */
-const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change"]);
+const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo"]);
 /** live_change's fused changes, by idempotency key, so a retried call reconciles its change instead of making another. */
 const MAX_FUSED_CHANGES = 4096;
 /**
@@ -588,6 +588,10 @@ export class McpHost {
   private readonly undoRefusals = new Map<string, { record: object; message: string }>();
   /** live_change's changes by idempotency key: the change asked for, its transaction and the preview's answer. */
   private readonly fusedChanges = new Map<string, { digest: string; transactionId: string; confirmation: string; preview: JsonObject }>();
+  /** The Live undo step this host opened and hasn't seen end: closed when the host's client goes. */
+  private openUndoStep?: { stepId: string; expiresAt: number };
+  /** Live's own undo and redo answered, by operation and key, so a retried call never moves the history twice. */
+  private readonly songHistoryCalls = new Map<string, JsonObject>();
   private recoveryFinalizationInFlight = false;
   private activeAsyncOperations = 0;
   private toolPolicy: ToolPolicySpec;
@@ -818,6 +822,64 @@ export class McpHost {
     return response(id, { content: [{ type: "text", text: JSON.stringify({ ...body, transactionId: body.transactionId ?? recorded.transactionId, change: { preview: previewTool, apply: applyTool, idempotencyKey }, preview: recorded.preview }) }], isError: applied.result.isError === true });
   }
 
+  /** Opens one step in Live's own undo history: what Kumi changes until the step ends is one Cmd-Z in Live. */
+  private async liveUndoStepBeginAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["label", "timeoutMs"]) || (params.label !== undefined && !isNonEmptyString(params.label, 256)) || (params.timeoutMs !== undefined && !isIntegerInRange(params.timeoutMs, 1000, 3_600_000))) return error(id, -32602, "label (1-256 characters) and timeoutMs (1000-3600000) are optional");
+    try {
+      await this.requireOperation("undo.step.begin");
+      const args = { ...(params.label !== undefined ? { label: params.label } : {}), ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}) };
+      const opened = await this.asyncAdapter().invokeAsync({ operation: "undo.step.begin", args }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
+      if (opened.open !== true || !isNonEmptyString(opened.stepId, 128) || typeof opened.expiresAt !== "number") throw new Error("Live didn't confirm the undo step");
+      this.openUndoStep = { stepId: opened.stepId, expiresAt: opened.expiresAt };
+      return this.successText(id, opened);
+    } catch (cause) { return this.adapterToolError(id, cause, "No undo step is open: each change still undoes on its own in Live."); }
+  }
+
+  private async liveUndoStepEndAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["stepId"]) || (params.stepId !== undefined && (typeof params.stepId !== "string" || params.stepId.length < 8 || params.stepId.length > 128))) return error(id, -32602, "stepId (from live_undo_step_begin) is optional");
+    try {
+      await this.requireOperation("undo.step.end");
+      return this.successText(id, await this.endUndoStepAsync(params.stepId as string | undefined, this.deadline(AUDITION_DEADLINE_MS)));
+    } catch (cause) { return this.adapterToolError(id, cause, "The undo step may still be open; Live closes it itself when its time runs out."); }
+  }
+
+  /** Ends Live's open undo step (only `stepId`, when given) and forgets the one this host opened unless it's still open. */
+  private async endUndoStepAsync(stepId: string | undefined, deadlineMs: number): Promise<JsonObject> {
+    const ended = await this.asyncAdapter().invokeAsync({ operation: "undo.step.end", args: stepId ? { stepId } : {} }, { deadlineMs }) as JsonObject;
+    if (ended.reason !== "other-step" || ended.stepId !== this.openUndoStep?.stepId) this.openUndoStep = undefined;
+    return ended;
+  }
+
+  /** Closes the undo step this host opened, if it's open: its client is going. Live closes it too when the bridge's connection goes. */
+  public async closeOpenUndoStep(): Promise<void> {
+    const step = this.openUndoStep; if (!step) return;
+    try { if (step.expiresAt > Date.now()) await this.endUndoStepAsync(step.stepId, Date.now() + 2_000); } catch { /* Live closes it when its time runs out */ }
+    this.openUndoStep = undefined;
+  }
+
+  /**
+   * Live's own undo or redo, once: a last resort for what the producer did in Live, never Kumi's undo for
+   * its own changes (live_undo). The key names the one undo asked for: a retry gets that answer again.
+   */
+  private async liveSongHistoryAsync(id: RequestId, params: unknown, redo: boolean, signal?: AbortSignal): Promise<JsonObject | null> {
+    const operation = redo ? "song.redo" : "song.undo"; const confirmation = redo ? "redo-in-live" : "undo-in-live";
+    if (!isObject(params) || !hasOnly(params, ["confirmation", "idempotencyKey"]) || params.confirmation !== confirmation || !isIdempotencyKey(params.idempotencyKey)) return error(id, -32602, `confirmation=${confirmation} and an idempotencyKey are required`);
+    const key = `${operation}\0${params.idempotencyKey as string}`; const recorded = this.songHistoryCalls.get(key);
+    if (recorded) return this.successText(id, { ...recorded, idempotent: true });
+    if (signal?.aborted) return null;
+    try {
+      await this.requireOperation(operation);
+      const transactionId = `${redo ? "song-redo" : "song-undo"}_${createHash("sha256").update(params.idempotencyKey as string).digest("base64url").slice(0, 32)}`;
+      const result = await this.asyncAdapter().invokeAsync({ operation, args: {} }, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId }) as JsonObject;
+      // Live closes an open undo step before undoing.
+      if (result.done === true) this.openUndoStep = undefined;
+      const answer = { operation, done: result.done === true, canUndo: result.canUndo ?? null, canRedo: result.canRedo ?? null };
+      while (this.songHistoryCalls.size >= MAX_FUSED_CHANGES) this.songHistoryCalls.delete(this.songHistoryCalls.keys().next().value as string);
+      this.songHistoryCalls.set(key, answer);
+      return this.successText(id, { ...answer, idempotent: false });
+    } catch (cause) { return this.adapterToolError(id, cause, "Live's own history may or may not have moved; look at the Set before trying again."); }
+  }
+
   /** The JSON a tool answered with (its first text content), when it's an object. */
   private resultBody(outcome: JsonObject): JsonObject | undefined {
     if (!isObject(outcome.result) || !Array.isArray(outcome.result.content) || !isObject(outcome.result.content[0]) || typeof outcome.result.content[0].text !== "string") return undefined;
@@ -828,6 +890,10 @@ export class McpHost {
   private async dispatchToolAsync(name: string, id: RequestId, toolArguments: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
       if (signal?.aborted) return null;
       if (name === "live_change") return await this.liveChangeAsync(id, toolArguments, signal);
+      if (name === "live_undo_step_begin") return await this.liveUndoStepBeginAsync(id, toolArguments);
+      if (name === "live_undo_step_end") return await this.liveUndoStepEndAsync(id, toolArguments);
+      if (name === "live_song_undo") return await this.liveSongHistoryAsync(id, toolArguments, false, signal);
+      if (name === "live_song_redo") return await this.liveSongHistoryAsync(id, toolArguments, true, signal);
       if (name === "live_status") return await this.liveStatusAsync(id);
       if (name === "audio_analyze") return await this.audioAnalyzeAsync(id, toolArguments, signal);
       if (name === "audio_compare_reference") return await this.audioCompareReferenceAsync(id, toolArguments, signal);
@@ -9605,6 +9671,8 @@ export async function serve(input: Readable, output: Writable, diagnostics: Writ
       return JSON.stringify(error(null, -32603, "Internal error"));
     }
   }, { notifier: (emit) => host.setEventEmitter((value) => emit(value)), shouldStop: () => host.isShuttingDown() }); } finally {
+    // The client went: an undo step it left open is closed before the bridge lets Live go.
+    await host.closeOpenUndoStep();
     const close = (adapter as Partial<{ close: () => Promise<void> }>).close;
     if (typeof close === "function") await close.call(adapter);
   }
