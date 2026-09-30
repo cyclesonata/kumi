@@ -1937,6 +1937,60 @@ class LiveObjectMapper:
                 return value
         return None
 
+    # What a light device row carries, each the value its whole row has: identity, place, name,
+    # class and cheap flags, and a rack's chains by name. Its parameters, macros, view, I/O and its
+    # chains' rows aren't read; nested devices are rows of their own.
+    _LIGHT_DEVICE_FIELDS = frozenset({"ref", "parentRef", "objectIdentity", "name", "className", "classDisplayName", "kind", "chainPosition", "deviceType", "enabled", "canHaveChains", "canHaveDrumPads", "chainList"})
+
+    def _light_device_row(self, device: Any, device_ref: str, parent_ref: str, index: int, chain_list: list[dict[str, Any]]) -> dict[str, Any]:
+        enabled = self._read_attr(device, "is_active", "is_enabled", "enabled"); can_chain = self._read_attr(device, "can_have_chains"); can_pads = self._read_attr(device, "can_have_drum_pads"); display = self._read_attr(device, "class_display_name")
+        row: dict[str, Any] = {
+            "ref": device_ref, "parentRef": parent_ref, "chainPosition": index, "objectIdentity": self._capture_object_identity(device),
+            "className": str(self._read_attr(device, "class_name") or device.__class__.__name__),
+            "classDisplayName": display[:256] if isinstance(display, str) and display else None,
+            "name": str(self._read_attr(device, "name") or "Device"), "light": True,
+            "kind": "rack" if can_chain is True else "device", "deviceType": self._device_type(device),
+            "enabled": bool(enabled) if isinstance(enabled, bool) else None,
+            "canHaveChains": can_chain if isinstance(can_chain, bool) else None,
+            "canHaveDrumPads": can_pads if isinstance(can_pads, bool) else None,
+        }
+        # As device discovery has always listed them: a rack's chains by name, when it has any.
+        if chain_list: row["chainList"] = chain_list
+        return row
+
+    def _light_device_walk(self, owner: Any, owner_ref: str, path: str, depth: int = 0, seen: set[str] | None = None) -> Any:
+        """The devices under a track or chain as light rows, (device, path, depth, row), in the order
+        whole rows flatten: each device, then its chains' devices, then a Drum Rack pad's chains the
+        rack doesn't list. Refs are the ones whole rows give. Nothing below a device is read but
+        its chains' names and identities."""
+        seen = set() if seen is None else seen
+        for index, device in enumerate(self._items(self._read_attr(owner, "devices") or [])):
+            identity = self._capture_object_identity(device)
+            if depth > 32 or identity in seen: raise ValueError("device hierarchy is cyclic or identity-ambiguous")
+            seen.add(identity)
+            device_path = f"{path}:{index}"; device_ref = self.refs.put("device", device, device_path)
+            chains = self._items(self._read_attr(device, "chains") or []) if self._read_attr(device, "can_have_chains") is True else []
+            chain_refs = [(chain, chain_index, self.refs.put("chain", chain, f"{device_path}:{chain_index}")) for chain_index, chain in enumerate(chains)]
+            yield device, device_path, depth, self._light_device_row(device, device_ref, owner_ref, index, [{"ref": chain_ref, "name": str(self._read_attr(chain, "name") or f"Chain {chain_index + 1}")} for chain, chain_index, chain_ref in chain_refs])
+            for chain, chain_index, chain_ref in chain_refs: yield from self._light_device_walk(chain, chain_ref, f"{device_path}:{chain_index}", depth + 1, seen)
+            if self._read_attr(device, "can_have_drum_pads") is True:
+                listed = {self._capture_object_identity(chain) for chain in chains}
+                for pad_index, pad in enumerate(self._rack_pads(device)):
+                    pad_chains = self._items(self._read_attr(pad, "chains") or [])
+                    identities = [self._capture_object_identity(chain) for chain in pad_chains]
+                    # A pad whose chains the rack lists points at them: their devices are listed once.
+                    if identities and all(identity in listed for identity in identities): continue
+                    pad_path = f"{device_path}:{pad_index}"; self.refs.put("drum_pad", pad, pad_path)
+                    for chain_index, chain in enumerate(pad_chains):
+                        chain_ref = self.refs.put("chain", chain, f"{pad_path}:{chain_index}")
+                        yield from self._light_device_walk(chain, chain_ref, f"{pad_path}:{chain_index}", depth + 1, seen)
+
+    def _whole_device_row(self, device: Any, path: str, depth: int, light_row: dict[str, Any]) -> dict[str, Any]:
+        """A walked device's whole row, as a track's whole row holds it (with chainList, as discovery lists it)."""
+        track_index = int(path.split(":", 1)[0])
+        row = self._device_row(device, light_row["ref"], light_row["parentRef"], track_index, path, light_row["chainPosition"], {"count": 0, "seen": set()}, depth)
+        return {**row, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in row["chains"] if isinstance(chain, dict)]} if row.get("chains") else row
+
     _SNAPSHOT_PARTS = ("set", "tracks", "scenes", "arrangement", "playback", "selection")
     # What a light track row carries, each the value its whole row has: identity, name, kind and
     # cheap scalar state read from the track itself. Nothing below the track (clip slots, clips,
@@ -2416,7 +2470,7 @@ class LiveObjectMapper:
             raise ValueError("stale parent reference")
         # Whose identity rows make a Set-wide list's revision; None: the items themselves.
         identity_fields: tuple[str, ...] | None = None
-        light = False
+        light = False; light_devices: dict[str, Any] | None = None
         if kind in {"set", "song"}: items = [self._set_row()]
         elif kind in self._DISCOVERY_TRACK_KINDS:
             wanted = self._DISCOVERY_TRACK_KINDS[kind]
@@ -2430,18 +2484,27 @@ class LiveObjectMapper:
         elif kind == "scene":
             items = [self._scene_row(scene, index) for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
             identity_fields = ("ref", "objectIdentity", "name")
-        elif kind in {"clip_slot", "clip", "session_clip", "note", "device", "parameter"}:
-            # What lives under a track is read from the parent's track alone; only a Set-wide device
-            # list (or a parent naming no track) reads every track.
+        elif kind == "device":
+            # Devices are walked light, from the Set's tracks (or the parent's track alone), without
+            # their parameters or anything a track holds besides; whole rows come only for the page,
+            # and only when the requested fields need them. A filter on what only a whole row has
+            # needs whole rows to filter.
+            track_index = self._ref_track_index(parent) if parent is not None else None
+            indices = [track_index] if track_index is not None else [] if parent is not None else range(len(self._track_entries(kinds=False)))
+            walked = [(device, path, depth, row) for index in indices for entry in [self._track_entry(index)] if entry is not None for device, path, depth, row in self._light_device_walk(entry[0], self.refs.put("track", entry[0], str(index)), str(index))]
+            identity_fields = ("ref", "objectIdentity", "name", "className")
+            if filters and any(key not in self._LIGHT_DEVICE_FIELDS for key in filters):
+                items = [self._whole_device_row(device, path, depth, row) for device, path, depth, row in walked]
+            else:
+                items = [row for _, _, _, row in walked]; light_devices = {row["ref"]: (device, path, depth, row) for device, path, depth, row in walked}
+        elif kind in {"clip_slot", "clip", "session_clip", "note", "parameter"}:
+            # What lives under a track is read from the parent's track alone.
             track_index = self._ref_track_index(parent)
             if track_index is not None: track_rows = [row for row in [self._whole_track_row(track_index)] if row is not None]
             else: track_rows = self.snapshot()["tracks"]
             if kind == "clip_slot": items = [slot for track in track_rows for slot in track["clipSlots"]]
             elif kind in {"clip", "session_clip"}: items = [clip for track in track_rows for clip in track["clips"]]
             elif kind == "note": items = [note | {"ref": f"{clip['ref']}:note:{index}", "parentRef": clip["ref"]} for track in track_rows for clip in track["clips"] if parent is None or clip["ref"] == parent for index, note in enumerate(clip["notes"])]
-            elif kind == "device":
-                # A rack's chains by name, empty ones too: what a device can be loaded into, without its whole tree.
-                items = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device.get("chains") or [] if isinstance(chain, dict)]} if device.get("chains") else device for track in track_rows for device in self._flatten_device_rows(track["devices"])]
             else: items = [parameter for track in track_rows for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
         elif kind == "arrangement_clip":
             track_index = self._ref_track_index(parent)
@@ -2496,6 +2559,9 @@ class LiveObjectMapper:
         if light and (requested_fields is None or not set(requested_fields) <= self._LIGHT_TRACK_FIELDS):
             # The page's tracks whole, and only the page's.
             page = [self._whole_track_row(self._ref_track_index(item["ref"])) or item for item in page]
+        if light_devices is not None and (requested_fields is None or not set(requested_fields) <= self._LIGHT_DEVICE_FIELDS):
+            # The page's devices whole, and only the page's.
+            page = [self._whole_device_row(*light_devices[item["ref"]][:3], item) for item in page]
         if requested_fields is not None:
             allowed = set(requested_fields) | {"ref", "parentRef"}
             page = [{key: value for key, value in item.items() if key in allowed} for item in page]

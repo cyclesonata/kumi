@@ -7790,3 +7790,113 @@ class AuditRowFieldTests(unittest.TestCase):
         with patch.dict(sys.modules, {"Live": live}):
             environment = LiveObjectMapper(FakeSong())._environment_probe()
         self.assertEqual((environment["liveVersion"], environment["liveEdition"], environment["unavailableFeatures"]), ("12.4.15b5", "Suite", ["push_apps"]))
+
+
+class LeanParameter:
+    __slots__ = ("name", "value", "min", "max", "is_quantized", "is_enabled", "automation_state", "default_value")
+
+    def __init__(self, name):
+        self.name = name; self.value = 0.5; self.min = 0.0; self.max = 1.0; self.is_quantized = False; self.is_enabled = True; self.automation_state = 0; self.default_value = 0.5
+
+
+class LeanChain:
+    def __init__(self, name, devices):
+        self.name = name; self.devices = devices; self.mute = False; self.solo = False
+
+
+class LeanDevice:
+    """A device as a big Set has thousands: parameters, and chains when it's a rack."""
+    parameter_reads = 0
+
+    def __init__(self, name, class_name, parameters, chains=None, kind=2):
+        self.name = name; self.class_name = class_name; self._parameters = [LeanParameter(f"{name} {index + 1}") for index in range(parameters)]
+        self.is_active = True; self.type = kind; self.can_have_chains = chains is not None; self.can_have_drum_pads = False
+        if chains is not None:
+            self.chains = chains; self.return_chains = []; self.macros = self._parameters[1:9]; self.visible_macro_count = 8; self.variation_count = 0; self.selected_variation_index = -1
+
+    @property
+    def parameters(self):
+        LeanDevice.parameter_reads += 1
+        return self._parameters
+
+
+class LeanPad:
+    def __init__(self, name, chains):
+        self.name = name; self.chains = chains; self.mute = False; self.solo = False; self.note = 36
+
+
+def lean_template_devices():
+    """The measured Set's template: Operator, EQ Eight, Compressor, Reverb, and an Audio Effect Rack
+    with two chains (Saturator + Auto Filter; a nested rack with Utility). Nine devices."""
+    nested = LeanDevice("Audio Effect Rack", "AudioEffectGroupDevice", 17, [LeanChain("Chain", [LeanDevice("Utility", "StereoGain", 20)])])
+    rack = LeanDevice("Audio Effect Rack", "AudioEffectGroupDevice", 17, [LeanChain("Drive", [LeanDevice("Saturator", "Saturator", 25), LeanDevice("Auto Filter", "AutoFilter", 40)]), LeanChain("Nest", [nested])])
+    return [LeanDevice("Operator", "Operator", 195, kind=1), LeanDevice("EQ Eight", "Eq8", 87), LeanDevice("Compressor", "Compressor2", 30), LeanDevice("Reverb", "Reverb", 37), rack]
+
+
+def lean_track(name, devices=None):
+    track = FakeTrack(); track.name = name; track.clip_slots = [FakeSlot() for _ in range(8)]; track.mixer_device = FakeMixerDevice(); track.arrangement_clips = []
+    track.devices = lean_template_devices() if devices is None else devices
+    return track
+
+
+def drum_rack():
+    """A Drum Rack whose pads' chains the rack lists, and one pad with a chain it doesn't."""
+    kick, snare = LeanChain("Kick", [LeanDevice("Simpler", "OriginalSimpler", 10)]), LeanChain("Snare", [LeanDevice("Simpler", "OriginalSimpler", 10)])
+    rack = LeanDevice("Drum Rack", "DrumGroupDevice", 17, [kick, snare]); rack.can_have_drum_pads = True
+    rack.visible_drum_pads = [LeanPad("Kick", [kick]), LeanPad("Snare", [snare]), LeanPad("Hat", [LeanChain("Hat", [LeanDevice("Simpler", "OriginalSimpler", 10)])])]
+    return rack
+
+
+class LightDeviceDiscoveryTests(unittest.TestCase):
+    """A: devices are listed from light rows, which read no parameters; whole rows only for a page
+    whose fields need them. What's listed is exactly what whole-row discovery listed."""
+
+    FIELDS = ["parentRef", "name", "className", "chainList"]
+
+    @staticmethod
+    def whole_items(mapper, parent=None):
+        """Device discovery's items as they were built from whole track rows."""
+        rows = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device["chains"]]} if device.get("chains") else device for track in mapper.snapshot()["tracks"] for device in mapper._flatten_device_rows(track["devices"])]
+        return [row for row in rows if parent is None or row.get("parentRef") == parent]
+
+    @staticmethod
+    def only(rows, fields):
+        allowed = set(fields) | {"ref", "parentRef"}
+        return [{key: value for key, value in row.items() if key in allowed} for row in rows]
+
+    def set_with_racks(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Drums", [drum_rack(), LeanDevice("Glue", "GlueCompressor", 12)]), lean_track("Empty", [])]
+        return song, LiveObjectMapper(song)
+
+    def test_a_device_list_reads_no_parameters_and_lists_what_whole_rows_listed(self):
+        song, mapper = self.set_with_racks(); expected = self.only(self.whole_items(mapper), self.FIELDS)
+        LeanDevice.parameter_reads = 0
+        listed = mapper.discover("device", 1000, None, None, None, self.FIELDS)
+        self.assertEqual(LeanDevice.parameter_reads, 0); self.assertEqual(listed["items"], expected)
+        self.assertEqual(len(expected), 9 + 5)  # a template track, and a Drum Rack's three Simplers (the unlisted pad's too) with a Glue Compressor
+        validate_operation_payload("discover", "result", listed)
+        # A track's devices and a chain's, as whole rows listed them.
+        row = mapper.snapshot()["tracks"][0]; rack = row["devices"][4]
+        for parent in (row["ref"], rack["chains"][0]["ref"], rack["chains"][1]["ref"], rack["chains"][1]["devices"][0]["chains"][0]["ref"]):
+            self.assertEqual(mapper.discover("device", 1000, None, parent, None, self.FIELDS)["items"], self.only(self.whole_items(mapper, parent), self.FIELDS), parent)
+        # A filter on a light field stays light; on what only a whole row has, whole rows filter.
+        LeanDevice.parameter_reads = 0
+        self.assertEqual([item["name"] for item in mapper.discover("device", 1000, None, None, {"className": "OriginalSimpler"}, self.FIELDS)["items"]], ["Simpler"] * 3)
+        self.assertEqual(LeanDevice.parameter_reads, 0)
+        self.assertEqual(mapper.discover("device", 1000, None, None, {"latencySamples": None}, self.FIELDS)["items"], self.only([row for row in self.whole_items(mapper) if row.get("latencySamples") is None], self.FIELDS))
+
+    def test_whole_rows_come_for_the_page_alone_and_the_revision_follows_identities(self):
+        song, mapper = self.set_with_racks(); whole = self.whole_items(mapper)
+        LeanDevice.parameter_reads = 0
+        first = mapper.discover("device", 2)
+        self.assertEqual(first["items"], whole[:2]); self.assertEqual(LeanDevice.parameter_reads, 2)
+        pages, cursor = [first["items"]], first.get("nextCursor")
+        while cursor:
+            page = mapper.discover("device", 2, cursor); pages.append(page["items"]); cursor = page.get("nextCursor")
+        self.assertEqual([item for page in pages for item in page], whole)
+        # A parameter moving isn't a new list; a renamed device is.
+        revision = first["revision"]; song.tracks[0].devices[0]._parameters[0].value = 0.9
+        self.assertEqual(mapper.discover("device", 2)["revision"], revision)
+        song.tracks[0].devices[0].name = "FM"
+        self.assertNotEqual(mapper.discover("device", 2)["revision"], revision)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("device", 2, first["nextCursor"])
