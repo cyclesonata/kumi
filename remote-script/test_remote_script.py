@@ -4991,7 +4991,7 @@ class RackMacroDrumPadTests(unittest.TestCase):
         row = mapper.snapshot()["tracks"][0]["devices"][0]
         args = {"ref": row["parameters"][0]["ref"], "expectedOwnerRef": row["ref"], "expectedTrackRef": mapper.snapshot()["tracks"][0]["ref"], "expectedSiblings": [{"ref": parameter["ref"], "objectIdentity": parameter["objectIdentity"]} for parameter in row["parameters"]]}
         builds = []; build = LiveObjectMapper._build_snapshot
-        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self: builds.append(1) or build(self)):
+        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(1) or build(self, args)):
             shared = _authority_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(len(builds), 1, "one snapshot for 42 references")
         self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
@@ -6160,3 +6160,193 @@ class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
         self.assertTrue(response["ok"]); self.assertEqual(len(response["result"]["tracks"]), 300)
         connection = self.bridge._connections[0]
         self.assertEqual((connection.pending_outbound(), len(connection.outbound), connection.sent), (0, 0, 0))
+
+
+def rich_song(links=True, playing=True, tracks=6):
+    """A Set with something of everything: MIDI and audio clips, a group, a rack with a nested device,
+    a Drum Rack, take lanes, Arrangement clips, a return, the main track, locators and a selection
+    three levels deep. With links, Live's canonical_parent chain from each object up to its track."""
+    song = FakeSong()
+    song.name = "Rich"; song.tempo = 124.0; song.loop = True; song.loop_length = 16.0; song.loop_start = 0.0
+    song.cue_points = [FakeLocator(0, "Intro"), FakeLocator(16, "Drop")]; song.set_or_delete_cue = lambda: None
+    rows = []
+    for index in range(tracks):
+        track = FakeTrack(); track.name = f"T{index}"
+        track.clip_slots = [FakeSlot() for _ in range(4)]
+        track.mixer_device = FakeMixerDevice(); track.mute = index == 2; track.solo = False
+        track.color_index = index % 70; track.color = 0x112233 + index
+        track.arrangement_clips = [FakeClip(2.0) for _ in range(index % 3)]
+        for clip in track.arrangement_clips: clip.start_time = 4.0
+        rows.append(track)
+    beat = FakeClip(8.0); beat.name = "Beat"; beat.add_new_notes([{"pitch": 36, "start_time": 0.0, "duration": 0.25, "velocity": 100}, {"pitch": 38, "start_time": 1.0, "duration": 0.25, "velocity": 90}])
+    rows[0].clip_slots[1].clip = beat
+    if playing: rows[0].playing_slot_index = 1; rows[3].fired_slot_index = 2
+    rows[3].clip_slots[2].clip = FakeClip(4.0)
+    class Marker:
+        def __init__(self, value): self.beat_time = value; self.sample_time = value * 100.0
+    audio = FakeClip(4.0); audio.is_audio_clip = True; audio.warp_markers = [Marker(0.0), Marker(2.0)]; audio.gain = 0.5; audio.file_path = "/tmp/a.wav"
+    rows[1].has_midi_input = False; rows[1].clip_slots[0].clip = audio
+    rows[2].is_foldable = True; rows[3].group_track = rows[2]
+    rack = FakeDevice(); rack.name = "Rack"; rack.can_have_chains = True
+    nested = FakeDevice(); nested.name = "Nested"
+    chain = type("Chain", (), {})(); chain.name = "C1"; chain.devices = [nested]; chain.mute = False; chain.solo = False
+    rack.chains = [chain]; rack.macros = [FakeParameter()]
+    rows[4].devices = [rack, FakeDevice()]
+    drum = FakeDevice(); drum.name = "Drums"; drum.can_have_chains = True; drum.can_have_drum_pads = True
+    kick = FakeDevice(); kick.name = "Kick"
+    pad_chain = type("Chain", (), {})(); pad_chain.name = "Kick"; pad_chain.devices = [kick]; pad_chain.mute = False; pad_chain.solo = False; pad_chain.in_note = 36
+    drum.chains = [pad_chain]; drum.macros = []
+    pad = type("Pad", (), {})(); pad.name = "Kick"; pad.note = 36; pad.chains = [pad_chain]; pad.mute = False; pad.solo = False
+    drum.drum_pads = [pad]; rows[5].devices = [drum]
+    lane = FakeTakeLane("Take A"); lane.arrangement_clips = [FakeClip(1.0)]; rows[0].take_lanes = [lane]
+    returned = FakeTrack(); returned.name = "A-Reverb"; returned.mixer_device = FakeMixerDevice(); returned.clip_slots = []
+    main = FakeTrack(); main.name = "Main"; main.mixer_device = FakeMixerDevice(); main.clip_slots = []
+    song.tracks = rows; song.return_tracks = [returned]; song.master_track = main
+    song.scenes = [FakeScene(f"S{index}") for index in range(4)]
+    rows[4].view = type("TrackView", (), {"selected_device": rack})()
+    song.view = type("View", (), {"selected_track": rows[4], "selected_scene": song.scenes[1], "highlighted_clip_slot": rows[4].clip_slots[1], "detail_clip": beat, "selected_parameter": nested.parameters[0], "selected_chain": chain})()
+    if links:
+        for track in rows + [returned, main]:
+            for slot in track.clip_slots:
+                slot.canonical_parent = track
+                if slot.clip is not None: slot.clip.canonical_parent = slot
+            for device in track.devices: device.canonical_parent = track
+            track.mixer_device.canonical_parent = track
+        nested.canonical_parent = chain; chain.canonical_parent = rack; kick.canonical_parent = pad_chain; pad_chain.canonical_parent = drum
+        for device in (rack, nested, drum, kick) + tuple(rows[4].devices):
+            for parameter in device.parameters: parameter.canonical_parent = device
+    return song
+
+
+class ReadCounter:
+    """Counts reads of the attributes below a track, per track: a light row must read none of them."""
+    BELOW = ("clip_slots", "devices", "take_lanes", "mixer_device", "arrangement_clips", "input_routing_type", "output_routing_type", "available_input_routing_types", "available_output_routing_types", "view")
+
+    def __init__(self, tracks):
+        self.reads = {}
+        for index, track in enumerate(tracks):
+            counter = self
+            class Counted(type(track)):
+                def __getattribute__(self, name, index=index):
+                    if name in ReadCounter.BELOW: counter.reads.setdefault(index, set()).add(name)
+                    return object.__getattribute__(self, name)
+            track.__class__ = Counted
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True)
+
+
+class FocusedSnapshotTests(unittest.TestCase):
+    """WS1/WS2: a snapshot takes windows, a focus and parts, and builds only what they name; the
+    rows it builds whole are the whole Set's rows, byte for byte."""
+
+    def test_without_arguments_it_is_the_whole_set_with_its_counts(self):
+        mapper = LiveObjectMapper(rich_song()); snapshot = mapper.snapshot()
+        self.assertEqual(list(snapshot), ["set", "tracks", "scenes", "arrangement", "playback", "selection", "epoch", "trackCount", "sceneCount"])
+        self.assertEqual((snapshot["trackCount"], snapshot["sceneCount"], len(snapshot["tracks"]), len(snapshot["scenes"])), (8, 4, 8, 4))
+        self.assertNotIn("window", snapshot, "no arguments, no window: the host reads that as the whole Set")
+        self.assertFalse(any(row.get("light") for row in snapshot["tracks"]))
+        validate_operation_payload("snapshot", "result", snapshot)
+        self.assertEqual(canonical(mapper.snapshot({})), canonical({**snapshot, "playback": mapper.snapshot({})["playback"]}))
+
+    def test_windows_page_whole_rows_and_echo_what_they_asked(self):
+        mapper = LiveObjectMapper(rich_song()); whole = mapper.snapshot()
+        page = mapper.snapshot({"tracks": {"from": 1, "count": 3}, "scenes": {"from": 2, "count": 5}})
+        validate_operation_payload("snapshot", "result", page)
+        self.assertEqual([row["ref"] for row in page["tracks"]], [row["ref"] for row in whole["tracks"][1:4]])
+        self.assertEqual([canonical(row) for row in page["tracks"]], [canonical(row) for row in whole["tracks"][1:4]], "the same rows, byte for byte")
+        self.assertEqual([row["ref"] for row in page["scenes"]], [row["ref"] for row in whole["scenes"][2:]])
+        self.assertEqual((page["trackCount"], page["sceneCount"]), (8, 4))
+        self.assertEqual(page["window"], {"tracks": {"from": 1, "count": 3}, "scenes": {"from": 2, "count": 5}})
+        # A window's Arrangement clips are its tracks' (tracks 1-3 hold 1, 2 and 0 clips).
+        self.assertEqual({clip["trackRef"] for clip in page["arrangement"]["clips"]}, {whole["tracks"][1]["ref"], whole["tracks"][2]["ref"]})
+        # Past the end, a window is empty, not refused.
+        beyond = mapper.snapshot({"tracks": {"from": 100, "count": 10}})
+        self.assertEqual((beyond["tracks"], beyond["trackCount"]), ([], 8))
+        # Playback and the selection are the whole Set's, however the rows are paged.
+        self.assertEqual(page["playback"], whole["playback"]); self.assertEqual(page["selection"], whole["selection"])
+
+    def test_focus_lists_every_track_the_focused_whole_and_the_rest_light(self):
+        mapper = LiveObjectMapper(rich_song()); whole = mapper.snapshot()
+        focused = mapper.snapshot({"focus": [4, 0]})
+        validate_operation_payload("snapshot", "result", focused)
+        self.assertEqual([row["ref"] for row in focused["tracks"]], [row["ref"] for row in whole["tracks"]], "every track, in order")
+        for index, row in enumerate(focused["tracks"]):
+            if index in (0, 4):
+                self.assertEqual(canonical(row), canonical(whole["tracks"][index]), "a focused row is the whole row")
+                continue
+            self.assertIs(row["light"], True)
+            self.assertEqual(set(row), set(LiveObjectMapper._LIGHT_TRACK_FIELDS) | {"light", "clips", "clipSlots", "devices", "takeLanes", "mixer", "routing"})
+            self.assertEqual({key: row[key] for key in LiveObjectMapper._LIGHT_TRACK_FIELDS}, {key: whole["tracks"][index][key] for key in LiveObjectMapper._LIGHT_TRACK_FIELDS}, f"track {index}'s light fields are its whole row's")
+            self.assertEqual((row["clips"], row["clipSlots"], row["devices"], row["takeLanes"], row["mixer"], row["routing"]), ([], [], [], [], None, None))
+        self.assertEqual([clip["ref"] for clip in focused["arrangement"]["clips"]], [clip["ref"] for clip in whole["arrangement"]["clips"] if clip["trackRef"] in {whole["tracks"][0]["ref"], whole["tracks"][4]["ref"]}], "the focused tracks' Arrangement clips")
+        self.assertEqual(len(focused["arrangement"]["clips"]), 1)
+        focused_two = mapper.snapshot({"focus": [2]})
+        self.assertEqual([clip["ref"] for clip in focused_two["arrangement"]["clips"]], [clip["ref"] for clip in whole["arrangement"]["clips"] if clip["trackRef"] == whole["tracks"][2]["ref"]])
+        self.assertEqual(focused["window"], {"focus": [4, 0]})
+        everything_light = mapper.snapshot({"focus": []})
+        self.assertTrue(all(row["light"] for row in everything_light["tracks"])); self.assertEqual(everything_light["arrangement"]["clips"], [])
+        self.assertEqual(focused["playback"], whole["playback"]); self.assertEqual(focused["selection"], whole["selection"])
+
+    def test_light_rows_never_walk_below_their_track(self):
+        song = rich_song(tracks=40, playing=False); song.view = None
+        counter = ReadCounter(song.tracks)
+        focused = LiveObjectMapper(song).snapshot({"focus": [7]})
+        self.assertFalse(focused["tracks"][7].get("light"))
+        self.assertEqual({index for index in counter.reads}, {7}, f"only the focused track is walked below: {counter.reads}")
+        counter.reads.clear()
+        LiveObjectMapper(song).snapshot({"focus": [], "parts": ["tracks"]})
+        self.assertEqual(counter.reads, {})
+        # Playback reads the slot list of a track that plays or is queued, and nothing else below a track.
+        song = rich_song(tracks=40, playing=True); song.view = None; counter = ReadCounter(song.tracks)
+        LiveObjectMapper(song).snapshot({"focus": []})
+        self.assertEqual(counter.reads, {0: {"clip_slots"}, 3: {"clip_slots"}})
+
+    def test_parts_build_only_what_is_asked(self):
+        mapper = LiveObjectMapper(rich_song()); built = []
+        original_row, original_light = LiveObjectMapper._track_row, LiveObjectMapper._light_track_row
+        with patch.object(LiveObjectMapper, "_track_row", lambda self, *args: built.append("whole") or original_row(self, *args)), patch.object(LiveObjectMapper, "_light_track_row", lambda self, *args: built.append("light") or original_light(self, *args)):
+            playback_only = mapper.snapshot({"parts": ["playback"]})
+            self.assertEqual(built, [], "no track row for playback")
+            tracks_only = mapper.snapshot({"focus": [1], "parts": ["tracks"]})
+        validate_operation_payload("snapshot", "result", playback_only); validate_operation_payload("snapshot", "result", tracks_only)
+        self.assertEqual(list(playback_only), ["playback", "epoch", "trackCount", "sceneCount", "window"])
+        self.assertEqual(list(tracks_only), ["tracks", "epoch", "trackCount", "sceneCount", "window"])
+        self.assertEqual(built, ["light", "whole"] + ["light"] * 6)
+        self.assertEqual(tracks_only["window"], {"focus": [1], "parts": ["tracks"]})
+        self.assertEqual(set(mapper.snapshot({"parts": []})), {"epoch", "trackCount", "sceneCount", "window"})
+
+    def test_a_shared_read_builds_each_distinct_snapshot_once(self):
+        mapper = LiveObjectMapper(rich_song()); builds = []; build = LiveObjectMapper._build_snapshot
+        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(canonical(args)) or build(self, args)):
+            mapper._shared_reads(lambda: [mapper.snapshot({"focus": [1]}), mapper.snapshot({"focus": [1]}), mapper.snapshot({"focus": [2]}), mapper.snapshot(), mapper.snapshot({})])
+        self.assertEqual(builds, [canonical({"focus": [1]}), canonical({"focus": [2]}), canonical({})])
+
+    def test_playback_and_selection_read_directly_are_what_the_rows_say(self):
+        for links in (True, False):
+            for playing in (True, False):
+                mapper = LiveObjectMapper(rich_song(links, playing)); whole = mapper.snapshot()
+                self.assertEqual(mapper._playback(), whole["playback"])
+                self.assertEqual(mapper._selection_row_targeted(), whole["selection"])
+                self.assertTrue(all(value is not None for value in whole["selection"].values()), whole["selection"])
+        song = rich_song(); mapper = LiveObjectMapper(song); song.view = None
+        self.assertEqual(mapper._selection_row_targeted(), {key: None for key, _, _ in LiveObjectMapper._SELECTION_KINDS})
+
+    def test_arguments_are_checked(self):
+        mapper = LiveObjectMapper(FakeSong())
+        for invalid in ({"tracks": {"from": -1, "count": 1}}, {"tracks": {"from": 0, "count": 0}}, {"scenes": {"from": 0}}, {"focus": [1, 1]}, {"focus": [True]}, {"parts": ["everything"]}, {"parts": ["set", "set"]}, {"windows": {}}):
+            with self.assertRaises(ValueError): mapper.snapshot(invalid)
+
+    def test_the_wire_carries_snapshot_arguments_both_ways(self):
+        mapper = LiveObjectMapper(rich_song())
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: AbletonMcpBridge._dispatch_main_for(method, request, mapper))
+        def ask(sequence, **fields):
+            unsigned = remote.bound({"version": PROTOCOL, "id": f"snapshot-{sequence}", "method": "snapshot", "nonce": f"snapshot-nonce-{sequence:04d}", "sequence": sequence, **fields})
+            return remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        focused = ask(1, args={"focus": [3], "parts": ["tracks", "playback"]})
+        self.assertTrue(focused["ok"], focused); self.assertEqual(focused["result"]["window"], {"focus": [3], "parts": ["tracks", "playback"]})
+        self.assertEqual([row.get("light", False) for row in focused["result"]["tracks"]], [True, True, True, False, True, True, True, True])
+        plain = ask(2)
+        self.assertTrue(plain["ok"]); self.assertNotIn("window", plain["result"])
+        self.assertFalse(ask(3, args={"parts": ["everything"]})["ok"])

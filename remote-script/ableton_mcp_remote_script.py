@@ -677,7 +677,8 @@ class AuthenticatedRemoteScript:
 
     def _operation_contract(self, request: dict[str, Any]) -> tuple[str, Any]:
         method = request["method"]
-        if method in {"status", "snapshot", "reconnect"}: return method, {}
+        if method in {"status", "reconnect"}: return method, {}
+        if method == "snapshot": return "snapshot", dict(request.get("args", {}))
         if method == "retire": return "authority.retire", {"transactionId": request.get("transactionId"), **({"terminal": request["terminal"]} if "terminal" in request else {})}
         if method == "discover":
             args = dict(request.get("args", {}))
@@ -717,7 +718,7 @@ class AuthenticatedRemoteScript:
             or not isinstance(request["mac"], str)
         ):
             return self._error(request.get("id", "invalid"), "invalid request")
-        if request["method"] in {"invoke", "preflight", "prepare", "discover"}:
+        if request["method"] in {"invoke", "preflight", "prepare", "discover", "snapshot"}:
             if request["method"] in {"invoke", "preflight", "prepare"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", request["operation"])):
                 return self._error(request["id"], "operation is required")
             if not isinstance(request.get("args", {}), dict) or len(request.get("args", {})) > MAX_REQUEST_ARGS:
@@ -1295,19 +1296,31 @@ class LiveObjectMapper:
         }
 
     def _playback(self, track_rows: list[dict[str, Any]] | None = None, scene_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        if track_rows is None or scene_rows is None:
-            snapshot = self.snapshot()
-            return snapshot["playback"]
+        """What plays and what's queued, with the transport. From a snapshot's whole rows when it has
+        them; otherwise read directly: each track's playing and fired slot, and only those slots, so
+        it costs two reads per track however big the Set is. Both give the same result."""
         transport = self._transport_dict()
         fired: list[dict[str, Any]] = []
         playing: list[dict[str, Any]] = []
-        for track in track_rows:
-            for field, destination in (("firedSlotIndex", fired), ("playingSlotIndex", playing)):
-                index = track.get(field)
-                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(scene_rows): continue
-                slot = next((item for item in track.get("clipSlots", []) if item.get("sceneIndex") == index), None)
-                if slot is None: continue
-                destination.append({"trackRef": track["ref"], "clipSlotRef": slot["ref"], "sceneRef": scene_rows[index]["ref"], "sceneIndex": index, "clipRef": slot.get("clipRef")})
+        if track_rows is None or scene_rows is None:
+            scenes = self._items(getattr(self.song, "scenes", []))
+            for index, (track, _) in enumerate(self._track_entries(kinds=False)):
+                slots: list[Any] | None = None
+                for attribute, destination in (("fired_slot_index", fired), ("playing_slot_index", playing)):
+                    slot_index = self._slot_index(self._read_attr(track, attribute))
+                    if slot_index is None or not slot_index < len(scenes): continue
+                    if slots is None: slots = self._items(getattr(track, "clip_slots", []))
+                    if not slot_index < len(slots): continue
+                    slot = slots[slot_index]; clip = getattr(slot, "clip", None)
+                    destination.append({"trackRef": self.refs.put("track", track, str(index)), "clipSlotRef": self.refs.put("clip_slot", slot, f"{index}:{slot_index}"), "sceneRef": self.refs.put("scene", scenes[slot_index], str(slot_index)), "sceneIndex": slot_index, "clipRef": self.refs.put("clip", clip, f"{index}:{slot_index}") if clip is not None else None})
+        else:
+            for track in track_rows:
+                for field, destination in (("firedSlotIndex", fired), ("playingSlotIndex", playing)):
+                    index = track.get(field)
+                    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(scene_rows): continue
+                    slot = next((item for item in track.get("clipSlots", []) if item.get("sceneIndex") == index), None)
+                    if slot is None: continue
+                    destination.append({"trackRef": track["ref"], "clipSlotRef": slot["ref"], "sceneRef": scene_rows[index]["ref"], "sceneIndex": index, "clipRef": slot.get("clipRef")})
         fired.sort(key=lambda item: (item["sceneIndex"], item["trackRef"], item["clipSlotRef"]))
         playing.sort(key=lambda item: (item["sceneIndex"], item["trackRef"], item["clipSlotRef"]))
         # Position drifts continuously while playing and is verified by
@@ -1413,9 +1426,20 @@ class LiveObjectMapper:
             if value is not None or key not in row: row[key] = value
         return row
 
-    def _arrangement_clip_items(self) -> list[dict[str, Any]]:
+    def _arrangement_clip_items(self, track_indices: Any = None) -> list[dict[str, Any]]:
+        """The Arrangement's clips as rows: every track's, or only those of the tracks at the given
+        snapshot indices (a focused snapshot, a targeted read)."""
         rows: list[dict[str, Any]] = []
         song_level = self._items(getattr(self.song, "arrangement_clips", []))
+        # A shape listing the Arrangement's clips on the Song has no per-track clips to pick from.
+        if song_level and track_indices is not None: return rows
+        if track_indices is not None:
+            tracks = self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", []))
+            for track_index in sorted({index for index in track_indices if isinstance(index, int) and 0 <= index < len(tracks)}):
+                track = tracks[track_index]; self.refs.put("track", track, str(track_index))
+                for clip_index, clip in enumerate(self._items(self._read_attr(track, "arrangement_clips") or [])):
+                    rows.append(self._arrangement_clip_row(track, clip, track_index, clip_index))
+            return rows
         if song_level:
             for index, clip in enumerate(song_level):
                 reference = self.refs.put("arrangement_clip", clip, str(index)); notes = self._read_notes(clip)
@@ -1735,11 +1759,46 @@ class LiveObjectMapper:
                 return value
         return None
 
-    def snapshot(self) -> dict[str, Any]:
+    _SNAPSHOT_PARTS = ("set", "tracks", "scenes", "arrangement", "playback", "selection")
+    # What a light track row carries, each the value its whole row has: identity, name, kind and
+    # cheap scalar state read from the track itself. Nothing below the track (clip slots, clips,
+    # notes, devices, parameters, take lanes, mixer, routing) is walked; those are empty or null.
+    _LIGHT_TRACK_FIELDS = frozenset({"ref", "parentRef", "objectIdentity", "name", "kind", "mediaKind", "armed", "monitoringState", "playingSlotIndex", "firedSlotIndex", "groupTrackRef", "colorIndex", "color", "isVisible", "isFrozen", "foldState"})
+
+    @classmethod
+    def _snapshot_arguments(cls, args: Any) -> dict[str, Any]:
+        """A snapshot request's arguments, checked (the registry checks the wire; direct callers too)."""
+        if args is None: return {}
+        if not isinstance(args, dict) or set(args) - {"tracks", "scenes", "focus", "parts"}: raise ValueError("snapshot arguments are invalid")
+        normalized: dict[str, Any] = {}
+        for key in ("tracks", "scenes"):
+            if key not in args: continue
+            window = args[key]
+            if not isinstance(window, dict) or set(window) != {"from", "count"} or any(not isinstance(window[name], int) or isinstance(window[name], bool) for name in ("from", "count")) or not 0 <= window["from"] <= MAX_COLLECTION_INDEX or not 1 <= window["count"] <= MAX_COLLECTION_INDEX:
+                raise ValueError(f"snapshot {key} window is invalid")
+            normalized[key] = {"from": window["from"], "count": window["count"]}
+        if "focus" in args:
+            focus = args["focus"]
+            if not isinstance(focus, list) or any(not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= MAX_COLLECTION_INDEX for index in focus) or len(set(focus)) != len(focus): raise ValueError("snapshot focus is invalid")
+            normalized["focus"] = list(focus)
+        if "parts" in args:
+            parts = args["parts"]
+            if not isinstance(parts, list) or any(not isinstance(part, str) or part not in cls._SNAPSHOT_PARTS for part in parts) or len(set(parts)) != len(parts): raise ValueError("snapshot parts are invalid")
+            normalized["parts"] = list(parts)
+        return normalized
+
+    def snapshot(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The Set as rows. Without arguments, all of it (with trackCount and sceneCount). A `tracks`
+        or `scenes` window ({from, count}) pages it by snapshot index; `focus` names the tracks
+        whose rows are whole, the others being light rows (nothing below the track is walked);
+        `parts` names the top-level parts to build. Any argument makes the result echo them in
+        `window`. Within a shared read, a snapshot is built once per distinct arguments."""
+        normalized = self._snapshot_arguments(args)
+        key = "snapshot" if not normalized else "snapshot:" + json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         cache = self._read_cache
-        if cache is not None and "snapshot" in cache: return cache["snapshot"]
-        result = self._build_snapshot()
-        if cache is not None: cache["snapshot"] = result
+        if cache is not None and key in cache: return cache[key]
+        result = self._build_snapshot(normalized)
+        if cache is not None: cache[key] = result
         return result
 
     def _shared_reads(self, work: Callable[[], Any]) -> Any:
@@ -1766,7 +1825,51 @@ class LiveObjectMapper:
         if cache is not None: cache["rows"] = rows
         return rows
 
-    def _build_snapshot(self) -> dict[str, Any]:
+    def _track_entries(self, kinds: bool = True) -> list[tuple[Any, Any]]:
+        """Every track in snapshot order (regular and group tracks, returns, then the main track) with
+        its kind. Without kinds, the tracks alone: no per-track read at all."""
+        # Song exposes regular/group, return, and main tracks separately; the
+        # authoritative collection determines kind rather than shape heuristics.
+        track_entries: list[tuple[Any, Any]] = []
+        for track in self._items(getattr(self.song, "tracks", [])):
+            track_entries.append((track, (self._track_kind(track) if self._track_kind(track) == "group" else "regular") if kinds else None))
+        for track in self._items(getattr(self.song, "return_tracks", [])):
+            track_entries.append((track, "return"))
+        main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
+        if main_track is not None:
+            track_entries.append((main_track, "main"))
+        return track_entries
+
+    def _track_entry(self, index: Any) -> tuple[Any, str] | None:
+        """The track at a snapshot index, with its kind, reading only that track."""
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0: return None
+        regular = self._items(getattr(self.song, "tracks", []))
+        if index < len(regular):
+            track = regular[index]
+            return track, ("group" if self._track_kind(track) == "group" else "regular")
+        returns = self._items(getattr(self.song, "return_tracks", []))
+        if index < len(regular) + len(returns): return returns[index - len(regular)], "return"
+        main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
+        if main_track is not None and index == len(regular) + len(returns): return main_track, "main"
+        return None
+
+    def _whole_track_row(self, index: int) -> dict[str, Any] | None:
+        """One track's whole row, by snapshot index, exactly as a snapshot has it. Within a shared
+        read it is built once (or taken from a whole snapshot already built)."""
+        cache = self._read_cache; key = f"track-row:{index}"
+        if cache is not None:
+            if key in cache: return cache[key]
+            whole = cache.get("snapshot")
+            if whole is not None:
+                row = whole["tracks"][index] if 0 <= index < len(whole["tracks"]) else None
+                cache[key] = row
+                return row
+        entry = self._track_entry(index)
+        row = self._track_row(entry[0], entry[1], index) if entry is not None else None
+        if cache is not None: cache[key] = row
+        return row
+
+    def _set_row(self) -> dict[str, Any]:
         set_ref = self.refs.put("set", self.song, "song")
         set_row: dict[str, Any] = {"ref": set_ref, "objectIdentity": self._capture_object_identity(self.song), "name": str(getattr(self.song, "name", "Live Set"))}
         file_path = getattr(self.song, "file_path", None)
@@ -1790,52 +1893,111 @@ class LiveObjectMapper:
             loop_row["length"] = float(loop_length)
         if loop_row:
             set_row["loop"] = loop_row
-        # Song exposes regular/group, return, and main tracks separately; the
-        # authoritative collection determines kind rather than shape heuristics.
-        track_entries: list[tuple[Any, str]] = []
-        for track in self._items(getattr(self.song, "tracks", [])):
-            track_entries.append((track, self._track_kind(track) if self._track_kind(track) == "group" else "regular"))
-        for track in self._items(getattr(self.song, "return_tracks", [])):
-            track_entries.append((track, "return"))
-        main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
-        if main_track is not None:
-            track_entries.append((main_track, "main"))
+        return set_row
+
+    def _track_row(self, track: Any, track_kind: str, index: int) -> dict[str, Any]:
+        """A track's whole row: its slots, clips with their notes, devices with their parameters,
+        take lanes, mixer and routing."""
+        track_ref = self.refs.put("track", track, str(index))
+        slots = self._items(getattr(track, "clip_slots", []))
+        clips = []
+        slot_rows = []
+        for slot_index, slot in enumerate(slots):
+            clip = getattr(slot, "clip", None)
+            slot_ref = self.refs.put("clip_slot", slot, f"{index}:{slot_index}")
+            if clip is None:
+                slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)})
+                continue
+            clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
+            notes = self._read_notes(clip)
+            clip_row = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0)), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
+            for key, value in self._clip_state_fields(clip).items():
+                if value is not None or key not in clip_row: clip_row[key] = value
+            clips.append(clip_row)
+            slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)})
+        armed_value = self._armed(track)
+        return {
+            "ref": track_ref, "parentRef": self.refs.put("set", self.song, "song"), "objectIdentity": self._capture_object_identity(track),
+            "name": str(getattr(track, "name", f"Track {index + 1}")), "kind": track_kind,
+            "mediaKind": "midi" if bool(self._read_attr(track, "has_midi_input")) else "audio",
+            "armed": armed_value if isinstance(armed_value, bool) else None,
+            "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
+            "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
+            "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
+            "mixer": self._mixer_row(track, index),
+            "routing": self._routing_row(track),
+            "clips": clips, "clipSlots": slot_rows, "devices": self._device_items(track, index), "takeLanes": self._take_lane_rows(track, index), **self._track_state_fields(track, index),
+        }
+
+    def _light_track_row(self, track: Any, track_kind: str, index: int) -> dict[str, Any]:
+        """A track as a focused snapshot lists the tracks it doesn't focus on: _LIGHT_TRACK_FIELDS,
+        each read as the whole row reads it, and `light: true`. Its lists are empty and its mixer
+        and routing null because they weren't read, not because the track has none."""
+        def optional_bool(name: str) -> bool | None:
+            value = self._read_attr(track, name)
+            return value if isinstance(value, bool) else None
+        armed_value = self._armed(track)
+        group = self._read_attr(track, "group_track")
+        color_index = self._read_attr(track, "color_index")
+        color_rgb = self._read_attr(track, "color")
+        return {
+            "ref": self.refs.put("track", track, str(index)), "parentRef": self.refs.put("set", self.song, "song"), "objectIdentity": self._capture_object_identity(track),
+            "name": str(getattr(track, "name", f"Track {index + 1}")), "kind": track_kind,
+            "mediaKind": "midi" if bool(self._read_attr(track, "has_midi_input")) else "audio",
+            "light": True,
+            "armed": armed_value if isinstance(armed_value, bool) else None,
+            "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
+            "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
+            "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
+            "groupTrackRef": self.refs.put("track", group, f"group:{index}") if group is not None else None,
+            "colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None,
+            "color": int(color_rgb) if isinstance(color_rgb, int) and not isinstance(color_rgb, bool) and 0 <= color_rgb <= 0xFFFFFF else None,
+            "isVisible": optional_bool("is_visible"),
+            "isFrozen": optional_bool("is_frozen"),
+            "foldState": optional_bool("fold_state") if optional_bool("fold_state") is not None else optional_bool("is_folded"),
+            "clips": [], "clipSlots": [], "devices": [], "takeLanes": [], "mixer": None, "routing": None,
+        }
+
+    @staticmethod
+    def _window_range(window: dict[str, int] | None, total: int) -> range:
+        if window is None: return range(total)
+        return range(min(window["from"], total), min(window["from"] + window["count"], total))
+
+    def _build_snapshot(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        args = args or {}
+        parts = set(args["parts"]) if "parts" in args else set(self._SNAPSHOT_PARTS)
+        track_window, scene_window = args.get("tracks"), args.get("scenes")
+        focus = set(args["focus"]) if "focus" in args else None
+        # Every track's row whole: the Set's Arrangement clips, and (with every scene) playback and
+        # the selection straight from the rows, as a request without arguments has them.
+        every_track_whole = track_window is None and focus is None
+        result: dict[str, Any] = {}
+        if "set" in parts: result["set"] = self._set_row()
+        track_entries = self._track_entries()
         scenes = self._items(getattr(self.song, "scenes", []))
-        track_rows = []
-        for index, (track, track_kind) in enumerate(track_entries):
-            track_ref = self.refs.put("track", track, str(index))
-            slots = self._items(getattr(track, "clip_slots", []))
-            clips = []
-            slot_rows = []
-            for slot_index, slot in enumerate(slots):
-                clip = getattr(slot, "clip", None)
-                slot_ref = self.refs.put("clip_slot", slot, f"{index}:{slot_index}")
-                if clip is None:
-                    slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)})
-                    continue
-                clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
-                notes = self._read_notes(clip)
-                clip_row = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0)), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
-                for key, value in self._clip_state_fields(clip).items():
-                    if value is not None or key not in clip_row: clip_row[key] = value
-                clips.append(clip_row)
-                slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)})
-            armed_value = self._armed(track)
-            track_rows.append({
-                "ref": track_ref, "parentRef": self.refs.put("set", self.song, "song"), "objectIdentity": self._capture_object_identity(track),
-                "name": str(getattr(track, "name", f"Track {index + 1}")), "kind": track_kind,
-                "mediaKind": "midi" if bool(self._read_attr(track, "has_midi_input")) else "audio",
-                "armed": armed_value if isinstance(armed_value, bool) else None,
-                "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
-                "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
-                "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
-                "mixer": self._mixer_row(track, index),
-                "routing": self._routing_row(track),
-                "clips": clips, "clipSlots": slot_rows, "devices": self._device_items(track, index), "takeLanes": self._take_lane_rows(track, index), **self._track_state_fields(track, index),
-            })
-        scene_rows = [self._scene_row(scene, i) for i, scene in enumerate(scenes)]
-        locators = self._locator_items()
-        return {"set": set_row, "tracks": track_rows, "scenes": scene_rows, "arrangement": {"locators": locators, "locatorRevision": hashlib.sha256(self._bounded_canonical(locators).encode("utf-8")).hexdigest(), "clips": self._arrangement_clip_items()}, "playback": self._playback(track_rows, scene_rows), "selection": self._selection_row(track_rows, scene_rows), "epoch": self.refs.epoch}
+        track_indices = self._window_range(track_window, len(track_entries))
+        whole_indices = [index for index in track_indices if focus is None or index in focus]
+        track_rows: list[dict[str, Any]] = []
+        if "tracks" in parts:
+            for index in track_indices:
+                track, track_kind = track_entries[index]
+                track_rows.append(self._track_row(track, track_kind, index) if focus is None or index in focus else self._light_track_row(track, track_kind, index))
+            result["tracks"] = track_rows
+        scene_rows: list[dict[str, Any]] = []
+        if "scenes" in parts:
+            scene_rows = [self._scene_row(scenes[index], index) for index in self._window_range(scene_window, len(scenes))]
+            result["scenes"] = scene_rows
+        if "arrangement" in parts:
+            locators = self._locator_items()
+            result["arrangement"] = {"locators": locators, "locatorRevision": hashlib.sha256(self._bounded_canonical(locators).encode("utf-8")).hexdigest(), "clips": self._arrangement_clip_items() if every_track_whole else self._arrangement_clip_items(whole_indices)}
+        rows_complete = every_track_whole and scene_window is None and "tracks" in parts and "scenes" in parts
+        if "playback" in parts: result["playback"] = self._playback(track_rows, scene_rows) if rows_complete else self._playback()
+        if "selection" in parts: result["selection"] = self._selection_row(track_rows, scene_rows) if rows_complete else self._selection_row_targeted()
+        result["epoch"] = self.refs.epoch
+        result["trackCount"] = len(track_entries)
+        result["sceneCount"] = len(scenes)
+        if args: result["window"] = {key: args[key] for key in ("tracks", "scenes", "focus", "parts") if key in args}
+        return result
 
     def _read_notes(self, clip: Any) -> list[dict[str, Any]]:
         if self._read_attr(clip, "is_audio_clip") is True:
@@ -5431,11 +5593,11 @@ class LiveObjectMapper:
         selector()
         return {"done": True}
 
-    def _selection_row(self, track_rows: list[dict[str, Any]], scene_rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """What Live has selected, named by the snapshot's own references (matched by object identity):
-        the snapshot carries it, so the host fences a selection change on the very state the bridge
-        checks. None where nothing is selected or the object is not among the snapshot's rows."""
-        view = getattr(self.song, "view", None)
+    _SELECTION_KINDS = (("trackRef", "track", "selected_track"), ("sceneRef", "scene", "selected_scene"), ("slotRef", "clip_slot", "highlighted_clip_slot"), ("detailClipRef", "clip", "detail_clip"), ("deviceRef", "device", "selected_device"), ("parameterRef", "parameter", "selected_parameter"), ("chainRef", "chain", "selected_chain"))
+
+    def _selection_known(self, track_rows: list[dict[str, Any]], scene_rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+        """The refs of what a selection can name in these rows, by (kind, object identity): the first
+        in reading order."""
         known: dict[tuple[str, str], str] = {}; budget = [0]
         def note(kind: str, row: Any, ref_key: str = "ref", identity_key: str = "objectIdentity") -> None:
             if isinstance(row, dict) and isinstance(row.get(ref_key), str) and isinstance(row.get(identity_key), str): known.setdefault((kind, row[identity_key]), row[ref_key])
@@ -5457,15 +5619,78 @@ class LiveObjectMapper:
             for send_ref, send_identity in zip(mixer.get("sendRefs") or [], mixer.get("sendIdentities") or []): note("parameter", {"ref": send_ref, "objectIdentity": send_identity})
             devices(track.get("devices"))
         for scene in scene_rows: note("scene", scene)
+        return known
+
+    def _selected_object(self, view: Any, attribute: str) -> Any:
+        if view is None: return None
+        return self._selected_device(view) if attribute == "selected_device" else self._read_attr(view, attribute)
+
+    def _selection_row(self, track_rows: list[dict[str, Any]], scene_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """What Live has selected, named by the snapshot's own references (matched by object identity):
+        the snapshot carries it, so the host fences a selection change on the very state the bridge
+        checks. None where nothing is selected or the object is not among the snapshot's rows."""
+        view = getattr(self.song, "view", None)
+        known = self._selection_known(track_rows, scene_rows)
         def selected(kind: str, attribute: str) -> str | None:
-            value = self._selected_device(view) if attribute == "selected_device" else self._read_attr(view, attribute) if view is not None else None
+            value = self._selected_object(view, attribute)
             return known.get((kind, self._capture_object_identity(value))) if value is not None else None
-        return {"trackRef": selected("track", "selected_track"), "sceneRef": selected("scene", "selected_scene"), "slotRef": selected("clip_slot", "highlighted_clip_slot"),
-                "detailClipRef": selected("clip", "detail_clip"), "deviceRef": selected("device", "selected_device"), "parameterRef": selected("parameter", "selected_parameter"), "chainRef": selected("chain", "selected_chain")}
+        return {key: selected(kind, attribute) for key, kind, attribute in self._SELECTION_KINDS}
+
+    def _owner_track_index(self, value: Any, track_indices: dict[str, int]) -> int | None:
+        """The snapshot index of the track an object lives on, through Live's canonical_parent chain
+        (a parameter's device, its chain, its rack... up to the track); None where the chain ends
+        before a track or the shape has none."""
+        candidate = value
+        for _ in range(64):
+            candidate = self._read_attr(candidate, "canonical_parent")
+            if candidate is None: return None
+            index = track_indices.get(self._capture_object_identity(candidate))
+            if index is not None: return index
+        return None
+
+    def _selection_row_targeted(self) -> dict[str, Any]:
+        """The selection row _selection_row gives over the whole Set, reading only what's selected:
+        a selected track or scene by its identity among the tracks and scenes, anything below a
+        track in the row of the track it lives on (found through canonical_parent, else the
+        selected track). Only a shape without canonical_parent, whose selection isn't on the
+        selected track, falls back to reading every track."""
+        view = getattr(self.song, "view", None)
+        result: dict[str, Any] = {key: None for key, _, _ in self._SELECTION_KINDS}
+        if view is None: return result
+        entries = self._track_entries(kinds=False)
+        track_indices: dict[str, int] = {}
+        for index, (track, _) in enumerate(entries): track_indices.setdefault(self._capture_object_identity(track), index)
+        selected_track = self._selected_object(view, "selected_track")
+        selected_index = track_indices.get(self._capture_object_identity(selected_track)) if selected_track is not None else None
+        if selected_index is not None: result["trackRef"] = self.refs.put("track", entries[selected_index][0], str(selected_index))
+        selected_scene = self._selected_object(view, "selected_scene")
+        if selected_scene is not None:
+            identity = self._capture_object_identity(selected_scene)
+            found = next(((index, scene) for index, scene in enumerate(self._items(getattr(self.song, "scenes", []))) if self._capture_object_identity(scene) == identity), None)
+            if found is not None: result["sceneRef"] = self.refs.put("scene", found[1], str(found[0]))
+        known_by_track: dict[int, dict[tuple[str, str], str]] = {}
+        def known_on(index: int) -> dict[tuple[str, str], str]:
+            if index not in known_by_track:
+                row = self._whole_track_row(index)
+                known_by_track[index] = self._selection_known([row], []) if row is not None else {}
+            return known_by_track[index]
+        for key, kind, attribute in self._SELECTION_KINDS[2:]:
+            value = self._selected_object(view, attribute)
+            if value is None: continue
+            identity = self._capture_object_identity(value); owner = self._owner_track_index(value, track_indices)
+            if owner is not None:
+                result[key] = known_on(owner).get((kind, identity))
+                continue
+            reference = known_on(selected_index).get((kind, identity)) if selected_index is not None else None
+            if reference is None:
+                # No canonical_parent to follow, and not on the selected track: every track is read.
+                reference = next((found for index in range(len(entries)) for found in [known_on(index).get((kind, identity))] if found is not None), None)
+            result[key] = reference
+        return result
 
     def _selection_state(self) -> dict[str, Any]:
         """The selection as the snapshot reports it: the host previews selection changes from that."""
-        return dict(self.snapshot()["selection"])
+        return dict(self._selection_row_targeted())
 
     def _selection_revision(self) -> str:
         return hashlib.sha256(self._bounded_canonical(self._selection_state()).encode("utf-8")).hexdigest()
@@ -9621,7 +9846,7 @@ class AbletonMcpBridge:
     @staticmethod
     def _dispatch_main_for(method: str, request: dict[str, Any], mapper: LiveObjectMapper) -> Any:
         if method == "status": return mapper.status()
-        if method == "snapshot": return mapper.snapshot()
+        if method == "snapshot": return mapper.snapshot(dict(request.get("args", {})))
         if method == "discover":
             args = dict(request.get("args", {}))
             if args.get("kind") == "session_playback": return mapper._playback()
