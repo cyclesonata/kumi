@@ -83,6 +83,40 @@
    }
   },
   {
+   "id": "application.message",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+     },
+     "modal": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "text"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "shown": {
+      "type": "boolean",
+      "const": true
+     }
+    },
+    "required": [
+     "shown"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "arrangement.audio-clip.create",
    "method": "invoke",
    "request": {
@@ -1670,7 +1704,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "args": {
       "type": "object",
@@ -1716,7 +1750,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "argsDigest": {
       "type": "string",
@@ -1796,7 +1830,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "argsDigest": {
       "type": "string",
@@ -2270,6 +2304,123 @@
     },
     "required": [
      "inserted"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "automation.step.insert",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "clipRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "parameterRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "start": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000
+     },
+     "length": {
+      "type": "number",
+      "minimum": 0.001,
+      "maximum": 1000000000
+     },
+     "value": {
+      "type": "number",
+      "minimum": -1000000,
+      "maximum": 1000000
+     },
+     "expectedAuthorityDigest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+     },
+     "expectedEnvelopeRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+     }
+    },
+    "required": [
+     "clipRef",
+     "parameterRef",
+     "start",
+     "length",
+     "value",
+     "expectedAuthorityDigest",
+     "expectedEnvelopeRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "inserted": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+     }
+    },
+    "required": [
+     "inserted"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "automation.value-at",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "clipRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "parameterRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "time": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000
+     }
+    },
+    "required": [
+     "clipRef",
+     "parameterRef",
+     "time"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "value": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "minimum": -1000000,
+      "maximum": 1000000
+     }
+    },
+    "required": [
+     "value"
     ],
     "additionalProperties": false
    }
@@ -3742,6 +3893,68 @@
    }
   },
   {
+   "id": "clip.time-convert",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "from": {
+      "type": "string",
+      "enum": [
+       "beats",
+       "samples",
+       "seconds"
+      ]
+     },
+     "value": {
+      "type": "number",
+      "minimum": -1000000000,
+      "maximum": 1000000000000
+     }
+    },
+    "required": [
+     "ref",
+     "from",
+     "value"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "beats": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "samples": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "seconds": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "beats",
+     "samples",
+     "seconds"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "clip.view.set",
    "method": "invoke",
    "request": {
@@ -3776,6 +3989,11 @@
      },
      "gridIsTriplet": {
       "type": "boolean"
+     },
+     "envelopeParameterRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
      }
     },
     "required": [
@@ -3856,6 +4074,131 @@
     "required": [
      "changed",
      "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "data.get",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     }
+    },
+    "required": [
+     "ref",
+     "key"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 256
+     },
+     "value": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 1048576
+     }
+    },
+    "required": [
+     "ref",
+     "key",
+     "value"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "data.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "value": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 1048576
+     },
+     "expectedValue": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 1048576
+     }
+    },
+    "required": [
+     "ref",
+     "key",
+     "value"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 256
+     },
+     "value": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 1048576
+     },
+     "prior": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 1048576
+     }
+    },
+    "required": [
+     "ref",
+     "key",
+     "value",
+     "prior"
     ],
     "additionalProperties": false
    }
@@ -4010,6 +4353,71 @@
    }
   },
   {
+   "id": "device.action",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "cc-control-resend",
+       "simpler-warp-as",
+       "simpler-warp-double",
+       "simpler-warp-half"
+      ]
+     },
+     "beats": {
+      "type": "number",
+      "minimum": 0.001,
+      "maximum": 1000000
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "action",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "done": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "done",
+     "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "device.bank.set",
    "method": "invoke",
    "request": {
@@ -4066,6 +4474,58 @@
     "required": [
      "changed",
      "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "device.banks.read",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     }
+    },
+    "required": [
+     "ref"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "banks": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string",
+         "maxLength": 256
+        },
+        "parameters": {
+         "type": "array",
+         "items": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 10000000
+         }
+        }
+       },
+       "required": [
+        "name",
+        "parameters"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "banks"
     ],
     "additionalProperties": false
    }
@@ -4219,6 +4679,44 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedOwnerRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedOwnerIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedSiblings": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "ref": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        },
+        "objectIdentity": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 256
+        }
+       },
+       "required": [
+        "ref",
+        "objectIdentity"
+       ],
+       "additionalProperties": false
+      }
      }
     },
     "additionalProperties": false,
@@ -4242,6 +4740,11 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 100000
+     },
+     "objectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
      }
     },
     "required": [
@@ -4681,6 +5184,9 @@
        ],
        "additionalProperties": false
       }
+     },
+     "gesture": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -4864,6 +5370,106 @@
     },
     "required": [
      "parameters"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "device.property.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "property": {
+      "type": "string",
+      "enum": [
+       "roar.routing_mode_index",
+       "roar.env_listen",
+       "shifter.pitch_mode_index",
+       "spectral_resonator.frequency_dial_mode",
+       "spectral_resonator.midi_gate",
+       "spectral_resonator.mod_mode",
+       "spectral_resonator.mono_poly",
+       "spectral_resonator.pitch_mode",
+       "hybrid_reverb.ir_time_shaping_on",
+       "cc_control.custom_bool_target",
+       "simpler.playback_mode",
+       "simpler.retrigger",
+       "simpler.slicing_playback_mode",
+       "simpler.voices",
+       "simpler.pad_slicing",
+       "simpler.note_pitch_bend_range",
+       "cc_control.custom_float_target_0",
+       "cc_control.custom_float_target_1",
+       "cc_control.custom_float_target_2",
+       "cc_control.custom_float_target_3",
+       "cc_control.custom_float_target_4",
+       "cc_control.custom_float_target_5",
+       "cc_control.custom_float_target_6",
+       "cc_control.custom_float_target_7",
+       "cc_control.custom_float_target_8",
+       "cc_control.custom_float_target_9",
+       "cc_control.custom_float_target_10",
+       "cc_control.custom_float_target_11"
+      ]
+     },
+     "value": {
+      "type": [
+       "integer",
+       "number",
+       "boolean"
+      ]
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "property",
+     "value",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "changed": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     },
+     "value": {
+      "type": [
+       "integer",
+       "number",
+       "boolean"
+      ]
+     }
+    },
+    "required": [
+     "changed",
+     "revision",
+     "value"
     ],
     "additionalProperties": false
    }
@@ -5126,6 +5732,66 @@
       "minLength": 64,
       "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
+     },
+     "modFilterSource1": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modFilterSource2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modLfoSource": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modPitchSource1": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modPitchSource2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modShapeSource": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modSource1": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modSource2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modSource3": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modTarget1": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modTarget2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "modTarget3": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
      }
     },
     "required": [
@@ -5687,6 +6353,82 @@
     "required": [
      "changed",
      "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "fire-button.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "pressed": {
+      "type": "boolean"
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "outputSafety": {
+      "type": "object",
+      "properties": {
+       "safe": {
+        "type": "boolean",
+        "const": true
+       },
+       "provenance": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+       },
+       "observedAt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+       },
+       "scope": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       }
+      },
+      "required": [
+       "safe",
+       "provenance"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "ref",
+     "pressed",
+     "expectedObjectIdentity",
+     "outputSafety"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "pressed": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "ref",
+     "pressed"
     ],
     "additionalProperties": false
    }
@@ -6355,7 +7097,9 @@
        "undo",
        "double-speed",
        "half-speed",
-       "export"
+       "export",
+       "double-length",
+       "half-length"
       ]
      },
      "expectedObjectIdentity": {
@@ -7153,6 +7897,127 @@
    }
   },
   {
+   "id": "note.delete-range",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "fromPitch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127
+     },
+     "pitchSpan": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 128
+     },
+     "fromTime": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000
+     },
+     "timeSpan": {
+      "type": "number",
+      "minimum": 0.001,
+      "maximum": 1000000000
+     },
+     "expectedClipAuthority": {
+      "type": "object",
+      "properties": {
+       "expectedObjectIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedTrackRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedTrackIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSlotRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSlotIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSceneRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSceneIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       }
+      },
+      "required": [
+       "expectedObjectIdentity",
+       "expectedTrackRef",
+       "expectedTrackIdentity",
+       "expectedSlotRef",
+       "expectedSlotIdentity",
+       "expectedSceneRef",
+       "expectedSceneIdentity"
+      ],
+      "additionalProperties": false
+     },
+     "expectedNotesRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "fromPitch",
+     "pitchSpan",
+     "fromTime",
+     "timeSpan",
+     "expectedClipAuthority",
+     "expectedNotesRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "deleted": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+     },
+     "notesRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+     }
+    },
+    "required": [
+     "deleted",
+     "notesRevision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "note.duplicate",
    "method": "invoke",
    "request": {
@@ -7466,6 +8331,103 @@
      "available",
      "notes",
      "notesRevision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "note.select",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "noteIds": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 9007199254740991
+      }
+     },
+     "all": {
+      "type": "boolean"
+     },
+     "none": {
+      "type": "boolean"
+     },
+     "expectedClipAuthority": {
+      "type": "object",
+      "properties": {
+       "expectedObjectIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedTrackRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedTrackIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSlotRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSlotIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSceneRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "expectedSceneIdentity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       }
+      },
+      "required": [
+       "expectedObjectIdentity",
+       "expectedTrackRef",
+       "expectedTrackIdentity",
+       "expectedSlotRef",
+       "expectedSlotIdentity",
+       "expectedSceneRef",
+       "expectedSceneIdentity"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "ref",
+     "expectedClipAuthority"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "selected": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+     }
+    },
+    "required": [
+     "selected"
     ],
     "additionalProperties": false
    }
@@ -8086,6 +9048,59 @@
    }
   },
   {
+   "id": "plugin.parameter-names",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "begin": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+     },
+     "end": {
+      "type": "integer",
+      "minimum": -1,
+      "maximum": 10000000
+     }
+    },
+    "required": [
+     "ref"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "names": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "maxLength": 1024
+      }
+     },
+     "total": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 10000000
+     }
+    },
+    "required": [
+     "names",
+     "total"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "plugin.set",
    "method": "invoke",
    "request": {
@@ -8616,7 +9631,8 @@
        "copy-pad",
        "store-variation",
        "recall-variation",
-       "delete-variation"
+       "delete-variation",
+       "recall-last-variation"
       ]
      },
      "index": {
@@ -9610,6 +10626,191 @@
     },
     "required": [
      "changed",
+     "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "sample.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "beatsGranulationResolution": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "beatsTransientEnvelope": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "beatsTransientLoopMode": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "complexProEnvelope": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "complexProFormants": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "textureFlux": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "textureGrainSize": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "tonesGrainSize": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "slicingStyle": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "slicingBeatDivision": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "slicingRegionCount": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "slicingSensitivity": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "changed": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "changed",
+     "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "sample.slice",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "insert",
+       "move",
+       "remove",
+       "clear",
+       "reset"
+      ]
+     },
+     "time": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+     },
+     "toTime": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "action",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "slices": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 9007199254740991
+      }
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "slices",
      "revision"
     ],
     "additionalProperties": false
@@ -11772,18 +12973,37 @@
          "count"
         ],
         "additionalProperties": false
+       },
+       "focus": {
+        "type": "array",
+        "items": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 100000
+        },
+        "uniqueItems": true
+       },
+       "parts": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "enum": [
+          "set",
+          "tracks",
+          "scenes",
+          "arrangement",
+          "playback",
+          "selection"
+         ]
+        },
+        "maxItems": 6,
+        "uniqueItems": true
        }
       },
       "additionalProperties": false
      }
     },
-    "required": [
-     "set",
-     "tracks",
-     "scenes",
-     "arrangement",
-     "playback"
-    ],
+    "required": [],
     "additionalProperties": false
    }
   },
@@ -11983,6 +13203,53 @@
       "minLength": 64,
       "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
+     },
+     "lastEventTime": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 1000000000
+     },
+     "sessionRecordStatus": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 16
+     },
+     "canJumpToNextCue": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "canJumpToPrevCue": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "isCuePointSelected": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "selectOnLaunch": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "beatsSongTime": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 64
      }
     },
     "required": [
@@ -12096,6 +13363,9 @@
       "minLength": 64,
       "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
+     },
+     "selectOnLaunch": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -12790,6 +14060,55 @@
    }
   },
   {
+   "id": "track.action",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "jump-in-running-clip"
+      ]
+     },
+     "beats": {
+      "type": "number",
+      "minimum": -1000000,
+      "maximum": 1000000
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     }
+    },
+    "required": [
+     "ref",
+     "action",
+     "expectedObjectIdentity"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "done": {
+      "type": "boolean",
+      "const": true
+     }
+    },
+    "required": [
+     "done"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "track.create",
    "method": "invoke",
    "request": {
@@ -13317,6 +14636,9 @@
       "minLength": 64,
       "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
+     },
+     "showChains": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -13366,7 +14688,7 @@
          "type": "string",
          "minLength": 3,
          "maxLength": 128,
-         "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+         "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
         },
         "args": {
          "type": "object",
@@ -13432,7 +14754,8 @@
        "trigger-session-record",
        "force-link-beat-time",
        "stop-all-clips",
-       "back-to-arrangement"
+       "back-to-arrangement",
+       "jump-by"
       ]
      },
      "beatTime": {
@@ -13449,6 +14772,11 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256
+     },
+     "beats": {
+      "type": "number",
+      "minimum": -1000000,
+      "maximum": 1000000
      }
     },
     "required": [
@@ -13736,6 +15064,43 @@
       "minLength": 64,
       "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
+     },
+     "referencePitch": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "frequency": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "indexInOctave": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1024
+       },
+       "octave": {
+        "type": "integer",
+        "minimum": -64,
+        "maximum": 64
+       }
+      },
+      "required": [
+       "frequency",
+       "indexInOctave",
+       "octave"
+      ],
+      "additionalProperties": false
+     },
+     "notesInPseudoOctave": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 1024
      }
     },
     "required": [
@@ -14071,6 +15436,191 @@
     "required": [
      "view",
      "visible"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "wavetable.modulation.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "targetIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "parameterRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "source": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+     },
+     "value": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "source",
+     "value",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "changed": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     },
+     "targetIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "value": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+     },
+     "prior": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+     }
+    },
+    "required": [
+     "changed",
+     "revision",
+     "targetIndex",
+     "value",
+     "prior"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "wavetable.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "oscillator1WavetableCategory": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "oscillator1WavetableIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "oscillator2WavetableCategory": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "oscillator2WavetableIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "oscillator1EffectMode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "oscillator2EffectMode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "filterRouting": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "unisonMode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "unisonVoiceCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    },
+    "required": [
+     "ref",
+     "expectedObjectIdentity",
+     "expectedStateRevision"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "changed": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "changed",
+     "revision"
     ],
     "additionalProperties": false
    }
