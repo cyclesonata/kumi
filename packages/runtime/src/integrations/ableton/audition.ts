@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Analysis } from "../../audio/analyze.js";
-import type { AuditionCandidate, AuditionRequest, JsonObject } from "../../core/contracts.js";
+import { MIX_CANDIDATE, type AuditionCandidate, type AuditionRequest, type JsonObject } from "../../core/contracts.js";
 
 export type { AuditionCandidate, AuditionRequest, AuditionResult, AuditionTake } from "../../core/contracts.js";
 
@@ -18,13 +18,15 @@ export const AUDITION_DESCRIPTION = [
   "Hear what you built, quietly, and how close it is to a reference, in one call: Kumi renders each candidate track (its Post FX, so its devices are in it) onto a scratch track with Main silenced,",
   "listens, compares with the reference, then removes the scratch tracks and puts everything back. Up to 8 candidates render together in one real-time pass, so try several ideas at once (different instruments, chains, settings on separate tracks).",
   "Say where the part is: from_beat and beats in the Arrangement, or a Session clip per candidate (clip), which Kumi plays from the Arrangement for the render and removes after.",
+  "A candidate can be the whole mix ({\"mix\": true}): what Main plays at from_beat, recorded as quietly as a track (through Resampling); audition it against a reference to match a mix, changing EQ, compression and levels between rounds.",
   "Returns each candidate's closeness to the reference (0–100) with the biggest gaps in words, and what it heard. A silent render is reported, not compared. Without a reference it only listens.",
 ].join(" ");
 
 const REF = { type: "string", minLength: 1, maxLength: 256 } as const;
 export const AUDITION_SCHEMA: JsonObject = { type: "object", additionalProperties: false, required: ["candidates"], properties: {
-  candidates: { type: "array", minItems: 1, maxItems: 8, description: "The tracks to render, each on its own (a candidate sound, or the track to check)", items: { type: "object", additionalProperties: false, required: ["track"], properties: {
-    track: REF, clip: { ...REF, description: "A Session clip on that track to play (its clipRef); left out, the Arrangement at from_beat" },
+  candidates: { type: "array", minItems: 1, maxItems: 8, description: "The tracks to render, each on its own (a candidate sound, or the track to check), or the whole mix", items: { type: "object", additionalProperties: false, properties: {
+    track: REF, mix: { type: "boolean", description: "true: the whole mix (Main's output) instead of a track" },
+    clip: { ...REF, description: "A Session clip on that track to play (its clipRef); left out, the Arrangement at from_beat" },
     label: { type: "string", minLength: 1, maxLength: 60, description: "A short name for it (\"Collision + parallel delay\")" } } } },
   from_beat: { type: "number", minimum: 0, description: "Where the part starts in the Arrangement, in beats (a 4/4 bar is 4)" },
   beats: { type: "number", exclusiveMinimum: 0, maximum: 64, description: "How long to render, in beats; a clip's length when left out, 8 at most by default" },
@@ -40,10 +42,19 @@ export function auditionRequest(input: JsonObject): AuditionRequest | string {
   const candidates: AuditionCandidate[] = [];
   for (const item of raw) {
     const row = item && typeof item === "object" && !Array.isArray(item) ? item as JsonObject : {};
-    if (typeof row.track !== "string" || !row.track) return "Each candidate needs its track (a trackRef from discovery).";
-    candidates.push({ track: row.track, ...(typeof row.clip === "string" && row.clip ? { clip: row.clip } : {}), ...(typeof row.label === "string" && row.label.trim() ? { label: row.label.trim().slice(0, 60) } : {}) });
+    const label = typeof row.label === "string" && row.label.trim() ? { label: row.label.trim().slice(0, 60) } : {};
+    if (row.mix === true) {
+      if (row.track !== undefined || row.clip !== undefined) return "A mix candidate is the whole mix: give it no track or clip.";
+      candidates.push({ track: MIX_CANDIDATE, mix: true, ...label });
+      continue;
+    }
+    if (typeof row.track !== "string" || !row.track) return "Each candidate needs its track (a trackRef from discovery), or is the whole mix ({\"mix\": true}).";
+    candidates.push({ track: row.track, ...(typeof row.clip === "string" && row.clip ? { clip: row.clip } : {}), ...label });
   }
   if (!candidates.length || candidates.length > 8) return "Give 1 to 8 candidates.";
+  const mix = candidates.some((candidate) => candidate.mix);
+  // The mix is what the Arrangement plays: Session clips copied there for the others would be in it too.
+  if (mix && candidates.some((candidate) => candidate.clip)) return "The whole mix renders from the Arrangement: give from_beat, and no Session clips for the other candidates.";
   if (new Set(candidates.map((candidate) => candidate.track)).size !== candidates.length) return "Each candidate is a track of its own; put ideas on separate tracks to hear them side by side.";
   const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
   const fromBeat = number(input.from_beat); const beats = number(input.beats);
@@ -53,7 +64,7 @@ export function auditionRequest(input: JsonObject): AuditionRequest | string {
     ...(typeof input.reference === "string" && input.reference.trim() ? { reference: input.reference.trim() } : {}),
     ...(number(input.reference_from_seconds) !== undefined ? { referenceFrom: number(input.reference_from_seconds)! } : {}),
     ...(number(input.reference_seconds) !== undefined ? { referenceSeconds: number(input.reference_seconds)! } : {}),
-    ...(input.focus === "sound" || input.focus === "section" ? { focus: input.focus } : {}) };
+    ...(input.focus === "sound" || input.focus === "section" ? { focus: input.focus } : mix ? { focus: "section" as const } : {}) };
 }
 
 /** A render nothing came through: no measurable loudness, or next to none. */

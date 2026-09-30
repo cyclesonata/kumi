@@ -196,7 +196,13 @@ export interface GoalRig {
 }
 
 /** An audition: the candidate tracks, where the part is, and what to match. */
-export interface AuditionCandidate { track: string; clip?: string; label?: string }
+export interface AuditionCandidate {
+  track: string; clip?: string; label?: string;
+  /** The whole mix (what Main plays, recorded through Resampling) rather than a track; `track` is then MIX_CANDIDATE. */
+  mix?: boolean;
+}
+/** The track name a mix candidate goes by (no track of the Set is a candidate then). */
+export const MIX_CANDIDATE = "the whole mix";
 export interface AuditionRequest {
   candidates: AuditionCandidate[];
   fromBeat?: number;

@@ -7,6 +7,7 @@ import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
+import { MIX_CANDIDATE } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
@@ -1387,7 +1388,7 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   interface Rig {
     tag: string;
-    sources: { track: string; name: string; scratch: string; label: string; clip?: string; /** The scene its clip is in, once copied: it names the clip in a later turn. */ scene?: number }[];
+    sources: { track: string; name: string; scratch: string; label: string; clip?: string; /** The scene its clip is in, once copied: it names the clip in a later turn. */ scene?: number; /** The whole mix, recorded through Resampling. */ mix?: boolean }[];
     /** The candidates play Session clips, copied to a free stretch of the Arrangement at `from`. */
     clips: boolean;
     /** A goal's rig holds Main down, the transport primed and recording on between passes (see renderPass). */
@@ -1412,6 +1413,11 @@ export function createAbletonIntegration(options: Options): Integration {
     rig.transport = await transportNow(signal);
     const tracks = await rows("track", { fields: ["name"] }, signal);
     for (const [index, candidate] of candidates.entries()) {
+      // The whole mix: what Main plays, which Resampling records before Main's fader (so Main can stay silent).
+      if (candidate.mix) {
+        if (!rig.sources.some((source) => source.mix)) rig.sources.push({ track: MIX_CANDIDATE, name: MIX_CANDIDATE, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}`, label: candidate.label ?? "The whole mix", mix: true });
+        continue;
+      }
       // By its reference from this turn, or (a goal resumed after a restart) by its name.
       const found = tracks.find((track) => track.ref === candidate.track) ?? tracks.find((track) => track.name === candidate.track);
       if (!found || typeof found.name !== "string") throw new ObservationError(`${candidate.track} isn't a track in this turn's discovery; discover again.`);
@@ -1465,7 +1471,7 @@ export function createAbletonIntegration(options: Options): Integration {
     for (const source of sources) {
       const found = now_.find((track) => track.name === source.scratch);
       if (typeof found?.ref !== "string") throw new ObservationError("Kumi's scratch track didn't appear.");
-      await step("set_routing", { trackRef: found.ref, inputType: source.name, inputSubRouting: "Post FX", arm: true, monitoring: "off" }, signal);
+      await step("set_routing", source.mix ? { trackRef: found.ref, inputType: "Resampling", arm: true, monitoring: "off" } : { trackRef: found.ref, inputType: source.name, inputSubRouting: "Post FX", arm: true, monitoring: "off" }, signal);
     }
   }
   /** A new source for an open rig (a candidate the model built mid-search). */
@@ -1673,6 +1679,8 @@ export function createAbletonIntegration(options: Options): Integration {
    * the end of each candidate's chain, and the reference heard once.
    */
   async function openGoal(given: AuditionRequest, originalSignal: AbortSignal): Promise<GoalRig | string> {
+    // A goal turns one track's own knobs (and closes its chain with a safety limiter): not Main's.
+    if (given.candidates.some((candidate) => candidate.mix)) return "A goal searches a track's own devices. For the whole mix, audition it against the reference (candidates [{\"mix\": true}]) and change EQ, compression and levels between rounds.";
     if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
     if (!supported({ since: GOAL_BRIDGE })) return tooOld({ since: GOAL_BRIDGE });
     if (!given.reference) return "A goal needs a reference to reach.";

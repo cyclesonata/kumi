@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { JsonObject } from "../src/core/contracts.js";
+import { MIX_CANDIDATE, type JsonObject } from "../src/core/contracts.js";
 import { auditionRequest, renderSpan, restoreStore } from "../src/integrations/ableton/audition.js";
 import { opened, signal, tool } from "./fixtures/synthetic-bridge.js";
 import { folder, noise, saw, silence, wav } from "./fixtures/synthetic-audio.js";
@@ -10,7 +10,7 @@ import { folder, noise, saw, silence, wav } from "./fixtures/synthetic-audio.js"
 // What each source's Post FX renders: the bass a saw like the reference, the drums noise.
 const reference = wav("reference.wav", saw(3, 110));
 // As long as a real take: the lead-in (two bars), the part and its tail.
-const renders = { "Fixture Bass": wav("bass-render.wav", saw(10, 110)), "Fixture Drums": wav("drums-render.wav", noise(10)) } as Record<string, string>;
+const renders = { "Fixture Bass": wav("bass-render.wav", saw(10, 110)), "Fixture Drums": wav("drums-render.wav", noise(10)), Resampling: wav("mix-render.wav", saw(10, 110)) } as Record<string, string>;
 const quiet = wav("silent-render.wav", silence(10));
 const RENDER = "1.0.49";
 let files = 0;
@@ -192,5 +192,26 @@ test("a rig that fails partway through setting up undoes what it made before say
     assert.equal(result.isError, true, result.text);
     assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"], "no scratch track left");
     assert.equal(b.main.volume, 0.85);
+  } finally { await b.integration.close(); }
+});
+
+test("the whole mix is a candidate: recorded quietly through Resampling, heard as a mix, and a goal points to audition rounds instead", async () => {
+  assert.deepEqual(auditionRequest({ candidates: [{ mix: true }], from_beat: 16, beats: 8, reference: "~/ref.wav" }), { candidates: [{ track: MIX_CANDIDATE, mix: true }], fromBeat: 16, beats: 8, reference: "~/ref.wav", focus: "section" });
+  assert.match(String(auditionRequest({ candidates: [{ mix: true, track: "track:1" }], from_beat: 0 })), /no track or clip/);
+  assert.match(String(auditionRequest({ candidates: [{ mix: true }, { track: "track:1", clip: "clip:1" }], from_beat: 0 })), /renders from the Arrangement/);
+  const b = await rig();
+  try {
+    const result = await tool(b.tools, "audition").execute({ candidates: [{ mix: true, label: "My mix" }], from_beat: 8, beats: 2, reference }, signal());
+    assert.equal(result.isError, false, result.text);
+    const reply = JSON.parse(result.text) as { best: string; takes: { label: string; score: number }[] };
+    assert.equal(reply.best, "My mix"); assert.ok(reply.takes[0]!.score >= 90, `the mix is the reference's sound (${reply.takes[0]!.score})`);
+    // Its scratch track records Main's output (Resampling, before Main's fader), while Main stays silent.
+    const routes = b.requests.filter((request) => request.name === "live_routing_preview" && request.args.inputType !== undefined);
+    assert.deepEqual(routes.map((request) => [request.args.inputType, request.args.inputSubRouting ?? null]), [["Resampling", null]]);
+    assert.deepEqual(b.requests.filter((request) => request.name === "live_mixer_preview" && request.args.trackRef === "7:main_track:0").map((request) => request.args.volume), [0, 0.85]);
+    assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"], "the scratch track is gone");
+    // A goal turns one track's knobs (with a safety limiter on its chain), never Main's.
+    const goal = await b.integration.goal!({ candidates: [{ track: MIX_CANDIDATE, mix: true }], fromBeat: 8, beats: 2, reference }, signal());
+    assert.match(String(goal), /For the whole mix, audition it against the reference/);
   } finally { await b.integration.close(); }
 });
