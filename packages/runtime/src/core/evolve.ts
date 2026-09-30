@@ -32,9 +32,15 @@ export interface Trial { slot: string; values: number[]; how: "start" | "nudge" 
 /** Names of knobs the search leaves alone: switching a device off, levels the score ignores, safety. */
 const LEAVE = /^(device on|on|power|output|out|volume|gain|master|global volume|limiter.*|ceiling|macro \d+|chain selector|pan|panorama)$/i;
 
-/** The knobs worth searching on a chain: continuous or with a few steps, not switches that silence it. */
-export function searchable(knobs: readonly Knob[]): Knob[] {
-  return knobs.filter((knob) => knob.max > knob.min && !LEAVE.test(knob.name.trim()) && !/limiter/i.test(knob.device));
+/** Knobs that shape a sound most, searched first: filters, envelopes, oscillators' shape and level, tuning, drive. */
+const SHAPING = /(filter|freq|cutoff|res(onance)?|q\b|attack|decay|sustain|release|\benv|shape|wave|tone|timbre|bright|color|colour|drive|dist|sat|detune|fine|coarse|level|mix|amount|depth|rate|spread|width|noise|body|decay|damp|stiff|mallet|feedback|morph|position|pw\b|pulse|glide)/i;
+/** Most knobs searched on a chain: past a few dozen, a search of a few knobs a trial finds little. */
+export const MOST_KNOBS = 24;
+
+/** The knobs worth searching on a chain: continuous or with a few steps, not switches that silence it; the most sound-shaping first, a few dozen at most. */
+export function searchable(knobs: readonly Knob[], most = MOST_KNOBS): Knob[] {
+  const open = knobs.filter((knob) => knob.max > knob.min && !LEAVE.test(knob.name.trim()) && !/limiter/i.test(knob.device));
+  return [...open.filter((knob) => SHAPING.test(knob.name)), ...open.filter((knob) => !SHAPING.test(knob.name))].slice(0, most);
 }
 
 /** A small seeded random source (mulberry32), so a search can be replayed in tests. */
@@ -76,6 +82,14 @@ export class Evolution {
     const at = this.slots.findIndex((item) => item.name === slot.name);
     if (at >= 0) this.slots[at] = added; else this.slots.push(added);
     return added;
+  }
+  /** Knobs Live won't set (it refuses the values) leave a slot's search. */
+  freeze(name: string, keys: ReadonlySet<string>): void {
+    const slot = this.slots.find((item) => item.name === name);
+    if (!slot) return;
+    const keep = slot.knobs.map((knob) => !keys.has(`${knob.device}|${knob.name}`));
+    slot.knobs = slot.knobs.filter((_, index) => keep[index]);
+    slot.elite = slot.elite.filter((_, index) => keep[index]);
   }
   remove(name: string): void { const at = this.slots.findIndex((slot) => slot.name === name); if (at >= 0) this.slots.splice(at, 1); }
 

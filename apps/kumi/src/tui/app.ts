@@ -1866,7 +1866,7 @@ export class TuiApp {
     const rows: TabRow[] = [];
     const line = (spans: TabRow["spans"]) => rows.push(...wrap(spans, width).map((row) => ({ spans: row })));
     line([{ text: clean(goal.goal, 300), style: st.text }]);
-    const state = { starting: "setting up", running: "searching", paused: "paused · /goal carries on", done: `done${goal.why ? ` · ${clean(goal.why, 80)}` : ""}` }[goal.state];
+    const state = { starting: "setting up", running: "searching", paused: `paused${goal.why && goal.why !== "paused" ? ` · ${clean(goal.why, 80)}` : ""} · /goal carries on`, done: `done${goal.why ? ` · ${clean(goal.why, 80)}` : ""}` }[goal.state];
     line([{ text: `${state} · gen ${goal.generation} · ${goal.rendered} heard · ${goal.candidates} ${goal.candidates === 1 ? "candidate" : "candidates"} · ${clockOf(elapsed)}`, style: st.dim }]);
     if (goal.best) {
       const trend = goal.trend.slice(-Math.max(4, width - 16));

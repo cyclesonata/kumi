@@ -180,7 +180,7 @@ export interface GoalRig {
   /** A candidate the model built mid-search joins (with a safety limiter at the end of its chain). */
   add(candidate: AuditionCandidate, signal: AbortSignal): Promise<GoalSlotInfo | string>;
   /** Each trial's values set on its slot, all rendered in one silent pass, each scored against the reference. */
-  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[] }>;
+  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[]; frozen: Map<string, Set<string>> }>;
   /** The best so far on a track of its own ("Kumi · Goal best"), replacing the last copy; its name, or why not. */
   keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
   /** A finished goal's candidates: the top ones muted for the producer to A/B, the rest removed; what it did. */

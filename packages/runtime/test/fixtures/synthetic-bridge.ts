@@ -183,6 +183,12 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_drum_pad_preview" && transaction.args.action === "load-samples") return wrap({ transactionId: args.transactionId, state: "applied", result: { pads: (transaction.args.pads as JsonObject[]).map((pad) => ({ ref: `7:drum_pad:0:0:${String(pad.note)}`, route: "hotswap" })) } });
         if (transaction.name === "live_drum_pad_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: `7:drum_pad:0:0:${String(transaction.args.note)}`, route: "chain", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_device_parameter_preview" && options.renders) {
+          // Like Live with a knob it won't take a value for: the change isn't confirmed.
+          const refuses = (Array.isArray(transaction.args.values) ? transaction.args.values as JsonObject[] : []).some((item) => {
+            const match = /:parameter:(\d+):(\d+):(\d+)$/.exec(String(item.parameterRef));
+            return match && tracks[Number(match[1])]?.devices?.[Number(match[2])]?.params[Number(match[3])]?.name === "Stuck Tone";
+          });
+          if (refuses) return refusal("request failed: parameter 1 of 1: parameter mutation was not confirmed", { state: "uncertain" });
           // Like Live: the knobs move.
           for (const item of (Array.isArray(transaction.args.values) ? transaction.args.values : [{ parameterRef: transaction.args.parameterRef, value: transaction.args.value }]) as JsonObject[]) {
             const match = /:parameter:(\d+):(\d+):(\d+)$/.exec(String(item.parameterRef));

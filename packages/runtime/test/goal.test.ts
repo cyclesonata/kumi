@@ -19,7 +19,9 @@ const render = (_source: string, devices: readonly FixtureDevice[]) => {
   return renders.get(bucket)!;
 };
 const operator = (filter: number): FixtureDevice[] => [{ name: "Operator", className: "Operator", params: [
-  { name: "Device On", value: 1, min: 0, max: 1 }, { name: "Filter Freq", value: filter, min: 0, max: 1 }, { name: "Volume", value: 0.8, min: 0, max: 1 } ] }];
+  { name: "Device On", value: 1, min: 0, max: 1 }, { name: "Filter Freq", value: filter, min: 0, max: 1 }, { name: "Volume", value: 0.8, min: 0, max: 1 },
+  // A knob Live won't set: it leaves the search instead of stopping it.
+  { name: "Stuck Tone", value: 0.5, min: 0, max: 1 } ] }];
 
 function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
   const kept = new Map<string, GoalState>();
@@ -66,6 +68,7 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   assert.equal(await r.session.stopGoal!(), true);
   await running;
   const last = r.statuses().at(-1)!;
+  assert.equal(last.state, "done", last.why);
   assert.equal(last.why, "stopped");
   assert.equal(last.candidates, 3, "the leap's candidate joined the search");
   assert.ok(last.best!.score > (last.first ?? 0), `it climbed: ${last.first} → ${last.best!.score}`);

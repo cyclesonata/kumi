@@ -63,3 +63,18 @@ test("the search leaves switches that silence a chain, levels and the safety lim
     evolution.scored([trial!], new Map([["A", 5]]));
   }
 });
+
+test("knobs Live won't set leave a slot's search; a chain offers its most sound-shaping few dozen", () => {
+  const evolution = new Evolution(seeded(2));
+  evolution.add({ name: "A", label: "A", chain: "Operator", knobs: knobs("Operator", [0.1, 0.2, 0.3]) });
+  evolution.scored(evolution.propose(), new Map([["A", 40]]));
+  evolution.freeze("A", new Set(["Operator|Knob 1"]));
+  const slot = evolution.slots[0]!;
+  assert.deepEqual(slot.knobs.map((knob) => knob.name), ["Knob 0", "Knob 2"]);
+  assert.deepEqual(slot.elite, [0.1, 0.3]);
+  assert.equal(evolution.propose()[0]!.values.length, 2);
+  const many: Knob[] = Array.from({ length: 60 }, (_, index) => ({ ref: String(index), device: "Operator", name: index === 59 ? "Filter Freq" : `Osc-B Unused ${index}`, min: 0, max: 1, value: 0 }));
+  const chosen = searchable(many);
+  assert.equal(chosen.length, 24);
+  assert.equal(chosen[0]!.name, "Filter Freq", "what shapes the sound comes first");
+});

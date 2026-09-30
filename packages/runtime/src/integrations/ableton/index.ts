@@ -1538,6 +1538,15 @@ export function createAbletonIntegration(options: Options): Integration {
     /** Each slot's values as last set, so a generation only sends what changes. */
     const current = new Map<string, Map<string, number>>();
     const key = (knob: Pick<Knob, "device" | "name">) => `${knob.device}|${knob.name}`;
+    /** Each slot's knobs with their references, read again only when the references have expired (a new observation). */
+    const known = new Map<string, { lease: number; read: Awaited<ReturnType<typeof readKnobs>> }>();
+    const knobsNow = async (name: string, signal: AbortSignal) => {
+      const cached = known.get(name);
+      if (cached && cached.lease === observationGeneration) return cached.read;
+      const read = await readKnobs(name, signal);
+      known.set(name, { lease: observationGeneration, read });
+      return read;
+    };
     const adopt = async (source: { name: string; label: string }, signal: AbortSignal): Promise<GoalSlotInfo> => {
       let read = await readKnobs(source.name, signal);
       // Every candidate's chain ends in a limiter: a runaway patch can't reach a dangerous level, even played by the producer.
@@ -1573,13 +1582,14 @@ export function createAbletonIntegration(options: Options): Integration {
         if (rendering) throw new ObservationError("Another render is running.");
         rendering = true;
         let files: Map<string, { file: string; start: number }>;
+        const frozen = new Map<string, Set<string>>();
         try {
           // Each trial's values onto its slot, one change per device, only what moved; references read fresh.
           for (const trial of trials) {
             const last = current.get(trial.slot)!;
             const moved = trial.knobs.map((knob, index) => ({ knob, value: trial.values[index]! })).filter(({ knob, value }) => Math.abs((last.get(key(knob)) ?? NaN) - value) > 1e-6 || !last.has(key(knob)));
             if (!moved.length) continue;
-            const fresh = await readKnobs(trial.slot, signal);
+            const fresh = await knobsNow(trial.slot, signal);
             const byKey = new Map(fresh.knobs.map((knob) => [key(knob), knob]));
             const byDevice = new Map<string, { parameterRef: string; value: number }[]>();
             for (const { knob, value } of moved) {
@@ -1589,8 +1599,20 @@ export function createAbletonIntegration(options: Options): Integration {
               if (typeof device !== "string") continue;
               byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value }]);
             }
-            await quietly(undefined, async () => { for (const [deviceRef, values] of byDevice) await step("set_device_parameters", { deviceRef, values }, signal); });
-            for (const { knob, value } of moved) last.set(key(knob), value);
+            // A value Live won't take (a knob it keeps to steps it doesn't say, one off in this mode) is tried alone,
+            // and a knob that still won't move leaves the search rather than stopping it.
+            const refused = new Set<string>();
+            await quietly(undefined, async () => {
+              for (const [deviceRef, values] of byDevice) {
+                try { await step("set_device_parameters", { deviceRef, values }, signal); continue; } catch { signal.throwIfAborted(); }
+                for (const value of values) {
+                  try { await step("set_device_parameters", { deviceRef, values: [value] }, signal); }
+                  catch { signal.throwIfAborted(); const knob = moved.find(({ knob }) => byKey.get(key(knob))?.ref === value.parameterRef)?.knob; if (knob) refused.add(key(knob)); }
+                }
+              }
+            });
+            for (const { knob, value } of moved) if (!refused.has(key(knob))) last.set(key(knob), value);
+            if (refused.size) frozen.set(trial.slot, refused);
           }
           files = await renderPass(rig, signal);
         } finally { rendering = false; }
@@ -1603,7 +1625,7 @@ export function createAbletonIntegration(options: Options): Integration {
           scores.set(name, close.score); gaps.set(name, close.gaps);
         }));
         for (const trial of trials) if (!files.has(trial.slot) && !silent.includes(trial.slot)) silent.push(trial.slot);
-        return { scores, gaps, silent };
+        return { scores, gaps, silent, frozen };
       },
       async keepBest(slot, knobs, values, given) {
         const signal = AbortSignal.any([given, lifetime.signal]);
@@ -1615,6 +1637,8 @@ export function createAbletonIntegration(options: Options): Integration {
           knobs.forEach((knob, index) => { const now_ = byKey.get(key(knob)); const device = fresh.devices[Number(knob.device.split(":")[0])]?.ref; if (now_ && typeof device === "string") byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value: values[index]! }]); });
           await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) await step("set_device_parameters", { deviceRef, values: set }, signal); });
           knobs.forEach((knob, index) => last.set(key(knob), values[index]!));
+          // Copying a track moves every track after it: the knobs' references are read again.
+          known.clear();
           // The last copy goes first: there's one best.
           const previous = bestSteps; bestSteps = [];
           await quietly(undefined, async () => { for (const id of [...previous].reverse()) await undoChange(id, signal, changes.get(id)?.record.family === "structure").catch(() => undefined); });

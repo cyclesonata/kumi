@@ -555,6 +555,8 @@ export function createSession(options: Options): SessionController {
         const slots = new Map(evolution.slots.map((slot) => [slot.name, slot]));
         const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: slots.get(trial.slot)!.knobs, values: trial.values })), op.controller.signal);
         const { improved } = evolution.scored(trials, result.scores);
+        // Knobs Live wouldn't set leave the search (after scoring, so each slot's best stays aligned with its knobs).
+        for (const [slot, keys] of result.frozen) evolution.freeze(slot, keys);
         if (state.first === undefined && evolution.best !== undefined) state.first = evolution.best;
         const leader = evolution.leader;
         if (leader) gaps = result.gaps.get(leader.name) ?? gaps;
