@@ -945,7 +945,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       case "browser.search": {
         const query = typeof args.query === "string" ? args.query.toLowerCase() : "";
         const category = typeof args.category === "string" ? args.category : undefined;
-        const limit = Number.isInteger(args.limit) && (args.limit as number) >= 1 && (args.limit as number) <= 100 ? args.limit as number : 50;
+        const limit = Number.isInteger(args.limit) && (args.limit as number) >= 1 && (args.limit as number) <= 10_000 ? args.limit as number : 50;
         const catalog = this.browserCatalog();
         return { items: structuredClone(catalog.filter((item) => (!category || item.category === category) && (!query || item.name.toLowerCase().includes(query) || item.path.includes(query))).slice(0, limit)) };
       }

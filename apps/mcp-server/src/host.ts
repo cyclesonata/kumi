@@ -12,7 +12,7 @@ import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagn
 import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
-import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
+import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
 import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project-semantic-diff.js";
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
@@ -21,7 +21,7 @@ import { defaultUserLibrary, drumSamplerPreset, findDrumSamplerTemplate, liveRes
 import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
 import { SqliteReader } from "./sqlite-reader.js";
 import { LIBRARY_KINDS, LIBRARY_SEARCH_SCHEMA, LibraryUnavailable, SUPPORTED_FILES_SCHEMA_VERSIONS, SUPPORTED_PLUGINS_SCHEMA_VERSIONS, assertSupportedFilesSchema, assertSupportedPluginsSchema, queryLibraryFiles, queryLibraryPlugins, queryLibraryTagVocabulary, type LibraryQuery } from "./library-search.js";
-import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD, MIDI_TRANSFORM_TYPES, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, type MidiTransformType } from "./midi-transforms.js";
+import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD, MIDI_TRANSFORM_MAX_NOTES, MIDI_TRANSFORM_TYPES, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, type MidiTransformType } from "./midi-transforms.js";
 import { estimateKey } from "./key-estimation.js";
 import { JOURNEY_IDS, JOURNEY_PROMPTS, journeyResource, planUserJourney, renderJourneyPrompt, type ExperienceLevel, type JourneyId } from "./journeys.js";
 import type { AsyncLiveAdapter } from "./live.js";
@@ -255,7 +255,7 @@ const SESSION_MIDI_TRANSACTION_DEADLINE_MS = 30_000;
 // Ranked browser search re-fetches a bounded candidate traversal per root at
 // most once per TTL window (or per Live connection epoch); the cache is
 // in-memory only, bounded, and never persisted across restarts.
-const BROWSER_SEARCH_CANDIDATE_LIMIT = 100;
+const BROWSER_SEARCH_CANDIDATE_LIMIT = 10_000;
 const BROWSER_SEARCH_CACHE_TTL_MS = 60_000;
 const BROWSER_SEARCH_CACHE_MAX_ENTRIES = 16;
 const BROWSER_SEARCH_MAX_TOKENS = 8;
@@ -265,6 +265,16 @@ const BROWSER_SEARCH_MAX_TOKENS = 8;
 // JSON length when it is kept (its prior state is most of it).
 const MAX_RETAINED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
 const MONITORABLE_TRACK_KINDS = new Set(["regular", "audio", "midi"]);
+/** No count cap on what mirrors a Set's content (notes, points, markers, parameters, devices, pads,
+ * targets): this only stops a request past what one wire array carries (the Remote Script's
+ * MAX_WIRE_ARRAY_LENGTH). */
+const MAX_SET_COLLECTION = 10_000_000;
+/** The largest track, scene or device index the registry accepts. */
+const MAX_SET_INDEX = 100_000;
+/** Parameter values that go to Live in one request (all or none): no device has more. */
+const MAX_PARAMETER_VALUES = 10_000;
+/** Notifications queued for a slow client before the rest are counted as dropped. */
+const MAX_QUEUED_EVENTS = 65_536;
 // Deadlines grow with the Set: what reads every track on Live's thread takes longer on a big one. Each
 // deadline is its base plus this per track (the count at the last read), within the Remote Script's 60 s.
 const DEADLINE_MS_PER_TRACK = 20;
@@ -349,12 +359,12 @@ function isDiscoveryFilter(value: unknown): value is Record<string, string | num
 function isIdempotencyKey(value: unknown): value is string { return typeof value === "string" && value.length >= 8 && value.length <= 128; }
 
 function canonicalMutationIdentity(value: unknown, depth = 0): string {
-  if (depth > 64) throw new Error("mutation authority is too deeply nested");
+  if (depth > 256) throw new Error("mutation authority is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("mutation authority contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-  if (typeof value === "string") { if (value.length > 16_384) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
-  if (Array.isArray(value)) { if (value.length > 256) throw new Error("mutation authority array is too large"); return `[${value.map((item) => canonicalMutationIdentity(item, depth + 1)).join(",")}]`; }
-  if (isObject(value)) { const keys = Object.keys(value).sort(); if (keys.length > 256) throw new Error("mutation authority object is too large"); return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalMutationIdentity(value[key], depth + 1)}`).join(",")}}`; }
+  if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
+  if (Array.isArray(value)) { if (value.length > MAX_SET_COLLECTION) throw new Error("mutation authority array is too large"); return `[${value.map((item) => canonicalMutationIdentity(item, depth + 1)).join(",")}]`; }
+  if (isObject(value)) { const keys = Object.keys(value).sort(); if (keys.length > MAX_SET_COLLECTION) throw new Error("mutation authority object is too large"); return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalMutationIdentity(value[key], depth + 1)}`).join(",")}}`; }
   throw new Error("mutation authority contains an unsupported value");
 }
 
@@ -1344,7 +1354,7 @@ export class McpHost {
   }
 
   private validateStructureItems(params: unknown): { tracks: SessionStructureItem[]; scenes: SessionStructureItem[] } | undefined {
-    if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 16 || params.scenes.length > 32) return undefined;
+    if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 1000 || params.scenes.length > 1000) return undefined;
     const names = new Set<string>();
     const parse = (items: unknown[], kind: "track" | "scene"): SessionStructureItem[] | undefined => {
       const result: SessionStructureItem[] = [];
@@ -1353,7 +1363,7 @@ export class McpHost {
         names.add(item.name);
         if (kind === "track" && item.kind !== "audio" && item.kind !== "midi") return undefined;
         const index = item.index === undefined ? position : item.index;
-        if (!isIntegerInRange(index, 0, kind === "track" ? 1024 : 1024)) return undefined;
+        if (!isIntegerInRange(index, 0, MAX_SET_INDEX)) return undefined;
         result.push({ kind, name: item.name, ...(kind === "track" ? { trackKind: item.kind as "audio" | "midi" } : {}), index });
       }
       return result;
@@ -1530,7 +1540,7 @@ export class McpHost {
 
   private async liveDiscoverAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const kinds = ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] as const;
-    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 32 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
+    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 256 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100_000)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
     return this.successText(id, await this.asyncAdapter().discoverAsync({ kind: params.kind as import("./live.js").LiveDiscoveryKind, parent: params.parent as string | undefined, filter: params.filter as Record<string, unknown> | undefined, fields: params.fields as string[] | undefined, budget: (params.budget as number | undefined) ?? 1000, limit: (params.limit as number | undefined) ?? 50, cursor: params.cursor as string | undefined }));
   }
 
@@ -1752,7 +1762,7 @@ export class McpHost {
   }
 
   private async liveSessionEmergencyStopAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
-    if (!isObject(params) || !hasOnly(params, ["confirmation", "expectedTargets", "expectedRecording", "idempotencyKey"]) || params.confirmation !== "emergency-stop" || !["stopped", "session", "arrangement", "both"].includes(String(params.expectedRecording)) || !Array.isArray(params.expectedTargets) || params.expectedTargets.length > 256 || new Set(params.expectedTargets).size !== params.expectedTargets.length || !params.expectedTargets.every((item) => isNonEmptyString(item, 1024)) || (params.idempotencyKey !== undefined && !isIdempotencyKey(params.idempotencyKey))) return error(id, -32602, "confirmation=emergency-stop plus exact freshly observed active playback targets and recording mode are required");
+    if (!isObject(params) || !hasOnly(params, ["confirmation", "expectedTargets", "expectedRecording", "idempotencyKey"]) || params.confirmation !== "emergency-stop" || !["stopped", "session", "arrangement", "both"].includes(String(params.expectedRecording)) || !Array.isArray(params.expectedTargets) || params.expectedTargets.length > MAX_SET_INDEX || new Set(params.expectedTargets).size !== params.expectedTargets.length || !params.expectedTargets.every((item) => isNonEmptyString(item, 1024)) || (params.idempotencyKey !== undefined && !isIdempotencyKey(params.idempotencyKey))) return error(id, -32602, "confirmation=emergency-stop plus exact freshly observed active playback targets and recording mode are required");
     try {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -2270,7 +2280,7 @@ export class McpHost {
   private onLiveEvent(event: LiveEvent): void {
     if (this.protocolEra !== "legacy") return;
     const line = JSON.stringify({ jsonrpc: "2.0", method: "notifications/live_event", params: event });
-    if (this.eventQueue.length >= 256) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
+    if (this.eventQueue.length >= MAX_QUEUED_EVENTS) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(line);
     if (event.type === "reset") this.noteToolListChanged();
     this.scheduleEventFlush();
@@ -2289,7 +2299,7 @@ export class McpHost {
     const prior = this.toolListFingerprint;
     this.toolListFingerprint = fingerprint;
     if (prior === undefined || prior === fingerprint) return;
-    if (this.eventQueue.length >= 256) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
+    if (this.eventQueue.length >= MAX_QUEUED_EVENTS) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }));
     this.scheduleEventFlush();
   }
@@ -2341,7 +2351,7 @@ export class McpHost {
   }
 
   private liveProjectSnapshotDiff(id: RequestId, params: unknown): JsonObject {
-    if (!isObject(params) || !hasOnly(params, ["beforePages", "afterPages", "limit", "cursor"]) || !Array.isArray(params.beforePages) || params.beforePages.length < 1 || params.beforePages.length > 512 || !Array.isArray(params.afterPages) || params.afterPages.length < 1 || params.afterPages.length > 512 || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "complete bounded beforePages and afterPages plus optional limit/cursor are required");
+    if (!isObject(params) || !hasOnly(params, ["beforePages", "afterPages", "limit", "cursor"]) || !Array.isArray(params.beforePages) || params.beforePages.length < 1 || params.beforePages.length > SEMANTIC_PROJECT_MAX_PAGES || !Array.isArray(params.afterPages) || params.afterPages.length < 1 || params.afterPages.length > SEMANTIC_PROJECT_MAX_PAGES || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "complete bounded beforePages and afterPages plus optional limit/cursor are required");
     try {
       if (Buffer.byteLength(JSON.stringify({ beforePages: params.beforePages, afterPages: params.afterPages }), "utf8") > SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES) throw new Error("combined semantic snapshot bundles exceed the bounded diff input size");
       const before = assembleSemanticProjectPages(params.beforePages as SemanticProjectPage[]); const after = assembleSemanticProjectPages(params.afterPages as SemanticProjectPage[]);
@@ -2415,7 +2425,7 @@ export class McpHost {
         const { source, model } = readAlsModel(authority.canonicalPath);
         return createOfflineAlsArtifact(source, model, { profile: this.alsProfileParam(alsArgs.profile, otherProfile ?? "collaboration"), exporterVersion: PACKAGE_VERSION });
       }
-      if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 512) throw new Error("a pages side requires 1-512 complete pages");
+      if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > SEMANTIC_PROJECT_MAX_PAGES) throw new Error(`a pages side requires 1-${SEMANTIC_PROJECT_MAX_PAGES} complete pages`);
       return assembleSemanticProjectPages(value.pages as SemanticProjectPage[]);
     };
     try {
@@ -2610,7 +2620,7 @@ export class McpHost {
     let authorityBudget = 0;
     let exhausted = false;
     const consumeAuthority = (amount: number): boolean => {
-      if (authorityBudget + amount > 16_384) { exhausted = true; return false; }
+      if (authorityBudget + amount > MAX_SET_COLLECTION) { exhausted = true; return false; }
       authorityBudget += amount;
       return true;
     };
@@ -2636,13 +2646,13 @@ export class McpHost {
           mixerRows.push({ ref, objectIdentity: sendIdentities[index], value: sends[index], kind: "mixer-send", sendIndex: index });
         });
         const holdsMixer = mixerRows.some((row) => wanted.has(row.ref));
-        if (holdsMixer && (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
+        if (holdsMixer && (!complete || mixerRows.length > MAX_SET_COLLECTION || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
         const siblings = mixerRows.map(({ ref, objectIdentity }) => ({ ref, objectIdentity }));
         if (holdsMixer) for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
       }
       const visitDevices = (candidate: unknown): void => {
         if (exhausted) return;
-        if (!Array.isArray(candidate) || candidate.length > 256 || !candidate.every(isObject)) { exhausted = true; return; }
+        if (!Array.isArray(candidate) || candidate.length > MAX_SET_COLLECTION || !candidate.every(isObject)) { exhausted = true; return; }
         for (const device of candidate) {
           if (!consumeAuthority(1)) return;
           const deviceRef = typeof device.ref === "string" ? device.ref : undefined;
@@ -2650,7 +2660,7 @@ export class McpHost {
           const rawParameters = Array.isArray(device.parameters) ? device.parameters : [];
           const rawMacros = Array.isArray(device.macros) ? device.macros : [];
           const holds = [...rawParameters, ...rawMacros].some((row) => isObject(row) && typeof row.ref === "string" && wanted.has(row.ref));
-          const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= 256;
+          const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= MAX_SET_COLLECTION;
           if (holds && !rowsComplete) { exhausted = true; return; }
           const parameters = rawParameters as JsonObject[];
           const rows = holds ? [...parameters, ...rawMacros as JsonObject[]] : [];
@@ -2664,14 +2674,14 @@ export class McpHost {
             add(parameterRef, parameter.value, { kind, parameterIdentity, deviceRef, deviceIdentity, trackRef, trackIdentity, ...(kind === "device-parameter" ? { min: parameter.min ?? null, max: parameter.max ?? null, enabled: parameter.enabled ?? null, automatable: parameter.automatable ?? null, revision: parameter.revision ?? null } : {}) }, { ref: parameterRef, parameterIdentity, ownerRef: deviceRef, ownerIdentity: deviceIdentity, trackRef, trackIdentity, siblings });
           }
           const chains = Array.isArray(device.chains) ? device.chains : [];
-          if (chains.length > 256 || !chains.every(isObject)) { exhausted = true; return; }
+          if (chains.length > MAX_SET_COLLECTION || !chains.every(isObject)) { exhausted = true; return; }
           for (const chain of chains) { if (!consumeAuthority(1)) return; visitDevices(chain.devices); if (exhausted) return; }
           const drumPads = Array.isArray(device.drumPads) ? device.drumPads : [];
-          if (drumPads.length > 256 || !drumPads.every(isObject)) { exhausted = true; return; }
+          if (drumPads.length > MAX_SET_COLLECTION || !drumPads.every(isObject)) { exhausted = true; return; }
           for (const pad of drumPads) {
             if (!consumeAuthority(1)) return;
             const padChains = Array.isArray(pad.chains) ? pad.chains : [];
-            if (padChains.length > 256 || !padChains.every(isObject)) { exhausted = true; return; }
+            if (padChains.length > MAX_SET_COLLECTION || !padChains.every(isObject)) { exhausted = true; return; }
             for (const chain of padChains) { if (!consumeAuthority(1)) return; visitDevices(chain.devices); if (exhausted) return; }
           }
         }
@@ -2781,7 +2791,7 @@ export class McpHost {
   private flattenDeviceRows(values: unknown): JsonObject[] {
     const flattened: JsonObject[] = [];
     const visit = (value: unknown): void => {
-      if (!isObject(value) || flattened.length >= 512) return;
+      if (!isObject(value) || flattened.length >= MAX_SET_COLLECTION) return;
       flattened.push(value);
       if (Array.isArray(value.chains)) for (const chain of value.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
       if (Array.isArray(value.drumPads)) for (const pad of value.drumPads) if (isObject(pad) && Array.isArray(pad.chains)) for (const chain of pad.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
@@ -2835,7 +2845,7 @@ export class McpHost {
 
   /** A chain's device authority, for loading into it: the track, the chain, and the chain's devices in order. */
   private chainDeviceAuthority(track: JsonObject, chain: JsonObject): { expectedTrackIdentity: string; chainRef: string; expectedChainIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
-    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? []) || ((chain.devices as unknown[] | undefined) ?? []).length > 256) throw new Error("chain device authority is incomplete");
+    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? [])) throw new Error("chain device authority is incomplete");
     const siblings = ((chain.devices as unknown[] | undefined) ?? []).map((device) => {
       if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
       return { ref: device.ref, objectIdentity: device.objectIdentity };
@@ -2852,7 +2862,7 @@ export class McpHost {
   }
 
   private trackDeviceAuthority(track: JsonObject): { expectedTrackIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
-    if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices) || track.devices.length > 256) throw new Error("track device authority is incomplete");
+    if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices)) throw new Error("track device authority is incomplete");
     const siblings = (track.devices as unknown[]).map((device) => {
       if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
       return { ref: device.ref, objectIdentity: device.objectIdentity };
@@ -3243,7 +3253,7 @@ export class McpHost {
       if (!isNonEmptyString(located.clip.objectIdentity, 256)) throw new Error("arrangement clip identity is not authoritative");
       const parameter = this.parameterRow(snapshot, params.parameterRef as LiveRef);
       const read = await adapter.invokeAsync({ operation: "arrangement.automation.read", args: { clipRef: params.clipRef, parameterRef: params.parameterRef } }, context) as { available?: unknown; exists?: unknown; points?: unknown };
-      if (typeof read.available !== "boolean" || typeof read.exists !== "boolean" || !Array.isArray(read.points) || read.points.length > 512) throw new Error("arrangement automation read returned an unbounded or malformed result");
+      if (typeof read.available !== "boolean" || typeof read.exists !== "boolean" || !Array.isArray(read.points) || read.points.length > MAX_SET_COLLECTION) throw new Error("arrangement automation read returned an unbounded or malformed result");
       const points = read.points.filter(isObject).map((point) => ({ time: point.time, value: point.value })).filter((point) => typeof point.time === "number" && Number.isFinite(point.time) && typeof point.value === "number" && Number.isFinite(point.value)).sort((a, b) => (a.time as number) - (b.time as number));
       if (points.length !== read.points.length) throw new Error("arrangement automation points are unreadable");
       const revision = createHash("sha256").update(canonicalMutationIdentity({ clipRef: params.clipRef, clipIdentity: located.clip.objectIdentity, parameterRef: params.parameterRef, points })).digest("hex");
@@ -3278,7 +3288,7 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "audio.take-lane.read", args: { trackRef: params.trackRef } }, context) as { lanes?: unknown };
-      if (!Array.isArray(read.lanes) || read.lanes.length > 128) throw new Error("take-lane read returned an unbounded or malformed result");
+      if (!Array.isArray(read.lanes) || read.lanes.length > MAX_SET_COLLECTION) throw new Error("take-lane read returned an unbounded or malformed result");
       const advertised = read.lanes.filter(isObject).map((lane) => ({ ref: lane.ref, name: lane.name }));
       if (advertised.some((lane) => !isNonEmptyString(lane.ref, 256) || typeof lane.name !== "string")) throw new Error("take-lane identity is malformed");
       const snapshot = await this.viewForAsync(context, [params.trackRef]);
@@ -3317,7 +3327,7 @@ export class McpHost {
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (!isNonEmptyString(located.clip.objectIdentity, 256)) throw new Error("comp read requires exact clip identity");
       const read = await adapter.invokeAsync({ operation: "audio.comp.read", args: { clipRef: params.clipRef } }, context) as { segments?: unknown };
-      if (!Array.isArray(read.segments) || read.segments.length > 512) throw new Error("comp read returned an unbounded or malformed result");
+      if (!Array.isArray(read.segments) || read.segments.length > MAX_SET_COLLECTION) throw new Error("comp read returned an unbounded or malformed result");
       const track = located.track as JsonObject | undefined;
       const laneRows = ((track?.takeLanes as unknown[]) ?? []).filter(isObject);
       const segments = read.segments.filter(isObject).map((segment) => {
@@ -3351,7 +3361,7 @@ export class McpHost {
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (located.clip.kind !== "audio" && located.clip.isAudio !== true) throw new Error("warp markers require an audio clip");
       const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: params.clipRef } }, context) as { revision?: unknown; markers?: unknown };
-      if (!isNonEmptyString(read.revision, 64) || !Array.isArray(read.markers) || read.markers.length > 256) throw new Error("warp-marker read returned an unbounded or malformed result");
+      if (!isNonEmptyString(read.revision, 64) || !Array.isArray(read.markers) || read.markers.length > MAX_SET_COLLECTION) throw new Error("warp-marker read returned an unbounded or malformed result");
       const markers = read.markers.filter(isObject).map((marker) => ({ beatTime: marker.beatTime, sampleTime: marker.sampleTime })).filter((marker) => typeof marker.beatTime === "number" && Number.isFinite(marker.beatTime) && typeof marker.sampleTime === "number" && Number.isFinite(marker.sampleTime)).sort((a, b) => (a.beatTime as number) - (b.beatTime as number));
       if (markers.length !== read.markers.length) throw new Error("warp markers are unreadable");
       const beatMonotonic = markers.every((marker, index) => index === 0 || (marker.beatTime as number) > (markers[index - 1]!.beatTime as number));
@@ -3489,7 +3499,7 @@ export class McpHost {
       if (params.action === "insert") {
         if (!(status.operations ?? []).includes("device.insert")) throw new Error("device insertion is unavailable");
         if (!isNonEmptyString(params.trackRef, 256) || !isNonEmptyString(params.deviceName, 256)) return error(id, -32602, "trackRef and deviceName are required for insert");
-        if (params.index !== undefined && (!Number.isInteger(params.index) || (params.index as number) < -1 || (params.index as number) > 256)) return error(id, -32602, "index is invalid");
+        if (params.index !== undefined && (!Number.isInteger(params.index) || (params.index as number) < -1 || (params.index as number) > MAX_SET_INDEX)) return error(id, -32602, "index is invalid");
         const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.trackRef);
         if (!track) throw new Error("track is not authoritative");
         const authority = this.trackDeviceAuthority(track);
@@ -3509,7 +3519,7 @@ export class McpHost {
         const located = this.deviceRow(snapshot, params.deviceRef as LiveRef); const { device } = located;
         if (!isNonEmptyString(device.objectIdentity, 256)) throw new Error("device object identity is unavailable");
         if (params.action === "enable" && typeof params.enabled !== "boolean") return error(id, -32602, "enabled must be boolean");
-        if (params.action === "move" && (!Number.isInteger(params.index) || (params.index as number) < 0 || (params.index as number) > 256)) return error(id, -32602, "index is invalid");
+        if (params.action === "move" && (!Number.isInteger(params.index) || (params.index as number) < 0 || (params.index as number) > MAX_SET_INDEX)) return error(id, -32602, "index is invalid");
         payload.ref = params.deviceRef; payload.expectedObjectIdentity = device.objectIdentity; payload.expectedOwnerRef = located.ownerRef; payload.expectedOwnerIdentity = located.ownerIdentity; payload.expectedSiblings = located.siblings; payload.expectedTrackRef = located.track.ref; payload.expectedTrackIdentity = located.track.objectIdentity;
         if (params.action === "enable") { if (typeof device.enabled !== "boolean") throw new Error("device enable state is unavailable"); payload.enabled = params.enabled; payload.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity({ enabled: device.enabled })).digest("hex"); prior = { enabled: device.enabled }; }
         if (params.action === "move") { payload.index = params.index; prior = { index: located.siblings.findIndex((sibling) => sibling.ref === device.ref) }; }
@@ -3587,7 +3597,7 @@ export class McpHost {
       const value = params[field];
       if (value === undefined) continue;
       if (field === "mute" || field === "solo") { if (typeof value !== "boolean") return error(id, -32602, `${field} must be boolean`); }
-      else if (field === "sends") { if (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) return error(id, -32602, "sends must be 0-1 values"); }
+      else if (field === "sends") { if (!Array.isArray(value) || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) return error(id, -32602, "sends must be 0-1 values"); }
       else if (typeof value !== "number" || !Number.isFinite(value) || (field === "pan" ? Math.abs(value) > 1 : (value < 0 || value > 1))) return error(id, -32602, `${field} is out of bounds`);
       proposed[field] = value;
     }
@@ -3619,7 +3629,7 @@ export class McpHost {
     for (const field of fields) {
       const value = source[field];
       if (typeof value === "string" && value.length <= 32) display[field] = value;
-      else if (Array.isArray(value) && value.length <= 64 && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
+      else if (Array.isArray(value) && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
     }
     return Object.keys(display).length ? display : undefined;
   }
@@ -4108,7 +4118,7 @@ export class McpHost {
   private async liveAudioImportPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["filePath", "allowedRoot", "trackRef", "sceneIndex", "takeLaneRef", "position", "name"])) return error(id, -32602, "filePath and allowedRoot plus a Session (trackRef, sceneIndex) or take-lane (takeLaneRef, position) destination are required");
     if (params.takeLaneRef !== undefined && (params.trackRef !== undefined || params.sceneIndex !== undefined)) return error(id, -32602, "takeLaneRef is mutually exclusive with trackRef/sceneIndex");
-    if (params.takeLaneRef === undefined && (!Number.isInteger(params.sceneIndex) || (params.sceneIndex as number) < 0 || (params.sceneIndex as number) > 10000)) return error(id, -32602, "sceneIndex is invalid");
+    if (params.takeLaneRef === undefined && (!Number.isInteger(params.sceneIndex) || (params.sceneIndex as number) < 0 || (params.sceneIndex as number) > MAX_SET_INDEX)) return error(id, -32602, "sceneIndex is invalid");
     if (params.takeLaneRef !== undefined && (!isNonEmptyString(params.takeLaneRef, 256) || typeof params.position !== "number" || !Number.isFinite(params.position) || params.position < 0)) return error(id, -32602, "takeLaneRef and position are required for a take-lane import");
     if (params.name !== undefined && !isNonEmptyString(params.name, 256)) return error(id, -32602, "name is invalid");
     try {
@@ -4376,7 +4386,7 @@ export class McpHost {
       const present = new Set(clip.notes.map((note) => note.id).filter((value) => typeof value === "number"));
       const payload: Record<string, unknown> = { ref: params.clipRef, expectedClipAuthority: clip.authority, expectedNotesRevision: clip.notesRevision };
       if (params.action === "duplicate") {
-        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 512 || new Set(params.noteIds).size !== params.noteIds.length || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-512 unique non-negative integers");
+        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || new Set(params.noteIds).size !== params.noteIds.length || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more unique non-negative integers");
         if ((params.noteIds as number[]).some((noteId) => !present.has(noteId))) return this.transactionError(id, "note id is not present in the clip");
         payload.noteIds = [...(params.noteIds as number[])];
       } else {
@@ -4454,12 +4464,12 @@ export class McpHost {
    * Byte-identical to captureObjectFingerprint within its limits. */
   private captureBoundedFingerprint(value: unknown): string {
     const canonical = (item: unknown, depth: number): string => {
-      if (depth > 16) throw new Error("clip content is too deeply nested");
+      if (depth > 256) throw new Error("clip content is too deeply nested");
       if (item === null || typeof item === "boolean") return JSON.stringify(item);
       if (typeof item === "number") { if (!Number.isFinite(item)) throw new Error("clip content contains a non-finite number"); return JSON.stringify(Object.is(item, -0) ? 0 : item); }
-      if (typeof item === "string") { if (item.length > 16384) throw new Error("clip content string is too large"); return JSON.stringify(item); }
-      if (Array.isArray(item)) { if (item.length > 4096) throw new Error("clip content array exceeds its authoritative bound"); return `[${item.map((entry) => canonical(entry, depth + 1)).join(",")}]`; }
-      if (isObject(item)) { const keys = Object.keys(item); if (keys.length > 256) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
+      if (typeof item === "string") { if (item.length > 1_048_576) throw new Error("clip content string is too large"); return JSON.stringify(item); }
+      if (Array.isArray(item)) { if (item.length > MAX_SET_COLLECTION) throw new Error("clip content array exceeds its authoritative bound"); return `[${item.map((entry) => canonical(entry, depth + 1)).join(",")}]`; }
+      if (isObject(item)) { const keys = Object.keys(item); if (keys.length > MAX_SET_COLLECTION) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
     return createHash("sha256").update(canonical(withoutPlaybackState(value), 0)).digest("hex");
@@ -4475,9 +4485,9 @@ export class McpHost {
       if (depth > 8) throw new Error("clip content is too deeply nested");
       if (value === null || typeof value === "boolean") return JSON.stringify(value);
       if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("clip content contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-      if (typeof value === "string") { if (value.length > 16384) throw new Error("clip content string is too large"); return JSON.stringify(value); }
-      if (Array.isArray(value)) { if (value.length > 4096) throw new Error("clip content array exceeds its authoritative bound"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
-      if (typeof value === "object" && value !== null) { const record = value as Record<string, unknown>; const keys = Object.keys(record); if (keys.length > 64) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key], depth + 1)}`).join(",")}}`; }
+      if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("clip content string is too large"); return JSON.stringify(value); }
+      if (Array.isArray(value)) { if (value.length > MAX_SET_COLLECTION) throw new Error("clip content array exceeds its authoritative bound"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
+      if (typeof value === "object" && value !== null) { const record = value as Record<string, unknown>; const keys = Object.keys(record); if (keys.length > 1_000_000) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
     return createHash("sha256").update(canonical({
@@ -4664,7 +4674,7 @@ export class McpHost {
       catch (cause) { return error(id, -32602, cause instanceof Error ? cause.message : "invalid transform parameters"); }
       const diff = diffNotes(clip.notes as never, outcome.notes as never);
       if (diff.add.length + diff.update.length + diff.delete.length === 0) return this.transactionError(id, "transform produced no changes");
-      if (diff.add.length + clip.notes.length - diff.delete.length > 2048) return this.transactionError(id, "transform result exceeds the bounded 2048-note limit");
+      if (diff.add.length + clip.notes.length - diff.delete.length > MIDI_TRANSFORM_MAX_NOTES) return this.transactionError(id, `transform result exceeds the bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit`);
       const largeEdit = diff.update.length > MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD;
       const effectiveScope = scope ?? (generative || largeEdit ? "duplicate" : "in-place");
       if (effectiveScope === "in-place" && generative) return this.transactionError(id, "Generative transforms default to duplicate scope; request an exact duplicate target");
@@ -4795,7 +4805,7 @@ export class McpHost {
         if (!(status.operations ?? []).includes("note.read-selected")) throw new Error("selected note reads are unavailable");
         return this.successText(id, await adapter.invokeAsync({ operation: "note.read-selected", args: { ref: params.clipRef } }, context));
       }
-      if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 1024 || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-1024 non-negative integers (or selected=true)");
+      if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more non-negative integers (or selected=true)");
       if (!(status.operations ?? []).includes("note.read-by-id")) throw new Error("targeted note reads are unavailable");
       return this.successText(id, await adapter.invokeAsync({ operation: "note.read-by-id", args: { ref: params.clipRef, noteIds: params.noteIds } }, context));
     } catch (cause) { return this.adapterToolError(id, cause, "Note read requires fresh authoritative state."); }
@@ -5487,7 +5497,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "notes", "expectedNotesRevision"])) return error(id, -32602, "key estimate arguments are invalid");
     if (params.notes !== undefined) {
       if (params.clipRef !== undefined || params.expectedNotesRevision !== undefined) return error(id, -32602, "notes is mutually exclusive with clipRef and expectedNotesRevision");
-      if (!Array.isArray(params.notes) || params.notes.length > 4096) return error(id, -32602, "notes must be an array of at most 4096 note objects");
+      if (!Array.isArray(params.notes) || params.notes.length > MAX_SET_COLLECTION) return error(id, -32602, "notes must be an array of note objects");
       const notes: Array<{ pitch: number; start: number; duration: number; velocity?: number }> = [];
       for (const entry of params.notes) {
         if (!isObject(entry) || !hasOnly(entry, ["pitch", "start", "duration", "velocity"])) return error(id, -32602, "note objects may only carry pitch, start, duration, and velocity");
@@ -5832,7 +5842,7 @@ export class McpHost {
       if (field === "chainActivator" && typeof value !== "boolean") return error(id, -32602, "chainActivator must be boolean");
       if (field === "volume" && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)) return error(id, -32602, "volume must be 0-1");
       if (field === "pan" && (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 1)) return error(id, -32602, "pan must be -1 to 1");
-      if (field === "sends" && (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1))) return error(id, -32602, "sends must be 0-1 values");
+      if (field === "sends" && (!Array.isArray(value) || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1))) return error(id, -32602, "sends must be 0-1 values");
       proposed[field] = value;
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one chain mixer field is required");
@@ -6143,7 +6153,7 @@ export class McpHost {
   /** A Drum Rack pad by reference, at any depth: preview finds nested racks (drumRackPad), so apply and undo must too. */
   private drumPadRow(snapshot: LiveSnapshot, padRef: LiveRef): JsonObject {
     const visit = (devices: unknown, depth: number): JsonObject | undefined => {
-      if (!Array.isArray(devices) || depth > 16) return undefined;
+      if (!Array.isArray(devices) || depth > 256) return undefined;
       for (const device of devices.filter(isObject)) {
         const pads = ((device.drumPads as unknown[]) ?? []).filter(isObject);
         const pad = pads.find((candidate) => candidate.ref === padRef);
@@ -6365,7 +6375,7 @@ export class McpHost {
         if (!(status.operations ?? []).includes("rack.set")) throw new Error("rack editing is unavailable");
         const proposed: Record<string, unknown> = {};
         if (params.visibleMacroCount !== undefined) return error(id, -32602, "visibleMacroCount is read-only in the public LOM; use add-macro/remove-macro actions to change it");
-        if (params.selectedVariationIndex !== undefined) { if (!Number.isInteger(params.selectedVariationIndex) || (params.selectedVariationIndex as number) < -1 || (params.selectedVariationIndex as number) > 256) return error(id, -32602, "selectedVariationIndex is invalid"); proposed.selectedVariationIndex = params.selectedVariationIndex; }
+        if (params.selectedVariationIndex !== undefined) { if (!Number.isInteger(params.selectedVariationIndex) || (params.selectedVariationIndex as number) < -1 || (params.selectedVariationIndex as number) > MAX_SET_INDEX) return error(id, -32602, "selectedVariationIndex is invalid"); proposed.selectedVariationIndex = params.selectedVariationIndex; }
         if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one rack field is required");
         prior = { selectedVariationIndex: row.device.selectedVariationIndex ?? null };
         payload = { action: params.action, ref: params.rackRef, ...proposed, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: stateRevision };
@@ -6803,7 +6813,7 @@ export class McpHost {
       const fence = JSON.stringify({ clipRef: params.clipRef, parameterRef: params.parameterRef, exists: read.exists, points, revision: read.revision, authorityDigest });
       const payload: Record<string, unknown> = { clipRef: params.clipRef, parameterRef: params.parameterRef, expectedAuthorityDigest: authorityDigest, expectedEnvelopeRevision: read.revision };
       if (params.action === "insert") {
-        if (!Array.isArray(params.points) || params.points.length < 1 || params.points.length > 512) return error(id, -32602, "points must be 1-512 point objects");
+        if (!Array.isArray(params.points) || params.points.length < 1 || params.points.length > MAX_SET_COLLECTION) return error(id, -32602, "points must be one or more point objects");
         for (const point of params.points) if (!isObject(point) || !hasOnly(point, ["time", "value"]) || typeof point.time !== "number" || !Number.isFinite(point.time) || point.time < 0 || typeof point.value !== "number" || !Number.isFinite(point.value)) return error(id, -32602, "points are invalid");
         payload.points = structuredClone(params.points);
       }
@@ -6879,7 +6889,7 @@ export class McpHost {
 
   private arrangementCollectionRevision(snapshot: LiveSnapshot, trackRef: LiveRef): string {
     const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).filter((item) => item.trackRef === trackRef).map((item) => ({ ref: item.ref, objectIdentity: item.objectIdentity }));
-    if (clips.some((item) => !isNonEmptyString(item.ref, 256) || !isNonEmptyString(item.objectIdentity, 256)) || clips.length > 256) throw new Error("Arrangement clip collection authority is incomplete");
+    if (clips.some((item) => !isNonEmptyString(item.ref, 256) || !isNonEmptyString(item.objectIdentity, 256))) throw new Error("Arrangement clip collection authority is incomplete");
     return createHash("sha256").update(canonicalMutationIdentity(clips)).digest("hex");
   }
 
@@ -6931,7 +6941,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "targetTrackRef", "targetSceneIndex", "arrangementPosition"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     const toArrangement = params.arrangementPosition !== undefined;
     if (toArrangement && (typeof params.arrangementPosition !== "number" || !Number.isFinite(params.arrangementPosition) || params.arrangementPosition < 0)) return error(id, -32602, "arrangementPosition is out of bounds");
-    if (!toArrangement && (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > 10000)) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for Session duplication");
+    if (!toArrangement && (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > MAX_SET_INDEX)) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for Session duplication");
     try {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -7093,7 +7103,7 @@ export class McpHost {
         fence = JSON.stringify({ ref: params.clipRef, objectIdentity: row.clip.objectIdentity, start: row.clip.start, contentFingerprint: payload.expectedContentFingerprint });
       } else {
         if (!(status.operations ?? []).includes("clip.move")) throw new Error("atomic Session clip move is unavailable");
-        if (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > 10000) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for a Session slot move");
+        if (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > MAX_SET_INDEX) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for a Session slot move");
         const targetTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === params.targetTrackRef);
         const target = targetTrack && (targetTrack.clipSlots as unknown[]).filter(isObject).find((slot) => slot.sceneIndex === params.targetSceneIndex);
         if (!target) throw new Error("target scene index is invalid");
@@ -7106,7 +7116,7 @@ export class McpHost {
         payload.deleteRef = params.clipRef;
         payload.deleteAuthority = sourceAuthority;
         payload.sourceSceneIndex = (row.track?.clipSlots as unknown[]).filter(isObject).find((slot) => slot.clipRef === params.clipRef)?.sceneIndex;
-        if (!isIntegerInRange(payload.sourceSceneIndex, 0, 10000)) throw new Error("Session move source scene identity is incomplete");
+        if (!isIntegerInRange(payload.sourceSceneIndex, 0, MAX_SET_INDEX)) throw new Error("Session move source scene identity is incomplete");
         fence = JSON.stringify({ sourceAuthority, sourceFingerprint, target: target.ref, targetIdentity: target.objectIdentity, targetTrackIdentity: targetTrack.objectIdentity, targetSceneIdentity: targetScene.objectIdentity, empty: target.empty });
       }
       const transaction: ClipLifecycleTransaction = { id: `clipmove_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind, fence, clipRef: params.clipRef as LiveRef, payload, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -7250,7 +7260,7 @@ export class McpHost {
       let patches: Array<Record<string, unknown>> | undefined;
       let noteIds: number[] | undefined;
       if (kind === "update") {
-        if (!Array.isArray(params.notes) || params.notes.length < 1 || params.notes.length > 512) return error(id, -32602, "notes must be 1-512 patch objects");
+        if (!Array.isArray(params.notes) || params.notes.length < 1 || params.notes.length > MAX_SET_COLLECTION) return error(id, -32602, "notes must be one or more patch objects");
         const seen = new Set<number>();
         for (const patch of params.notes) {
           if (!isObject(patch) || Object.keys(patch).length < 2 || !Number.isInteger(patch.id) || (patch.id as number) < 0 || !hasOnly(patch, ["id", "pitch", "start", "duration", "velocity", "mute", "probability", "velocityDeviation", "releaseVelocity"])) return error(id, -32602, "note patches require an id, at least one edit, and only supported fields");
@@ -7269,7 +7279,7 @@ export class McpHost {
         patches = structuredClone(params.notes) as Array<Record<string, unknown>>;
         noteIds = [...seen];
       } else {
-        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 512 || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-512 non-negative integers");
+        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more non-negative integers");
         if (new Set(params.noteIds).size !== params.noteIds.length) return error(id, -32602, "duplicate note id");
         if ((params.noteIds as number[]).some((noteId) => !present.has(noteId))) return this.transactionError(id, "note id is not present in the clip");
         noteIds = [...(params.noteIds as number[])];
@@ -7484,7 +7494,7 @@ export class McpHost {
    */
   private async liveDeviceParametersPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
     const values = params.values;
-    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > 64 || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 64 values, each a parameterRef and a finite value, are required");
+    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > MAX_PARAMETER_VALUES || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 10000 values, each a parameterRef and a finite value, are required");
     const requested = values as Array<{ parameterRef: string; value: number }>;
     if (new Set(requested.map((item) => item.parameterRef)).size !== requested.length) return error(id, -32602, "each parameter takes one value");
     try {
@@ -7596,7 +7606,7 @@ export class McpHost {
   }
 
   private async liveMidiPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, 1023) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
+    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, MAX_SET_INDEX) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
     return this.successText(id, await this.midiTransactions.previewAsync(params));
   }
 
@@ -8621,7 +8631,7 @@ export class McpHost {
           if (reconciliation) { if (action === "enable" && located.device.enabled !== device.prior?.enabled) throw new Error("device-enable undo replay did not restore prior state"); if (action === "move" && located.siblings.findIndex((sibling) => sibling.ref === reference) !== device.prior?.index) throw new Error("device-move undo replay did not restore prior location"); }
           else { const args: JsonObject = { ref: reference, expectedObjectIdentity: located.device.objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
             if (action === "enable") { if (located.device.enabled !== device.payload.enabled || typeof device.prior?.enabled !== "boolean") throw new Error("device enable state changed after apply"); args.enabled = device.prior.enabled; args.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity({ enabled: located.device.enabled })).digest("hex"); }
-            else if (action === "move") { const currentIndex = located.siblings.findIndex((sibling) => sibling.ref === reference); if (located.device.objectIdentity !== device.payload.expectedObjectIdentity || currentIndex !== device.created?.index || !isIntegerInRange(device.prior?.index, 0, 256)) throw new Error("moved device identity or location changed after apply"); args.index = device.prior.index; }
+            else if (action === "move") { const currentIndex = located.siblings.findIndex((sibling) => sibling.ref === reference); if (located.device.objectIdentity !== device.payload.expectedObjectIdentity || currentIndex !== device.created?.index || !isIntegerInRange(device.prior?.index, 0, MAX_SET_INDEX)) throw new Error("moved device identity or location changed after apply"); args.index = device.prior.index; }
             else throw new Error("arbitrary device deletion has no automatic undo authority");
             const result = await this.invokeUndoRecovery(device, adapter, action === "enable" ? "device.enable" : "device.move", args, context) as JsonObject; if (result.changed !== true && !isNonEmptyString(result.ref, 256)) throw new Error("device restoration was not confirmed"); if (action === "move") device.created = result;
           }
@@ -9150,7 +9160,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   }
 
   private liveMidiPreview(id: RequestId, params: unknown): JsonObject {
-    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, 1023) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
+    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, MAX_SET_INDEX) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
     try { return this.successText(id, this.midiTransactions.preview(params)); }
     catch (cause) { return this.adapterToolError(id, cause, "MIDI preview failed without mutation; verify the track, empty slot, and bounded notes."); }
   }

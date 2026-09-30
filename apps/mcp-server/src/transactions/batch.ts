@@ -23,6 +23,8 @@ import { LiveViews, ownedTrackFingerprintRow, withoutPlaybackState, type AsyncLi
 
 export const BATCH_TRANSACTION_TTL_MS = 30_000;
 export const MAX_BATCH_OPERATIONS = 32;
+/** No count cap on a Set's devices or rows: this only stops past what one wire array carries. */
+const MAX_SET_ROWS = 10_000_000;
 
 export const BATCH_OPERATION_KINDS = ["mixer.set", "device.parameter.set", "clip.set", "track.rename", "scene.rename", "track.create", "routing.arm"] as const;
 export type BatchOperationKind = typeof BATCH_OPERATION_KINDS[number];
@@ -143,7 +145,7 @@ function mixerIdentityDigest(target: { track: Row; mixer: Row }): string {
 export function flattenDeviceRows(values: unknown): Row[] {
   const flattened: Row[] = [];
   const visit = (value: unknown): void => {
-    if (!isObject(value) || flattened.length >= 512) return;
+    if (!isObject(value) || flattened.length >= MAX_SET_ROWS) return;
     flattened.push(value);
     if (Array.isArray(value.chains)) for (const chain of value.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
     if (Array.isArray(value.drumPads)) for (const pad of value.drumPads) if (isObject(pad) && Array.isArray(pad.chains)) for (const chain of pad.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
@@ -168,7 +170,7 @@ export function parameterAuthority(snapshot: LiveSnapshot, parameterRef: string)
     const trackRef = typeof track.ref === "string" ? track.ref : undefined;
     const trackIdentity = typeof track.objectIdentity === "string" ? track.objectIdentity : undefined;
     const visit = (candidate: unknown): Row | undefined => {
-      if (!Array.isArray(candidate) || candidate.length > 256 || !candidate.every(isObject)) return undefined;
+      if (!Array.isArray(candidate) || candidate.length > MAX_SET_ROWS || !candidate.every(isObject)) return undefined;
       for (const device of candidate as Row[]) {
         const deviceRef = typeof device.ref === "string" ? device.ref : undefined;
         const deviceIdentity = typeof device.objectIdentity === "string" ? device.objectIdentity : undefined;
@@ -264,7 +266,7 @@ function validateBatchOperation(value: unknown, index: number): BatchOperation {
         const fieldValue = value[field];
         if (fieldValue === undefined) continue;
         if (field === "mute" || field === "solo") { if (typeof fieldValue !== "boolean") throw new Error(`transaction batch operation ${index} ${field} must be boolean`); }
-        else if (field === "sends") { if (!Array.isArray(fieldValue) || fieldValue.length > 64 || !fieldValue.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) throw new Error(`transaction batch operation ${index} sends must be 0-1 values`); }
+        else if (field === "sends") { if (!Array.isArray(fieldValue) || !fieldValue.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) throw new Error(`transaction batch operation ${index} sends must be 0-1 values`); }
         else if (typeof fieldValue !== "number" || !Number.isFinite(fieldValue) || (field === "pan" ? Math.abs(fieldValue) > 1 : (fieldValue < 0 || fieldValue > 1))) throw new Error(`transaction batch operation ${index} ${field} is out of bounds`);
         proposed[field] = fieldValue;
       }
@@ -295,7 +297,7 @@ function validateBatchOperation(value: unknown, index: number): BatchOperation {
       return { kind: "scene.rename", sceneRef: value.sceneRef, name: value.name };
     }
     case "track.create": {
-      if (!keys(["kind", "name", "trackKind", "index"]) || !isNonEmptyString(value.name, 128) || (value.trackKind !== "audio" && value.trackKind !== "midi") || (value.index !== undefined && (!Number.isInteger(value.index) || (value.index as number) < 0 || (value.index as number) > 10_000))) throw new Error(`transaction batch operation ${index} requires a name, trackKind audio|midi, and an optional bounded index`);
+      if (!keys(["kind", "name", "trackKind", "index"]) || !isNonEmptyString(value.name, 128) || (value.trackKind !== "audio" && value.trackKind !== "midi") || (value.index !== undefined && (!Number.isInteger(value.index) || (value.index as number) < 0 || (value.index as number) > 100_000))) throw new Error(`transaction batch operation ${index} requires a name, trackKind audio|midi, and an optional bounded index`);
       return { kind: "track.create", name: value.name, trackKind: value.trackKind, ...(value.index === undefined ? {} : { index: value.index as number }) };
     }
     case "routing.arm": {

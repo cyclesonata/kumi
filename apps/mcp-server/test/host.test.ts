@@ -706,10 +706,11 @@ test("bounds server event flushing across slow output and contains emitter failu
     calls += 1;
     if (calls === 1) await new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
   });
-  for (let index = 0; index < 2_000; index += 1) (host as any).onLiveEvent({ epoch: 1, sequence: index + 1, type: "object", payload: { index } });
+  // 65,536 queue; the rest are counted as dropped.
+  for (let index = 0; index < 67_000; index += 1) (host as any).onLiveEvent({ epoch: 1, sequence: index + 1, type: "object", payload: { index } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 1);
-  assert.ok((host as any).eventQueue.length <= 256);
+  assert.ok((host as any).eventQueue.length <= 65_536);
   assert.ok((host as any).eventOverflow > 0);
   rejectFirst?.(new Error("output failed"));
   await new Promise((resolve) => setImmediate(resolve));
@@ -2242,8 +2243,13 @@ test("realtime control requires real provenance and arms exact bounded channels 
   mixer.sendRefs = Array.from({ length: 254 }, (_, index) => `parameter:mixer:0:sends:${index}`);
   mixer.sendIdentities = Array.from({ length: 254 }, (_, index) => `simulator:parameter:mixer:0:sends:${index}`);
   mixer.sends = Array.from({ length: 254 }, () => 0);
-  const oversizedAuthority = await call(19, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:mixer:0:volume"], outputSafety: evidence });
-  assert.equal((oversizedAuthority as any).result.isError, true);
+  // No count cap: a mixer with 254 sends is armed like any other.
+  const manySends = await call(19, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:mixer:0:volume"], outputSafety: evidence });
+  assert.equal((manySends as any).result.isError, false);
+  // A mixer whose sends lack their identities isn't authoritative, however many there are.
+  mixer.sendIdentities = mixer.sendIdentities.slice(1);
+  const incompleteAuthority = await call(1019, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:mixer:0:volume"], outputSafety: evidence });
+  assert.equal((incompleteAuthority as any).result.isError, true);
   mixer.sendRefs = ["parameter:mixer:0:sends:0", "parameter:mixer:0:sends:1"];
   mixer.sendIdentities = ["simulator:parameter:mixer:0:sends:0", "simulator:parameter:mixer:0:sends:1"];
   mixer.sends = [0.5, 0.25];
@@ -2258,8 +2264,8 @@ test("realtime control requires real provenance and arms exact bounded channels 
   assert.equal((pastOtherDevices as any).result.isError, false);
   const budgetDevices = (simulator as any).state.tracks[0].devices;
   (simulator as any).state.tracks[0].devices = [...Array.from({ length: 16_400 }, (_, deviceIndex) => ({ ref: `device:crowd:${deviceIndex}`, objectIdentity: `simulator:device:crowd:${deviceIndex}`, macros: [], chains: [], drumPads: [], parameters: [] })), ...budgetDevices];
-  const cumulativeOversize = await call(21, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:budget:4:0"], outputSafety: evidence });
-  assert.equal((cumulativeOversize as any).result.isError, true);
+  const pastManyDevices = await call(21, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:budget:4:0"], outputSafety: evidence });
+  assert.equal((pastManyDevices as any).result.isError, false, "16,400 devices before the parameter are passed by: no count cap");
   (simulator as any).state.tracks[0].devices = budgetDevices;
   const aliasedIdentity = "simulator:parameter:rack:macro-0";
   (simulator as any).state.tracks[0].devices = [{ ref: "device:rack", objectIdentity: "simulator:device:rack", chains: [], drumPads: [], parameters: [{ ref: "parameter:rack:0", objectIdentity: aliasedIdentity, value: 0.5 }], macros: [{ ref: "parameter:rack:macro:0", objectIdentity: aliasedIdentity, value: 0.5 }] }];
@@ -2270,8 +2276,8 @@ test("realtime control requires real provenance and arms exact bounded channels 
     { ref: "device:oversized-rack", objectIdentity: "simulator:device:oversized-rack", parameters: [], macros: [], drumPads: [], chains: Array.from({ length: 257 }, () => ({ devices: [] })) },
     { ref: "device:after-oversized-rack", objectIdentity: "simulator:device:after-oversized-rack", parameters: [{ ref: "parameter:after-oversized-rack:0", objectIdentity: "simulator:parameter:after-oversized-rack:0", value: 0.5 }], macros: [], drumPads: [], chains: [] },
   ];
-  const structuralOversize = await call(23, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:after-oversized-rack:0"], outputSafety: evidence });
-  assert.equal((structuralOversize as any).result.isError, true);
+  const pastBigRack = await call(23, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:after-oversized-rack:0"], outputSafety: evidence });
+  assert.equal((pastBigRack as any).result.isError, false, "a rack of 257 chains is passed by: no count cap");
   assert.equal(armCalls, 2);
 });
 

@@ -2,7 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { LiveViews, withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveOperationContext, type LiveRef, type LiveSnapshot, type Note, type LiveStatus } from "../live.js";
 
 export const SESSION_MIDI_TRANSACTION_TTL_MS = 30_000;
-export const MAX_SESSION_MIDI_NOTES = 512;
+/** No count cap on a clip's notes: this only stops past what one wire array carries. */
+export const MAX_SESSION_MIDI_NOTES = 10_000_000;
 
 export interface SessionMidiRequest { trackRef: LiveRef; sceneIndex: number; name: string; length: number; notes: Note[]; }
 export interface SessionMidiPreview { transactionId: string; epoch: number; revision: string; target: { trackRef: LiveRef; trackIdentity: string; sceneIndex: number; slotRef: LiveRef; slotIdentity: string; sceneRef: LiveRef; sceneIdentity: string; }; prior: { occupied: boolean; clipRef?: LiveRef }; proposed: SessionMidiRequest; impact: "creates-session-midi-clip"; confirmation: "apply"; expiresAt: number; }
@@ -48,7 +49,7 @@ function validateRequest(value: unknown): asserts value is SessionMidiRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid MIDI clip request");
   const request = value as Partial<SessionMidiRequest>;
   const sceneIndex = request.sceneIndex;
-  if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 1023 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
+  if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 100_000 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
   // Most producers never think about MIDI channels; default to channel 1.
   for (const note of request.notes) { note.channel ??= 1; validateNote(note, request.length as number); }
 }
