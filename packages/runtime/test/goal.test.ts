@@ -30,7 +30,7 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number, options: { reference?: string; leapEvery?: number } = {}) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
@@ -41,13 +41,13 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook
   const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
   session = createSession({
     onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goals, goalRandom: seeded(5), ...(playbook ? { playbook } : {}), ...(idleTimeoutMs ? { idleTimeoutMs } : {}),
-    goalBudget: { target: 99, leapEvery: 3, stallGenerations: 99 },
+    goalBudget: { target: 99, leapEvery: options.leapEvery ?? 3, stallGenerations: 99 },
     kernelFactory: async ({ tools }) => ({
       async run(input, _signal, emit) {
         asked.push(input.split("<current_observation")[0]!);
         const tracks = JSON.parse((await call(tools, "live_discover", { kind: "track", fields: ["name"] })).text).live.items as { ref: string; name: string }[];
         const ref = (name: string) => tracks.find((track) => track.name === name)!.ref;
-        const span = { from_beat: 8, beats: 4, reference, focus: "sound" };
+        const span = { from_beat: 8, beats: 4, reference: options.reference ?? reference, focus: "sound" };
         if (input.includes("Set the search up")) await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Dark"), label: "Dark Operator" }, { track: ref("Kumi · Goal · Bright"), label: "Bright Operator" }], ...span });
         else if (input.includes("structural leap")) { emit({ type: "text", text: "A third Operator, wider open." }); await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Wide"), label: "Wide Operator" }], ...span }); }
         return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
@@ -159,5 +159,21 @@ test("a goal is at work the whole time: an answer's quiet timer doesn't call it 
   await running;
   assert.equal(r.statuses().at(-1)!.why, "stopped", "stopped by /goal stop, not as stuck");
   assert.ok(!r.events.some((event) => event.type === "error" && /without progress/.test(event.message)), JSON.stringify(r.events.filter((event) => event.type === "error")));
+  await r.session.close();
+});
+
+test("a target with a sub the candidates lack leads to a structural leap in the next rounds, not more knob turning", async () => {
+  // The reference has a sine an octave and a half below; no candidate's knobs make one.
+  const withSub = wav("goal-with-sub.wav", saw(1.6, 110, 2600).map((value, index) => value + 0.5 * Math.sin(2 * Math.PI * 41.2 * index / 48000)));
+  const r = rig(memoryGoals(), render, undefined, undefined, { reference: withSub, leapEvery: 99 });
+  await r.session.start();
+  const running = r.session.goal!("make my pad sound like the reference");
+  while (!r.asked.some((prompt) => /Make a structural leap/.test(prompt)) && (r.statuses().at(-1)?.generation ?? 0) < 6) await delay(50);
+  const leapAt = r.statuses().at(-1)!.generation;
+  await r.session.stopGoal!(); await running;
+  const leap = r.asked.find((prompt) => /Make a structural leap/.test(prompt));
+  assert.ok(leap, "a leap came");
+  assert.ok(leapAt <= 3, `at once, not after the usual eight generations: generation ${leapAt}`);
+  assert.match(leap!, /Knobs can't close this: .*sub.*Change the structure: add a sub layer/);
   await r.session.close();
 });

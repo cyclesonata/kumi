@@ -180,7 +180,8 @@ export interface GoalRig {
   /** A candidate the model built mid-search joins (with a safety limiter at the end of its chain). */
   add(candidate: AuditionCandidate, signal: AbortSignal): Promise<GoalSlotInfo | string>;
   /** Each trial's values set on its slot, all rendered in one silent pass, each scored against the reference. */
-  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[]; frozen: Map<string, Set<string>> }>;
+  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[]; frozen: Map<string, Set<string>>;
+    /** Each slot's gap no knob closes, when it has one. */ structural: Map<string, { gap: string; move: string }> }>;
   /** The best so far on a track of its own ("Kumi · Goal best"), replacing the last copy; its name, or why not. */
   keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
   /** A finished goal's candidates: the top ones muted for the producer to A/B, the rest removed; what it did. */
@@ -232,6 +233,8 @@ export interface AuditionEvent {
   gaps: string[];
   /** What was auditioned, so a match run can audition it again after changes. */
   request?: AuditionRequest;
+  /** The best's gap no knob closes, and the structural change that closes it. */
+  structural?: { gap: string; move: string };
   /** The reference as heard ("C2 · bright, rich · attack 15 ms"), for what a lesson says was matched. */
   reference?: string;
 }

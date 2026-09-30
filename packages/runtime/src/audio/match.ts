@@ -23,7 +23,30 @@ export interface Closeness {
   features: Feature[];
   /** The biggest gaps, in words, biggest first. */
   gaps: string[];
+  /**
+   * A gap no knob closes (a band 9 dB or more off, an attack three times off, the wrong register, far
+   * too wide or narrow), when it's the largest part of what's lost: what it is, and the structural
+   * change that closes it.
+   */
+  structural?: { kind: StructuralKind; gap: string; move: string; share: number };
 }
+
+export type StructuralKind = "missing-low" | "excess-low" | "missing-top" | "excess-top" | "missing-mids" | "excess-mids" | "envelope" | "register" | "pitched" | "width" | "density";
+
+/** What closes a gap knobs can't: the structure to change. The guide gives the model the same table. */
+export const STRUCTURE_MOVES: Record<StructuralKind, string> = {
+  "missing-low": "add a sub layer (an Operator sine or a Drift one octave down, in a rack chain), an EQ Eight low shelf, or change the base instrument",
+  "excess-low": "high-pass it (EQ Eight), take the low layer out, or change the base",
+  "missing-top": "add saturation (Saturator, Roar), an exciter or a brighter base (a saw or noise layer)",
+  "excess-top": "low-pass it (Auto Filter), use a darker base (sine, triangle), or take a layer out",
+  "missing-mids": "add a layer for the body (a second oscillator or a rack chain), or change the base",
+  "excess-mids": "cut the mids (EQ Eight), change the base, or thin the layers",
+  "envelope": "change the instrument family (a plucked or struck model against a sustained one), or add a transient shaper (Drum Buss, Compressor)",
+  "register": "transpose it (the MIDI, or the instrument's octave), or change the base",
+  "pitched": "change the kind of source: a tonal oscillator against noise or a sample",
+  "width": "widen or narrow it: Utility width, Chorus-Ensemble, or parallel chains panned apart",
+  "density": "change the MIDI: more or fewer notes, another rhythm",
+};
 
 /** Weights: a single sound is its timbre, envelope and pitch; a section adds balance, density and rhythm. */
 const WEIGHTS: Record<Closeness["focus"], Record<Feature["name"], number>> = {
@@ -101,6 +124,32 @@ export function closeness(mine: Analysis, reference: Analysis, focus?: Closeness
 
   const weights = WEIGHTS[kind];
   const weighted = features.map((feature) => ({ ...feature, weight: weights[feature.name] }));
+  // Gaps knobs can't close, each with the feature whose points it costs.
+  const found: { kind: StructuralKind; feature: Feature["name"] | "spectrum"; gap: string }[] = [];
+  for (const [index, band] of mine.balance.bands.entries()) {
+    const other = reference.balance.bands[index]!;
+    if (Math.max(band.db, other.db) <= -45) continue;
+    const difference = band.db - other.db;
+    if (Math.abs(difference) < 9) continue;
+    const region = index <= 2 ? "low" : index >= 6 ? "top" : "mids";
+    found.push({ kind: `${difference < 0 ? "missing" : "excess"}-${region}` as StructuralKind, feature: "spectrum", gap: `${band.name} ${signed(difference)} dB against the reference` });
+  }
+  if (kind === "sound" && mine.sound && reference.sound) {
+    const attack = ratio(mine.sound.envelope.attackMs + 1, reference.sound.envelope.attackMs + 1);
+    const length = ratio(mine.sound.envelope.lengthMs + 1, reference.sound.envelope.lengthMs + 1);
+    if (Math.abs(attack) >= 1.6 || Math.abs(length) >= 1.6) found.push({ kind: "envelope", feature: "envelope", gap: Math.abs(attack) >= 1.6 ? `attack ${mine.sound.envelope.attackMs} ms against ${reference.sound.envelope.attackMs} ms` : `length ${mine.sound.envelope.lengthMs} ms against ${reference.sound.envelope.lengthMs} ms` });
+  }
+  if (mine.sound?.pitch && reference.sound?.pitch && Math.abs(12 * Math.log2(mine.sound.pitch.hz / reference.sound.pitch.hz)) >= 5) found.push({ kind: "register", feature: "pitch", gap: `${mine.sound.pitch.note} against ${reference.sound.pitch.note}` });
+  else if (kind === "sound" && Boolean(mine.sound?.pitch) !== Boolean(reference.sound?.pitch)) found.push({ kind: "pitched", feature: "pitch", gap: reference.sound?.pitch ? "the reference is pitched; this isn't" : "this is pitched; the reference isn't" });
+  if (mine.stereo && reference.stereo && Math.abs(mine.stereo.width - reference.stereo.width) >= 0.35) found.push({ kind: "width", feature: "width", gap: `${mine.stereo.width > reference.stereo.width ? "far wider" : "far narrower"} than the reference` });
+  if (kind === "section" && Math.abs(ratio(mine.dynamics.onsetsPerSecond + 0.1, reference.dynamics.onsetsPerSecond + 0.1)) >= 1.6) found.push({ kind: "density", feature: "density", gap: `${mine.dynamics.onsetsPerSecond} against ${reference.dynamics.onsetsPerSecond} onsets a second` });
+  // The one costing the most, when it's the largest part of what's lost: the harness hands it to the model.
+  // A band far off costs its balance, and the tilt and brightness it drags along.
+  const lost = (name: Feature["name"] | "spectrum"): number => name === "spectrum" ? lost("balance") + lost("tilt") + lost("brightness")
+    : (() => { const feature = weighted.find((item) => item.name === name); return feature ? (1 - feature.similarity) * feature.weight : 0; })();
+  const totalLost = weighted.reduce((sum, feature) => sum + (1 - feature.similarity) * feature.weight, 0);
+  const major = found.map((item) => ({ ...item, cost: lost(item.feature) })).sort((a, b) => b.cost - a.cost)[0];
+  const share = major && totalLost > 0 ? major.cost / totalLost : 0;
   const total = weighted.reduce((sum, feature) => sum + feature.weight, 0);
   const score = total > 0 ? weighted.reduce((sum, feature) => sum + feature.similarity * feature.weight, 0) / total : 0;
   return {
@@ -108,5 +157,6 @@ export function closeness(mine: Analysis, reference: Analysis, focus?: Closeness
     features: weighted.map((feature) => ({ ...feature, similarity: Math.round(feature.similarity * 100) })),
     // Biggest gaps first: what each would add to the score if closed.
     gaps: weighted.filter((feature) => feature.gap).sort((a, b) => (1 - b.similarity) * b.weight - (1 - a.similarity) * a.weight).map((feature) => feature.gap!).slice(0, 5),
+    ...(major && share >= 0.3 ? { structural: { kind: major.kind, gap: major.gap, move: STRUCTURE_MOVES[major.kind], share: Math.round(share * 100) / 100 } } : {}),
   };
 }

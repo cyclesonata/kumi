@@ -189,3 +189,12 @@ test("a first round of a single candidate is sent back to start wide, once", () 
   run.auditioned({ type: "auditioned", round: 2, best: { label: "Operator", score: 60 }, takes: [{ label: "Operator", score: 60 }], gaps: [], request });
   assert.match(String((run.decide() as { next: string }).next), /Keep going/, "only once");
 });
+
+test("a gap no knob closes leads the next round: change the structure, not the knobs", () => {
+  const run = new MatchRun("make it sound like this", undefined, () => 0);
+  run.auditioned({ type: "auditioned", round: 1, best: { label: "Saw", score: 60 }, takes: [{ label: "Saw", score: 60 }, { label: "Sine", score: 50 }], gaps: ["sub −20 dB"], request,
+    structural: { gap: "sub −20.0 dB against the reference", move: "add a sub layer (an Operator sine …)" } });
+  const next = String((run.decide() as { next: string }).next);
+  assert.match(next, /Knobs can't close this: sub −20\.0 dB against the reference\. Change the structure: add a sub layer/);
+  assert.doesNotMatch(next, /Keep going/);
+});

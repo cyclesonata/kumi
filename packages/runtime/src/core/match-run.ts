@@ -118,6 +118,9 @@ export class MatchRun {
       this.checks.length = 0; this.checks.push(this.best.score);
       return { next: `[Kumi] Score ${scores}, and refining has stalled.${budget}${gaps} Try something genuinely different now: 2–4 new candidates on new tracks with other base instruments or another topology (parallel against serial, a rack of layers, resampling), audition them with the best so far, then refine the winner.` };
     }
+    // A gap no knob closes leads: the structure changes, at once.
+    const structural = this.last?.event.structural;
+    if (structural) return { next: `[Kumi] Score ${scores} (best: ${this.best.label}).${budget} Knobs can't close this: ${structural.gap}. Change the structure: ${structural.move}. Build it on a copy or a new track, audition it with the best, then refine.` };
     return { next: `[Kumi] Score ${scores} (best: ${this.best.label}).${budget}${gaps} Keep going: fix the biggest gaps on the best candidate, trying several values side by side on copies, and audition again. Try something different if refinement has stalled.` };
   }
 }

@@ -112,6 +112,11 @@ The first release for producers to use day to day. Ships with bridge 1.0.50.
   hours, or with /goal stop; Esc pauses it, and /goal picks it up again, after a
   restart too. The best so far lands on a "Kumi · Goal best" track, and every
   candidate's chain ends in a limiter. Needs bridge 1.0.50.
+- A gap no knob closes (a band 9 dB or more off, an attack three times off,
+  the wrong register, far too wide) that costs the most is named with the
+  structural change for it: a missing sub asks for a sub layer, an EQ low
+  shelf or another base. A match run's next round and a goal's next leap lead
+  with it at once, instead of turning more knobs.
 - Kumi learns from its match runs: each leaves a short lesson with its
   evidence ("plucked metallic percussion: Collision + parallel delays won,
   52% → 74%; Operator FM 52% → Collision 64% → …"), which the next matching

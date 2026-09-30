@@ -581,13 +581,16 @@ export function createSession(options: Options): SessionController {
         sync(); persist(); status("running", evolution);
         op.progress?.({ type: "tool-end" });
         const stalled = evolution.stalledFor >= goalBudget.stallGenerations;
-        if (evolution.generation - lastLeap >= goalBudget.leapEvery || (stalled && evolution.generation - lastLeap >= goalBudget.stallGenerations)) {
+        // A gap no knob closes (a missing sub, say) is handed to the model at once: turning knobs won't reach it.
+        const structural = leader ? result.structural.get(leader.name) : undefined;
+        const since = evolution.generation - lastLeap;
+        if (since >= goalBudget.leapEvery || (stalled && since >= goalBudget.stallGenerations) || (structural && since >= 2)) {
           lastLeap = evolution.generation;
           heardLast = undefined;
           // The model's new tracks go after the render tracks, and Live undoes tracks from the last one back:
           // the render tracks go first, and come back after, with the new candidates.
           closedNotes.push(...await rig.close().catch(() => [] as string[])); open = false;
-          const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: Math.round(leader.score) } : undefined, gaps.slice(0, 3), stalled));
+          const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: Math.round(leader.score) } : undefined, gaps.slice(0, 3), stalled, structural));
           if (leap.stopReason === "cancelled" || op.controller.signal.aborted) break;
           // What it tried: its "Tried:" line, or its first line.
           const idea = (/Tried:\s*(.+)/i.exec(said)?.[1] ?? said.trim().split(/\n+/).find(Boolean))?.replace(/[*_`]/g, "").trim().slice(0, 200);

@@ -33,3 +33,13 @@ test("a section is judged on density and rhythm too: the same part is close, one
   assert.ok(dense.features.find((feature) => feature.name === "density")!.similarity < 60);
   assert.match(dense.gaps.join(" · "), /too dense/);
 });
+
+test("a gap no knob closes is named with the structure that closes it: a missing sub asks for a sub layer", async () => {
+  const withSub = saw(3, 110).map((value, index) => value + 0.5 * Math.sin(2 * Math.PI * 41.2 * index / 48000));
+  const reference = await analyzeFile(wav("with-sub.wav", withSub), { focus: "sound" });
+  const mine = await analyzeFile(wav("no-sub.wav", saw(3, 110)), { focus: "sound" });
+  const result = closeness(mine, reference);
+  assert.equal(result.structural?.kind, "missing-low", JSON.stringify(result));
+  assert.match(result.structural!.move, /sub layer/);
+  assert.equal(closeness(mine, mine).structural, undefined, "nothing to change against itself");
+});

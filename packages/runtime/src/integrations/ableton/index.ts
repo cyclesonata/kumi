@@ -1644,15 +1644,17 @@ export function createAbletonIntegration(options: Options): Integration {
           files = await renderPass(rig, signal);
         } finally { rendering = false; }
         const scores = new Map<string, number>(); const gaps = new Map<string, string[]>(); const silent: string[] = [];
+        const structural = new Map<string, { gap: string; move: string }>();
         const tempo = currentTempo!;
         await Promise.all([...files].map(async ([name, { file, start }]) => {
           const heard = await hear(file, { start, seconds: rig.beats * 60 / tempo + LEAD_IN, ...(focus ? { focus: focus === "section" ? "mix" : "sound" } : {}), signal });
           if (silentRender(heard)) { silent.push(name); return; }
           const close = closeness(heard, reference, focus);
           scores.set(name, close.score); gaps.set(name, close.gaps);
+          if (close.structural) structural.set(name, { gap: close.structural.gap, move: close.structural.move });
         }));
         for (const trial of trials) if (!files.has(trial.slot) && !silent.includes(trial.slot)) silent.push(trial.slot);
-        return { scores, gaps, silent, frozen };
+        return { scores, gaps, silent, frozen, structural };
       },
       async keepBest(slot, knobs, values, given) {
         const signal = AbortSignal.any([given, lifetime.signal]);
@@ -1769,7 +1771,8 @@ export function createAbletonIntegration(options: Options): Integration {
       try {
         options.onAudition?.({ type: "auditioned", round, ...(best ? { best: { label: best.label, score: best.closeness!.score } } : {}), ...(previous !== undefined ? { previous } : {}),
           takes: [...scored.map((take) => ({ label: take.label, score: take.closeness!.score })), ...takes.filter((take) => !take.closeness).map((take) => ({ label: take.label, ...(take.silent ? { silent: true } : {}) }))],
-          gaps: best?.closeness!.gaps.slice(0, 3) ?? [], request, ...(reference ? { reference: heardSummary(reference) } : {}) });
+          gaps: best?.closeness!.gaps.slice(0, 3) ?? [], request, ...(reference ? { reference: heardSummary(reference) } : {}),
+          ...(best?.closeness!.structural ? { structural: { gap: best.closeness.structural.gap, move: best.closeness.structural.move } } : {}) });
       } catch { /* a listener failure must not affect Live */ }
       tell(best ? `Auditioned · ${best.closeness!.score}%` : "Auditioned", false);
       return result;
@@ -1880,7 +1883,8 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         const round = rounds.count;
         return { text: JSON.stringify({ round, ...(result.best ? { best: result.best } : {}),
           takes: result.takes.map((take) => ({ label: take.label, track: shortRef(take.track), ...(take.silent ? { silent: true } : {}), ...(take.heard ? { heard: take.heard.summary } : {}),
-            ...(take.closeness ? { score: take.closeness.score, gaps: take.closeness.gaps, features: Object.fromEntries(take.closeness.features.map((feature) => [feature.name, feature.similarity])) } : {}) })),
+            ...(take.closeness ? { score: take.closeness.score, gaps: take.closeness.gaps, features: Object.fromEntries(take.closeness.features.map((feature) => [feature.name, feature.similarity])),
+              ...(take.closeness.structural ? { knobsCantCloseThis: `${take.closeness.structural.gap}: ${take.closeness.structural.move}` } : {}) } : {}) })),
           ...(result.reference ? { reference: result.reference.summary } : {}), seconds: result.seconds, ...(result.notes.length ? { notes: result.notes } : {}) }), isError: result.takes.every((take) => take.silent) };
       } }] : [];
     return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions];
