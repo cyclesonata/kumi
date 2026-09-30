@@ -7319,3 +7319,59 @@ class PlayingControlTests(unittest.TestCase):
         transport = {"setRef": snapshot["set"]["ref"], "action": "jump-by", "beats": -8, "expectedObjectIdentity": snapshot["set"]["objectIdentity"], "expectedRevision": bridge.mapper._playback()["revision"]}
         self.assertTrue(mutate_through(bridge, "transport.action", transport, "jump-key-0001")["done"]); self.assertEqual(song.jumps, [-8.0])
         with self.assertRaisesRegex(ValueError, "beats is required for jump-by"): bridge.mapper.invoke("transport.action", {key: value for key, value in transport.items() if key != "beats"})
+
+
+class FakeEnvelopeEvent:
+    def __init__(self, time, value): self.time = time; self.value = value
+
+
+class FakeStepEnvelope:
+    """A clip envelope with Live's event API, insert_step and value_at_time (a held value per event)."""
+
+    def __init__(self, clip, events=()):
+        self.canonical_parent = clip; self.events = list(events); self.halve_steps = False
+    def events_in_range(self, start, end): return [event for event in sorted(self.events, key=lambda event: event.time) if start <= event.time < end]
+    def create_event(self, event): self.events.append(event)
+    def delete_events_in_range(self, start, end): self.events = [event for event in self.events if not start <= event.time < end]
+    def insert_step(self, start, length, value):
+        if self.halve_steps: value = value / 2
+        self.events = [event for event in self.events if not start <= event.time <= start + length] + [FakeEnvelopeEvent(start, value), FakeEnvelopeEvent(start + length - 1e-3, value)]
+    def value_at_time(self, time):
+        ordered = sorted(self.events, key=lambda event: event.time); before = [event for event in ordered if event.time <= time]
+        return before[-1].value if before else (ordered[0].value if ordered else 0.0)
+
+
+class FakeAutomationClip(FakeClip):
+    def __init__(self, events=((0.0, 0.2),)):
+        super().__init__(4.0); self.envelope = FakeStepEnvelope(self, [FakeEnvelopeEvent(time, value) for time, value in events])
+    def automation_envelope(self, _parameter): return self.envelope
+    def create_automation_envelope(self, _parameter): self.envelope = FakeStepEnvelope(self); return self.envelope
+    def clear_envelope(self, _parameter): self.envelope = None
+
+
+class AutomationStepTests(unittest.TestCase):
+    """automation.step.insert (fenced as point inserts) and automation.value-at (a read)."""
+
+    def test_a_step_holds_its_value_or_the_envelope_goes_back(self):
+        song = FakeSong(); clip = FakeAutomationClip(); song.tracks[0].clip_slots[0].clip = clip; bridge = immediate_bridge(song); snapshot = bridge.mapper.snapshot()
+        clip_ref, parameter_ref = snapshot["tracks"][0]["clips"][0]["ref"], snapshot["tracks"][0]["devices"][0]["parameters"][0]["ref"]
+        self.assertTrue(bridge.mapper._operation_supported("automation.step.insert") and bridge.mapper._operation_supported("automation.value-at"))
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("automation.value-at"))
+        self.assertFalse(remote_module._mutation_authority_required("automation.value-at"))
+        self.assertEqual(read_through(bridge, "automation.value-at", {"clipRef": clip_ref, "parameterRef": parameter_ref, "time": 1.5}), {"value": 0.2})
+        def step(**fields):
+            read = bridge.mapper.invoke("automation.envelope.read", {"clipRef": clip_ref, "parameterRef": parameter_ref})
+            return {"clipRef": clip_ref, "parameterRef": parameter_ref, "start": 1.0, "length": 1.0, "value": 0.8, "expectedAuthorityDigest": bridge.mapper._envelope_authority_digest(clip_ref, parameter_ref), "expectedEnvelopeRevision": read["revision"], **fields}
+        self.assertEqual(mutate_through(bridge, "automation.step.insert", step(), "step-key-0001"), {"inserted": 1})
+        self.assertEqual(read_through(bridge, "automation.value-at", {"clipRef": clip_ref, "parameterRef": parameter_ref, "time": 1.5}), {"value": 0.8})
+        # Live holds something else over the step: the envelope goes back exactly.
+        before = [(event.time, event.value) for event in clip.envelope.events_in_range(0, 8)]; clip.envelope.halve_steps = True
+        with self.assertRaisesRegex(ValueError, "^automation step was not confirmed$"): bridge.mapper.invoke("automation.step.insert", step(start=2.5, length=0.5, value=0.6))
+        self.assertEqual([(event.time, event.value) for event in clip.envelope.events_in_range(0, 8)], before)
+        with self.assertRaisesRegex(ValueError, "outside the clip"): bridge.mapper.invoke("automation.step.insert", step(start=3.5, length=1.0))
+        with self.assertRaisesRegex(ValueError, "outside the parameter's range"): bridge.mapper.invoke("automation.step.insert", step(value=2.0))
+        with self.assertRaisesRegex(ValueError, "envelope changed since preview"): bridge.mapper.invoke("automation.step.insert", step(expectedEnvelopeRevision="0" * 64))
+        # No envelope yet: the value is null, and a step makes one.
+        clip.envelope = None
+        self.assertEqual(bridge.mapper.invoke("automation.value-at", {"clipRef": clip_ref, "parameterRef": parameter_ref, "time": 0.0}), {"value": None})
+        self.assertEqual(bridge.mapper.invoke("automation.step.insert", step(start=0.0, length=2.0, value=0.4)), {"inserted": 1}); self.assertEqual(clip.envelope.value_at_time(1.0), 0.4)

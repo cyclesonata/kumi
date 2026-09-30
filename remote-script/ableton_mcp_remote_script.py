@@ -301,7 +301,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get"}
+_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -909,7 +909,7 @@ class LiveObjectMapper:
         "simpler": ("SimplerDevice", "SimplerDevice"), "plugin": ("PluginDevice", "PluginDevice"), "drift": ("DriftDevice", "DriftDevice"),
         "eq8": ("Eq8Device", "Eq8Device"), "hybrid_reverb": ("HybridReverbDevice", "HybridReverbDevice"), "looper": ("LooperDevice", "LooperDevice"),
         "meld": ("MeldDevice", "MeldDevice"), "drum_cell": ("DrumCellDevice", "DrumCellDevice"), "compressor": ("CompressorDevice", "CompressorDevice"),
-        "max": ("MaxDevice", "MaxDevice"),
+        "max": ("MaxDevice", "MaxDevice"), "envelope": ("Envelope", "Envelope"),
     }
     # How far a probe looks into the Set when Live's module isn't there (a test double): a few of each kind.
     _PROBE_SAMPLE = 8
@@ -969,6 +969,16 @@ class LiveObjectMapper:
             probe["take_lane"].extend(self._items(self._read_attr(track, "take_lanes") or [])[:sample])
             devices_of(track, 0)
         probe["arrangement_clip"].extend(self._items(getattr(self.song, "arrangement_clips", []))[:sample])
+        # An envelope exists only per clip and parameter: the first a few sampled clips have.
+        for clip in probe["clip"][:sample]:
+            reader = getattr(clip, "automation_envelope", None)
+            if not callable(reader): continue
+            for parameter in probe["parameter"][:sample]:
+                try: envelope = reader(parameter)
+                except Exception: envelope = None
+                if envelope is not None:
+                    probe["envelope"].append(envelope); break
+            if probe["envelope"]: break
         return probe
 
     def _offers(self, kind: str, *members: str, method: bool = True) -> bool:
@@ -1013,6 +1023,10 @@ class LiveObjectMapper:
             return self._offers("clip", "set_fire_button_state") or self._offers("slot", "set_fire_button_state") or self._offers("scene", "set_fire_button_state")
         if operation == "track.action":
             return self._offers("track", "jump_in_running_session_clip")
+        if operation == "automation.step.insert":
+            return self._offers("clip", "automation_envelope", "create_automation_envelope", "clear_envelope") and self._offers("envelope", "insert_step")
+        if operation == "automation.value-at":
+            return self._offers("clip", "automation_envelope") and self._offers("envelope", "value_at_time")
         if operation == "subscribe":
             return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
@@ -3424,6 +3438,10 @@ class LiveObjectMapper:
             return self._fire_button_set(args, getattr(self, "_request_owner", None))
         if operation == "track.action":
             return self._track_action(args)
+        if operation == "automation.step.insert":
+            return self._envelope_step_insert(args)
+        if operation == "automation.value-at":
+            return self._envelope_value_at(args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
@@ -8256,6 +8274,50 @@ class LiveObjectMapper:
             except BaseException as rollback_error: raise ValueError("automation point deletion failed and exact rollback failed") from rollback_error
             raise
         return {"deleted": len(before_points) - len(expected)}
+
+    def _envelope_step_insert(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A step of automation: one value held from start for length (Live's Envelope.insert_step)
+        in a Session clip's envelope for a parameter, made when it has none. Fenced as point inserts
+        are; the envelope must then give the value over the step, or it goes back as it was."""
+        if set(args) - {"clipRef", "parameterRef", "start", "length", "value", "expectedAuthorityDigest", "expectedEnvelopeRevision"}: raise ValueError("automation step arguments are invalid")
+        self._guard_envelope_mutation(args)
+        clip_ref, parameter_ref = str(args["clipRef"]), str(args["parameterRef"])
+        clip, prior_envelope = self._envelope(clip_ref, parameter_ref); parameter = self._resolve_parameter(parameter_ref)
+        start, length, value = args.get("start"), args.get("length"), args.get("value")
+        clip_length = self._read_attr(clip, "length"); minimum = self._read_attr(parameter, "min", "min_value"); maximum = self._read_attr(parameter, "max", "max_value")
+        if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in (start, length, value, clip_length, minimum, maximum)): raise ValueError("the step or its clip and parameter bounds are unavailable")
+        if float(start) < 0 or float(length) <= 0 or float(start) + float(length) > float(clip_length) + 1e-9: raise ValueError("the step is outside the clip")
+        if not float(minimum) <= float(value) <= float(maximum): raise ValueError("the step's value is outside the parameter's range")
+        before_points = self._envelope_points(prior_envelope) if prior_envelope is not None else []; prior_exists = prior_envelope is not None
+        if not callable(getattr(clip, "clear_envelope", None)) or not callable(getattr(clip, "create_automation_envelope", None)) or prior_exists and not callable(getattr(prior_envelope, "create_event", None)): raise ValueError("automation step insertion cannot guarantee exact rollback on this Live shape")
+        envelope = prior_envelope
+        try:
+            if envelope is None: _, envelope = self._envelope(clip_ref, parameter_ref, create=True)
+            inserter = getattr(envelope, "insert_step", None) if envelope is not None else None
+            if not callable(inserter): raise ValueError("automation steps are unavailable on this Live shape")
+            inserter(float(start), float(length), float(value))
+            after_points = self._envelope_points(envelope); reader = getattr(envelope, "value_at_time", None)
+            if callable(reader):
+                middle = reader(float(start) + float(length) / 2)
+                if not isinstance(middle, (int, float)) or isinstance(middle, bool) or not math.isfinite(float(middle)) or not _same_number(float(middle), float(value)): raise ValueError("automation step was not confirmed")
+            elif prior_exists and self._bounded_canonical(after_points) == self._bounded_canonical(before_points): raise ValueError("automation step was not confirmed")
+        except BaseException as error:
+            try: self._restore_envelope_state(clip, parameter, prior_exists, before_points, "clear-recreate")
+            except BaseException as rollback_error: raise ValueError("automation step insertion failed and exact rollback failed") from rollback_error
+            raise
+        return {"inserted": 0 if prior_exists and self._bounded_canonical(after_points) == self._bounded_canonical(before_points) else 1}
+
+    def _envelope_value_at(self, args: dict[str, Any]) -> dict[str, Any]:
+        """The value a Session clip's envelope gives a parameter at a time (Live's value_at_time);
+        null when the clip has no envelope for it."""
+        moment = args.get("time")
+        if set(args) - {"clipRef", "parameterRef", "time"} or not isinstance(moment, (int, float)) or isinstance(moment, bool) or not math.isfinite(float(moment)) or float(moment) < 0: raise ValueError("automation value arguments are invalid")
+        _, envelope = self._envelope(str(args.get("clipRef")), str(args.get("parameterRef")))
+        if envelope is None: return {"value": None}
+        reader = getattr(envelope, "value_at_time", None)
+        if not callable(reader): raise ValueError("envelope values are unavailable on this Live shape")
+        value = reader(float(moment))
+        return {"value": float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None}
 
     def _device_location(self, reference: str, expected_identity: str | None = None, expected_owner_ref: str | None = None, expected_owner_identity: str | None = None, expected_siblings: Any = None, expected_track_ref: str | None = None, expected_track_identity: str | None = None) -> tuple[Any, Any, int, int, str]:
         """Resolve a discovered device to its exact track/chain owner without
