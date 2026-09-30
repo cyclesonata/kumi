@@ -1,109 +1,65 @@
-# Kumi
+<p align="center">
+  <img src="docs/assets/kumi-logo.svg" alt="kumi" width="300">
+</p>
 
-English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+<p align="center">
+  <a href="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/ableton-mcp-beyond/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/ableton-mcp-beyond?label=release"></a>
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-A personal producer assistant for Ableton Live: a full-screen terminal
-conversation about the open Live Set. It answers questions about the Set and
-makes the changes you ask for, each shown in HISTORY with its own undo. That
-covers almost anything Live's scripting allows:
+<p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a>
+</p>
 
-- tempo, time signature, swing and scale;
-- the mixer, routing and sidechains;
-- tracks, returns and scenes;
-- clips, notes and MIDI transforms;
-- devices, racks and their parameters;
-- samples it finds on your computer.
+**A studio partner for Ableton Live that learns how you work.** Tell Kumi what you want in plain words and it does the work in your Set, from the tedious to the things you'd never have time to figure out: rebuilding a sound from a YouTube tutorial, comparing your mix with a reference, writing a Max for Live device you describe, or reworking the rack you point at. Every change shows up with its own undo, so nothing happens behind your back, and it remembers the techniques you keep, so it fits you better with every session.
 
-It also:
+## What it does
 
-- plays, records and bounces audio (by resampling) when you ask;
-- listens to audio, such as a reference track, a sample or its own recording,
-  and compares a mix with a reference;
-- watches video tutorials, from YouTube or a file, and builds what they show;
-- makes Max for Live MIDI effects you describe, and puts them on your tracks;
-- saves your ways of working as recipes to replay, including ones it learns by
-  watching you;
-- keeps short notes of what you tell it;
-- keeps each Set's conversations, so next time it picks up where you left off
-  (`/conversations` goes back to earlier ones), and for a saved Set says what
-  changed while it was closed.
+- **Changes almost anything in the Set:** tempo, scale and groove; the mixer, routing and sidechains; tracks, scenes and clips; notes and MIDI transforms; devices, racks and their parameters. Every change can be undone on its own.
+- **Listens:** loudness, tonal balance, width, tempo and key of a mix, a sample or its own bounce, and how your mix compares with a reference.
+- **Watches tutorials** from YouTube or a file, then builds what they show on a new track.
+- **Plays, records and resamples** when you ask.
+- **Makes Max for Live devices** you describe in plain words, and puts them on your tracks.
+- **Shows where you are:** FOCUS follows what you touch in Live, as a device tree, a piano roll or a Session or Arrangement strip. Click a device to point at it: "this Saturator's too harsh".
+- **Remembers:** notes about you and each Set, techniques it learns from what you keep, and recipes you can replay. Every save is shown, and one click forgets it.
+- **Keeps your conversations** for each Set, and says what changed while it was closed.
+- **Works with your model:** sign in with ChatGPT, or use an OpenAI, Anthropic or OpenCode API key.
 
-## Quick start
+## Get started
 
-You need **Node.js 22 or 24**; the Node 24 LTS installer from
-[nodejs.org](https://nodejs.org) is fine (Node 25 has reached end of life). From the
-repository root:
+You need **Node.js 22 or 24** ([nodejs.org](https://nodejs.org)) and Ableton Live 12.
 
 ```sh
-npm run setup                          # install and build everything, about a minute
-npm run kumi -- login openai-codex     # sign in with your ChatGPT plan (--device without a browser)
-npm run kumi -- bridge                 # with Live closed: put the bridge into Live (or update it)
-npm run kumi                           # talk about the open Live Set
-npm run kumi -- doctor                 # if anything's off: checks everything and says what to run
+npm run setup                        # install and build, about a minute
+npm run kumi -- login openai-codex   # sign in with ChatGPT (or set an API key)
+npm run kumi -- bridge               # with Live closed: connect Kumi to Live
+npm run kumi                         # open Kumi next to your Set
 ```
 
-Signing in also picks a default model; change it any time with
-`npm run kumi -- model <provider>/<model>`. API keys work too: `openai/`,
-`anthropic/` and `opencode/` models use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or
-`OPENCODE_API_KEY`, and `npm run kumi -- auth` shows what is usable.
+The first time, pick **AbletonMcpBridge** as a Control Surface in Live's **Settings → Link, Tempo & MIDI**. After that, Kumi finds Live by itself.
 
-To connect Live, quit it and run `npm run kumi -- bridge`: it installs the
-bridge's Remote Script (or updates it), then waits while you open Live. The
-first time, choose `AbletonMcpBridge` as a Control Surface in Live's
-**Settings → Link, Tempo & MIDI**. Kumi then finds the bridge by itself. Until
-then it still starts and chats, and tells you Live isn't connected
-([Connect to Live](docs/en/KUMI_POC.md#connect-to-live)).
+Something off? `npm run kumi -- doctor` checks everything and says what to run. `npm run kumi -- report` puts what went wrong in one file to send us, and `npm run kumi -- update` keeps Kumi and its bridge current.
 
-- [Kumi setup, commands, privacy and limitations](docs/en/KUMI_POC.md)
-- [Bridge setup and safety](docs/en/USER_GUIDE.md)
-- [Verification evidence](docs/evidence/kumi-poc.md)
+Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live.
 
-Kumi runs full screen in a terminal window: the conversation, a Live pane and the
-input box. Type `/` for commands; Esc stops Kumi's work; `/stop` stops Live;
-Ctrl-C clears the input box, then quits. If Live closes, Kumi picks up where you
-left off when it's back. It reads the Set fresh before each answer; `/new` starts
-a fresh conversation, and the last one stays kept.
+[Full guide](docs/en/KUMI_POC.md) · [Commands and screens](docs/en/KUMI_TUI.md) · [Changelog](CHANGELOG.md)
 
-## Tested with, and what's next
+## Status
 
-So far Kumi has been tested only with Ableton Live 12.4.15b4; other versions of
-Live haven't been tried yet. Support for Renoise and Reaper is up next.
+Kumi 1.0 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
 
 ## Development
 
 ```sh
 npm run typecheck
-npm test                     # credential-free; no Live required
-npm run probe:inference --workspace @kumi/app   # opt-in authenticated requests
+npm test          # no Live or sign-in needed
 ```
 
-`apps/kumi` owns the terminal; `packages/runtime` holds the session lifecycle, Kumi's
-agent core (`kernel/`), provider transports (`providers/`, built on the AI SDK
-provider packages), sign-in (`auth/`), notes and recipes (`core/`), audio
-analysis (`audio/`) and the restricted MCP integration. There is no direct Live
-adapter import, shell tool or beta Extensions SDK integration.
-[Changelog](CHANGELOG.md).
-
-## Ableton MCP Beyond — standalone bridge
-
-[![Bridge CI](https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml?query=branch%3Amain)
-[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
-
-The existing `@ableton-mcp/mcp-server` component remains independently usable
-with other MCP clients. Kumi uses its Live reads, editing, transport and
-recording tools, with their verified undo, and does its own audio analysis. It
-retains its own lockfile, Node support policy, safety contracts and CI.
-
-- [Standalone bridge entry](apps/mcp-server/README.md)
-- [User guide](docs/en/USER_GUIDE.md) · [Safety](docs/en/LIVE_SAFETY.md)
-- [Operations](docs/en/OPERATIONS.md) · [Recovery](docs/en/RECOVERY.md)
-- [Capabilities](docs/en/CAPABILITY_MATRIX.md) · [Support matrix](docs/en/SUPPORT_MATRIX.md)
-- [Delivery](docs/en/DELIVERY.md) · [Distribution policy](docs/en/DISTRIBUTION_POLICY.md)
-
-The hosted repository still uses its existing name; its rename is owner-managed.
+`apps/kumi` is the terminal app; `packages/runtime` holds Kumi's agent core, providers, memory, audio analysis and the Live integration. Kumi talks to Live through a local bridge, `apps/mcp-server` plus its Remote Script, which also works on its own with other MCP clients ([bridge guide](apps/mcp-server/README.md)).
 
 ## License
 
-[MIT](LICENSE.md). The local bridge artifact is unpublished, unsigned and
-unnotarized. Ableton Live is a trademark of Ableton AG; this project is not
-affiliated with or endorsed by Ableton.
+[MIT](LICENSE.md). Ableton Live is a trademark of Ableton AG; Kumi is not affiliated with or endorsed by Ableton.
