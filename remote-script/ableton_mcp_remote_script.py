@@ -1813,18 +1813,6 @@ class LiveObjectMapper:
         try: return work()
         finally: self._read_cache = None
 
-    def _device_and_parameter_rows(self) -> dict[str, Any]:
-        """Device and parameter rows by reference, the first of each in reading order."""
-        cache = self._read_cache
-        if cache is not None and "rows" in cache: return cache["rows"]
-        rows: dict[str, Any] = {}
-        for track in self.snapshot()["tracks"]:
-            for device in self._flatten_device_rows(track.get("devices", [])):
-                rows.setdefault(device["ref"], device)
-                for parameter in device["parameters"]: rows.setdefault(parameter["ref"], parameter)
-        if cache is not None: cache["rows"] = rows
-        return rows
-
     def _track_entries(self, kinds: bool = True) -> list[tuple[Any, Any]]:
         """Every track in snapshot order (regular and group tracks, returns, then the main track) with
         its kind. Without kinds, the tracks alone: no per-track read at all."""
@@ -1895,6 +1883,58 @@ class LiveObjectMapper:
             set_row["loop"] = loop_row
         return set_row
 
+    def _slot_rows(self, track_ref: str, index: int, slot: Any, slot_index: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """A Session slot's row and its clip's row (None when empty), as a track's whole row has them."""
+        clip = getattr(slot, "clip", None)
+        slot_ref = self.refs.put("clip_slot", slot, f"{index}:{slot_index}")
+        if clip is None:
+            return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)}, None
+        clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
+        notes = self._read_notes(clip)
+        clip_row = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0)), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
+        for key, value in self._clip_state_fields(clip).items():
+            if value is not None or key not in clip_row: clip_row[key] = value
+        return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)}, clip_row
+
+    def _ref_track_index(self, reference: Any) -> int | None:
+        """The snapshot index of the track a ref sits on, read from its path (refs are positional:
+        clip:3:5, device:3:0:2, a parameter's embedded device ref, mixer:3:volume...). None for
+        Set-level refs (set, scene, locator), another epoch's, or a path naming no track."""
+        if not isinstance(reference, str): return None
+        parts = reference.split(":")
+        epoch = str(self.refs.epoch)
+        if len(parts) < 3 or parts[0] != epoch: return None
+        kind, path = parts[1], parts[2:]
+        # A ref whose path is another ref (a parameter's device, a return chain's rack): that one decides.
+        if len(path) >= 3 and path[0] == epoch and not path[1].isdigit(): return self._ref_track_index(":".join(path))
+        if kind == "parameter":
+            return int(path[1]) if len(path) >= 2 and path[0] == "mixer" and path[1].isdigit() else None
+        if kind == "arrangement_clip":
+            # A two-part path is track:clip; one part is a Song-level Arrangement clip, on no track.
+            return int(path[0]) if len(path) == 2 and path[0].isdigit() else None
+        if kind in {"track", "clip", "clip_slot", "device", "chain", "drum_pad", "take_lane", "take_lane_clip", "routing_choice"}:
+            return int(path[0]) if path[0].isdigit() else None
+        return None
+
+    def _refresh(self, *references: Any) -> None:
+        """Re-register the objects at these refs' positions, as a snapshot would, reading only their
+        tracks: a ref names a position, and the object there now is what a mutation fences and acts on."""
+        scenes: list[Any] | None = None
+        for reference in references:
+            index = self._ref_track_index(reference)
+            parts = reference.split(":") if isinstance(reference, str) else []
+            if len(parts) >= 3 and parts[1] == "arrangement_clip":
+                # A track's row doesn't list its Arrangement clips; they're read (and registered) apart.
+                self._arrangement_clip_items() if index is None else self._arrangement_clip_items([index])
+                continue
+            if index is not None:
+                self._whole_track_row(index)
+                continue
+            if len(parts) == 3 and parts[0] == str(self.refs.epoch) and parts[1] == "scene" and parts[2].isdigit():
+                scenes = scenes if scenes is not None else self._items(getattr(self.song, "scenes", []))
+                if int(parts[2]) < len(scenes): self.refs.put("scene", scenes[int(parts[2])], parts[2])
+            elif len(parts) == 3 and parts[1] == "set": self.refs.put("set", self.song, "song")
+
     def _track_row(self, track: Any, track_kind: str, index: int) -> dict[str, Any]:
         """A track's whole row: its slots, clips with their notes, devices with their parameters,
         take lanes, mixer and routing."""
@@ -1903,18 +1943,9 @@ class LiveObjectMapper:
         clips = []
         slot_rows = []
         for slot_index, slot in enumerate(slots):
-            clip = getattr(slot, "clip", None)
-            slot_ref = self.refs.put("clip_slot", slot, f"{index}:{slot_index}")
-            if clip is None:
-                slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)})
-                continue
-            clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
-            notes = self._read_notes(clip)
-            clip_row = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0)), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
-            for key, value in self._clip_state_fields(clip).items():
-                if value is not None or key not in clip_row: clip_row[key] = value
-            clips.append(clip_row)
-            slot_rows.append({"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)})
+            slot_row, clip_row = self._slot_rows(track_ref, index, slot, slot_index)
+            if clip_row is not None: clips.append(clip_row)
+            slot_rows.append(slot_row)
         armed_value = self._armed(track)
         return {
             "ref": track_ref, "parentRef": self.refs.put("set", self.song, "song"), "objectIdentity": self._capture_object_identity(track),
@@ -2038,6 +2069,9 @@ class LiveObjectMapper:
         return rows
 
     def get(self, reference: str) -> Any:
+        """One object's row, reading only what it lives in: the ref's track (a clip, take lane,
+        device or parameter row comes from that track's whole row), a scene or the Set by
+        itself, the locators. Rows are exactly the snapshot's."""
         if not isinstance(reference, str):
             raise ValueError("object reference is required")
         obj = self.refs.get(reference)
@@ -2046,35 +2080,53 @@ class LiveObjectMapper:
         kind = reference.split(":", 2)[1] if reference.count(":") >= 2 else ""
         result = None
         if kind == "set":
-            result = self.snapshot()["set"]
-        elif kind == "clip":
-            result = next((clip for track in self.snapshot()["tracks"] for clip in track["clips"] if clip["ref"] == reference), None)
+            result = self._set_row()
+        elif kind in {"clip", "take_lane", "take_lane_clip", "device", "parameter"}:
+            result = self._track_scoped_rows(self._ref_track_index(reference), kind).get(reference)
         elif kind == "arrangement_clip":
-            result = next((clip for clip in self._arrangement_clip_items() if clip["ref"] == reference), None)
-        elif kind == "take_lane":
-            result = next((lane for track in self.snapshot()["tracks"] for lane in (track.get("takeLanes") or []) if lane["ref"] == reference), None)
-        elif kind == "take_lane_clip":
-            result = next((clip for track in self.snapshot()["tracks"] for lane in (track.get("takeLanes") or []) for clip in (lane.get("clips") or []) if clip["ref"] == reference), None)
-        elif kind in {"device", "parameter"}:
-            if self._read_cache is not None: result = self._device_and_parameter_rows().get(reference)
-            else:
-                for track in self.snapshot()["tracks"]:
-                    for device in self._flatten_device_rows(track.get("devices", [])):
-                        if device["ref"] == reference:
-                            result = device; break
-                        result = next((parameter for parameter in device["parameters"] if parameter["ref"] == reference), None)
-                        if result is not None: break
-                    if result is not None: break
+            track_index = self._ref_track_index(reference)
+            rows = self._arrangement_clip_items() if track_index is None else self._arrangement_clip_items([track_index])
+            result = next((clip for clip in rows if clip["ref"] == reference), None)
         elif kind == "locator":
             result = next((item for item in self._locator_items() if item["ref"] == reference), None)
         elif kind == "scene":
-            result = next((row for row in self.snapshot()["scenes"] if row["ref"] == reference), None)
+            path = reference.split(":", 2)[2]
+            scenes = self._items(getattr(self.song, "scenes", [])) if path.isdigit() else []
+            if path.isdigit() and int(path) < len(scenes):
+                row = self._scene_row(scenes[int(path)], int(path))
+                result = row if row["ref"] == reference else None
         elif kind == "track":
             identity = self._capture_object_identity(obj); tracks = self._all_track_objects(); matches = [candidate for candidate in tracks if self._capture_same_object(candidate, obj, identity)]
-            if len(matches) == 1: result = next((row for row in self.snapshot()["tracks"] if row["ref"] == reference and row.get("objectIdentity") == identity), None)
+            track_index = self._ref_track_index(reference)
+            row = self._whole_track_row(track_index) if len(matches) == 1 and track_index is not None else None
+            if row is not None and row["ref"] == reference and row.get("objectIdentity") == identity: result = row
         if result is None:
             raise ValueError("unknown live ref")
         return result
+
+    def _track_scoped_rows(self, index: int | None, kind: str) -> dict[str, Any]:
+        """The rows of one kind under a track, by ref (the first of each in reading order): its
+        clips, take lanes, take-lane clips, or devices and their parameters. Cached per shared read."""
+        if index is None: return {}
+        group = "device" if kind in {"device", "parameter"} else kind
+        cache = self._read_cache; key = f"track-{group}:{index}"
+        if cache is not None and key in cache: return cache[key]
+        row = self._whole_track_row(index)
+        rows: dict[str, Any] = {}
+        if row is not None:
+            if group == "clip":
+                for clip in row.get("clips") or []: rows.setdefault(clip["ref"], clip)
+            elif group == "take_lane":
+                for lane in row.get("takeLanes") or []: rows.setdefault(lane["ref"], lane)
+            elif group == "take_lane_clip":
+                for lane in row.get("takeLanes") or []:
+                    for clip in lane.get("clips") or []: rows.setdefault(clip["ref"], clip)
+            else:
+                for device in self._flatten_device_rows(row.get("devices", [])):
+                    rows.setdefault(device["ref"], device)
+                    for parameter in device["parameters"]: rows.setdefault(parameter["ref"], parameter)
+        if cache is not None: cache[key] = rows
+        return rows
 
     def _parameter_step(self, parameter: Any) -> float:
         """The step between a parameter's values: 1 for Live's stepped parameters (a switch, a
@@ -2117,7 +2169,13 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "ref": reference, "property": "value", "value": float(observed), "revision": revision}
 
-    def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = 1000) -> dict[str, Any]:
+    _DISCOVERY_TRACK_KINDS = {"track": {"regular", "group"}, "group_track": {"group"}, "return_track": {"return"}, "main_track": {"main"}}
+
+    def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = MAX_TRAVERSAL) -> dict[str, Any]:
+        """A page of one kind of object. What it reads follows what it lists: a parent's track alone
+        for what lives under a track; light rows for the Set's tracks (whole rows only for the page,
+        and only when the requested fields need them); scene rows; the locators. A Set-wide list's
+        revision (which binds its cursors) comes from its members' identities, names and order."""
         supported = {"set", "song", "track", "group_track", "return_track", "main_track", "scene", "clip_slot", "clip", "session_clip", "arrangement_clip", "note", "locator", "device", "parameter", "selection", "routing_choice", "session_playback"}
         if kind not in supported:
             raise ValueError("unsupported discovery kind")
@@ -2137,44 +2195,55 @@ class LiveObjectMapper:
             raise ValueError("discovery filters are invalid")
         if requested_fields is not None and (not isinstance(requested_fields, list) or len(requested_fields) > MAX_REQUESTED_FIELDS or any(not isinstance(field, str) or not field for field in requested_fields)):
             raise ValueError("requested fields are invalid")
-        snapshot = self.snapshot()
-        set_row = snapshot["set"]
-        if kind in {"set", "song"}: items = [set_row]
-        elif kind == "track": items = [item for item in snapshot["tracks"] if item["kind"] in {"regular", "group"}]
-        elif kind == "group_track": items = [item for item in snapshot["tracks"] if item["kind"] == "group"]
-        elif kind == "return_track": items = [item for item in snapshot["tracks"] if item["kind"] == "return"]
-        elif kind == "main_track": items = [item for item in snapshot["tracks"] if item["kind"] == "main"]
-        elif kind == "scene": items = snapshot["scenes"]
-        elif kind == "clip_slot": items = [slot for track in snapshot["tracks"] for slot in track["clipSlots"]]
-        elif kind in {"clip", "session_clip"}: items = [clip for track in snapshot["tracks"] for clip in track["clips"]]
-        elif kind == "arrangement_clip": items = self._arrangement_clip_items()
-        elif kind == "note": items = [note | {"ref": f"{clip['ref']}:note:{index}", "parentRef": clip["ref"]} for track in snapshot["tracks"] for clip in track["clips"] for index, note in enumerate(clip["notes"])]
-        elif kind == "locator": items = snapshot["arrangement"]["locators"]
-        elif kind == "device":
-            # A rack's chains by name, empty ones too: what a device can be loaded into, without its whole tree.
-            items = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device.get("chains") or [] if isinstance(chain, dict)]} if device.get("chains") else device for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"])]
-        elif kind == "parameter": items = [parameter for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
-        elif kind == "session_playback": items = [snapshot["playback"]]
-        elif kind == "selection":
-            view = getattr(self.song, "view", None); selected_track = getattr(view, "selected_track", None); selected_scene = getattr(view, "selected_scene", None); highlighted_slot = getattr(view, "highlighted_clip_slot", None)
-            track_objects = self._all_track_objects()
-            track_index = self._capture_index(track_objects, selected_track); track_ref = snapshot["tracks"][track_index]["ref"] if track_index is not None and track_index < len(snapshot["tracks"]) else None
-            scene_objects = self._items(getattr(self.song, "scenes", [])); scene_index = self._capture_index(scene_objects, selected_scene); scene_ref = snapshot["scenes"][scene_index]["ref"] if scene_index is not None and scene_index < len(snapshot["scenes"]) else None
-            highlighted_identity = self._capture_object_identity(highlighted_slot) if highlighted_slot is not None else None; slot_matches = [slot["ref"] for track in snapshot["tracks"] for slot in track.get("clipSlots", []) if highlighted_identity is not None and self._capture_same_object(self.refs.get(slot["ref"]), highlighted_slot, highlighted_identity)]; slot_ref = slot_matches[0] if len(slot_matches) == 1 else None
-            items = [{"ref": f"{self.refs.epoch}:selection:current", "parentRef": set_row["ref"], "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref, "selectedDeviceRef": (snapshot.get("selection") or {}).get("deviceRef"), **self._focus_fields()}]
+        if parent is not None and kind != "routing_choice" and not parent.startswith(f"{self.refs.epoch}:"):
+            raise ValueError("stale parent reference")
+        # Whose identity rows make a Set-wide list's revision; None: the items themselves.
+        identity_fields: tuple[str, ...] | None = None
+        light = False
+        if kind in {"set", "song"}: items = [self._set_row()]
+        elif kind in self._DISCOVERY_TRACK_KINDS:
+            wanted = self._DISCOVERY_TRACK_KINDS[kind]
+            members = [(index, track, track_kind) for index, (track, track_kind) in enumerate(self._track_entries()) if track_kind in wanted]
+            identity_fields = ("ref", "objectIdentity", "name", "kind")
+            if filters and any(key not in self._LIGHT_TRACK_FIELDS for key in filters):
+                # A filter on what only a whole row has: whole rows it is.
+                items = [row for index, _, _ in members for row in [self._whole_track_row(index)] if row is not None]
+            else:
+                items = [self._light_track_row(track, track_kind, index) for index, track, track_kind in members]; light = True
+        elif kind == "scene":
+            items = [self._scene_row(scene, index) for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
+            identity_fields = ("ref", "objectIdentity", "name")
+        elif kind in {"clip_slot", "clip", "session_clip", "note", "device", "parameter"}:
+            # What lives under a track is read from the parent's track alone; only a Set-wide device
+            # list (or a parent naming no track) reads every track.
+            track_index = self._ref_track_index(parent)
+            if track_index is not None: track_rows = [row for row in [self._whole_track_row(track_index)] if row is not None]
+            else: track_rows = self.snapshot()["tracks"]
+            if kind == "clip_slot": items = [slot for track in track_rows for slot in track["clipSlots"]]
+            elif kind in {"clip", "session_clip"}: items = [clip for track in track_rows for clip in track["clips"]]
+            elif kind == "note": items = [note | {"ref": f"{clip['ref']}:note:{index}", "parentRef": clip["ref"]} for track in track_rows for clip in track["clips"] if parent is None or clip["ref"] == parent for index, note in enumerate(clip["notes"])]
+            elif kind == "device":
+                # A rack's chains by name, empty ones too: what a device can be loaded into, without its whole tree.
+                items = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device.get("chains") or [] if isinstance(chain, dict)]} if device.get("chains") else device for track in track_rows for device in self._flatten_device_rows(track["devices"])]
+            else: items = [parameter for track in track_rows for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
+        elif kind == "arrangement_clip":
+            track_index = self._ref_track_index(parent)
+            items = self._arrangement_clip_items([track_index]) if track_index is not None else self._arrangement_clip_items()
+        elif kind == "locator": items = self._locator_items()
+        elif kind == "session_playback": items = [self._playback()]
+        elif kind == "selection": items = [self._selection_item()]
         else:
             # Routing choices are track-scoped Live objects. Enumerating a
             # non-existent Song.routing_choices collection made parent-scoped
             # discovery silently return no rows even when routing was usable.
             if parent is None or not parent.startswith(f"{self.refs.epoch}:track:"):
                 raise ValueError("routing-choice parent must be an authoritative track")
+            self._refresh(parent)
             try:
                 track = self.refs.get(parent)
             except KeyError as error:
                 raise ValueError("routing-choice parent is stale") from error
-            tracks = self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", []))
-            main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
-            if main_track is not None: tracks.append(main_track)
+            tracks = self._all_track_objects()
             track_index = self._capture_index(tracks, track)
             if track_index is None: raise ValueError("routing-choice parent is stale")
             items = []
@@ -2192,13 +2261,12 @@ class LiveObjectMapper:
                     row["parentRef"] = parent
                     items.append(row)
         if parent is not None:
-            if not parent.startswith(f"{self.refs.epoch}:"):
-                raise ValueError("stale parent reference")
             items = [item for item in items if item.get("parentRef") == parent]
         if filters:
             items = [item for item in items if all(item.get(key) == value for key, value in filters.items())]
         items = items[:traversal_budget]
-        fingerprint = hashlib.sha256(json.dumps(items, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+        basis = [[item.get(field) for field in identity_fields] for item in items] if identity_fields is not None else items
+        fingerprint = hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
         revision = f"{self.refs.epoch}:{kind}:{len(items)}:{fingerprint}"
         offset = 0
         if cursor is not None:
@@ -2208,10 +2276,33 @@ class LiveObjectMapper:
         page = items[offset:offset + limit]
         next_offset = offset + len(page)
         next_cursor = self._cursor(next_offset, revision) if next_offset < len(items) else None
+        if light and (requested_fields is None or not set(requested_fields) <= self._LIGHT_TRACK_FIELDS):
+            # The page's tracks whole, and only the page's.
+            page = [self._whole_track_row(self._ref_track_index(item["ref"])) or item for item in page]
         if requested_fields is not None:
             allowed = set(requested_fields) | {"ref", "parentRef"}
             page = [{key: value for key, value in item.items() if key in allowed} for item in page]
         return {"epoch": self.refs.epoch, "items": page, "truncated": next_cursor is not None, "revision": revision, "kind": kind, **({"nextCursor": next_cursor} if next_cursor else {})}
+
+    def _selection_item(self) -> dict[str, Any]:
+        """The selection as discovery lists it: the selected track, scene and highlighted slot by
+        identity, the selected device, and the focus fields, reading only the selected track."""
+        view = getattr(self.song, "view", None); selected_track = getattr(view, "selected_track", None); selected_scene = getattr(view, "selected_scene", None); highlighted_slot = getattr(view, "highlighted_clip_slot", None)
+        track_objects = self._all_track_objects()
+        track_index = self._capture_index(track_objects, selected_track); track_ref = self.refs.put("track", track_objects[track_index], str(track_index)) if track_index is not None else None
+        scene_objects = self._items(getattr(self.song, "scenes", [])); scene_index = self._capture_index(scene_objects, selected_scene); scene_ref = self.refs.put("scene", scene_objects[scene_index], str(scene_index)) if scene_index is not None else None
+        slot_ref = None
+        if highlighted_slot is not None:
+            identity = self._capture_object_identity(highlighted_slot); track_indices: dict[str, int] = {}
+            for index, track in enumerate(track_objects): track_indices.setdefault(self._capture_object_identity(track), index)
+            owner = self._owner_track_index(highlighted_slot, track_indices)
+            def matches_on(indices: Any) -> list[str]:
+                return [self.refs.put("clip_slot", slot, f"{index}:{slot_index}") for index in indices for slot_index, slot in enumerate(self._items(getattr(track_objects[index], "clip_slots", []))) if self._capture_same_object(slot, highlighted_slot, identity)]
+            matches = matches_on([owner] if owner is not None else [track_index] if track_index is not None else [])
+            # No canonical_parent to follow and not on the selected track: every track's slots, by identity.
+            if not matches and owner is None: matches = matches_on(range(len(track_objects)))
+            slot_ref = matches[0] if len(matches) == 1 else None
+        return {"ref": f"{self.refs.epoch}:selection:current", "parentRef": self.refs.put("set", self.song, "song"), "selectedRef": track_ref or scene_ref or slot_ref, "selectedTrackRef": track_ref, "selectedSceneRef": scene_ref, "highlightedClipSlotRef": slot_ref, "selectedDeviceRef": self._selection_row_targeted({"deviceRef"})["deviceRef"], **self._focus_fields()}
 
     _MONITORABLE_KINDS = {"regular", "audio", "midi"}
 
@@ -2224,6 +2315,10 @@ class LiveObjectMapper:
         for target in list(playback.get("firedTargets", [])) + list(playback.get("playingTargets", [])):
             seen[self._target_key(target)] = target
         return [seen[key] for key in sorted(seen)]
+
+    def _target_track_indices(self, keys: Any) -> list[int]:
+        """The snapshot indices of the tracks that playback target keys (trackRef|slotRef|sceneRef) name."""
+        return sorted({index for key in keys for index in [self._ref_track_index(str(key).split("|", 1)[0])] if index is not None})
 
     def _check_audition_safety(self, snapshot: dict[str, Any]) -> None:
         playback = snapshot["playback"]
@@ -2305,7 +2400,8 @@ class LiveObjectMapper:
         if not isinstance(eligible, list) or not 1 <= len(eligible) <= MAX_DISCOVERY_COLLECTION_LENGTH or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
             raise ValueError("eligible targets are invalid")
         eligible_keys = set(eligible)
-        snapshot = self.snapshot()
+        # Every track's arm and monitoring (light rows carry them) and the targets' tracks whole.
+        snapshot = self.snapshot({"focus": self._target_track_indices(eligible_keys)})
         if snapshot["set"].get("name") != set_name or not isinstance(expected_set_identity, str) or not hmac.compare_digest(str(snapshot["set"].get("objectIdentity", "")), expected_set_identity):
             raise ValueError("disposable Set identity does not match")
         scenes = snapshot["scenes"]
@@ -2341,7 +2437,7 @@ class LiveObjectMapper:
         if not isinstance(eligible, list) or len(eligible) > MAX_DISCOVERY_COLLECTION_LENGTH or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
             raise ValueError("eligible targets are invalid")
         eligible_keys = set(eligible)
-        snapshot = self.snapshot()
+        snapshot = self.snapshot({"focus": self._target_track_indices(eligible_keys)})
         if snapshot["set"].get("name") != set_name or not isinstance(expected_set_identity, str) or not hmac.compare_digest(str(snapshot["set"].get("objectIdentity", "")), expected_set_identity):
             raise ValueError("disposable Set identity does not match")
         scene_row = next((item for item in snapshot.get("scenes", []) if item.get("ref") == reference), None)
@@ -2373,7 +2469,7 @@ class LiveObjectMapper:
         return {"stopped": True, "stoppedTargets": sorted(active_keys), "recordingStopped": True}
 
     def _guard_note_clip(self, args: dict[str, Any]) -> Any:
-        reference = str(args.get("ref")); self.snapshot(); authority = self._session_clip_authority(reference)
+        reference = str(args.get("ref")); self._refresh(reference); authority = self._session_clip_authority(reference)
         expected_authority = args.get("expectedClipAuthority"); expected_revision = args.get("expectedNotesRevision")
         if not isinstance(expected_authority, dict) or not hmac.compare_digest(self._bounded_canonical(authority), self._bounded_canonical(expected_authority)):
             raise ValueError("note clip hierarchy identity changed since preview")
@@ -3086,7 +3182,7 @@ class LiveObjectMapper:
                 raise ValueError("discovery arguments are invalid")
             if any(key in args and args[key] is not None and not isinstance(args[key], expected) for key, expected in (("kind", str), ("limit", int), ("cursor", str), ("parent", str), ("filters", dict), ("requestedFields", list), ("traversalBudget", int))):
                 raise ValueError("discovery arguments are invalid")
-            return self.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", 1000))
+            return self.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL))
         if operation == "session.status":
             return self.status()
         if operation == "session.reconnect":
@@ -3168,7 +3264,8 @@ class LiveObjectMapper:
             authority = self._session_clip_authority(reference) if reference.startswith(f"{self.refs.epoch}:clip:") else {"expectedObjectIdentity": self.get(reference).get("objectIdentity"), "expectedAuthorityRevision": self._arrangement_clip_authority_revision(reference)}
             return hashlib.sha256(self._bounded_canonical(authority).encode("utf-8")).hexdigest()
         if kind == "device":
-            snapshot = self.snapshot()
+            track_index = self._ref_track_index(reference)
+            track_rows = [row for row in [self._whole_track_row(track_index) if track_index is not None else None] if row is not None]
             def visit(values: Any, owner_ref: str, owner_identity: str, track: dict[str, Any]) -> dict[str, Any] | None:
                 if not isinstance(values, list): return None
                 siblings = [{"ref": item.get("ref"), "objectIdentity": item.get("objectIdentity")} for item in values if isinstance(item, dict)]
@@ -3183,7 +3280,7 @@ class LiveObjectMapper:
                             found = visit(chain.get("devices", []), chain.get("ref"), chain.get("objectIdentity"), track)
                             if found is not None: return found
                 return None
-            for track in snapshot.get("tracks", []):
+            for track in track_rows:
                 found = visit(track.get("devices", []), track.get("ref"), track.get("objectIdentity"), track)
                 if found is not None: return hashlib.sha256(self._bounded_canonical(found).encode("utf-8")).hexdigest()
             raise ValueError("device rename hierarchy is unavailable")
@@ -3211,8 +3308,9 @@ class LiveObjectMapper:
             arrangement_rows = self._arrangement_clip_items(); current_clips = [getattr(slot, "clip", None) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", []))] + [self.refs.get(row["ref"]) for row in arrangement_rows]
             if sum(1 for candidate in current_clips if self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename clip is stale or ambiguous")
         if kind == "device":
-            matching_rows = [device for track in self.snapshot()["tracks"] for device in self._flatten_device_rows(track.get("devices", [])) if device.get("objectIdentity") == expected_identity]
-            if len(matching_rows) != 1 or matching_rows[0].get("ref") != reference: raise ValueError("rename device is stale or ambiguous")
+            track_index = self._ref_track_index(reference); track_row = self._whole_track_row(track_index) if track_index is not None else None
+            named = next((device for device in self._flatten_device_rows((track_row or {}).get("devices", [])) if device.get("ref") == reference), None)
+            if named is None or named.get("objectIdentity") != expected_identity or self._device_identity_count(expected_identity) != 1: raise ValueError("rename device is stale or ambiguous")
         prefix = self._return_name_prefix(target, expected_identity) if kind == "track" else ""
         requested = name[len(prefix):] if prefix and name.startswith(prefix) else name
         if not requested: raise ValueError("rename name is invalid")
@@ -3225,6 +3323,25 @@ class LiveObjectMapper:
             if str(getattr(target, "name", "")) != expected_name: raise ValueError("rename failed and exact rollback failed") from rename_error
             raise ValueError("rename postcondition was not confirmed") from rename_error
         return {"renamed": reference, "name": actual}
+
+    def _device_identity_count(self, identity: str) -> int:
+        """How many times a device identity occurs in the Set's device trees (every track's devices,
+        their chains and their drum pads' chains), reading identities, not parameters."""
+        count = 0; walked = 0; owners: set[str] = set()
+        def visit(owner: Any) -> None:
+            nonlocal count, walked
+            owner_identity = self._capture_object_identity(owner)
+            if owner_identity in owners: return
+            owners.add(owner_identity)
+            for device in self._items(self._read_attr(owner, "devices") or []):
+                walked += 1
+                if walked > MAX_TRAVERSAL: raise ValueError("device hierarchy traversal exceeds its bound")
+                if self._capture_object_identity(device) == identity: count += 1
+                for chain in self._items(self._read_attr(device, "chains") or []): visit(chain)
+                for pad in self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or []):
+                    for chain in self._items(self._read_attr(pad, "chains") or []): visit(chain)
+        for track in self._all_track_objects(): visit(track)
+        return count
 
     def _return_name_prefix(self, target: Any, identity: str) -> str:
         """Live shows a return track with its letter ("A-Reverb") and prepends the letter to any
@@ -3245,9 +3362,15 @@ class LiveObjectMapper:
             if str(getattr(target, "name", "")) == display_name: return
 
     def _structure_revision(self) -> str:
-        snapshot = self.snapshot()
-        identity = {"tracks": [[item["ref"], item.get("objectIdentity"), item["name"], item["kind"], index] for index, item in enumerate(snapshot["tracks"])], "scenes": [[item["ref"], item.get("objectIdentity"), item["name"], index] for index, item in enumerate(snapshot["scenes"])]}
-        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        """The Set's structure (each track's and scene's ref, identity, name, kind and place), hashed
+        exactly as the host hashes a snapshot's rows, from light reads: nothing below a track."""
+        cache = self._read_cache
+        if cache is not None and "structure" in cache: return cache["structure"]
+        tracks = [[self.refs.put("track", track, str(index)), self._capture_object_identity(track), str(getattr(track, "name", f"Track {index + 1}")), track_kind, index] for index, (track, track_kind) in enumerate(self._track_entries())]
+        scenes = [[self.refs.put("scene", scene, str(index)), self._capture_object_identity(scene), str(getattr(scene, "name", f"Scene {index + 1}")), index] for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
+        revision = hashlib.sha256(json.dumps({"tracks": tracks, "scenes": scenes}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if cache is not None: cache["structure"] = revision
+        return revision
 
     def _owned_row_exists(self, row: dict[str, Any]) -> bool:
         """Whether a transaction-owned object is still in the Set, wherever it is now. One that's
@@ -3470,7 +3593,7 @@ class LiveObjectMapper:
 
     def _mutate(self, operation: str, args: dict[str, Any]) -> Any:
         if operation == "clip.create":
-            track_ref = str(args["trackRef"]); self.snapshot(); track = self.refs.get(track_ref)
+            track_ref = str(args["trackRef"]); self._refresh(track_ref); track = self.refs.get(track_ref)
             if not bool(getattr(track, "has_midi_input", False)):
                 raise ValueError("target track is not MIDI-capable")
             slots = self._items(getattr(track, "clip_slots", [])); scenes = self._items(getattr(self.song, "scenes", []))
@@ -3647,20 +3770,28 @@ class LiveObjectMapper:
         return hashlib.sha256(self._bounded_canonical(_without_fields(row, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
 
     def _ownership_fingerprint(self, reference: str) -> str:
+        """What a created object's cleanup checks has not changed since it was made, in the form the
+        host fingerprints it. Reads the object's own track (a track), each track's slot on the
+        scene (a scene), or the object's row: never the whole Set."""
         if not reference.startswith(f"{self.refs.epoch}:"): raise ValueError("created object reference is malformed")
-        snapshot = _expanded_pad_chains(self.snapshot())
         if f":track:" in reference:
-            track = next((row for row in snapshot["tracks"] if row["ref"] == reference), None)
-            if track is None: raise ValueError("created track fingerprint is unavailable")
-            owned_track = {**{key: value for key, value in track.items() if key not in _VOLATILE_TRACK_FIELDS}, **({"routing": {key: value for key, value in track["routing"].items() if key not in _VOLATILE_ROUTING_FIELDS}} if isinstance(track.get("routing"), dict) else {}), "clipSlots": [{key: value for key, value in slot.items() if key not in _VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}; arrangement_clips = [clip for clip in snapshot.get("arrangement", {}).get("clips", []) if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
+            index = self._ref_track_index(reference)
+            row = self._whole_track_row(index) if index is not None else None
+            if row is None or row["ref"] != reference: raise ValueError("created track fingerprint is unavailable")
+            # Expanded as within a whole snapshot, whose track rows sit two levels down.
+            track = _expanded_pad_chains(row, 2)
+            owned_track = {**{key: value for key, value in track.items() if key not in _VOLATILE_TRACK_FIELDS}, **({"routing": {key: value for key, value in track["routing"].items() if key not in _VOLATILE_ROUTING_FIELDS}} if isinstance(track.get("routing"), dict) else {}), "clipSlots": [{key: value for key, value in slot.items() if key not in _VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}; arrangement_clips = [clip for clip in self._arrangement_clip_items([index]) if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
             return hashlib.sha256(self._bounded_canonical(_without_fields({"track": owned_track, "arrangementClips": arrangement_clips}, _VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
         if f":scene:" not in reference: return self._mapped_fingerprint(reference)
-        scene = next((row for row in snapshot["scenes"] if row["ref"] == reference), None)
-        if scene is None: raise ValueError("created scene fingerprint is unavailable")
+        path = reference.split(":", 2)[2]; scenes = self._items(getattr(self.song, "scenes", []))
+        scene = self._scene_row(scenes[int(path)], int(path)) if path.isdigit() and int(path) < len(scenes) else None
+        if scene is None or scene["ref"] != reference: raise ValueError("created scene fingerprint is unavailable")
         scene_identity = {key: scene.get(key) for key in ("ref", "parentRef", "objectIdentity", "name", "triggerable")}; contents = []
-        for track in snapshot["tracks"]:
-            slot = next((row for row in track.get("clipSlots", []) if row.get("sceneIndex") == scene["index"]), None); clip = next((row for row in track.get("clips", []) if slot is not None and row.get("ref") == slot.get("clipRef")), None); owned_slot = {key: slot.get(key) for key in ("ref", "parentRef", "trackRef", "objectIdentity", "clipRef", "empty")} if slot is not None else None
-            contents.append({"trackRef": track.get("ref"), "trackIdentity": track.get("objectIdentity"), "slot": owned_slot, "clip": _without_fields(clip, _VOLATILE_CLIP_FIELDS)})
+        for index, (track, _) in enumerate(self._track_entries(kinds=False)):
+            track_ref = self.refs.put("track", track, str(index)); slots = self._items(getattr(track, "clip_slots", []))
+            slot, clip = self._slot_rows(track_ref, index, slots[scene["index"]], scene["index"]) if scene["index"] < len(slots) else (None, None)
+            owned_slot = {key: slot.get(key) for key in ("ref", "parentRef", "trackRef", "objectIdentity", "clipRef", "empty")} if slot is not None else None
+            contents.append({"trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "slot": owned_slot, "clip": _without_fields(clip, _VOLATILE_CLIP_FIELDS)})
         return hashlib.sha256(self._bounded_canonical({"scene": scene_identity, "contents": contents}).encode("utf-8")).hexdigest()
 
     def _creation_topology(self) -> str:
@@ -3781,7 +3912,7 @@ class LiveObjectMapper:
         reference = args.get("ref")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:clip:"):
             raise ValueError("clip reference is stale or invalid")
-        self.snapshot(); authority = self._session_clip_authority(reference)
+        self._refresh(reference, args.get("targetTrackRef")); authority = self._session_clip_authority(reference)
         expected_source = {key: args.get(key) for key in authority}
         if not all(isinstance(value, str) for value in expected_source.values()) or not hmac.compare_digest(self._bounded_canonical(authority), self._bounded_canonical(expected_source)):
             raise ValueError("clip duplication source identity changed since preview")
@@ -3883,7 +4014,7 @@ class LiveObjectMapper:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot(); track = self.refs.get(track_ref)
+        self._refresh(track_ref); track = self.refs.get(track_ref)
         expected_track_identity = args.get("expectedTrackIdentity"); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track, expected_track_identity if isinstance(expected_track_identity, str) else None)
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("arrangement clip target track hierarchy is stale")
         if not isinstance(expected_track_identity, str) or not hmac.compare_digest(self._capture_object_identity(track), expected_track_identity):
@@ -4297,7 +4428,7 @@ class LiveObjectMapper:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot(); track = self.refs.get(track_ref)
+        self._refresh(track_ref); track = self.refs.get(track_ref)
         track_view = getattr(track, "view", None)
         if track_view is None or self._read_attr(track_view, "is_collapsed") is None: raise ValueError("track collapse is unavailable")
         track_view.is_collapsed = action == "collapse-track"
@@ -4308,7 +4439,7 @@ class LiveObjectMapper:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot(); track = self.refs.get(track_ref)
+        self._refresh(track_ref); track = self.refs.get(track_ref)
         expected_track_identity = args.get("expectedTrackIdentity"); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track, expected_track_identity if isinstance(expected_track_identity, str) else None)
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("arrangement audio clip target track hierarchy is stale")
         if not isinstance(expected_track_identity, str) or not hmac.compare_digest(self._capture_object_identity(track), expected_track_identity):
@@ -4478,7 +4609,7 @@ class LiveObjectMapper:
         if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("name is invalid")
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str): raise ValueError("track reference is invalid")
-        self.snapshot(); track = self.refs.get(track_ref)
+        self._refresh(track_ref); track = self.refs.get(track_ref)
         if bool(getattr(track, "has_midi_input", False)):
             raise ValueError("target track is not an audio track")
         slots = self._items(getattr(track, "clip_slots", [])); scenes = self._items(getattr(self.song, "scenes", []))
@@ -4749,7 +4880,7 @@ class LiveObjectMapper:
             raise ValueError("arrangement automation read arguments are invalid")
         if not clip_ref.startswith(f"{self.refs.epoch}:arrangement_clip:"):
             raise ValueError("arrangement automation requires an exact Arrangement clip reference")
-        self.snapshot()
+        self._refresh(clip_ref, parameter_ref)
         clip = self.refs.get(clip_ref)
         reader = getattr(clip, "automation_envelope", None)
         if not callable(reader):
@@ -4763,7 +4894,7 @@ class LiveObjectMapper:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str) or set(args) - {"trackRef"}:
             raise ValueError("take-lane read arguments are invalid")
-        self.snapshot(); track = self.refs.get(track_ref); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track)
+        self._refresh(track_ref); track = self.refs.get(track_ref); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track)
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("take-lane track hierarchy is stale")
         lanes = [{"ref": row["ref"], "name": row["name"]} for row in self._take_lane_rows(track, track_index)]
         return {"lanes": lanes}
@@ -4771,7 +4902,7 @@ class LiveObjectMapper:
     def _take_lane_create(self, args: dict[str, Any]) -> dict[str, Any]:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str): raise ValueError("track reference is invalid")
-        self.snapshot(); track = self.refs.get(track_ref); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track, args.get("expectedTrackIdentity") if isinstance(args.get("expectedTrackIdentity"), str) else None)
+        self._refresh(track_ref); track = self.refs.get(track_ref); track_index = self._capture_index(self._items(getattr(self.song, "tracks", [])), track, args.get("expectedTrackIdentity") if isinstance(args.get("expectedTrackIdentity"), str) else None)
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("take-lane track hierarchy is stale")
         if not isinstance(args.get("expectedTrackIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(track), args["expectedTrackIdentity"]):
             raise ValueError("take-lane target track identity changed since preview")
@@ -5648,12 +5779,12 @@ class LiveObjectMapper:
             if index is not None: return index
         return None
 
-    def _selection_row_targeted(self) -> dict[str, Any]:
+    def _selection_row_targeted(self, keys: Any = None) -> dict[str, Any]:
         """The selection row _selection_row gives over the whole Set, reading only what's selected:
         a selected track or scene by its identity among the tracks and scenes, anything below a
         track in the row of the track it lives on (found through canonical_parent, else the
         selected track). Only a shape without canonical_parent, whose selection isn't on the
-        selected track, falls back to reading every track."""
+        selected track, falls back to reading every track. With keys, only those are resolved."""
         view = getattr(self.song, "view", None)
         result: dict[str, Any] = {key: None for key, _, _ in self._SELECTION_KINDS}
         if view is None: return result
@@ -5675,6 +5806,7 @@ class LiveObjectMapper:
                 known_by_track[index] = self._selection_known([row], []) if row is not None else {}
             return known_by_track[index]
         for key, kind, attribute in self._SELECTION_KINDS[2:]:
+            if keys is not None and key not in keys: continue
             value = self._selected_object(view, attribute)
             if value is None: continue
             identity = self._capture_object_identity(value); owner = self._owner_track_index(value, track_indices)
@@ -7297,7 +7429,9 @@ class LiveObjectMapper:
             if budget[0] > MAX_TRAVERSAL: raise ValueError("realtime parameter identity traversal exceeded its bound")
         def descriptor(current_ref: str, parameter: Any, owner_ref: str, owner: Any, track_ref: str, track: Any, siblings: list[dict[str, str]]) -> dict[str, Any]:
             return {"ref": current_ref, "parameterIdentity": self._capture_object_identity(parameter), "ownerRef": owner_ref, "ownerIdentity": self._capture_object_identity(owner), "trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "siblings": siblings}
-        for track_index, track in enumerate(tracks):
+        # A ref is positional: only its own track can hold it, so only that track is walked.
+        own_track = self._ref_track_index(reference)
+        for track_index, track in ([(own_track, tracks[own_track])] if own_track is not None and own_track < len(tracks) else [] if own_track is not None else enumerate(tracks)):
             if track is None: continue
             track_ref = self.refs.put("track", track, str(track_index)); mixer = self._read_attr(track, "mixer_device")
             mixer_parameters: list[tuple[str, Any]] = []
@@ -7356,7 +7490,7 @@ class LiveObjectMapper:
         reference = args.get("ref")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot()
+        self._refresh(reference)
         track = self.refs.get(reference)
         mixer = self._read_attr(track, "mixer_device")
         if mixer is None:
@@ -7527,7 +7661,7 @@ class LiveObjectMapper:
 
     def _guard_envelope_mutation(self, args: dict[str, Any]) -> None:
         clip_ref, parameter_ref = str(args.get("clipRef")), str(args.get("parameterRef"))
-        self.snapshot(); authority_digest = self._envelope_authority_digest(clip_ref, parameter_ref); current = self._envelope_read({"clipRef": clip_ref, "parameterRef": parameter_ref})
+        self._refresh(clip_ref, parameter_ref); authority_digest = self._envelope_authority_digest(clip_ref, parameter_ref); current = self._envelope_read({"clipRef": clip_ref, "parameterRef": parameter_ref})
         if not isinstance(args.get("expectedAuthorityDigest"), str) or not hmac.compare_digest(authority_digest, args["expectedAuthorityDigest"]):
             raise ValueError("automation clip or parameter identity changed since preview")
         if not isinstance(args.get("expectedEnvelopeRevision"), str) or not hmac.compare_digest(current["revision"], args["expectedEnvelopeRevision"]):
@@ -7634,7 +7768,10 @@ class LiveObjectMapper:
                 for pad in self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or []):
                     for chain in self._items(self._read_attr(pad, "chains") or []):
                         if self._capture_object_identity(chain) not in counted_owners: count(chain)
-        for current_track in tracks: count(current_track)
+        # A ref is positional: its own track is where the device must be, exactly once.
+        own_track = self._ref_track_index(reference)
+        walked_tracks = [(own_track, tracks[own_track])] if own_track is not None and own_track < len(tracks) else [] if own_track is not None else list(enumerate(tracks))
+        for _, current_track in walked_tracks: count(current_track)
         if target_occurrences != 1: raise ValueError("device target identity is stale or ambiguous")
         def locate(owner: Any, owner_ref: str, path: str, track_index: int, seen: set[str]) -> tuple[Any, Any, int, int, str] | None:
             owner_identity = self._capture_object_identity(owner)
@@ -7660,7 +7797,7 @@ class LiveObjectMapper:
                         found = locate(chain, chain_ref, chain_path, track_index, seen)
                         if found is not None: return found
             return None
-        for track_index, track in enumerate(tracks):
+        for track_index, track in walked_tracks:
             track_ref = self.refs.put("track", track, str(track_index))
             found = locate(track, track_ref, str(track_index), track_index, set())
             if found is not None:
@@ -7680,7 +7817,7 @@ class LiveObjectMapper:
         track_ref = args.get("trackRef")
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot(); track = self.refs.get(track_ref)
+        self._refresh(track_ref); track = self.refs.get(track_ref)
         chain_ref = args.get("chainRef")
         if chain_ref is not None:
             if not isinstance(chain_ref, str) or not chain_ref.startswith(f"{self.refs.epoch}:chain:"): raise ValueError("chain reference is stale or invalid")
@@ -8000,7 +8137,7 @@ class LiveObjectMapper:
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("an exact regular-track reference is required")
         if args.get("chainRef") is not None: return self._browser_load_into_chain(args, item, metadata, loader)
-        self.snapshot(); track = self.refs.get(track_ref); regular_tracks = self._items(getattr(self.song, "tracks", [])); track_identity = self._capture_object_identity(track); track_matches = [(index, candidate) for index, candidate in enumerate(regular_tracks) if self._capture_same_object(candidate, track, track_identity)]
+        self._refresh(track_ref); track = self.refs.get(track_ref); regular_tracks = self._items(getattr(self.song, "tracks", [])); track_identity = self._capture_object_identity(track); track_matches = [(index, candidate) for index, candidate in enumerate(regular_tracks) if self._capture_same_object(candidate, track, track_identity)]
         if len(track_matches) != 1:
             raise ValueError("browser loading is limited to one exact regular Set track")
         track_index, track = track_matches[0]
@@ -8099,7 +8236,7 @@ class LiveObjectMapper:
         in that chain where the placeholder was, nothing new anywhere else on the track."""
         track_ref = args["trackRef"]; chain_ref = args.get("chainRef")
         if not isinstance(chain_ref, str) or not chain_ref.startswith(f"{self.refs.epoch}:chain:"): raise ValueError("chain reference is stale or invalid")
-        self.snapshot(); track = self.refs.get(track_ref); chain = self.refs.get(chain_ref)
+        self._refresh(track_ref, chain_ref); track = self.refs.get(track_ref); chain = self.refs.get(chain_ref)
         track_index = self._capture_index(self._all_track_objects(), track, str(args.get("expectedTrackIdentity")))
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("browser target track reference is stale")
         chain_path = ":".join(chain_ref.split(":")[2:])
@@ -8779,7 +8916,7 @@ class LiveObjectMapper:
         reference = args.get("ref")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("track reference is stale or invalid")
-        self.snapshot()
+        self._refresh(reference)
         track = self.refs.get(reference)
         expected_identity = args.get("expectedObjectIdentity"); tracks = self._all_track_objects(); track_index = self._capture_index(tracks, track, expected_identity if isinstance(expected_identity, str) else None)
         if not isinstance(expected_identity, str) or track_index is None or reference != f"{self.refs.epoch}:track:{track_index}" or not hmac.compare_digest(self._capture_object_identity(track), expected_identity):
@@ -8880,7 +9017,7 @@ class LiveObjectMapper:
             raise ValueError("recording state changed since preview")
         if not isinstance(output_safety, dict) or output_safety.get("safe") is not True or not isinstance(output_safety.get("provenance"), str) or output_safety.get("provenance") in {"", "unknown", "simulator"}:
             raise ValueError("authoritative output safety is required")
-        self.snapshot(); tracks = self._items(getattr(self.song, "tracks", [])); destination = None
+        self._refresh(destination_ref, *(args.get("alsoTrackRefs") or [] if isinstance(args.get("alsoTrackRefs"), list) else [])); tracks = self._items(getattr(self.song, "tracks", [])); destination = None
         if destination_ref is not None:
             if not isinstance(destination_ref, str) or not isinstance(destination_identity, str):
                 raise ValueError("recording destination identity is invalid")
@@ -9850,7 +9987,7 @@ class AbletonMcpBridge:
         if method == "discover":
             args = dict(request.get("args", {}))
             if args.get("kind") == "session_playback": return mapper._playback()
-            return mapper.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", 1000))
+            return mapper.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL))
         if method == "get": return mapper.get(str(request.get("ref")))
         if method == "reconnect": return mapper.invoke("session.reconnect", {})
         if method == "invoke": return mapper.invoke(str(request.get("operation")), dict(request.get("args", {})))

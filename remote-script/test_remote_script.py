@@ -4990,10 +4990,11 @@ class RackMacroDrumPadTests(unittest.TestCase):
         mapper = LiveObjectMapper(song)
         row = mapper.snapshot()["tracks"][0]["devices"][0]
         args = {"ref": row["parameters"][0]["ref"], "expectedOwnerRef": row["ref"], "expectedTrackRef": mapper.snapshot()["tracks"][0]["ref"], "expectedSiblings": [{"ref": parameter["ref"], "objectIdentity": parameter["objectIdentity"]} for parameter in row["parameters"]]}
-        builds = []; build = LiveObjectMapper._build_snapshot
-        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(1) or build(self, args)):
+        builds = []; rows = []; build = LiveObjectMapper._build_snapshot; track_row = LiveObjectMapper._track_row
+        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(1) or build(self, args)), patch.object(LiveObjectMapper, "_track_row", lambda self, *row_args: rows.append(row_args[2]) or track_row(self, *row_args)):
             shared = _authority_state_digest(mapper, args, "device.parameter.set")
-        self.assertEqual(len(builds), 1, "one snapshot for 42 references")
+        self.assertEqual(builds, [], "no whole-Set snapshot for 42 references")
+        self.assertEqual(rows, [0], "only their track's row, once")
         self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
         alone = remote_module._reference_state_digest(mapper, args)
         self.assertEqual(shared, alone, "the same digest as reading each reference on its own")
@@ -6350,3 +6351,133 @@ class FocusedSnapshotTests(unittest.TestCase):
         plain = ask(2)
         self.assertTrue(plain["ok"]); self.assertNotIn("window", plain["result"])
         self.assertFalse(ask(3, args={"parts": ["everything"]})["ok"])
+
+
+class TargetedReadTests(unittest.TestCase):
+    """WS2.1: get, discover, the structure revision and mutations read what they name: the ref's own
+    track, the parent's track, light rows for the Set's lists. Their answers are the snapshot's."""
+
+    def built_tracks(self, mapper, work):
+        built = []; original = LiveObjectMapper._track_row
+        with patch.object(LiveObjectMapper, "_track_row", lambda self, track, kind, index: built.append(index) or original(self, track, kind, index)):
+            result = work()
+        return built, result
+
+    def test_get_reads_only_the_track_a_ref_lives_on_and_answers_as_the_snapshot_does(self):
+        mapper = LiveObjectMapper(rich_song(tracks=12)); whole = mapper.snapshot()
+        device = whole["tracks"][4]["devices"][0]; nested = device["chains"][0]["devices"][0]
+        cases = [
+            (whole["tracks"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["clips"][0]),
+            (nested["ref"], [4], nested),
+            (nested["parameters"][0]["ref"], [4], nested["parameters"][0]),
+            (whole["tracks"][0]["takeLanes"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]),
+            (whole["tracks"][0]["takeLanes"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]["clips"][0]),
+            (whole["tracks"][7]["ref"], [7], whole["tracks"][7]),
+            (whole["set"]["ref"], [], whole["set"]),
+            (whole["scenes"][2]["ref"], [], whole["scenes"][2]),
+            (whole["arrangement"]["locators"][1]["ref"], [], whole["arrangement"]["locators"][1]),
+            (whole["arrangement"]["clips"][0]["ref"], [], whole["arrangement"]["clips"][0]),
+        ]
+        for reference, tracks, expected in cases:
+            built, row = self.built_tracks(mapper, lambda: mapper.get(reference))
+            self.assertEqual(built, tracks, reference); self.assertEqual(canonical(row), canonical(expected), reference)
+        # What get never answered, it still doesn't: slots, mixer parameters, another epoch.
+        for reference in (whole["tracks"][0]["clipSlots"][0]["ref"], whole["tracks"][0]["mixer"]["volumeRef"]):
+            with self.assertRaisesRegex(ValueError, "unknown live ref"): mapper.get(reference)
+        with self.assertRaises(KeyError): mapper.get(f"{mapper.refs.epoch + 1}:track:0")
+
+    def test_get_of_a_moved_object_is_refused_as_before(self):
+        song = rich_song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        reference = whole["tracks"][0]["clips"][0]["ref"]; song.tracks[0].clip_slots[1].clip = None
+        with self.assertRaisesRegex(ValueError, "unknown live ref"): mapper.get(reference)
+        track_ref = whole["tracks"][3]["ref"]; song.tracks.insert(0, FakeTrack())
+        with self.assertRaisesRegex(ValueError, "unknown live ref"): mapper.get(track_ref)
+
+    def test_discovery_under_a_parent_reads_only_the_parents_track(self):
+        song = rich_song(tracks=30, playing=False); song.view = None; mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        counter = ReadCounter(song.tracks)
+        device = whole["tracks"][4]["devices"][0]
+        slots = mapper.discover("clip_slot", parent=whole["tracks"][4]["ref"])["items"]
+        nested = mapper.discover("device", parent=device["chains"][0]["ref"])["items"]
+        parameters = mapper.discover("parameter", parent=nested[0]["ref"])["items"]
+        notes = mapper.discover("note", parent=whole["tracks"][0]["clips"][0]["ref"])["items"]
+        self.assertEqual(set(counter.reads), {0, 4}, counter.reads)
+        self.assertEqual([slot["ref"] for slot in slots], [slot["ref"] for slot in whole["tracks"][4]["clipSlots"]])
+        self.assertEqual([row["ref"] for row in nested], [row["ref"] for row in device["chains"][0]["devices"]])
+        self.assertEqual(len(parameters), len(device["chains"][0]["devices"][0]["parameters"])); self.assertEqual([note["pitch"] for note in notes], [36, 38])
+
+    def test_the_sets_track_list_pages_over_light_rows_and_builds_only_its_page(self):
+        song = rich_song(tracks=30, playing=False); song.view = None; mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        counter = ReadCounter(song.tracks)
+        names = mapper.discover("track", limit=100, requested_fields=["name", "kind", "armed"])
+        self.assertEqual(counter.reads, {}, "light fields read nothing below a track")
+        self.assertEqual([item["name"] for item in names["items"]], [f"T{index}" for index in range(30)])
+        built, page = self.built_tracks(mapper, lambda: mapper.discover("track", limit=2, cursor=mapper.discover("track", limit=5, requested_fields=["name"])["nextCursor"]))
+        self.assertEqual(built, [5, 6], "whole rows for the page alone")
+        self.assertEqual([canonical(item) for item in page["items"]], [canonical(row) for row in whole["tracks"][5:7]])
+        # A filter on a field only whole rows have still works (reading them).
+        muted = mapper.discover("track", filters={"performanceImpact": None}, requested_fields=["name"])
+        self.assertEqual(len(muted["items"]), 30)
+
+    def test_a_list_revision_follows_membership_names_and_order_not_values(self):
+        song = rich_song(); mapper = LiveObjectMapper(song)
+        first = mapper.discover("track", limit=2); cursor = first["nextCursor"]
+        song.tracks[3].mixer_device.volume.value = 0.9; song.tracks[3].arm = True
+        self.assertEqual(mapper.discover("track", limit=2, cursor=cursor)["revision"], first["revision"], "a value changing keeps the pages consistent")
+        for change in (lambda: setattr(song.tracks[1], "name", "Renamed"), lambda: song.tracks.append(FakeTrack()), lambda: song.tracks.insert(0, song.tracks.pop(2))):
+            change()
+            with self.assertRaisesRegex(ValueError, "discovery cursor"): mapper.discover("track", limit=2, cursor=cursor)
+            first = mapper.discover("track", limit=2); cursor = first["nextCursor"]
+        scenes = mapper.discover("scene", limit=1); song.scenes[0].name = "Renamed"
+        with self.assertRaisesRegex(ValueError, "discovery cursor"): mapper.discover("scene", limit=1, cursor=scenes["nextCursor"])
+
+    def test_the_structure_revision_is_the_hosts_formula_from_light_reads(self):
+        song = rich_song(tracks=20, playing=False); song.view = None; mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        host = {"tracks": [[row["ref"], row.get("objectIdentity"), row["name"], row["kind"], index] for index, row in enumerate(whole["tracks"])], "scenes": [[row["ref"], row.get("objectIdentity"), row["name"], index] for index, row in enumerate(whole["scenes"])]}
+        counter = ReadCounter(song.tracks)
+        self.assertEqual(mapper._structure_revision(), hashlib.sha256(json.dumps(host, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest())
+        self.assertEqual(counter.reads, {})
+
+    def test_ownership_fingerprints_read_their_object_and_keep_their_formula(self):
+        song = rich_song(); mapper = LiveObjectMapper(song); whole = remote_module._expanded_pad_chains(mapper.snapshot())
+        def old_track(reference):
+            track = next(row for row in whole["tracks"] if row["ref"] == reference)
+            owned = {**{key: value for key, value in track.items() if key not in remote_module._VOLATILE_TRACK_FIELDS}, **({"routing": {key: value for key, value in track["routing"].items() if key not in remote_module._VOLATILE_ROUTING_FIELDS}} if isinstance(track.get("routing"), dict) else {}), "clipSlots": [{key: value for key, value in slot.items() if key not in remote_module._VOLATILE_SLOT_FIELDS} for slot in track.get("clipSlots", []) if slot.get("empty") is not True or slot.get("clipRef") is not None]}
+            clips = [clip for clip in whole["arrangement"]["clips"] if clip.get("trackRef") == reference or clip.get("parentRef") == reference]
+            return hashlib.sha256(mapper._bounded_canonical(remote_module._without_fields({"track": owned, "arrangementClips": clips}, remote_module._VOLATILE_CLIP_FIELDS)).encode("utf-8")).hexdigest()
+        def old_scene(reference):
+            scene = next(row for row in whole["scenes"] if row["ref"] == reference); contents = []
+            for track in whole["tracks"]:
+                slot = next((row for row in track.get("clipSlots", []) if row.get("sceneIndex") == scene["index"]), None); clip = next((row for row in track.get("clips", []) if slot is not None and row.get("ref") == slot.get("clipRef")), None)
+                contents.append({"trackRef": track["ref"], "trackIdentity": track["objectIdentity"], "slot": {key: slot.get(key) for key in ("ref", "parentRef", "trackRef", "objectIdentity", "clipRef", "empty")} if slot is not None else None, "clip": remote_module._without_fields(clip, remote_module._VOLATILE_CLIP_FIELDS)})
+            return hashlib.sha256(mapper._bounded_canonical({"scene": {key: scene.get(key) for key in ("ref", "parentRef", "objectIdentity", "name", "triggerable")}, "contents": contents}).encode("utf-8")).hexdigest()
+        for index in (0, 2, 5, 6, 7):
+            reference = whole["tracks"][index]["ref"]
+            built, fingerprint = self.built_tracks(mapper, lambda: mapper._ownership_fingerprint(reference))
+            self.assertEqual(fingerprint, old_track(reference)); self.assertEqual(built, [index])
+        for scene in whole["scenes"]:
+            built, fingerprint = self.built_tracks(mapper, lambda: mapper._ownership_fingerprint(scene["ref"]))
+            self.assertEqual(fingerprint, old_scene(scene["ref"])); self.assertEqual(built, [])
+
+    def test_mutations_read_only_the_tracks_they_name(self):
+        song = rich_song(tracks=30, playing=False); song.view = None; mapper = LiveObjectMapper(song, provenance="real-live"); whole = mapper.snapshot()
+        # The previews (the host's reads) come first; only the mutations are counted.
+        track = whole["tracks"][9]; mixer = track["mixer"]
+        state = {field: mixer.get(field) for field in ("volume", "pan", "mute", "solo", "cueVolume", "sends")}
+        mixer_args = {"ref": track["ref"], "volume": 0.75, "expectedObjectIdentity": track["objectIdentity"], "expectedVolumeIdentity": mixer["volumeIdentity"], "expectedPanIdentity": mixer["panIdentity"], "expectedCueIdentity": mixer["cueIdentity"], "expectedSendIdentities": mixer["sendIdentities"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+        clip_args = ControlSurfaceTests.clip_creation_args(mapper, whole["tracks"][11]["ref"], 0, kind="midi", name="Targeted", length=4)
+        parameter = whole["tracks"][4]["devices"][1]["parameters"][0]
+        parameter_args = {"ref": parameter["ref"], "value": 0.75, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(mapper, parameter["ref"])}
+        counter = ReadCounter(song.tracks)
+        mapper.invoke("mixer.set", mixer_args); mapper.invoke("device.parameter.set", parameter_args)
+        self.assertEqual(set(counter.reads), {4, 9}, counter.reads)
+        # A creation also records the Set's identity topology (each track's slots, devices and
+        # Arrangement clips by identity, no rows) to prove an exact rollback if its ownership can't attach.
+        counter.reads.clear()
+        created = mapper.invoke("clip.create", clip_args, "targeted-transaction")
+        self.assertTrue(all(reads <= {"clip_slots", "devices", "arrangement_clips"} for index, reads in counter.reads.items() if index != 11), counter.reads)
+        note_args = {"ref": created["ref"], "notes": [{"pitch": 60, "start": 0, "duration": 1, "velocity": 100, "channel": 1}], **ControlSurfaceTests.note_authority(mapper, created["ref"])}
+        counter.reads.clear()
+        mapper.invoke("note.add-batch", note_args, "targeted-transaction")
+        self.assertEqual(set(counter.reads), {11}, counter.reads)
+        self.assertEqual(song.tracks[9].mixer_device.volume.value, 0.75); self.assertEqual(song.tracks[4].devices[1].parameters[0].value, 0.75)
