@@ -776,7 +776,8 @@ const toolDescriptors = [
     description: "Undo a verified guarded transaction only when fresh authoritative state still matches its exact postcondition.",
     inputSchema: {
       type: "object",
-      properties: { transactionId: { type: "string" }, confirmation: { type: "string", enum: ["undo"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } },
+      properties: { transactionId: { type: "string" }, confirmation: { type: "string", enum: ["undo"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 },
+        discard: { type: "boolean", description: "For a track the client made as scratch (a render it recorded): delete it though it changed since" } },
       required: ["transactionId", "confirmation", "idempotencyKey"],
       additionalProperties: false,
     },

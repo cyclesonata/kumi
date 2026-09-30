@@ -25,7 +25,7 @@ function hostFor(simulator: DeterministicLiveSimulator) {
 }
 
 function applyToolFor(transactionId: string): string {
-  const prefixes: Record<string, string> = { clipaction_: "live_clip_action_apply", routing_: "live_routing_apply", sceneset_: "live_scene_apply", songset_: "live_song_settings_apply", trackstruct_: "live_track_structure_apply", devadv_: "live_device_advanced_apply", devdel_: "live_device_delete_apply", scenecapture_: "live_scene_capture_apply", capturemidi_: "live_capture_midi_apply", arrangement_: "live_arrangement_section_apply" };
+  const prefixes: Record<string, string> = { clipaction_: "live_clip_action_apply", routing_: "live_routing_apply", sceneset_: "live_scene_apply", songset_: "live_song_settings_apply", trackstruct_: "live_track_structure_apply", devadv_: "live_device_advanced_apply", devdel_: "live_device_delete_apply", scenecapture_: "live_scene_capture_apply", capturemidi_: "live_capture_midi_apply", arrangement_: "live_arrangement_section_apply", structure_: "live_session_structure_apply" };
   const prefix = Object.keys(prefixes).find((candidate) => transactionId.startsWith(candidate));
   if (!prefix) throw new Error(`no apply tool for ${transactionId}`);
   return prefixes[prefix]!;
@@ -140,6 +140,19 @@ test("a scene Live launches on its next tick is confirmed in fresh state", async
   const empty = await call("live_scene_fire_preview", { ref: "scene:scene-1" });
   assert.equal(empty.isError, true);
   assert.deepEqual(empty.body, { reason: "that scene has no clips to play, so launching it would only stop what's playing", remediation: "Nothing was launched. Put clips in the scene first, or launch another." });
+});
+
+test("a track the client made as scratch goes on an undo with discard, though it changed; without it, the undo is refused", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { call, apply } = hostFor(simulator);
+  const made = await call("live_session_structure_preview", { tracks: [{ name: "Kumi Listen", kind: "audio" }], scenes: [] });
+  assert.equal((await apply(made, "scratch-track")).body.state, "applied");
+  // Something recorded on it: its fingerprint no longer matches.
+  const scratch = (simulator as any).state.tracks.find((track: any) => track.name === "Kumi Listen"); scratch.armed = true; scratch.monitoringState = "in";
+  const kept = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "scratch-undo" });
+  assert.equal(kept.isError, true); assert.match(kept.body.reason, /modified after apply/);
+  const discarded = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "scratch-discard", discard: true });
+  assert.equal(discarded.body.state, "undone", JSON.stringify(discarded.body));
+  assert.equal((simulator as any).state.tracks.some((track: any) => track.name === "Kumi Listen"), false);
 });
 
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {

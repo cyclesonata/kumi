@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.45.
+The first release for producers to use day to day. Ships with bridge 1.0.46.
 
 ### Changes to the Set
 
@@ -72,6 +72,10 @@ The first release for producers to use day to day. Ships with bridge 1.0.45.
   icons and marks the right one of two same-named devices (bridge 1.0.45).
   Selecting a device in Live from Kumi was tried and left out: on real Live it
   lagged or landed elsewhere, so pointing at one stays inside Kumi.
+- A track Kumi made as scratch (a render it recorded) is deleted on undo though
+  its clip changed since, and an undo refused because something Kumi made
+  was changed says nothing changed, rather than leaving the change uncertain
+  (bridge 1.0.46).
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 
