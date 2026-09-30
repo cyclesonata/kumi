@@ -1,5 +1,8 @@
 import { JOURNEY_IDS } from "./journeys.js";
-import type { LiveCapability, LiveStatus } from "./live.js";
+import { DEVICE_PROPERTIES, SAMPLE_FIELDS, WAVETABLE_FIELDS, type LiveCapability, type LiveStatus } from "./live.js";
+
+/** The settings live_device_edit sets by name (the Remote Script's device.property.set names). */
+const DEVICE_SETTINGS = Object.keys(DEVICE_PROPERTIES);
 
 /**
  * Declarative tool catalog: one entry per MCP tool containing the schema,
@@ -94,7 +97,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { name: "live_take_lane_read", prereq: { capabilitiesAll: ["takes"], operationsAll: ["snapshot", "audio.take-lane.read"] } },
   { name: "live_comp_read", prereq: { capabilitiesAll: ["takes"], operationsAll: ["snapshot", "audio.comp.read"] } },
   { prefix: "live_clip_action_", prereq: { capabilitiesAll: ["clips"], operationsAll: ["snapshot", "clip.action"] } },
-  { prefix: "live_note_edit_", prereq: { capabilitiesAll: ["session.midi_note.write"], operationsAll: ["snapshot"], operationsAny: ["note.quantize", "note.duplicate"] } },
+  { prefix: "live_note_edit_", prereq: { capabilitiesAll: ["session.midi_note.write"], operationsAll: ["snapshot"], operationsAny: ["note.quantize", "note.duplicate", "note.select", "note.delete-range"] } },
   { name: "live_note_read", prereq: { capabilitiesAll: ["session.midi_note.read"], operationsAny: ["note.read-by-id", "note.read-selected"] } },
   { name: "live_key_estimate", prereq: { capabilitiesAll: ["clips"], operationsAll: ["snapshot"] } },
   { prefix: "live_tuning_", prereq: { capabilitiesAll: ["tuning"], operationsAll: ["tuning.read", "tuning.set"] } },
@@ -123,7 +126,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { name: "live_rack_preview", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot"], operationsAny: ["rack.set", "rack.action"] } },
   { name: "live_rack_apply", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot"], operationsAny: ["rack.set", "rack.action"] } },
   { prefix: "live_rack_view_", prereq: { capabilitiesAll: ["racks"], operationsAll: ["snapshot", "rack.view.set"] } },
-  { prefix: "live_device_specialized_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "meld.set", "plugin.set"] } },
+  { prefix: "live_device_specialized_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "meld.set", "plugin.set", "sample.set", "wavetable.set"] } },
   { prefix: "live_looper_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["looper.action", "looper.set"] } },
   { prefix: "live_simpler_", prereq: { capabilitiesAll: ["devices"], operationsAll: ["snapshot", "simpler.replace-sample"] } },
   { name: "live_observe_subscribe", prereq: { capabilitiesAll: ["session.read"], operationsAll: ["observe.subscribe"] } },
@@ -165,6 +168,17 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { prefix: "live_arrangement_midi_clip_", prereq: { operationsAll: ["snapshot", "discover", "arrangement.midi-clip.create", "arrangement.clip.delete"] } },
   { prefix: "live_clip_clear_range_", prereq: { operationsAll: ["snapshot", "clip.clear-range"] } },
   { prefix: "live_device_duplicate_", prereq: { operationsAll: ["snapshot", "device.duplicate", "device.delete"] } },
+  // The Remote Script's LOM-gap operations (batch 2).
+  { name: "live_data_read", prereq: { operationsAll: ["data.get"] } },
+  { prefix: "live_data_", prereq: {operationsAll: ["snapshot", "data.get", "data.set"] } },
+  { name: "live_automation_read", prereq: { capabilitiesAll: ["automation"], operationsAll: ["automation.envelope.read"] } },
+  { name: "live_device_read", prereq: { operationsAny: ["plugin.parameter-names", "device.banks.read"] } },
+  { name: "live_clip_time_convert", prereq: { operationsAll: ["clip.time-convert"] } },
+  { name: "live_message", prereq: { operationsAll: ["application.message"] } },
+  { name: "live_browser_preview", prereq: { operationsAll: ["browser.inspect", "browser.preview.start"] } },
+  { name: "live_browser_preview_stop", prereq: { operationsAll: ["browser.preview.stop"] } },
+  { prefix: "live_fire_button_", prereq: {operationsAll: ["snapshot", "fire-button.set"] } },
+  { prefix: "live_device_edit_", prereq: {capabilitiesAll: ["devices"], operationsAll: ["snapshot"], operationsAny: ["device.property.set", "device.action", "sample.slice", "wavetable.modulation.set"] } },
   { name: "live_song_undo", prereq: { operationsAll: ["song.undo"] } },
   { name: "live_song_redo", prereq: { operationsAll: ["song.redo"] } },
   { name: "live_transaction_release", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
@@ -209,6 +223,13 @@ export const TOOL_POLICY_RULES: readonly PolicyRule[] = [
   { name: "live_arrangement_automation_read", policyClass: "read" },
   { name: "live_render_offline", policyClass: "read" },
   { name: "live_project_import", policyClass: "filesystem" },
+  { name: "live_data_read", policyClass: "read" },
+  { name: "live_automation_read", policyClass: "read" },
+  { name: "live_device_read", policyClass: "read" },
+  { name: "live_clip_time_convert", policyClass: "read" },
+  { name: "live_message", policyClass: "performance" },
+  { prefix: "live_browser_preview", policyClass: "performance" },
+  { prefix: "live_fire_button_", policyClass: "performance" },
   { name: "live_session_emergency_stop", policyClass: "performance" },
   { prefix: "live_batch_", policyClass: "edit" },
   { prefix: "live_session_audition_", policyClass: "performance" },
@@ -533,8 +554,8 @@ const toolDescriptors = [
   },
   {
     name: "live_automation_preview",
-    description: "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["create-envelope", "delete-envelope", "insert", "delete-range"] }, clipRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, points: { type: "array", items: { type: "object", properties: { time: { type: "number", minimum: 0 }, value: { type: "number" } }, required: ["time", "value"], additionalProperties: false } }, from: { type: "number", minimum: 0 }, to: { type: "number", minimum: 0 } }, required: ["action", "clipRef", "parameterRef"], additionalProperties: false },
+    description: "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing. insert-step: one value held from start for length (beats), as drawing a step does; it makes the envelope when there's none, and undo takes the step (or that envelope) away.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["create-envelope", "delete-envelope", "insert", "insert-step", "delete-range"] }, start: { type: "number", minimum: 0 }, length: { type: "number", minimum: 0.001 }, value: { type: "number" }, clipRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, points: { type: "array", items: { type: "object", properties: { time: { type: "number", minimum: 0 }, value: { type: "number" } }, required: ["time", "value"], additionalProperties: false } }, from: { type: "number", minimum: 0 }, to: { type: "number", minimum: 0 } }, required: ["action", "clipRef", "parameterRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -907,6 +928,84 @@ const toolDescriptors = [
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
+    name: "live_data_read",
+    description: "Read text saved inside the Set under a key (any key: other control surfaces' too), or with one track (trackRef). value is null when nothing is saved there.",
+    inputSchema: { type: "object", properties: { key: { type: "string", minLength: 1, maxLength: 256 }, trackRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["key"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_data_preview",
+    description: "Preview saving text inside the Set (it's saved with the Set), or with one track (trackRef), under one of Kumi's own keys (they start with kumi.); null clears it. Shows what's there now; undo puts it back.",
+    inputSchema: { type: "object", properties: { key: { type: "string", minLength: 7, maxLength: 256, pattern: "^kumi\\." }, value: { type: ["string", "null"], maxLength: 1048576 }, trackRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["key", "value"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_data_apply",
+    description: "Apply an exact, unexpired saved-text preview. Refused if the key's text changed since the preview.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_automation_read",
+    description: "Read a Session clip's envelope for one parameter: whether it has one, its points and their revision. With time (a beat in the clip), also the value the envelope gives the parameter there.",
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, time: { type: "number", minimum: 0, maximum: 1000000000 } }, required: ["clipRef", "parameterRef"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_device_read",
+    description: "Read what only some devices list. parameter-names: every parameter a plug-in has, configured or not (begin and end pick a range, end -1 to the last; total counts them when all were asked for). banks: a Max for Live device's parameter banks, each bank's name and its parameters' indices (-1 for an empty slot).",
+    inputSchema: { type: "object", properties: { deviceRef: { type: "string", minLength: 1, maxLength: 256 }, what: { type: "string", enum: ["parameter-names", "banks"] }, begin: { type: "integer", minimum: 0, maximum: 10000000 }, end: { type: "integer", minimum: -1, maximum: 10000000 } }, required: ["deviceRef", "what"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_clip_time_convert",
+    description: "Convert a time in an audio clip's sample between beats, sample frames and seconds, as Live's warping maps them. A value is null where Live can't convert it (an unwarped clip's sample has no beat time).",
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, from: { type: "string", enum: ["beats", "samples", "seconds"] }, value: { type: "number", minimum: -1000000000, maximum: 1000000000000 } }, required: ["clipRef", "from", "value"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_message",
+    description: "Show the producer a short message in Live: in passing in its status bar, or with modal: true in a dialog they close. Nothing in the Set changes.",
+    inputSchema: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 1024 }, modal: { type: "boolean" } }, required: ["text"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_browser_preview",
+    description: "Play a browser item's preview (a sample, a preset) as clicking it in Live's browser does, through Live's preview output. Gives a previewId: live_browser_preview_stop with it stops that preview.",
+    inputSchema: { type: "object", properties: { itemId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["itemId"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_browser_preview_stop",
+    description: "Stop the browser preview live_browser_preview started, by its previewId. An earlier preview's id doesn't stop a later one.",
+    inputSchema: { type: "object", properties: { previewId: { type: "string", minLength: 32, maxLength: 256 } }, required: ["previewId"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_fire_button_preview",
+    description: "Preview pressing (pressed: true) or letting go of (pressed: false) the launch button of a Session clip, a clip slot or a scene, as a player does: a press launches it, and a clip in Gate launch mode plays only while its button is held. A press is held until it's let go, Kumi disconnects, or 30 s after it. Needs output-safety evidence: it plays out loud. Nothing to undo.",
+    inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 256 }, pressed: { type: "boolean" }, outputSafety: { type: "object", properties: { safe: { type: "boolean", const: true }, provenance: { type: "string", minLength: 1, maxLength: 512 }, observedAt: { type: "string", minLength: 1, maxLength: 64 }, scope: { type: "string", minLength: 1, maxLength: 256 } }, required: ["safe", "provenance"], additionalProperties: false } }, required: ["ref", "pressed", "outputSafety"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_fire_button_apply",
+    description: "Apply an exact, unexpired launch-button preview. Refused if the clip, slot or scene changed since the preview.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_device_edit_preview",
+    description: "Preview one edit of a device that isn't a parameter. set: a setting of Roar, Shifter, Spectral Resonator, Hybrid Reverb, CC Control or Simpler by its name (setting, value; a choice is its index, and the preview lists the choices). modulate: how much a Wavetable modulation source moves a target (source, value -1 to 1, and targetIndex in its matrix or parameterRef, one of its parameters, added to the matrix if it isn't there). slice-insert, slice-move, slice-remove (time, toTime in sample frames), slice-clear, slice-reset: a Simpler's slice points. warp-as (beats), warp-double, warp-half: a Simpler's warping. resend: CC Control sends its values again. Undo puts back a setting, a modulation amount or one slice; slice-clear, slice-reset and the warps are Live's undo's to take back.",
+    inputSchema: { type: "object", properties: { deviceRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["set", "modulate", "slice-insert", "slice-move", "slice-remove", "slice-clear", "slice-reset", "warp-as", "warp-double", "warp-half", "resend"] }, setting: { type: "string", enum: DEVICE_SETTINGS }, value: { type: ["number", "boolean"] }, source: { type: "integer", minimum: 0, maximum: 1000 }, targetIndex: { type: "integer", minimum: 0, maximum: 100000 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, time: { type: "integer", minimum: 0 }, toTime: { type: "integer", minimum: 0 }, beats: { type: "number", minimum: 0.001, maximum: 1000000 } }, required: ["deviceRef", "action"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_device_edit_apply",
+    description: "Apply an exact, unexpired device-edit preview. Refused if the device, or what the edit is fenced on (the setting, the matrix's targets, the slices, the sample), changed since the preview.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
     name: "live_undo_step_begin",
     description: "Open one step in Live's own undo history, so every change until live_undo_step_end is one Cmd-Z in Live for the producer (wrap a plan's changes in it). Kumi's own undo (live_undo) still undoes each change. The step closes itself after timeoutMs (default two minutes), when the bridge's connection goes, and when another one opens (closedPrevious says so). It groups the changes Kumi makes through the Remote Script, not those through Kumi's Live extension (offline renders, Arrangement MIDI clips, clearing a range, pad sample chains); an edit the producer makes while it's open becomes its own step and splits it.",
     inputSchema: { type: "object", properties: { label: { type: "string", minLength: 1, maxLength: 256 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 3600000 } }, additionalProperties: false },
@@ -1026,8 +1125,8 @@ const toolDescriptors = [
   },
   {
     name: "live_note_edit_preview",
-    description: "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["quantize", "quantize-pitch", "duplicate"] }, noteIds: { type: "array", items: { type: "integer", minimum: 0 } }, grid: { type: "number", exclusiveMinimum: 0 }, amount: { type: "number", minimum: 0, maximum: 1 }, pitch: { type: "integer", minimum: 0, maximum: 127 } }, required: ["clipRef", "action"], additionalProperties: false },
+    description: "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs. select: select notes in the clip as a click in its editor would (exactly one of noteIds, all: true, none: true; nothing to undo). delete-range: delete the notes starting inside a region of pitch (fromPitch, pitchSpan) and time (fromTime, timeSpan, in beats); the preview counts them, and undo puts them back.",
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["quantize", "quantize-pitch", "duplicate", "select", "delete-range"] }, noteIds: { type: "array", items: { type: "integer", minimum: 0 } }, grid: { type: "number", exclusiveMinimum: 0 }, amount: { type: "number", minimum: 0, maximum: 1 }, pitch: { type: "integer", minimum: 0, maximum: 127 }, all: { type: "boolean", const: true }, none: { type: "boolean", const: true }, fromPitch: { type: "integer", minimum: 0, maximum: 127 }, pitchSpan: { type: "integer", minimum: 1, maximum: 128 }, fromTime: { type: "number", minimum: 0 }, timeSpan: { type: "number", minimum: 0.001 } }, required: ["clipRef", "action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1116,8 +1215,8 @@ const toolDescriptors = [
   },
   {
     name: "live_transport_action_preview",
-    description: "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). Audible actions are fenced but not undoable; emergency stop stays separate.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"] }, beatTime: { type: "number" } }, required: ["action"], additionalProperties: false },
+    description: "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). jump-by moves the song position by beats (negative jumps back); jump-in-running-clip (trackRef, beats) jumps in the Session clip playing on a track. Audible actions are fenced but not undoable; emergency stop stays separate.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement", "jump-by", "jump-in-running-clip"] }, beatTime: { type: "number" }, beats: { type: "number", minimum: -1000000, maximum: 1000000 }, trackRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1328,8 +1427,8 @@ const toolDescriptors = [
   },
   {
     name: "live_device_specialized_preview",
-    description: "Read-only preflight for specialized device families: Drift (including its modulation matrix: each slot's source or target index, from the device row's drift mod*List names), Drum Cell, Eq8, Hybrid Reverb, Meld, and plug-ins (presets and editor state).",
-    inputSchema: { type: "object", properties: { family: { type: "string", enum: ["drift", "drum-cell", "eq8", "hybrid-reverb", "meld", "plugin"] }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, pitchBendRange: { type: "integer", minimum: 1, maximum: 96 }, voiceCount: { type: "integer", minimum: 1, maximum: 64 }, voiceMode: { type: "integer", minimum: 0, maximum: 8 }, ...Object.fromEntries(["modFilterSource1", "modFilterSource2", "modLfoSource", "modPitchSource1", "modPitchSource2", "modShapeSource", "modSource1", "modSource2", "modSource3", "modTarget1", "modTarget2", "modTarget3"].map((field) => [field, { type: "integer", minimum: 0, maximum: 1000 }])), gain: { type: "number", minimum: -70, maximum: 24 }, editMode: { type: "integer", minimum: 0, maximum: 4 }, globalMode: { type: "integer", minimum: 0, maximum: 4 }, oversampling: { type: "boolean" }, selectedBand: { type: "integer", minimum: 0, maximum: 8 }, irCategory: { type: "string", minLength: 1, maxLength: 128 }, irFile: { type: "string", minLength: 1, maxLength: 256 }, attack: { type: "number", minimum: 0 }, decay: { type: "number", minimum: 0 }, size: { type: "number", minimum: 0 }, time: { type: "number", minimum: 0 }, engine: { type: "integer", minimum: 0, maximum: 4 }, unison: { type: "integer", minimum: 1, maximum: 16 }, monoPoly: { type: "boolean" }, polyphony: { type: "integer", minimum: 1, maximum: 64 }, presetIndex: { type: "integer", minimum: 0, maximum: 1024 }, isEditorOpen: { type: "boolean" } }, required: ["family", "deviceRef"], additionalProperties: false },
+    description: "Read-only preflight for specialized device families: Drift (including its modulation matrix: each slot's source or target index, from the device row's drift mod*List names), Drum Cell, Eq8, Hybrid Reverb, Meld, plug-ins (presets and editor state), a Simpler's sample (sample: its Beats, Complex Pro, Texture and Tones warp settings and its slicing settings, as the device row's sample shows them), and Wavetable (wavetable: each oscillator's wavetable category and index, from the row's categories and oscillator*Wavetables, and effect mode, the filter routing and unison).",
+    inputSchema: { type: "object", properties: { family: { type: "string", enum: ["drift", "drum-cell", "eq8", "hybrid-reverb", "meld", "plugin", "sample", "wavetable"] }, ...Object.fromEntries(SAMPLE_FIELDS.map((field) => [field, { type: "number", minimum: 0, maximum: 1000000 }])), ...Object.fromEntries(WAVETABLE_FIELDS.map((field) => [field, { type: "integer", minimum: 0, maximum: 100000 }])), deviceRef: { type: "string", minLength: 1, maxLength: 256 }, pitchBendRange: { type: "integer", minimum: 1, maximum: 96 }, voiceCount: { type: "integer", minimum: 1, maximum: 64 }, voiceMode: { type: "integer", minimum: 0, maximum: 8 }, ...Object.fromEntries(["modFilterSource1", "modFilterSource2", "modLfoSource", "modPitchSource1", "modPitchSource2", "modShapeSource", "modSource1", "modSource2", "modSource3", "modTarget1", "modTarget2", "modTarget3"].map((field) => [field, { type: "integer", minimum: 0, maximum: 1000 }])), gain: { type: "number", minimum: -70, maximum: 24 }, editMode: { type: "integer", minimum: 0, maximum: 4 }, globalMode: { type: "integer", minimum: 0, maximum: 4 }, oversampling: { type: "boolean" }, selectedBand: { type: "integer", minimum: 0, maximum: 8 }, irCategory: { type: "string", minLength: 1, maxLength: 128 }, irFile: { type: "string", minLength: 1, maxLength: 256 }, attack: { type: "number", minimum: 0 }, decay: { type: "number", minimum: 0 }, size: { type: "number", minimum: 0 }, time: { type: "number", minimum: 0 }, engine: { type: "integer", minimum: 0, maximum: 4 }, unison: { type: "integer", minimum: 1, maximum: 16 }, monoPoly: { type: "boolean" }, polyphony: { type: "integer", minimum: 1, maximum: 64 }, presetIndex: { type: "integer", minimum: 0, maximum: 1024 }, isEditorOpen: { type: "boolean" } }, required: ["family", "deviceRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {

@@ -538,7 +538,26 @@ export function ownedDeviceFingerprintRow(row: unknown): unknown {
     .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
 }
 
-export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control", "undo.step.begin", "undo.step.end", "song.undo", "song.redo", "render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import", "transaction.group"] as const;
+/** The Remote Script's LOM-gap operations (batch 2), which the simulator answers too. */
+export const LOM_GAP_OPERATIONS = ["data.get", "data.set", "note.select", "note.delete-range", "fire-button.set", "track.action", "automation.step.insert", "automation.value-at", "device.property.set", "device.action", "sample.set", "sample.slice", "wavetable.set", "wavetable.modulation.set", "plugin.parameter-names", "device.banks.read", "clip.time-convert", "application.message", "browser.preview.start", "browser.preview.stop"] as const;
+/** A Simpler sample's warp-mode and slicing settings, by sample.set's names (the device row's sample row). */
+export const SAMPLE_FIELDS = ["beatsGranulationResolution", "beatsTransientEnvelope", "beatsTransientLoopMode", "complexProEnvelope", "complexProFormants", "textureFlux", "textureGrainSize", "tonesGrainSize", "slicingStyle", "slicingBeatDivision", "slicingRegionCount", "slicingSensitivity"] as const;
+/** Wavetable's oscillator, effect, filter-routing and unison settings, by wavetable.set's names (the device row's wavetable row). */
+export const WAVETABLE_FIELDS = ["oscillator1WavetableCategory", "oscillator1WavetableIndex", "oscillator2WavetableCategory", "oscillator2WavetableIndex", "oscillator1EffectMode", "oscillator2EffectMode", "filterRouting", "unisonMode", "unisonVoiceCount"] as const;
+/**
+ * The settings device.property.set changes, by the Remote Script's names: the device row's key for the
+ * device's family, the setting's field there, and the field listing its choices (the value is an index).
+ */
+export const DEVICE_PROPERTIES: Readonly<Record<string, { rowKey: string; field: string; choices: string | null }>> = Object.fromEntries(([
+  ["roar.routing_mode_index", "roar", "routingModeIndex", "routingModeList"], ["roar.env_listen", "roar", "envListen", null],
+  ["shifter.pitch_mode_index", "shifter", "pitchModeIndex", "pitchModeList"],
+  ["spectral_resonator.frequency_dial_mode", "spectralResonator", "frequencyDialMode", "frequencyDialModeList"], ["spectral_resonator.midi_gate", "spectralResonator", "midiGate", "midiGateList"], ["spectral_resonator.mod_mode", "spectralResonator", "modMode", "modModeList"], ["spectral_resonator.mono_poly", "spectralResonator", "monoPoly", "monoPolyList"], ["spectral_resonator.pitch_mode", "spectralResonator", "pitchMode", "pitchModeList"],
+  ["hybrid_reverb.ir_time_shaping_on", "hybridReverb", "irTimeShapingOn", null],
+  ["cc_control.custom_bool_target", "ccControl", "customBoolTarget", "customBoolTargetList"],
+  ...Array.from({ length: 12 }, (_, index) => [`cc_control.custom_float_target_${index}`, "ccControl", `customFloatTarget${index}`, `customFloatTarget${index}List`]),
+  ["simpler.playback_mode", "simpler", "playbackMode", null], ["simpler.retrigger", "simpler", "retrigger", null], ["simpler.slicing_playback_mode", "simpler", "slicingPlaybackMode", null], ["simpler.voices", "simpler", "voices", null], ["simpler.pad_slicing", "simpler", "padSlicing", null], ["simpler.note_pitch_bend_range", "simpler", "notePitchBendRange", null],
+] as Array<[string, string, string, string | null]>).map(([property, rowKey, field, choices]) => [property, { rowKey, field, choices }]));
+export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control", "undo.step.begin", "undo.step.end", "song.undo", "song.redo", "render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import", "transaction.group", ...LOM_GAP_OPERATIONS] as const;
 /** What Kumi's Live extension offers (apps/live-extension), which the simulator does on its own Set too. */
 export const EXTENSION_OPERATIONS = ["render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import", "transaction.group"] as const;
 
@@ -564,6 +583,18 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   undoStep?: { stepId: string; expiresAt: number };
   readonly closedUndoSteps: string[] = [];
   readonly liveHistory = { undo: 1, redo: 0 };
+  /** Text saved inside the Set (data.set), by owner ref and key. */
+  private readonly storedData = new Map<string, string>();
+  /** Each clip's selected notes (note.select), by clip ref. */
+  readonly selectedNotes = new Map<string, number[]>();
+  /** Launch buttons held down (fire-button.set). */
+  readonly heldFireButtons = new Set<string>();
+  /** Wavetable modulation amounts, by device ref and `${target}:${source}`. */
+  private readonly modulationAmounts = new Map<string, Map<string, number>>();
+  /** Messages Kumi showed in Live (application.message). */
+  readonly shownMessages: Array<{ text: string; modal: boolean }> = [];
+  /** The browser preview playing, by its previewId. */
+  private browserPreview: string | undefined;
 
   private structureCreatedFingerprint(kind: "track" | "scene", reference: LiveRef): string {
     const snapshot = this.snapshot();
@@ -657,6 +688,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     switch (operation) {
       case "render.offline": case "arrangement.midi-clip.create": case "clip.clear-range": case "device.duplicate": case "drum-pad.sample-chain": case "project.import": case "transaction.group":
         return this.extensionOperation(operation, args);
+      case "data.get": case "data.set": case "note.select": case "note.delete-range": case "fire-button.set": case "track.action": case "automation.step.insert": case "automation.value-at": case "device.property.set": case "device.action": case "sample.set": case "sample.slice": case "wavetable.set": case "wavetable.modulation.set": case "plugin.parameter-names": case "device.banks.read": case "clip.time-convert": case "application.message": case "browser.preview.start": case "browser.preview.stop":
+        return this.lomGapOperation(operation, args);
       // Live's own undo history: one open step at a time (opening another closes it), and Live's undo and redo.
       case "undo.step.begin": {
         const closedPrevious = this.undoStep !== undefined; if (this.undoStep) this.closedUndoSteps.push(this.undoStep.stepId);
@@ -1614,6 +1647,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (action === "stop-all-clips") { for (const track of this.state.tracks) { track.playingSlotIndex = null; track.firedSlotIndex = null; } transport.playing = false; this.state.set.playing = false; }
         else if (action === "back-to-arrangement") { for (const track of this.state.tracks) track.backToArranger = false; if (this.state.song) this.state.song.backToArranger = false; }
         else if (action === "scrub") { if (typeof args.beatTime !== "number" || !Number.isFinite(args.beatTime)) throw new RangeError("beatTime distance is required for scrub"); transport.position = (transport.position ?? 0) + args.beatTime; }
+        else if (action === "jump-by") { if (typeof args.beats !== "number" || !Number.isFinite(args.beats)) throw new RangeError("beats is required to jump"); transport.position = Math.max(0, (transport.position ?? 0) + args.beats); this.state.set.position = transport.position; }
         else if (!["tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record"].includes(action as string)) throw new RangeError("transport action is invalid");
         this.state.playback.revision = `${this.epoch}:transport:${++this.sequence}`;
         this.emit({ type: "transport", payload: { operation } });
@@ -2550,6 +2584,191 @@ export class DeterministicLiveSimulator implements LiveAdapter {
    * sample through a new chain, a file copied into the project, and several of those grouped. The object
    * at a reference must still bear the name the host read (expectedName), as the extension checks.
    */
+  /** The Remote Script's LOM-gap operations (batch 2), answered as the Remote Script answers them. */
+  private lomGapOperation(operation: string, args: Record<string, unknown>): Record<string, unknown> {
+    const text = (name: string): string => { const value = args[name]; if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new TypeError(`${name} is invalid`); return value; };
+    const number = (name: string, minimum = -Infinity, maximum = Infinity): number => { const value = args[name]; if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) throw new RangeError(`${name} is invalid`); return value; };
+    const device = (): Device => { const found = this.findDevice(text("ref") as LiveRef); if (!found) throw new Error("device reference is stale or invalid"); if (found.objectIdentity !== args.expectedObjectIdentity && operation !== "plugin.parameter-names" && operation !== "device.banks.read") throw new Error("device identity changed since preview"); return found; };
+    const rowOf = (found: Device, key: string): Record<string, unknown> | undefined => { const row = (found as unknown as Record<string, unknown>)[key]; return row && typeof row === "object" ? row as Record<string, unknown> : undefined; };
+    const fenced = (state: unknown, what: string): void => { if (args.expectedStateRevision !== simulatorRevision(state)) throw new Error(`${what} state changed since preview`); };
+    const clipAuthority = (clip: Clip): void => { if (simulatorCanonical(this.sessionClipAuthority(clip.ref)) !== simulatorCanonical(args.expectedClipAuthority)) throw new Error("note clip hierarchy identity changed since preview"); };
+    const touched = (reference: LiveRef): number => { this.emit({ type: "object", ref: reference, payload: { operation } }); return ++this.sequence; };
+    switch (operation) {
+      case "data.get": case "data.set": {
+        const owner = text("ref"); if (owner !== this.state.set.ref && !this.findTrack(owner as LiveRef)) throw new Error("track reference is stale or invalid");
+        const key = text("key"); const slot = `${owner}\u0000${key}`; const prior = this.storedData.get(slot) ?? null;
+        if (operation === "data.get") return { ref: owner, key, value: prior };
+        if (!key.startsWith("kumi.")) throw new Error("Kumi writes only its own keys (kumi.…); other keys are read-only");
+        const value = args.value; if (value !== null && typeof value !== "string") throw new TypeError("value must be text of at most 1 MiB, or null");
+        if ("expectedValue" in args && args.expectedValue !== prior) throw new Error("the data under that key changed since it was read");
+        if (value === null) this.storedData.delete(slot); else this.storedData.set(slot, value);
+        return { ref: owner, key, value, prior };
+      }
+      case "note.select": {
+        const clip = this.findClip(text("ref") as LiveRef); clipAuthority(clip);
+        const modes = ["noteIds", "all", "none"].filter((key) => key in args);
+        if (modes.length !== 1 || (modes[0] !== "noteIds" && args[modes[0]!] !== true)) throw new Error("name exactly one of noteIds, all: true or none: true");
+        let selected: number[];
+        if (args.all === true) selected = clip.notes.map((note) => note.id as number);
+        else if (args.none === true) selected = [];
+        else {
+          const ids = args.noteIds; if (!Array.isArray(ids) || ids.length < 1 || new Set(ids).size !== ids.length || !ids.every((value) => Number.isInteger(value) && (value as number) >= 0)) throw new RangeError("note ids are invalid");
+          if (ids.some((noteId) => !clip.notes.some((note) => note.id === noteId))) throw new Error("note id is not present in the clip");
+          selected = [...ids as number[]];
+        }
+        this.selectedNotes.set(clip.ref, selected);
+        return { selected: selected.length };
+      }
+      case "note.delete-range": {
+        const clip = this.findClip(text("ref") as LiveRef); clipAuthority(clip);
+        if (args.expectedNotesRevision !== (clip.notesRevision ?? simulatorRevision(clip.notes))) throw new Error("clip notes changed since preview");
+        const fromPitch = number("fromPitch", 0, 127); const pitchSpan = number("pitchSpan", 1, 128); const fromTime = number("fromTime", 0); const timeSpan = number("timeSpan", 0.001);
+        if (!Number.isInteger(fromPitch) || !Number.isInteger(pitchSpan)) throw new RangeError("the pitch range is invalid");
+        const inside = (note: Note): boolean => note.pitch >= fromPitch && note.pitch < fromPitch + pitchSpan && note.start >= fromTime && note.start < fromTime + timeSpan;
+        const before = clip.notes.length; clip.notes = clip.notes.filter((note) => !inside(note));
+        clip.notesRevision = simulatorRevision(clip.notes); touched(clip.ref);
+        return { deleted: before - clip.notes.length, notesRevision: clip.notesRevision };
+      }
+      case "fire-button.set": {
+        const reference = text("ref"); const pressed = args.pressed; if (typeof pressed !== "boolean") throw new TypeError("pressed must be true or false");
+        const safety = args.outputSafety as { safe?: unknown; provenance?: unknown } | undefined;
+        if (!safety || safety.safe !== true || typeof safety.provenance !== "string" || ["", "unknown", "simulator"].includes(safety.provenance)) throw new Error("explicit output-safety evidence is required");
+        const clip = this.findClipWithTrack(reference as LiveRef); const slot = this.state.tracks.flatMap((track) => track.clipSlots ?? []).find((candidate) => candidate.ref === reference || (clip !== undefined && candidate.clipRef === reference)); const scene = this.state.scenes.find((candidate) => candidate.ref === reference);
+        const target = clip ? clip.clip : slot ?? scene; const button = scene ?? slot;
+        if (!target || !button) throw new Error("that has no launch button");
+        if (target.objectIdentity !== args.expectedObjectIdentity) throw new Error("fire button target changed since preview");
+        button.fireButtonState = pressed;
+        if (pressed) this.heldFireButtons.add(reference); else this.heldFireButtons.delete(reference);
+        this.emit({ type: "transport", payload: { operation, pressed } });
+        return { ref: reference, pressed };
+      }
+      case "track.action": {
+        const track = this.findTrack(text("ref") as LiveRef); if (!track) throw new Error("track reference is stale or invalid");
+        if (args.action !== "jump-in-running-clip") throw new RangeError("track action is invalid");
+        if (track.objectIdentity !== args.expectedObjectIdentity) throw new Error("track identity changed since preview");
+        const beats = number("beats", -1_000_000, 1_000_000);
+        if (track.playingSlotIndex === null || track.playingSlotIndex === undefined) throw new Error("no Session clip is playing on this track");
+        this.emit({ type: "transport", payload: { operation, beats } });
+        return { done: true };
+      }
+      case "automation.step.insert": case "automation.value-at": {
+        const clip = this.findClip(text("clipRef") as LiveRef); const parameterRef = text("parameterRef") as LiveRef;
+        if (operation === "automation.value-at") {
+          const time = number("time", 0); const points = clip.envelopes?.[parameterRef];
+          if (!points) return { value: null };
+          if (points.length === 0) return { value: 0 };
+          const after = points.findIndex((point) => point.time >= time);
+          if (after <= 0) return { value: (after === 0 ? points[0] : points.at(-1))!.value };
+          const left = points[after - 1]!, right = points[after]!;
+          return { value: right.time === left.time ? right.value : left.value + (right.value - left.value) * (time - left.time) / (right.time - left.time) };
+        }
+        if (args.expectedAuthorityDigest !== this.automationAuthorityDigest(clip.ref, parameterRef) || args.expectedEnvelopeRevision !== this.envelopeRevision(clip, parameterRef)) throw new Error("automation target identity or envelope changed since preview");
+        const start = number("start", 0); const length = number("length", 0.001); const value = number("value");
+        if (start + length > clip.length + 1e-9) throw new Error("the step is outside the clip");
+        clip.envelopes = clip.envelopes ?? {};
+        const kept = (clip.envelopes[parameterRef] ?? []).filter((point) => point.time < start || point.time > start + length);
+        clip.envelopes[parameterRef] = [...kept, { time: start, value }, { time: start + length, value }].sort((a, b) => a.time - b.time);
+        touched(clip.ref);
+        return { inserted: 1 };
+      }
+      case "device.property.set": {
+        const found = device(); const property = args.property; const spec = typeof property === "string" ? DEVICE_PROPERTIES[property] : undefined;
+        if (!spec) throw new RangeError("device property is unknown");
+        const row = rowOf(found, spec.rowKey); const current = row?.[spec.field];
+        if (current === null || current === undefined) throw new Error(`${property as string} is unavailable on this device`);
+        fenced({ property, value: current }, "device property");
+        const value = args.value; const choices = spec.choices ? row![spec.choices] : undefined;
+        if (typeof current === "boolean" ? typeof value !== "boolean" : typeof value !== "number" || !Number.isFinite(value) || (Array.isArray(choices) && (!Number.isInteger(value) || value < 0 || value >= choices.length))) throw new RangeError(`${property as string} is not one of its choices`);
+        row![spec.field] = value;
+        return { changed: true, revision: touched(found.ref), value };
+      }
+      case "device.action": {
+        const found = device(); const action = args.action;
+        const family = action === "cc-control-resend" ? "ccControl" : typeof action === "string" && ["simpler-warp-as", "simpler-warp-double", "simpler-warp-half"].includes(action) ? "simpler" : undefined;
+        if (!family) throw new RangeError("device action is unknown");
+        if (!rowOf(found, family)) throw new Error(`this needs a ${family === "simpler" ? "Simpler" : "CC Control"}; that device isn't one`);
+        const sample = family === "simpler" ? rowOf(found, "sample") ?? null : null;
+        fenced({ sample }, "device");
+        if ((action === "simpler-warp-as") !== ("beats" in args)) throw new RangeError("beats goes with simpler-warp-as, and only with it");
+        if (action === "simpler-warp-as") number("beats", 0.001);
+        if (family === "simpler") { if (!sample) throw new Error("this Simpler has no sample"); sample.warping = true; }
+        return { done: true, revision: touched(found.ref) };
+      }
+      case "sample.set": case "wavetable.set": {
+        const found = device(); const key = operation === "sample.set" ? "sample" : "wavetable"; const fields = operation === "sample.set" ? SAMPLE_FIELDS : WAVETABLE_FIELDS;
+        const row = rowOf(found, key); if (!row) throw new Error(operation === "sample.set" ? "this Simpler has no sample" : "this needs a Wavetable; that device isn't one");
+        fenced(Object.fromEntries(fields.map((field) => [field, row[field] ?? null])), key);
+        const given = fields.filter((field) => args[field] !== undefined); if (given.length === 0) throw new Error(`${key} mutation has no fields`);
+        for (const field of given) { const value = number(field, 0, operation === "sample.set" ? 1_000_000 : 100_000); if (operation === "wavetable.set" && !Number.isInteger(value)) throw new RangeError(`${field} is invalid`); row[field] = value; }
+        return { changed: true, revision: touched(found.ref) };
+      }
+      case "sample.slice": {
+        const found = device(); const sample = rowOf(found, "sample"); if (!sample) throw new Error("this Simpler has no sample");
+        const before = Array.isArray(sample.slices) ? [...sample.slices as number[]] : []; fenced({ slices: before }, "slice");
+        const action = args.action; const time = args.time as number; const toTime = args.toTime as number;
+        if (action === "insert") { if (before.includes(time)) throw new Error("a slice is already at that time"); sample.slices = [...before, time].sort((a, b) => a - b); }
+        else if (action === "move") { if (!before.includes(time)) throw new Error("no slice is at that time"); if (before.includes(toTime) && toTime !== time) throw new Error("a slice is already at the new time"); sample.slices = before.map((value) => value === time ? toTime : value).sort((a, b) => a - b); }
+        else if (action === "remove") { if (!before.includes(time)) throw new Error("no slice is at that time"); sample.slices = before.filter((value) => value !== time); }
+        else if (action === "clear") sample.slices = [];
+        else if (action === "reset") sample.slices = Array.isArray(sample.detectedSlices) ? [...sample.detectedSlices as number[]] : [];
+        else throw new RangeError("slice action is unknown");
+        return { slices: [...sample.slices as number[]], revision: touched(found.ref) };
+      }
+      case "wavetable.modulation.set": {
+        const found = device(); const table = rowOf(found, "wavetable"); if (!table) throw new Error("this needs a Wavetable; that device isn't one");
+        const targets = Array.isArray(table.visibleModulationTargetNames) ? [...table.visibleModulationTargetNames as string[]] : [];
+        fenced({ targets }, "Wavetable modulation");
+        if (("targetIndex" in args) === ("parameterRef" in args)) throw new RangeError("name exactly one of targetIndex or parameterRef");
+        const source = number("source", 0, 1000); const value = number("value", -1, 1);
+        let target: number;
+        if ("targetIndex" in args) { target = number("targetIndex", 0, targets.length - 1); if (!Number.isInteger(target)) throw new RangeError("targetIndex is not one of the matrix's targets"); }
+        else {
+          const parameter = found.parameters.find((candidate) => candidate.ref === args.parameterRef); if (!parameter) throw new Error("parameterRef must name one of this Wavetable's parameters");
+          target = targets.indexOf(parameter.name); if (target < 0) { targets.push(parameter.name); table.visibleModulationTargetNames = targets; target = targets.length - 1; }
+        }
+        const amounts = this.modulationAmounts.get(found.ref) ?? new Map<string, number>(); this.modulationAmounts.set(found.ref, amounts);
+        const prior = amounts.get(`${target}:${source}`) ?? 0; amounts.set(`${target}:${source}`, value);
+        return { changed: true, revision: touched(found.ref), targetIndex: target, value, prior };
+      }
+      case "plugin.parameter-names": {
+        const names = (device() as Device & { parameterNames?: string[] }).parameterNames; if (!Array.isArray(names)) throw new Error("only a plug-in lists all its parameter names");
+        const begin = args.begin === undefined ? 0 : number("begin", 0); const end = args.end === undefined ? -1 : number("end", -1);
+        const listed = names.slice(begin, end === -1 ? undefined : end);
+        return { names: listed, total: begin === 0 && end === -1 ? listed.length : null };
+      }
+      case "device.banks.read": {
+        const banks = (device() as Device & { banks?: Array<{ name: string; parameters: number[] }> }).banks; if (!Array.isArray(banks)) throw new Error("only a Max for Live device lists its banks");
+        return { banks: structuredClone(banks) };
+      }
+      case "clip.time-convert": {
+        const clip = this.findClip(text("ref") as LiveRef); if (clip.kind !== "audio") throw new Error("only an audio clip converts between beats and its sample's time");
+        const rate = (clip as Clip & { sampleRate?: number }).sampleRate ?? 44_100; const secondsPerBeat = 60 / (this.state.set.tempo ?? 120); const warped = clip.warp !== false;
+        const from = args.from; const value = number("value");
+        if (from === "beats") { const samples = warped ? value * secondsPerBeat * rate : null; return { beats: value, samples, seconds: samples === null ? null : samples / rate }; }
+        if (from === "samples") return { beats: warped ? value / rate / secondsPerBeat : null, samples: value, seconds: value / rate };
+        if (from === "seconds") return { beats: warped ? value / secondsPerBeat : null, samples: value * rate, seconds: value };
+        throw new RangeError("time conversion arguments are invalid");
+      }
+      case "application.message": {
+        const message = args.text; if (typeof message !== "string" || message.length < 1 || message.length > 1024 || (args.modal !== undefined && typeof args.modal !== "boolean")) throw new RangeError("message arguments are invalid");
+        this.shownMessages.push({ text: message, modal: args.modal === true });
+        return { shown: true };
+      }
+      case "browser.preview.start": {
+        const itemId = text("itemId"); const item = this.browserCatalog().find((candidate) => candidate.id === itemId); if (!item) throw new Error("browser item is not present");
+        if (args.expectedName !== item.name || args.expectedItemIdentity !== item.objectIdentity) throw new Error("browser item identity changed since it was found");
+        this.browserPreview = `preview_simulator_${String(++this.sequence).padStart(24, "0")}`;
+        return { previewId: this.browserPreview, started: true };
+      }
+      case "browser.preview.stop": {
+        if (this.browserPreview === undefined || args.previewId !== this.browserPreview) throw new Error("that preview isn't playing any more");
+        this.browserPreview = undefined;
+        return { stopped: true };
+      }
+      default: throw new Error(`live operation unavailable: ${operation}`);
+    }
+  }
+
   private extensionOperation(operation: string, args: Record<string, unknown>): Record<string, unknown> {
     const named = (actual: string, what: string): void => { if (typeof args.expectedName === "string" && args.expectedName !== actual) throw new Error(`the ${what} there is "${actual}" now, not "${args.expectedName}"`); };
     const number = (key: string): number => { const value = args[key]; if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${key} must be a number`); return value; };
