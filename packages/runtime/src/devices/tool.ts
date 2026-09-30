@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { KernelTool } from "../core/contracts.js";
 import { encodeAmxd } from "./amxd.js";
 import { lowDisk, MB } from "../core/disk.js";
-import { checkMidiDevice } from "./harness.js";
+import { checkMidiDeviceIsolated } from "./harness.js";
 import { midiDevicePatcher } from "./midi.js";
 import { checkSpec, MAX_CONTROLS, UNITS, type Control } from "./spec.js";
 
@@ -101,7 +101,8 @@ export function deviceTool(options: DeviceToolOptions): KernelTool {
       const checked = checkSpec(input);
       if ("problems" in checked) return { text: JSON.stringify({ problems: checked.problems, next: "Fix these and call make_device again." }), isError: true };
       const spec = checked.spec;
-      const verified = checkMidiDevice(spec);
+      // In a process of its own: the code is the model's, and may be steered by text Kumi read (a video, a name).
+      const verified = await checkMidiDeviceIsolated(spec);
       if (verified.problems.length) return { text: JSON.stringify({ problems: verified.problems, passed: `${verified.passed} of ${verified.of} of its tests`, next: "Fix the code (or a test that's wrong) and call make_device again." }), isError: true };
       signal.throwIfAborted();
       // Where Live's Browser looks: a folder that stays, so new files are noticed quickly.

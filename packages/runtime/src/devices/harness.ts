@@ -4,6 +4,9 @@
  * so a test is exact and instant. The device's own tests run, and Kumi's checks: it runs, it
  * throws nothing, it leaves no note hanging, and it goes quiet once every note is released.
  */
+import { spawn } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { midiDeviceCode } from "./midi.js";
 import type { DeviceSpec, MidiEvent, MidiTest } from "./spec.js";
@@ -62,7 +65,7 @@ function run(spec: Pick<DeviceSpec, "controls" | "code">, input: MidiEvent[], se
   }
   const fakeDate = class extends Date { static override now() { return clock; } };
   const context = vm.createContext({ outlet: (_index: number, byte: number) => { sent.push({ at: clock, byte: Number(byte) }); }, post: (text: string) => { if (/^Kumi device:/.test(String(text))) errors.push(String(text).replace(/^Kumi device:\s*/, "").trim()); },
-    Task, Date: fakeDate, inlet: 0, messagename: "" });
+    Task, Date: fakeDate, inlet: 0, messagename: "" }, { codeGeneration: { strings: false, wasm: false } });
   const until = (time: number) => {
     for (let guard = 0; guard < 100_000; guard++) {
       let next: { due: number; order: number; fn: () => void } | undefined;
@@ -144,4 +147,33 @@ export function checkMidiDevice(spec: Pick<DeviceSpec, "controls" | "code" | "te
     problems.push(`test "${test.name}": expected ${test.expect.map(describe).join(", ") || "nothing"}; got ${result.output.map(describe).join(", ") || "nothing"}${result.errors.length ? ` (it threw: ${result.errors[0]})` : ""}.`);
   }
   return { passed, of: spec.tests.length, problems };
+}
+
+/** How long a device's check may take before its process is stopped: code that loops forever says so, not hangs Kumi. */
+export const CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * checkMidiDevice in a process of its own, for code the model wrote: Node's permission model lets it read
+ * Kumi's code and nothing else (no files written, no programs started, no workers), it gets no
+ * environment (no keys), code can't be made from strings (an escape from the device's frame can't
+ * compile anything), and it's stopped at the deadline. Only plain data goes in and comes out.
+ */
+export function checkMidiDeviceIsolated(spec: Pick<DeviceSpec, "controls" | "code" | "tests">, options: { timeoutMs?: number } = {}): Promise<Checked> {
+  const child = fileURLToPath(new URL("./harness-child.js", import.meta.url));
+  const permission = process.allowedNodeEnvironmentFlags.has("--permission") ? "--permission" : "--experimental-permission";
+  const args = [permission, `--allow-fs-read=${dirname(dirname(child))}`, "--disallow-code-generation-from-strings", "--max-old-space-size=128", child];
+  return new Promise((resolve) => {
+    const worker = spawn(process.execPath, args, { env: {}, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let out = ""; let settled = false;
+    const done = (result: Checked) => { if (settled) return; settled = true; clearTimeout(timer); worker.kill("SIGKILL"); resolve(result); };
+    const timer = setTimeout(() => done({ passed: 0, of: spec.tests.length, problems: [`Kumi's check: it didn't finish within ${Math.round((options.timeoutMs ?? CHECK_TIMEOUT_MS) / 1000)} s; something loops forever (a while loop, or a timer that reschedules itself at once).`] }), options.timeoutMs ?? CHECK_TIMEOUT_MS);
+    timer.unref?.();
+    worker.stdout.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); if (out.length > 1_000_000) done({ passed: 0, of: spec.tests.length, problems: ["Kumi's check: it said far too much."] }); });
+    worker.on("error", (error) => done({ passed: 0, of: spec.tests.length, problems: [`Kumi's check couldn't start: ${error.message.slice(0, 200)}`] }));
+    worker.on("close", () => {
+      try { const result = JSON.parse(out) as Checked; done({ passed: Number(result.passed) || 0, of: Number(result.of) || 0, problems: Array.isArray(result.problems) ? result.problems.map(String).slice(0, 20) : [] }); }
+      catch { done({ passed: 0, of: spec.tests.length, problems: ["Kumi's check: it stopped before saying how it went (the code may have ended its process)."] }); }
+    });
+    worker.stdin.end(JSON.stringify({ controls: spec.controls, code: spec.code, tests: spec.tests }));
+  });
 }

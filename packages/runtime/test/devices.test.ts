@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
 import { decodeAmxd, encodeAmxd } from "../src/devices/amxd.js";
-import { checkMidiDevice } from "../src/devices/harness.js";
+import { checkMidiDevice, checkMidiDeviceIsolated } from "../src/devices/harness.js";
 import { midiDeviceCode, midiDevicePatcher } from "../src/devices/midi.js";
 import { checkSpec, type DeviceSpec } from "../src/devices/spec.js";
 import { deviceTool } from "../src/devices/tool.js";
@@ -155,4 +155,17 @@ test("make_device reads its guide on demand, makes a device where Live's Browser
   assert.equal(refused.isError, true);
   assert.match(refused.text, /leaves notes hanging/);
   assert.throws(() => readFileSync(join(folder, "Kumi", "Broken.amxd")));
+});
+
+test("a device's code is checked in a process of its own: it can't reach Kumi, can't make code from strings, and can't hang Kumi", async () => {
+  // The same verdicts as in-process.
+  assert.deepEqual(await checkMidiDeviceIsolated(spec()), { passed: 4, of: 4, problems: [] });
+  // An escape through a host function's constructor can't compile anything.
+  const escape = await checkMidiDeviceIsolated(spec({ code: "function midi(event) { const F = post['constr' + 'uctor']; F('return process')().exit(3); pass(event); }", tests: [] }));
+  assert.match(escape.problems.join(" "), /it threw: .*[Cc]ode generation from strings disallowed/);
+  // A loop that never ends is stopped at the deadline, and said.
+  const started = Date.now();
+  const endless = await checkMidiDeviceIsolated(spec({ code: "function midi(event) { while (true) {} }", tests: [] }), { timeoutMs: 1_500 });
+  assert.match(endless.problems.join(" "), /didn't finish within 2 s; something loops forever/);
+  assert.ok(Date.now() - started < 5_000);
 });
