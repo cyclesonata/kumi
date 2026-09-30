@@ -1702,7 +1702,8 @@ export function createAbletonIntegration(options: Options): Integration {
       const byKey = new Map(fresh.knobs.map((knob) => [key(knob), knob]));
       const byDevice = new Map<string, { parameterRef: string; value: number }[]>();
       knobs.forEach((knob, index) => { const now_ = byKey.get(key(knob)); const device = fresh.devices[Number(knob.device.split(":")[0])]?.ref; if (now_ && typeof device === "string") byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value: values[index]! }]); });
-      await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) await step("set_device_parameters", { deviceRef, values: set }, signal); });
+      // Live takes 64 of a device's values at a time.
+      await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) for (let at = 0; at < set.length; at += 64) await step("set_device_parameters", { deviceRef, values: set.slice(at, at + 64) }, signal); });
       knobs.forEach((knob, index) => last.set(key(knob), values[index]!));
     };
     /** A track's closing limiter (the search's safety) with its input back at 0 dB. */
