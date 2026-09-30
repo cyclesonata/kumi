@@ -610,7 +610,10 @@ export function createSession(options: Options): SessionController {
           heardLast = undefined;
           // The model's new tracks go after the render tracks, and Live undoes tracks from the last one back:
           // the render tracks go first, and come back after, with the new candidates.
-          closedNotes.push(...await rig.close().catch(() => [] as string[])); open = false;
+          const closing = await rig.close().catch(() => [] as string[]); open = false;
+          closedNotes.push(...closing);
+          // Main not put back: the goal stops rather than render on over a Main it can't restore.
+          if (closing.some((note) => /Main may still be silent/.test(note))) { state.status = "paused"; state.why = "Main couldn't be put back; set it in Live, then /goal carries on"; break; }
           const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: Math.round(leader.score) } : undefined, gaps.slice(0, 3), stalled, structural));
           if (leap.stopReason === "cancelled" || op.controller.signal.aborted) break;
           // What it tried: its "Tried:" line, or its first line.

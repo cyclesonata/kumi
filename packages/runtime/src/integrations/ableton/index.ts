@@ -16,7 +16,7 @@ import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { setMeter } from "./more-changes.js";
-import { ARRANGEMENT_BRIDGE, atLeast, RENDER_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, atLeast, GOAL_BRIDGE, RENDER_BRIDGE } from "./bridge-version.js";
 import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, renderSpan, restoreStore, silentRender } from "./audition.js";
 import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
 import { summary as heardSummary } from "../../audio/tools.js";
@@ -1331,6 +1331,8 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Where a fader position is in dB, as Live shows it (0.85 is 0 dB). */
   const faderDb = (volume: number) => (volume <= 0 ? "-inf dB" : `${(20 * Math.log10(volume / 0.85) * (volume > 0.85 ? 0.3 : 1)).toFixed(1)} dB`);
 
+  /** The current "Kumi · Goal best" copy's own steps, across a goal's rigs (a pause and a resume): undone when a better one replaces it. */
+  let bestSteps: string[] = [];
   /** Whether a render is running (an audition, or a goal's pass): one at a time. */
   let rendering = false;
   /** Run Kumi's own steps quietly (no HISTORY, no NOW), their ids into `into`, and the answer's change count as it was. */
@@ -1396,6 +1398,8 @@ export function createAbletonIntegration(options: Options): Integration {
       if (rig.sources.some((source) => source.name === found.name)) continue;
       rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}`, ...(candidate.clip ? { clip: candidate.clip } : {}) });
     }
+    // Failing partway, the rig undoes what it made before saying so: nobody else holds its steps yet.
+    try {
     await quietly(rig.steps, async () => {
       // Session clips play from a free stretch of the Arrangement, after everything in it. When any
       // candidate plays one, they all do (each its own, or its first): the stretch is empty otherwise.
@@ -1409,6 +1413,7 @@ export function createAbletonIntegration(options: Options): Integration {
       }
       await addScratch(rig, rig.sources, signal);
     });
+    } catch (error) { await closeRig(rig); throw error; }
     return rig;
   }
   /**
@@ -1465,6 +1470,10 @@ export function createAbletonIntegration(options: Options): Integration {
       const main = await mainVolume(signal);
       if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
       prior = main.volume; mainRef = main.ref;
+      // Main at -inf with a level still waiting to be put back (an earlier render couldn't): that level is
+      // the producer's, not -inf.
+      const pending = restore.load();
+      if (prior === 0 && pending && (pending.path ? pending.path === project?.path : pending.set === currentSet)) prior = pending.volume;
     }
     lap("main read");
     let started = false;
@@ -1606,7 +1615,7 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   async function openGoal(request: AuditionRequest, originalSignal: AbortSignal): Promise<GoalRig | string> {
     if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
-    if (!supported({ since: RENDER_BRIDGE })) return tooOld({ since: RENDER_BRIDGE });
+    if (!supported({ since: GOAL_BRIDGE })) return tooOld({ since: GOAL_BRIDGE });
     if (!request.reference) return "A goal needs a reference to reach.";
     if (!currentTempo) return "Kumi doesn't know the Set's tempo yet; try again.";
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
@@ -1674,8 +1683,7 @@ export function createAbletonIntegration(options: Options): Integration {
     }
     /** Analyses by candidate settings (and window): a render already heard isn't heard again. */
     const heardBefore = new Map<string, { score: number; gaps: string[]; structural?: { gap: string; move: string } }>();
-    /** The current "Kumi · Goal best" copy's own steps: undone when a better one replaces it. */
-    let bestSteps: string[] = [];
+
     return {
       slots,
       screens: screen !== undefined,
@@ -1798,6 +1806,12 @@ export function createAbletonIntegration(options: Options): Integration {
             await step("rename", { kind: "track", ref: copy.ref, name: after.some((row) => row.name === name) ? `${name} ${randomUUID().slice(0, 3)}` : name }, signal);
             // The candidate may be muted (kept for A/B): its copy plays.
             await step("set_mixer", { trackRef: copy.ref, mute: false }, signal).catch(() => undefined);
+            // And at the level it was made at: the search's limiter took its input 12 dB down; the copy's goes back to 0 dB.
+            const copied = await readKnobs(String((await rows("track", { fields: ["name"] }, signal)).find((row) => row.ref === copy.ref)?.name ?? name), signal).catch(() => undefined);
+            const limiter = copied?.devices.at(-1);
+            const input = limiter?.className === "Limiter" ? copied!.knobs.find((knob) => knob.device === `${copied!.devices.length - 1}:${String(limiter.name ?? "Limiter")}` && /^(gain|input( gain)?)$/i.test(knob.name)) : undefined;
+            const unity = input ? (input.min < 0 ? 0 : input.min === 0 && input.max === 1 ? 0.5 : undefined) : undefined;
+            if (input && unity !== undefined && typeof limiter?.ref === "string") await step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: input.ref, value: unity }] }, signal).catch(() => undefined);
           });
           return name;
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "The best couldn't be kept on its own track."; }
@@ -2000,7 +2014,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
           takes: result.takes.map((take) => ({ label: take.label, track: shortRef(take.track), ...(take.silent ? { silent: true } : {}), ...(take.heard ? { heard: take.heard.summary } : {}),
             ...(take.closeness ? { score: take.closeness.score, gaps: take.closeness.gaps, features: Object.fromEntries(take.closeness.features.map((feature) => [feature.name, feature.similarity])),
               ...(take.closeness.structural ? { knobsCantCloseThis: `${take.closeness.structural.gap}: ${take.closeness.structural.move}` } : {}) } : {}) })),
-          ...(result.reference ? { reference: result.reference.summary } : {}), seconds: result.seconds, ...(result.notes.length ? { notes: result.notes } : {}) }), isError: result.takes.every((take) => take.silent) };
+          ...(result.reference ? { reference: result.reference.summary } : {}), seconds: result.seconds, ...(result.notes.length ? { notes: result.notes } : {}) }), isError: result.takes.every((take) => take.silent || !take.heard) };
       } }] : [];
     return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions];
   }

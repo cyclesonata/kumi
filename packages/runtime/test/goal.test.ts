@@ -35,7 +35,7 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
   let session!: ReturnType<typeof createSession>;
-  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: renderWith,
+  const b = bridge({ transport: true, version: "1.0.50", tempo: 480, renders: renderWith,
     extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }, { name: "Kumi · Goal · Bright", devices: operator(0.95) }, { name: "Kumi · Goal · Wide", devices: operator(0.6) }],
     onConnection: (state) => connection?.(state), onAudition: (event) => session.watch?.(event) });
   const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
@@ -85,7 +85,8 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   assert.equal(names.filter((name) => name.startsWith("Kumi · Goal best")).length, 1, "one best: a better one replaces the last");
   const best = r.b.devicesOf("Kumi · Goal best")!;
   assert.equal(best.at(-1)!.className, "Limiter");
-  assert.equal(best.at(-1)!.params[0]!.value, 0.25, "its input at -12 dB, where it only catches a runaway");
+  assert.equal(best.at(-1)!.params[0]!.value, 0.5, "the copy at the level it was made at: its limiter's input back at 0 dB");
+  assert.equal(r.b.devicesOf("Kumi · Goal · Dark")!.at(-1)!.params[0]!.value, 0.25, "a candidate's limiter input at -12 dB, where it only catches a runaway");
   assert.ok(Math.abs(cutoff(best[0]!.params[1]!.value) - 2600) < 1400, `the best's cutoff ${cutoff(best[0]!.params[1]!.value)} Hz is near the reference's`);
   assert.ok(!names.some((name) => name.startsWith("Kumi · render")), `no scratch tracks left: ${names.join(", ")}`);
   assert.equal(r.b.main.volume, 0.85);
@@ -179,7 +180,7 @@ test("a target with a sub the candidates lack leads to a structural leap in the 
 });
 
 test("a goal's analyses are kept by settings: a render already heard isn't heard again, and a generation of only those renders nothing", async () => {
-  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: render, extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }] });
+  const b = bridge({ transport: true, version: "1.0.50", tempo: 480, renders: render, extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }] });
   await b.integration.start(new AbortController().signal);
   const observation = await b.integration.observe(new AbortController().signal);
   const tracks = JSON.parse((await observation.tools.find((tool) => tool.name === "live_discover")!.execute({ kind: "track", fields: ["name"] }, new AbortController().signal)).text).live.items as { ref: string; name: string }[];
@@ -228,4 +229,12 @@ test("a long part is screened on a short, characteristic window of it, with the 
   const last = r.statuses().at(-1)!;
   assert.ok(last.best !== undefined, "the best reported is a full-length score");
   await r.session.close();
+});
+
+test("goals need bridge 1.0.50, which releases their render steps' undo", async () => {
+  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: render, extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }] });
+  await b.integration.start(new AbortController().signal);
+  await b.integration.observe(new AbortController().signal);
+  assert.match(String(await b.integration.goal!({ candidates: [{ track: "Kumi · Goal · Dark" }], fromBeat: 8, beats: 4, reference }, new AbortController().signal)), /needs the Ableton bridge 1\.0\.50 or later/);
+  await b.integration.close();
 });

@@ -131,3 +131,15 @@ test("an older bridge doesn't offer auditions; the request is checked before any
   assert.deepEqual(renderSpan(8, 4, 4), { position: 4, preroll: 4, wait: 10 });
   assert.deepEqual(renderSpan(2, 4, 4), { position: 0, preroll: 2, wait: 8 }, "no pre-roll before the start");
 });
+
+test("a rig that fails partway through setting up undoes what it made before saying so", async () => {
+  const b = await rig();
+  try {
+    // A scratch track's routing is refused, after the scratch tracks were made.
+    b.failNext("live_routing_apply");
+    const result = await tool(b.tools, "audition").execute(both, signal());
+    assert.equal(result.isError, true, result.text);
+    assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"], "no scratch track left");
+    assert.equal(b.main.volume, 0.85);
+  } finally { await b.integration.close(); }
+});
