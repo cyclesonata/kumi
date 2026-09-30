@@ -1162,6 +1162,7 @@ class LiveObjectMapper:
         if operation == "note.delete":
             return self._offers("clip", "remove_notes_by_id")
         if operation in {"device.parameter.set", "device.parameters.set"}:
+            # A gesture is asked for per change, and refused where the parameter can't make one.
             if self._probe_classes("parameter"): return self._offers("parameter", "value", method=False)
             return any(all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))) for parameter in self._shape_probe()["parameter"])
         if operation == "arrangement.audio-clip.create":
@@ -1242,7 +1243,7 @@ class LiveObjectMapper:
         if operation == "track.set":
             return self._offers("track", "color_index", method=False)
         if operation == "track.view.set":
-            return self._offers_any("track_view", "is_collapsed", "device_insert_mode", method=False)
+            return self._offers_any("track_view", "is_collapsed", "device_insert_mode", method=False) or self._offers("track", "is_showing_chains", method=False)
         if operation == "track.select-instrument":
             return self._offers("track_view", "select_instrument")
         if operation == "selection.set":
@@ -2302,6 +2303,23 @@ class LiveObjectMapper:
         step = self._read_attr(parameter, "quantization")
         if isinstance(step, (int, float)) and not isinstance(step, bool) and math.isfinite(float(step)) and step > 0: return float(step)
         return 1.0 if self._read_attr(parameter, "is_quantized") is True else 0.0
+
+    def _set_parameter_in_gesture(self, reference: str, value: Any) -> dict[str, Any]:
+        """A parameter change as a hand on a control makes it (begin_gesture, the value, end_gesture):
+        while Live records automation, the change is recorded. The gesture always ends."""
+        parameter = self.refs.get(reference)
+        begin, end = getattr(parameter, "begin_gesture", None), getattr(parameter, "end_gesture", None)
+        if not callable(begin) or not callable(end): raise ValueError("parameter gestures are unavailable on this Live shape")
+        begin()
+        changed = False
+        try:
+            result = self._set_parameter_value(reference, value); changed = True
+            return result
+        finally:
+            try: end()
+            except BaseException as error:
+                # A change that went through and left its gesture open is reported; a failed one keeps its own error.
+                if changed: raise ValueError("the parameter changed, but its gesture didn't end") from error
 
     def _set_parameter_value(self, reference: str, value: Any) -> dict[str, Any]:
         parameter = self.refs.get(reference)
@@ -3456,6 +3474,7 @@ class LiveObjectMapper:
         if operation == "device.parameter.set":
             reference = str(args.get("ref"))
             self._check_parameter_authority(reference, args)
+            if args.get("gesture") is True: return self._set_parameter_in_gesture(reference, args.get("value"))
             return self._set_parameter_value(reference, args.get("value"))
         if operation == "device.parameters.set":
             return self._device_parameters_set(args)
@@ -5544,7 +5563,18 @@ class LiveObjectMapper:
                  "scaleName": scale_name if isinstance(scale_name, str) else None,
                  "scaleMode": scale_mode if isinstance(scale_mode, bool) else None,
                  "scaleIntervals": intervals}
-        return {"tuningSystem": system, "scale": scale}
+        notes = int_or_none(self._read_attr(tuning, "number_of_notes_in_pseudo_octave")) if tuning is not None else None
+        return {"tuningSystem": system, "scale": scale, "referencePitch": self._reference_pitch(tuning), "notesInPseudoOctave": notes if notes is not None and 0 <= notes <= 1024 else None}
+
+    def _reference_pitch(self, tuning: Any) -> dict[str, Any] | None:
+        """The tuning's reference pitch (Live's ReferencePitch: a frequency on a note of an octave)."""
+        reference = self._read_attr(tuning, "reference_pitch") if tuning is not None else None
+        if reference is None: return None
+        read = (lambda name, alias: reference.get(name, reference.get(alias))) if isinstance(reference, dict) else (lambda name, alias: self._read_attr(reference, name))
+        frequency, index, octave = read("frequency", "frequency"), read("index_in_octave", "indexInOctave"), read("octave", "octave")
+        if isinstance(frequency, bool) or not isinstance(frequency, (int, float)) or not math.isfinite(float(frequency)) or not 0 <= float(frequency) <= 100000: return None
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in (index, octave)) or not 0 <= index <= 1024 or not -64 <= octave <= 64: return None
+        return {"frequency": float(frequency), "indexInOctave": int(index), "octave": int(octave)}
 
     def _setting_dict_or_none(self, value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict) or len(value) > 8: return None
@@ -5874,14 +5904,43 @@ class LiveObjectMapper:
             "isAbletonLinkEnabled": optional_bool("is_ableton_link_enabled"),
             "isAbletonLinkStartStopSyncEnabled": optional_bool("is_ableton_link_start_stop_sync_enabled"),
             "tempoFollower": optional_bool("tempo_follower"),
+            "lastEventTime": (lambda value: value if value is not None and 0 <= value <= 1e9 else None)(optional_float("last_event_time")),
+            "sessionRecordStatus": (lambda value: value if value is not None and 0 <= value <= 16 else None)(optional_int("session_record_status")),
+            "canJumpToNextCue": optional_bool("can_jump_to_next_cue"),
+            "canJumpToPrevCue": optional_bool("can_jump_to_prev_cue"),
+            "isCuePointSelected": self._called_bool(song, "is_cue_point_selected"),
+            "selectOnLaunch": optional_bool("select_on_launch"),
+            "beatsSongTime": self._beats_song_time(),
         }
+
+    # Song state that moves on its own while Live plays: song.read reports it, its revision leaves it out.
+    _MOVING_SONG_STATE = ("beatsSongTime", "isCuePointSelected")
+
+    def _called_bool(self, owner: Any, method_name: str) -> bool | None:
+        method = getattr(owner, method_name, None)
+        if not callable(method): return None
+        try: value = method()
+        except Exception: return None
+        return value if isinstance(value, bool) else None
+
+    def _beats_song_time(self) -> str | None:
+        """Where the playhead is, as Live shows it: bars.beats.sixteenths.ticks."""
+        getter = getattr(self.song, "get_current_beats_song_time", None)
+        if not callable(getter): return None
+        try: value = getter()
+        except Exception: return None
+        parts = [self._read_attr(value, name) for name in ("bars", "beats", "sub_division", "ticks")]
+        if all(isinstance(part, int) and not isinstance(part, bool) for part in parts): return "{}.{}.{}.{}".format(*parts)[:64]
+        text = str(value) if value is not None else ""
+        return text[:64] or None
 
     def _song_read(self, args: dict[str, Any]) -> dict[str, Any]:
         set_ref = args.get("setRef")
         if not isinstance(set_ref, str) or set_ref != self.refs.put("set", self.song, "song") or set(args) - {"setRef"}:
             raise ValueError("song read arguments are invalid")
         state = self._song_state()
-        return {**state, "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
+        settled = {key: value for key, value in state.items() if key not in self._MOVING_SONG_STATE}
+        return {**state, "revision": hashlib.sha256(self._bounded_canonical(settled).encode("utf-8")).hexdigest()}
 
     _TRANSPORT_ACTIONS = {"start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement", "jump-by"}
 
@@ -6038,10 +6097,13 @@ class LiveObjectMapper:
         }
 
     def _track_view_state_revision(self, track: Any) -> str:
+        """What track.view.set is fenced on, as the track row's view shows it: isCollapsed,
+        deviceInsertMode and isShowingChains, as collapsed, deviceInsertMode and showChains."""
         view = getattr(track, "view", None)
         collapsed = self._read_attr(view, "is_collapsed") if view is not None else None
         mode = self._read_attr(view, "device_insert_mode") if view is not None else None
-        return hashlib.sha256(self._bounded_canonical({"collapsed": collapsed if isinstance(collapsed, bool) else None, "deviceInsertMode": int(mode) if isinstance(mode, int) and not isinstance(mode, bool) else None}).encode("utf-8")).hexdigest()
+        chains = self._read_attr(track, "is_showing_chains")
+        return hashlib.sha256(self._bounded_canonical({"collapsed": collapsed if isinstance(collapsed, bool) else None, "deviceInsertMode": int(mode) if isinstance(mode, int) and not isinstance(mode, bool) else None, "showChains": chains if isinstance(chains, bool) else None}).encode("utf-8")).hexdigest()
 
     def _track_create_return(self, args: dict[str, Any]) -> dict[str, Any]:
         if set(args) - {"name", "expectedStructureRevision"}: raise ValueError("return-track creation arguments are invalid")
@@ -6197,7 +6259,7 @@ class LiveObjectMapper:
 
     def _track_view_set(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
-        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:track:") or set(args) - {"ref", "collapsed", "deviceInsertMode", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("track view authority is invalid")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:track:") or set(args) - {"ref", "collapsed", "deviceInsertMode", "showChains", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("track view authority is invalid")
         tracks = self._items(getattr(self.song, "tracks", [])); parts = reference.split(":"); index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else -1
         if not 0 <= index < len(tracks): raise ValueError("track hierarchy changed")
         track = tracks[index]; view = getattr(track, "view", None)
@@ -6208,25 +6270,32 @@ class LiveObjectMapper:
         if "collapsed" in args:
             value = args["collapsed"]
             if not isinstance(value, bool): raise ValueError("collapsed is invalid")
-            proposals.append(("is_collapsed", value))
+            proposals.append((view, "is_collapsed", value))
         if "deviceInsertMode" in args:
             value = args["deviceInsertMode"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 8: raise ValueError("deviceInsertMode is invalid")
-            proposals.append(("device_insert_mode", value))
+            proposals.append((view, "device_insert_mode", value))
+        if "showChains" in args:
+            # The Session View's chains of the track's Instrument Rack: the track's own setting.
+            value = args["showChains"]
+            if not isinstance(value, bool): raise ValueError("showChains is invalid")
+            if self._read_attr(track, "can_show_chains") is False: raise ValueError("this track can't show chains: it has no Instrument Rack to show them from")
+            if not isinstance(self._read_attr(track, "is_showing_chains"), bool): raise ValueError("showing chains is unavailable on this track")
+            proposals.append((track, "is_showing_chains", value))
         if not proposals: raise ValueError("track view mutation has no fields")
-        assignments = [(attribute, value, self._read_attr(view, attribute)) for attribute, value in proposals]
+        assignments = [(owner, attribute, value, self._read_attr(owner, attribute)) for owner, attribute, value in proposals]
         before_revision = self._track_view_state_revision(track)
         try:
-            for attribute, value, _ in assignments: setattr(view, attribute, value)
-            for attribute, value, _ in assignments:
-                observed = self._read_attr(view, attribute)
+            for owner, attribute, value, _ in assignments: setattr(owner, attribute, value)
+            for owner, attribute, value, _ in assignments:
+                observed = self._read_attr(owner, attribute)
                 if isinstance(value, bool):
                     if observed is not value: raise ValueError("track view change was not confirmed")
                 elif not isinstance(observed, int) or isinstance(observed, bool) or observed != value: raise ValueError("track view change was not confirmed")
         except BaseException as error:
             rollback_failed = False
-            for attribute, _, prior in reversed(assignments):
-                try: setattr(view, attribute, prior)
+            for owner, attribute, _, prior in reversed(assignments):
+                try: setattr(owner, attribute, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._track_view_state_revision(track) != before_revision: raise ValueError("track view change failed and exact rollback failed") from error
             raise
@@ -6482,7 +6551,7 @@ class LiveObjectMapper:
             raise
         return {"changed": True, "revision": hashlib.sha256(self._bounded_canonical({"drawMode": self._read_attr(view, "draw_mode")}).encode("utf-8")).hexdigest()}
 
-    _SONG_SET_FIELDS = ("signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization")
+    _SONG_SET_FIELDS = ("signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization", "selectOnLaunch")
 
     def _song_settings_state(self) -> dict[str, Any]:
         def int_or_none(value: Any) -> int | None:
@@ -6495,8 +6564,9 @@ class LiveObjectMapper:
                 return candidate if 0 <= candidate <= 10**6 else None
             except (TypeError, ValueError):
                 return None
-        swing = self._read_attr(self.song, "swing_amount")
-        return {"signatureNumerator": int_or_none(self._read_attr(self.song, "signature_numerator")),
+        swing = self._read_attr(self.song, "swing_amount"); select_on_launch = self._read_attr(self.song, "select_on_launch")
+        return {"selectOnLaunch": select_on_launch if isinstance(select_on_launch, bool) else None,
+                "signatureNumerator": int_or_none(self._read_attr(self.song, "signature_numerator")),
                 "signatureDenominator": int_or_none(self._read_attr(self.song, "signature_denominator")),
                 "swingAmount": float(swing) if isinstance(swing, (int, float)) and not isinstance(swing, bool) and math.isfinite(float(swing)) else None,
                 "clipTriggerQuantization": enum_or_none(self._read_attr(self.song, "clip_trigger_quantization")),
@@ -6528,6 +6598,10 @@ class LiveObjectMapper:
             value = args["midiRecordingQuantization"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 8: raise ValueError("midiRecordingQuantization is invalid")
             proposals.append(("midiRecordingQuantization", "midi_recording_quantization", value))
+        if "selectOnLaunch" in args:
+            value = args["selectOnLaunch"]
+            if not isinstance(value, bool): raise ValueError("selectOnLaunch is invalid")
+            proposals.append(("selectOnLaunch", "select_on_launch", value))
         if not proposals: raise ValueError("song settings mutation has no fields")
         for _, attribute, _ in proposals:
             if self._read_attr(self.song, attribute) is None: raise ValueError(f"{attribute} is unavailable on this song")
@@ -6538,6 +6612,9 @@ class LiveObjectMapper:
             observed_state = self._song_settings_state()
             for field, _, value, _ in assignments:
                 observed = observed_state.get(field)
+                if isinstance(value, bool):
+                    if observed is not value: raise ValueError("song settings change was not confirmed")
+                    continue
                 # Swing is a 32-bit float in Live (0.15 reads back as 0.15000000596): compare within its
                 # precision, as every numeric readback does; the whole-number settings stay exact.
                 if not isinstance(observed, (int, float)) or isinstance(observed, bool) or not (_same_number(observed, value) if field == "swingAmount" else float(observed) == float(value)): raise ValueError("song settings change was not confirmed")
@@ -6560,13 +6637,20 @@ class LiveObjectMapper:
 
     def _clip_view_set(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref")
-        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:clip:") or set(args) - {"ref", "gridQuantization", "gridIsTriplet", "showEnvelope", "showLoop", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("clip view authority is invalid")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:clip:") or set(args) - {"ref", "gridQuantization", "gridIsTriplet", "showEnvelope", "showLoop", "envelopeParameterRef", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("clip view authority is invalid")
         clip = self.refs.get(reference); view = getattr(clip, "view", None)
         if view is None: raise ValueError("clip view is unavailable")
         current = self.get(reference)
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(str(current.get("objectIdentity", "")), args["expectedObjectIdentity"]): raise ValueError("clip identity changed since preview")
         state_revision = hashlib.sha256(self._bounded_canonical(self._clip_view_state(clip)).encode("utf-8")).hexdigest()
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("clip view state changed since preview")
+        # The envelope to show: one of the clip's own track's parameters, found before anything changes.
+        envelope_parameter, envelope_selector = None, None
+        if "envelopeParameterRef" in args:
+            parameter_ref = args["envelopeParameterRef"]
+            if not isinstance(parameter_ref, str) or self._ref_track_index(parameter_ref) is None or self._ref_track_index(parameter_ref) != self._ref_track_index(reference): raise ValueError("the envelope shown must be a parameter on the clip's own track")
+            envelope_parameter = self._resolve_parameter(parameter_ref); envelope_selector = getattr(view, "select_envelope_parameter", None)
+            if not callable(envelope_selector): raise ValueError("choosing the envelope a clip shows is unavailable on this Live shape")
         proposals = []
         if "gridQuantization" in args:
             value = args["gridQuantization"]
@@ -6604,6 +6688,7 @@ class LiveObjectMapper:
             shower = getattr(view, "show_loop", None)
             if not callable(shower): raise ValueError("clip show-loop is unavailable")
             shower()
+        if envelope_selector is not None: envelope_selector(envelope_parameter)
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 

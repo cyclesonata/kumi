@@ -7669,3 +7669,74 @@ class DeviceDuplicationTests(unittest.TestCase):
         validate_operation_payload("device.duplicate", "result", made)
         self.assertEqual((made["ref"], [device.name for device in chain.devices]), (f"{mapper.refs.epoch}:device:0:0:0:1", ["Saturator", "Saturator"]))
         self.assertIs(mapper._device_owner_of(made["ref"]), chain)
+
+
+class ExtendedOperationTests(unittest.TestCase):
+    """song.set selectOnLaunch, song.read's and tuning.read's new fields, track.view.set showChains,
+    clip.view.set envelopeParameterRef and device.parameter.set gesture."""
+
+    @staticmethod
+    def host_song_settings(read):
+        """The song settings fence as the host computes it from song.read."""
+        settings = {field: read.get(field) for field in ("signatureNumerator", "signatureDenominator", "swingAmount", "selectOnLaunch")}
+        settings.update({field: (read.get(field) or {}).get("value") for field in ("clipTriggerQuantization", "midiRecordingQuantization")})
+        return state_revision(settings)
+
+    def test_select_on_launch_and_what_song_read_adds(self):
+        song = FakeSong(); song.clip_trigger_quantization = type("Quantization", (int,), {"name": "q_bar"})(4); song.signature_numerator = 4; song.signature_denominator = 4; song.select_on_launch = False; song.last_event_time = 64.0; song.session_record_status = 0
+        song.can_jump_to_next_cue = True; song.can_jump_to_prev_cue = False; song.is_cue_point_selected = lambda: False
+        song.get_current_beats_song_time = lambda: types.SimpleNamespace(bars=3, beats=2, sub_division=1, ticks=0)
+        bridge = immediate_bridge(song); snapshot = bridge.mapper.snapshot(); set_ref = snapshot["set"]["ref"]
+        read = read_through(bridge, "song.read", {"setRef": set_ref})
+        self.assertEqual({key: read[key] for key in ("lastEventTime", "sessionRecordStatus", "canJumpToNextCue", "canJumpToPrevCue", "isCuePointSelected", "selectOnLaunch", "beatsSongTime")}, {"lastEventTime": 64.0, "sessionRecordStatus": 0, "canJumpToNextCue": True, "canJumpToPrevCue": False, "isCuePointSelected": False, "selectOnLaunch": False, "beatsSongTime": "3.2.1.0"})
+        # The playhead moving doesn't move the revision; a setting does.
+        song.get_current_beats_song_time = lambda: types.SimpleNamespace(bars=5, beats=1, sub_division=1, ticks=0)
+        self.assertEqual(bridge.mapper.invoke("song.read", {"setRef": set_ref})["revision"], read["revision"])
+        request = {"setRef": set_ref, "expectedObjectIdentity": snapshot["set"]["objectIdentity"], "selectOnLaunch": True, "expectedStateRevision": self.host_song_settings(read)}
+        self.assertTrue(mutate_through(bridge, "song.set", request, "song-set-0001")["changed"]); self.assertIs(song.select_on_launch, True)
+        self.assertNotEqual(bridge.mapper.invoke("song.read", {"setRef": set_ref})["revision"], read["revision"])
+        with self.assertRaisesRegex(ValueError, "song settings state changed since preview"): bridge.mapper.invoke("song.set", {**request, "selectOnLaunch": False})
+        with self.assertRaisesRegex(ValueError, "selectOnLaunch is invalid"): bridge.mapper.invoke("song.set", {**request, "selectOnLaunch": 1, "expectedStateRevision": self.host_song_settings(bridge.mapper.invoke("song.read", {"setRef": set_ref}))})
+
+    def test_tuning_read_gives_the_reference_pitch_and_the_pseudo_octave(self):
+        song = FakeSong(); song.tuning_system = FakeTuningSystem(); song.root_note = 0; song.scale_name = "Major"; song.scale_mode = True; song.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
+        song.tuning_system.reference_pitch = types.SimpleNamespace(frequency=432.0, index_in_octave=9, octave=4); song.tuning_system.number_of_notes_in_pseudo_octave = 12
+        mapper = LiveObjectMapper(song); set_ref = mapper.snapshot()["set"]["ref"]
+        read = mapper.invoke("tuning.read", {"setRef": set_ref}); validate_operation_payload("tuning.read", "result", read)
+        self.assertEqual((read["referencePitch"], read["notesInPseudoOctave"]), ({"frequency": 432.0, "indexInOctave": 9, "octave": 4}, 12))
+        # The revision covers them: a new reference pitch is a new revision.
+        song.tuning_system.reference_pitch = types.SimpleNamespace(frequency=440.0, index_in_octave=9, octave=4)
+        self.assertNotEqual(mapper.invoke("tuning.read", {"setRef": set_ref})["revision"], read["revision"])
+        song.tuning_system.reference_pitch = {"note": 69, "frequency": 440.0}
+        self.assertIsNone(mapper.invoke("tuning.read", {"setRef": set_ref})["referencePitch"])
+
+    def test_a_track_shows_its_racks_chains_and_a_clip_shows_a_parameters_envelope(self):
+        song = FakeSong(); track = song.tracks[0]; track.view = types.SimpleNamespace(is_collapsed=False, device_insert_mode=0); track.is_showing_chains = False; track.can_show_chains = True
+        shown = []; clip = FakeClip(4.0); clip.view = types.SimpleNamespace(grid_quantization=4, grid_is_triplet=False, select_envelope_parameter=lambda parameter: shown.append(parameter)); track.clip_slots[0].clip = clip
+        other = FakeTrack(); song.tracks.append(other)
+        bridge = immediate_bridge(song); snapshot = bridge.mapper.snapshot(); row = snapshot["tracks"][0]
+        view_state = lambda chains: state_revision({"collapsed": False, "deviceInsertMode": 0, "showChains": chains})
+        request = {"ref": row["ref"], "showChains": True, "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": view_state(False)}
+        self.assertTrue(mutate_through(bridge, "track.view.set", request, "track-view-0001")["changed"]); self.assertIs(track.is_showing_chains, True)
+        with self.assertRaisesRegex(ValueError, "track view state changed since preview"): bridge.mapper.invoke("track.view.set", request)
+        track.can_show_chains = False
+        with self.assertRaisesRegex(ValueError, "no Instrument Rack"): bridge.mapper.invoke("track.view.set", {**request, "showChains": False, "expectedStateRevision": view_state(True)})
+        clip_row = row["clips"][0]; parameter = row["devices"][0]["parameters"][0]; foreign = snapshot["tracks"][1]["devices"][0]["parameters"][0]
+        clip_request = {"ref": clip_row["ref"], "envelopeParameterRef": parameter["ref"], "expectedObjectIdentity": clip_row["objectIdentity"], "expectedStateRevision": state_revision({"gridQuantization": 4, "gridIsTriplet": False})}
+        self.assertTrue(mutate_through(bridge, "clip.view.set", clip_request, "clip-view-0001")["changed"]); self.assertEqual(shown, [track.devices[0].parameters[0]])
+        with self.assertRaisesRegex(ValueError, "parameter on the clip's own track"): bridge.mapper.invoke("clip.view.set", {**clip_request, "envelopeParameterRef": foreign["ref"]})
+        self.assertEqual(len(shown), 1)
+
+    def test_a_gesture_begins_and_always_ends(self):
+        calls = []; bridge = immediate_bridge(); parameter_object = bridge.mapper.song.tracks[0].devices[0].parameters[0]
+        parameter_object.begin_gesture = lambda: calls.append("begin"); parameter_object.end_gesture = lambda: calls.append("end")
+        parameter = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
+        args = lambda value: {"ref": parameter["ref"], "value": value, "gesture": True, "expectedRevision": bridge.mapper.refs.revision(parameter["ref"]), **ControlSurfaceTests.parameter_authority(bridge.mapper, parameter["ref"])}
+        self.assertEqual(mutate_through(bridge, "device.parameter.set", args(0.75), "gesture-key-0001")["value"], 0.75); self.assertEqual(calls, ["begin", "end"])
+        with self.assertRaisesRegex(ValueError, "outside authoritative bounds"): bridge.mapper.invoke("device.parameter.set", args(2.0))
+        self.assertEqual(calls, ["begin", "end", "begin", "end"])
+        def stuck(): raise RuntimeError("Live kept the gesture")
+        parameter_object.end_gesture = stuck
+        with self.assertRaisesRegex(ValueError, "gesture didn't end"): bridge.mapper.invoke("device.parameter.set", args(0.25))
+        del parameter_object.begin_gesture
+        with self.assertRaisesRegex(ValueError, "gestures are unavailable"): bridge.mapper.invoke("device.parameter.set", args(0.5))
