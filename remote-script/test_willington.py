@@ -66,6 +66,24 @@ class WillingtonTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.mapper._follow_action_set(self.args(**values))
         self.song.is_playing = True
         with self.assertRaisesRegex(ValueError, 'stopped'): self.mapper._follow_action_set(self.args())
+    def test_stopped_transport_allows_retained_session_flags_but_not_recording(self):
+        for attribute in ('is_playing', 'is_triggered'):
+            setattr(self.clip, attribute, True)
+            prior = self.mapper._follow_action_fields(self.clip)
+            self.mapper._follow_action_set(self.args(followActionA=8))
+            self.mapper._follow_action_set(self.args(**prior))
+            self.assertTrue(getattr(self.clip, attribute))
+            setattr(self.clip, attribute, False)
+        self.clip.is_recording = True
+        with self.assertRaisesRegex(ValueError, 'non-recording clip'):
+            self.mapper._follow_action_set(self.args(followActionA=8))
+        self.clip.is_recording = False
+        prepared = self.args(followActionA=8)
+        self.song.is_playing = True
+        with self.assertRaisesRegex(ValueError, 'stopped transport'):
+            self.mapper._follow_action_set(prepared)
+        self.assertEqual(self.clip.follow_action_a, 4)
+
     def test_partial_write_restores_all_fields(self):
         prior = self.mapper._follow_action_fields(self.clip)
         original = self.clip.__class__

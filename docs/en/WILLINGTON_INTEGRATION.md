@@ -58,3 +58,5 @@ name the action in ordinary language. Full-screen TUI behavior, playback and
 save/reload persistence were not exercised by this chat trial.
 
 Follow Action capability is advertised whenever its native provider is ready, including an empty Set. Exact clip state is validated at preview/apply time; clients can therefore plan clip creation and Follow Action edits in the same request.
+
+Stopped transport may retain Session clip `isPlaying`/`isTriggered` flags. Follow Action edits and undo allow those retained states when transport is stopped and the target is not recording. Transport is checked again at mutation time; a resumed transport refuses the edit. Playback refusals now report the actual cause rather than a generic freshness error. Read-only previews of the reported four-clip case passed after this correction; no user clip settings were changed during diagnosis.

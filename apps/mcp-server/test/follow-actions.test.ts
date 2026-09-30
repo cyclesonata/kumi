@@ -71,3 +71,29 @@ test('follow actions reconcile lost apply and undo acknowledgements with the exa
   await call('live_undo',undo);
   assert.equal((adapter.get(clipRef) as any).followActionA,initial.followActionA);
 });
+
+test("paused Session playing/triggered flags allow Follow Action edits and undo", async () => {
+  for (const retained of [{ isPlaying: true }, { isTriggered: true }]) {
+    const { adapter, call, clipRef } = fixture();
+    Object.assign((adapter as any).state.tracks[0].clips[0], retained);
+    const preview = await call("live_follow_actions_preview", { clipRef, followActionB: 2, followActionChanceA: 50 });
+    await call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "paused-follow-apply" });
+    assert.equal((adapter.get(clipRef) as any).followActionChanceB, 50);
+    await call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "paused-follow-undo" });
+    assert.equal((adapter.get(clipRef) as any).followActionChanceB, 0);
+    for (const [key,value] of Object.entries(retained)) assert.equal((adapter.get(clipRef) as any)[key], value);
+  }
+});
+test("active transport and recording are refused with actionable errors, including after preview", async () => {
+  const { adapter, call, clipRef } = fixture();
+  const state = (adapter as any).state;
+  state.playback.transport.playing = true;
+  await assert.rejects(call("live_follow_actions_preview", { clipRef, followActionA: 8 }), /stopped transport.*non-recording clip/);
+  state.playback.transport.playing = false; state.tracks[0].clips[0].isRecording = true;
+  await assert.rejects(call("live_follow_actions_preview", { clipRef, followActionA: 8 }), /Stop Live transport/);
+  state.tracks[0].clips[0].isRecording = false;
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionA: 8 });
+  state.playback.transport.playing = true;
+  await assert.rejects(call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "transport-resumed" }), /stopped transport/);
+  assert.equal((adapter.get(clipRef) as any).followActionA, initial.followActionA);
+});

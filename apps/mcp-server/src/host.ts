@@ -423,7 +423,8 @@ function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { m
 function adapterReason(raw: string): string {
   const known = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240;
   const hostSentence = raw.length <= 240 && /^(?:[a-z]|Live )/.test(raw) && !/[\r\n]/.test(raw) && !/(?:^|[\s'"(=])(?:\/[^\s/'"]+){2,}|[A-Za-z]:\\|\bat \S+ \(|node:internal/.test(raw);
-  return known || hostSentence ? raw : "adapter request failed";
+  const followPlayback = raw === "Follow Action edits require stopped transport and a non-recording clip";
+  return known || hostSentence || followPlayback ? raw : "adapter request failed";
 }
 
 /** The Remote Script refused before anything changed in Live (a position past the end of the Set):
@@ -3867,7 +3868,7 @@ export class McpHost {
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.arrangement) throw new Error("Follow Actions require a Session clip");
-      if (snapshot.playback.transport.playing !== false || row.clip.isPlaying !== false || row.clip.isTriggered !== false || row.clip.isRecording !== false) throw new Error("Follow Action edits require stopped, non-recording playback");
+      if (snapshot.playback.transport.playing !== false || row.clip.isRecording !== false) throw new Error("Follow Action edits require stopped transport and a non-recording clip");
       const prior = Object.fromEntries(fields.map(field => [field, row.clip[field]]));
       validateFollowActions(prior);
       const proposed = { ...prior, ...Object.fromEntries(fields.filter(field => params[field] !== undefined).map(field => [field, params[field]])) };
@@ -3879,7 +3880,12 @@ export class McpHost {
       const transaction: ClipLifecycleTransaction = { id: `follow_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "follow-actions", fence, clipRef: params.clipRef as LiveRef, payload: { ref: params.clipRef, ...proposed, ...authority }, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "Follow Actions");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, clipRef: params.clipRef, prior, proposed, impact: "edits-clip-follow-actions", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Follow Action preview requires fresh authoritative state."); }
+    } catch (cause) {
+      const remediation = cause instanceof Error && cause.message === "Follow Action edits require stopped transport and a non-recording clip"
+        ? "Stop Live transport and clip recording, then retry the edit."
+        : "Follow Action preview requires fresh authoritative state.";
+      return this.adapterToolError(id, cause, remediation);
+    }
   }
 
   private async liveFollowActionsApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {

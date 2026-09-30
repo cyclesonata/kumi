@@ -923,7 +923,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const prior = Object.fromEntries(FOLLOW_ACTION_FIELDS.map(field => [field, (clip as unknown as Record<string, unknown>)[field] ?? null]));
         validateFollowActions(prior);
         if (args.expectedAuthorityRevision !== simulatorRevision(this.sessionClipAuthority(clip.ref)) || args.expectedStateRevision !== simulatorRevision(prior)) throw new Error("clip hierarchy or Follow Action state changed since preview");
-        if (this.state.playback.transport.playing !== false || clip.isPlaying !== false || clip.isTriggered !== false || clip.isRecording !== false) throw new Error("Follow Action edits require stopped, non-recording playback");
+        if (this.state.playback.transport.playing !== false || clip.isRecording !== false) throw new Error("Follow Action edits require stopped transport and a non-recording clip");
         validateFollowActions(args);
         for (const field of FOLLOW_ACTION_FIELDS) (clip as unknown as Record<string, unknown>)[field] = args[field];
         this.emit({ type: "object", ref: clip.ref, payload: { operation } });

@@ -3880,8 +3880,11 @@ class LiveObjectMapper:
         revision = hashlib.sha256(self._bounded_canonical(before).encode()).hexdigest()
         if args["expectedStateRevision"] != revision or args["expectedAuthorityRevision"] != self._clip_authority_digest(reference):
             raise ValueError("clip hierarchy or Follow Action state changed since preview")
-        if self._read_attr(self.song, "is_playing") is not False or self._read_attr(clip, "is_playing") is not False or self._read_attr(clip, "is_triggered") is not False or self._read_attr(clip, "is_recording") is not False:
-            raise ValueError("Follow Action edits require stopped, non-recording playback")
+        # Session clips retain playing/triggered flags while transport is stopped.
+        # Those queued states do not mean audio is advancing; check transport
+        # again at the mutation boundary, plus the target's recording state.
+        if self._read_attr(self.song, "is_playing") is not False or self._read_attr(clip, "is_recording") is not False:
+            raise ValueError("Follow Action edits require stopped transport and a non-recording clip")
         proposed = {field: args[field] for field in fields}
         for field, (_, kind, minimum, maximum) in fields.items():
             value = proposed[field]
