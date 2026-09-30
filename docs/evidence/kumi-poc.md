@@ -1011,6 +1011,11 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.35), at `3
 - An empty scene plays nothing, so its fire could never be confirmed; 1.0.41 refuses it at preview
   ("that scene has no clips to play, so launching it would only stop what's playing").
 - accept:live on 1.0.41 after a fresh Live start: 56 of 56. After firing scene 1 and stopping: 56 of 56.
+- accept:live on **1.0.52** (the bridge 1.0.0 ships with) after a fresh Live start, 2026-09-30: **55 of 55**.
+  The same script as the 1.0.41 pass. Every change is undone except, as before, the recorded bounce track, the track it
+  recorded from and the bounce's routing, which Kumi keeps with the reason. The Set is otherwise as it was (tempo 122, 62
+  tracks, 10 scenes, no locators). The bounce took 9 steps and was heard at −19.9 LUFS; the watch saw the hand-made
+  volume change. The count is one lower than on 1.0.41 because HISTORY holds one fewer entry to undo; nothing failed.
 
 **Open:** after adding a scene through Kumi and undoing it (`add_tracks_and_scenes` with one scene,
 then its undo), every later arrangement bounce in that Live session records silence (peak 0.0; the
