@@ -1900,7 +1900,25 @@ class LiveObjectMapper:
         elif kind == "device":
             # A rack's chains by name, empty ones too: what a device can be loaded into, without its whole tree.
             items = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device.get("chains") or [] if isinstance(chain, dict)]} if device.get("chains") else device for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"])]
-        elif kind == "parameter": items = [parameter for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
+        elif kind == "parameter":
+            devices = [device for track in snapshot["tracks"] for device in self._flatten_device_rows(track["devices"])]
+            items = [parameter for device in devices for parameter in device["parameters"]]
+            if parent is not None and parent.startswith(f"{self.refs.epoch}:chain:"):
+                chains = [chain for device in devices for chain in device.get("chains", []) if chain.get("ref") == parent]
+                if len(chains) != 1: raise ValueError("chain parameter parent is no longer authoritative")
+                mixer = chains[0].get("mixer", {})
+                references = [mixer.get(key) for key in ("volumeRef", "panningRef", "chainActivatorRef")] + list(mixer.get("sendRefs") or [])
+                items = []
+                for reference in dict.fromkeys(reference for reference in references if isinstance(reference, str)):
+                    parameter = self.refs.get(reference)
+                    minimum, maximum, value = (self._read_attr(parameter, key) for key in ("min", "max", "value"))
+                    if any(type(item) not in (int, float) or not math.isfinite(item) for item in (minimum, maximum, value)): continue
+                    formatter = self._read_attr(parameter, "str_for_value")
+                    try: display = formatter(value) if callable(formatter) else value
+                    except Exception: display = value
+                    items.append({"ref": reference, "parentRef": parent, "objectIdentity": self._capture_object_identity(parameter),
+                        "name": str(self._read_attr(parameter, "name") or "Parameter"), "value": float(value), "min": float(minimum), "max": float(maximum),
+                        "quantization": self._parameter_step(parameter), "displayValue": str(display), "revision": self.refs.revision(reference)})
         elif kind == "session_playback": items = [snapshot["playback"]]
         elif kind == "selection":
             view = getattr(self.song, "view", None); selected_track = getattr(view, "selected_track", None); selected_scene = getattr(view, "selected_scene", None); highlighted_slot = getattr(view, "highlighted_clip_slot", None)

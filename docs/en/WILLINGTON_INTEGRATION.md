@@ -42,3 +42,17 @@ The following remain deliberately unavailable through Kumi:
 - Modulator mapping: native patch processing is asynchronous. Kumi still needs bounded settled-state verification, exact target/source ownership capture, cancellation and restoration before this can become a history transaction.
 
 These native methods existing in Willington is not sufficient evidence of an undoable Kumi operation. Do not advertise them by adding only a runtime descriptor or protocol entry.
+
+## Kumi chat acceptance
+
+The actual Kumi CLI (plain chat with the configured model) was exercised against
+the disposable Live fixture. Macro rename, Follow Actions, chain pan mapping and
+Modulators-category searches passed; each mutation was undone using `/undo`,
+including the owned test clip. Independent bridge readback verified the results.
+See [chat trial evidence](../evidence/willington-kumi-chat.json).
+
+This trial found and fixed a discovery gap: `parameter` now accepts a current
+chain parent and returns its mixer parameters with ranges and identities. Mapping
+`targetRef` must come from discovery in the current turn. Rack history titles now
+name the action in ordinary language. Full-screen TUI behavior, playback and
+save/reload persistence were not exercised by this chat trial.

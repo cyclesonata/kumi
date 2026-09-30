@@ -699,3 +699,17 @@ test("before a plan of three steps or more, or one that deletes, Kumi keeps a co
     assert.equal(result.isError, false); assert.equal(JSON.parse(result.text).copy, undefined);
   } finally { await unsaved.integration.close(); }
 });
+
+test("chain mixer discovery accepts a fresh chain and mapping targets require fresh provenance", async () => {
+  const b = await opened({ racks: true });
+  try {
+    const result = await tool(b.tools, "live_discover").execute({ kind: "parameter", parent: "7:chain:0:0:0" }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert(b.requests.some(request => request.name === "live_discover" && request.args.kind === "parameter" && request.args.parent === "7:chain:0:0:0"));
+    const before = b.requests.length;
+    const stale = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5, targetRef: "7:parameter:stale" }, signal());
+    assert.equal(stale.isError, true);
+    assert.match(stale.text, /targetRef.*discovery/);
+    assert(!b.requests.slice(before).some(request => request.name.endsWith("_preview") || request.name.endsWith("_apply")));
+  } finally { await b.integration.close(); }
+});

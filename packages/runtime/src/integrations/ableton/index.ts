@@ -325,6 +325,9 @@ export function createAbletonIntegration(options: Options): Integration {
       if (typeof row.ref === "string" && row.ref.length > 0 && row.ref.length <= 256) {
         refs.set(row.ref, kind);
         if (kind === "clip-slot" && typeof row.clipRef === "string" && row.clipRef.length <= 256) refs.set(row.clipRef, "session-clip");
+        if (kind === "device" && Array.isArray(row.chainList)) for (const chain of row.chainList) {
+          if (chain && typeof chain === "object" && typeof (chain as JsonObject).ref === "string" && String((chain as JsonObject).ref).length <= 256) refs.set(String((chain as JsonObject).ref), "chain");
+        }
         const color = hexColor(row.color);
         if (/track$/.test(kind) && typeof row.name === "string") known.set(row.ref, { name: row.name.slice(0, 256), ...(color ? { color } : {}) });
       }

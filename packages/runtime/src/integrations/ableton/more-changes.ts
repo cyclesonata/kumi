@@ -98,7 +98,14 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "edit_rack_mapping", preview: "live_willington_device_preview", apply: "live_willington_device_apply", family: "device",
     description: "Experimental Willington rack edits: kind macro-name renames macroIndex 0–15; variation-name renames the selected variation; macro-mapping assigns targetRef to mappingIndex 0–15 with minimum, maximum and mappingKind continuous, enum or boolean. Null mappingIndex unmaps. Boolean endpoints are macro thresholds 0–127; others use target parameter units. Requires stopped playback.",
-    summarize(_preview, input, track) { return withTrack({ title: `Changed rack ${String(input.kind ?? "mapping")}` }, ownerTrack(input.ref, track)); },
+    summarize(_preview, input, track) {
+      const macro = typeof input.macroIndex === "number" ? `Macro ${input.macroIndex + 1}` : "macro";
+      const title = input.kind === "macro-name" ? `Renamed ${macro} to “${String(input.name ?? "")}”`
+        : input.kind === "variation-name" ? `Renamed variation to “${String(input.name ?? "")}”`
+        : input.mappingIndex === null ? "Removed macro mapping"
+        : typeof input.mappingIndex === "number" ? `Mapped parameter to Macro ${input.mappingIndex + 1}` : "Changed macro mapping";
+      return withTrack({ title }, ownerTrack(input.ref, track));
+    },
   },
   {
     tool: "set_clip_follow_actions", preview: "live_follow_actions_preview", apply: "live_follow_actions_apply", family: "clip",
@@ -440,4 +447,4 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
 ];
 
 /** Fields in the new tools that name Live objects; they must come from discovery in this turn. */
-export const MORE_REFERENCE_FIELDS = ["targetTrackRef", "targetChainRef", "slotRef", "sceneRef", "takeLaneRef", "destinationTrackRef"] as const;
+export const MORE_REFERENCE_FIELDS = ["targetRef", "targetTrackRef", "targetChainRef", "slotRef", "sceneRef", "takeLaneRef", "destinationTrackRef"] as const;

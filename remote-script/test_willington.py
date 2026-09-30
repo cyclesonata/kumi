@@ -98,6 +98,21 @@ class DeviceTests(unittest.TestCase):
         result = self.mapper.invoke('willington.device.set',args)
         validate_operation_payload('willington.device.set','result',result)
         return before,result
+    def test_chain_mixer_discovery_is_bounded_and_rejects_detached_parent(self):
+        from test_remote_script import FakeMixerDevice
+        mixer = FakeMixerDevice(); mixer.panning.name = 'Chain Pan'; mixer.panning.min = -1
+        self.rack.chains[0].mixer_device = mixer
+        chain = self.mapper.snapshot()['tracks'][0]['devices'][0]['chains'][0]
+        page = self.mapper.discover('parameter', parent=chain['ref'], limit=2)
+        self.assertTrue(page['truncated'])
+        rows = self.mapper.discover('parameter', parent=chain['ref'])['items']
+        pan = next(row for row in rows if row['name']=='Chain Pan')
+        self.assertEqual(pan['ref'],chain['mixer']['panningRef'])
+        self.assertEqual((pan['min'],pan['max'],pan['parentRef']),(-1,1,chain['ref']))
+        self.rack.chains = []
+        with self.assertRaisesRegex(ValueError,'no longer authoritative'):
+            self.mapper.discover('parameter', parent=chain['ref'])
+
     def test_names_apply_and_restore(self):
         for kind in ['macro-name','variation-name']:
             before,after = self.apply(kind, {'name':'Kumi 測試'})
