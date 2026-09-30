@@ -12,7 +12,7 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { findBridgeConfig, remoteScriptsDir } from "./config.js";
+import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
 import { KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
 
@@ -110,7 +110,7 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   if (!existsSync(join(bridgeDir, "dist", "src", "lifecycle-cli.js"))) { say(`The bridge isn't built yet. Run ${KUMI_REPAIR}.`); return 1; }
 
   const config = findBridgeConfig(io.env);
-  const state = config ? dirname(config) : join(io.home ?? join(homedir(), ".kumi"), "bridge", "state");
+  const state = config ? dirname(config) : join(io.home ?? kumiDir(io.env), "bridge", "state");
   let installed: string | undefined;
   try { installed = config ? readBridgeServer(config).version : undefined; } catch { installed = undefined; }
   const lifecycle = (root: string, action: string, extra: readonly string[] = []) => run(process.execPath, [join(root, "dist", "src", "lifecycle-cli.js"), action,
@@ -138,7 +138,7 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
 
   // The bridge's own package, as a tarball the lifecycle verifies byte for byte. It goes in a folder of
   // its own under ~/.kumi/bridge, so updating or removing Kumi later doesn't pull it out from under Live.
-  const folder = join(io.home ?? join(homedir(), ".kumi"), "bridge", `${bundled}-${Date.now()}`);
+  const folder = join(io.home ?? kumiDir(io.env), "bridge", `${bundled}-${Date.now()}`);
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   const ready = preparedBridge(io.prepared ?? PREPARED);
   let artifact: string; let sha: string;

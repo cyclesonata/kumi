@@ -64,11 +64,11 @@ Then load_device with the itemId it returns, on the producer's MIDI track: Live 
 /** What an audio effect's and an instrument's code share: GenExpr, as gen~ runs it. */
 const GENEXPR = `GenExpr is the language of Max's gen~: C-like, run once per sample. Variables need no declaring; every statement ends with a semicolon.
 - Its order is fixed: your function definitions first (name(a, b) { ... return x; }), then declarations (History, Delay, Data), then statements. Kumi puts the Params for your controls after your functions.
-- Each control is a Param, named like it: a control "Decay Time" is decay_time in the code (Kumi declares it; read it). A number control is its value; a choice is its option's index (0, 1, …); a switch is 0 or 1. Don't name functions or variables like a control's Param.
+- Each control is a Param, named like it: a control "Decay Time" is decay_time in the code (Kumi declares it: read it, and don't declare it again). A number control is its value; a choice is its option's index (0, 1, …); a switch is 0 or 1. Don't name functions or variables like a control's Param.
 - History x(0); keeps x from one sample to the next (filters, envelopes, feedback). Delay d(samplerate); is a delay line up to one second long (d.write(v); y = d.read(mstosamps(ms)); interp="linear" in the declaration or the read makes it smooth). Data t(512); is a table (peek, poke).
 - Operators you'll use: mix(a, b, t), clamp(x, lo, hi), tanh, abs, sqrt, pow, exp, sin, cos, dbtoa, atodb, mtof, ftom, mstosamps, phasor(hz), cycle(hz), triangle(phase, duty), noise(), slide(x, up, down), dcblock, latch, sah, change(x), delta, scale, fold, wrap, interp, and the constants samplerate, pi, twopi.
 - Use samplerate, never 44100: Live runs at whatever rate the producer set.
-- Kumi's output stage follows your code and can't be changed: NaN and denormals out, DC blocked, an Output knob, and the level held under -1 dBFS (hard, so aim well under it: it's a safety net, not a limiter to lean on).`;
+- Kumi's output stage follows your code and can't be changed: your output has NaN, denormals and DC taken out and is held under +6 dBFS (hard: a safety net against a runaway patch, not a limiter to lean on); on an effect, Mix blends it with the dry signal, which passes untouched; Output sets the level.`;
 
 const GUIDE_AUDIO = `Making an audio effect
 
@@ -97,7 +97,7 @@ Assign out1 and out2 (left, right). There's no audio input. Kumi adds an Output 
 
 Craft:
 - Envelopes from History: on a strike, restart the attack; while velocity > 0, rise to the sustain; once it's 0, fall (exp(-1 / (seconds * samplerate)) per sample makes an exponential decay).
-- Voices add up: keep one voice around 0.2 at full velocity, so a chord stays well under the output stage's ceiling.
+- Voices add up: keep one voice around 0.2 at full velocity, so a chord stays well under 0 dBFS.
 - Oscillators: phasor(freq) is a rising ramp 0–1 (a saw once scaled to -1..1; it aliases, so filter it or use a polyBLEP), cycle(freq) a sine, triangle(phasor(freq), 0.5) a triangle, noise() white noise. Detune by adding cents: mtof(note + bend + cents / 100).
 - A filter with its cutoff following an envelope does most of the work in subtractive sounds; FM is cycle(freq + cycle(freq * ratio) * index * freq).
 - Choose sensible defaults, so it plays well when it loads.

@@ -103,7 +103,7 @@ export function checkSpec(input: Record<string, unknown>): { spec: DeviceSpec } 
   }
   const code = typeof input.code === "string" ? input.code : "";
   if (!code.trim() || code.length > 24_000) problems.push(`code: the device's ${gen ? "GenExpr" : "JavaScript"}, up to 24,000 characters.`);
-  else if (gen) problems.push(...checkGenCode(code, type as "audio_effect" | "instrument"));
+  else if (gen) problems.push(...checkGenCode(code, type as "audio_effect" | "instrument", checked));
   else {
     if (!/\bfunction\s+midi\s*\(/.test(code)) problems.push("code: define function midi(event), called for each MIDI event that arrives.");
     for (const [pattern, why] of FORBIDDEN) {

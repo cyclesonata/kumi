@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { KUMI_VERSION } from "@kumi/runtime";
-import { checkRelease, fetchManifest, newerVersion, rollbackInstalled, uninstallInstalled, updateInstalled } from "../src/install.js";
+import { askRelease, checkRelease, fetchManifest, newerVersion, PATH_MARKER, rollbackInstalled, swapIn, uninstallInstalled, updateInstalled } from "../src/install.js";
 
 const out = () => { const stream = new PassThrough(); let text = ""; stream.on("data", (chunk) => { text += String(chunk); }); return { stream, text: () => text }; };
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
@@ -93,7 +93,7 @@ test("uninstall removes Kumi, its Node and its launcher, and keeps the producer'
     const home = join(dir, "home");
     for (const part of ["app", "app.previous", "node", "bin", "projects"]) mkdirSync(join(home, part), { recursive: true });
     writeFileSync(join(home, "auth.json"), "{}");
-    const env = { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: join(dir, "none") };
+    const env = { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: join(dir, "none"), HOME: join(dir, "user") };
     const refused = out();
     assert.equal(await uninstallInstalled({ out: refused.stream, env, confirm: async () => false }, { all: false, yes: false }), 1);
     assert.equal(existsSync(join(home, "app")), true, "nothing goes without a yes");
@@ -103,5 +103,87 @@ test("uninstall removes Kumi, its Node and its launcher, and keeps the producer'
     assert.equal(existsSync(join(home, "auth.json")), true); assert.equal(existsSync(join(home, "projects")), true);
     assert.equal(await uninstallInstalled({ out: out().stream, env }, { all: true, yes: true }), 0);
     assert.equal(existsSync(home), false, "--all takes everything");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** An installed Kumi whose bridge Live loads from KUMI_HOME/bridge, as `kumi bridge` sets it up. */
+function withBridge(dir: string) {
+  const home = join(dir, "home"); const scripts = join(dir, "Remote Scripts");
+  for (const part of ["app", "node", "bin"]) mkdirSync(join(home, part), { recursive: true });
+  const state = join(home, "bridge", "state"); const packageRoot = join(home, "bridge", "1.0.52-1", "node_modules", "@ableton-mcp", "mcp-server");
+  mkdirSync(state, { recursive: true }); mkdirSync(join(packageRoot, "dist", "src"), { recursive: true }); mkdirSync(join(scripts, "AbletonMcpBridge"), { recursive: true });
+  writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ version: "1.0.52" }));
+  writeFileSync(join(packageRoot, "dist", "src", "lifecycle-cli.js"), "");
+  const config = join(state, "bridge-config.json");
+  writeFileSync(config, JSON.stringify({ version: 2, server: { command: process.execPath, args: [join(packageRoot, "dist", "src", "cli.js"), "--config", config] } }));
+  writeFileSync(join(scripts, "AbletonMcpBridge", "bridge-reference.json"), JSON.stringify({ config }));
+  writeFileSync(join(home, "auth.json"), "{}");
+  return { home, env: { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: scripts, HOME: join(dir, "user") } };
+}
+
+test("uninstall keeps the bridge's files while Live still loads the bridge from them, and takes them once it's out", async () => {
+  if (process.platform === "win32") return; // Windows removes them a moment after Kumi exits.
+  const dir = mkdtempSync(join(tmpdir(), "kumi-uninstall-bridge-"));
+  try {
+    // Kept in Live (said no, or Live open, or --yes with nobody to ask): its configuration and package stay.
+    let kumi = withBridge(dir);
+    const kept = out();
+    assert.equal(await uninstallInstalled({ out: kept.stream, env: kumi.env, confirm: async (question) => !/bridge/i.test(question), liveRunning: async () => false }, { all: true, yes: true }), 0);
+    assert.equal(existsSync(join(kumi.home, "bridge", "state", "bridge-config.json")), true, "the bridge in Live still has its configuration");
+    assert.equal(existsSync(join(kumi.home, "bridge", "1.0.52-1")), true, "and its package");
+    assert.equal(existsSync(join(kumi.home, "app")) || existsSync(join(kumi.home, "auth.json")), false, "everything else goes with --all");
+    assert.match(kept.text(), /The bridge's files stay in .*bridge while Live uses it\./);
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(dir);
+    // Taken out of Live by its own uninstaller: its files go too.
+    kumi = withBridge(dir);
+    const ran: string[] = [];
+    const gone = out();
+    assert.equal(await uninstallInstalled({ out: gone.stream, env: kumi.env, confirm: async () => true, liveRunning: async () => false,
+      run: async (_command, args) => { ran.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; } }, { all: false, yes: true }), 0);
+    assert.ok(ran.some((line) => line.includes("uninstall")), "the bridge's own uninstaller ran");
+    assert.equal(existsSync(join(kumi.home, "bridge")), false);
+    assert.equal(existsSync(join(kumi.home, "auth.json")), true, "the producer's files stay without --all");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("uninstall takes Kumi's PATH lines out of the startup files it wrote, zsh's ZDOTDIR too, and leaves a line someone put under the marker", async () => {
+  if (process.platform === "win32") return;
+  const dir = mkdtempSync(join(tmpdir(), "kumi-uninstall-path-"));
+  try {
+    const home = join(dir, "home"); const user = join(dir, "user"); const zdot = join(dir, "zdot");
+    for (const folder of [join(home, "app"), user, zdot]) mkdirSync(folder, { recursive: true });
+    const line = `export PATH="${join(home, "bin")}:$PATH"`;
+    writeFileSync(join(zdot, ".zshrc"), `alias ll='ls -l'\n\n${PATH_MARKER}\n${line}\n`);
+    writeFileSync(join(user, ".profile"), `${PATH_MARKER}\nexport EDITOR=vim\n`);
+    await uninstallInstalled({ out: out().stream, env: { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: join(dir, "none"), HOME: user, ZDOTDIR: zdot } }, { all: false, yes: true });
+    assert.equal(readFileSync(join(zdot, ".zshrc"), "utf8"), "alias ll='ls -l'\n\n", "the marker and Kumi's line go");
+    assert.equal(readFileSync(join(user, ".profile"), "utf8"), "export EDITOR=vim\n", "a line that isn't Kumi's stays");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("no release to get is told apart from no network, so the advice fits", async () => {
+  const env = { KUMI_RELEASES: "https://example.test/r" };
+  assert.equal(await askRelease(env, (async () => new Response("Not Found", { status: 404 })) as typeof fetch), "none");
+  assert.equal(await askRelease(env, (async () => { throw new TypeError("fetch failed"); }) as typeof fetch), "offline");
+  assert.equal(await askRelease(env, (async () => new Response("<html>", { status: 200 })) as typeof fetch), "invalid");
+  await assert.rejects(checkRelease(env, (async () => new Response("", { status: 404 })) as typeof fetch), /There's no Kumi release to get at example\.test\/r yet/);
+  const said = out();
+  assert.equal(await updateInstalled({ out: said.stream, env: { ...env, KUMI_HOME: join(tmpdir(), "kumi-no-release") }, fetcher: (async () => new Response("", { status: 404 })) as typeof fetch }), 1);
+  assert.match(said.text(), /There's no Kumi release to get/);
+  assert.doesNotMatch(said.text(), /internet/);
+});
+
+test("a swap that fails partway puts everything back, the rollback copy included", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kumi-swap-"));
+  try {
+    const app = join(dir, "app"); const previous = join(dir, "app.previous");
+    mkdirSync(app); writeFileSync(join(app, "v"), "2"); mkdirSync(previous); writeFileSync(join(previous, "v"), "1");
+    await assert.rejects(swapIn(join(dir, "missing"), app, previous));
+    assert.equal(readFileSync(join(app, "v"), "utf8"), "2"); assert.equal(readFileSync(join(previous, "v"), "utf8"), "1");
+    // And one that works keeps the one before as the rollback copy.
+    const fresh = join(dir, "app.new"); mkdirSync(fresh); writeFileSync(join(fresh, "v"), "3");
+    await swapIn(fresh, app, previous);
+    assert.equal(readFileSync(join(app, "v"), "utf8"), "3"); assert.equal(readFileSync(join(previous, "v"), "utf8"), "2");
+    assert.equal(existsSync(`${previous}.old`), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

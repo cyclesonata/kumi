@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findBridgeConfig, liveUserLibrary, loadConfig, loadInferenceConfig, readSettings, remoteScriptsDir, safeError, writeSettings } from "../src/config.js";
+import { findBridgeConfig, kumiDir, liveUserLibrary, loadConfig, loadInferenceConfig, readSettings, remoteScriptsDir, safeError, writeSettings } from "../src/config.js";
 
 // Never read the developer's own ~/.kumi settings or installed bridge.
 const isolated = { KUMI_SETTINGS_FILE: "/nonexistent-kumi-test/settings.json", KUMI_REMOTE_SCRIPTS_DIR: "/nonexistent-kumi-test/Remote Scripts" };
@@ -45,6 +45,9 @@ test("sign-in commands: login (browser, device, Pi import, a key asked for), log
   assert.deepEqual(loadConfig(["auth"], isolated), { mode: "auth", authFile: defaultAuth, settingsFile: isolated.KUMI_SETTINGS_FILE });
   // A key is asked for, never read from the command line, where shell history would keep it.
   assert.throws(() => loadConfig(["login", "anthropic", secret], {}), (error: unknown) => error instanceof Error && /asks for the API key/.test(error.message) && !error.message.includes(secret));
+  // An installed Kumi in its own folder (KUMI_HOME) keeps everything there, sign-ins and conversations included.
+  assert.equal(loadConfig(["auth"], { KUMI_HOME: "/kumi-home" }).mode === "auth" && (loadConfig(["auth"], { KUMI_HOME: "/kumi-home" }) as { authFile: string }).authFile, join("/kumi-home", "auth.json"));
+  assert.equal(kumiDir({ KUMI_HOME: "/kumi-home" }), "/kumi-home"); assert.equal(kumiDir({}), join(homedir(), ".kumi"));
   // `login` alone asks which way to sign in.
   assert.equal(loadConfig(["login"], isolated).mode, "login-choose");
   // update, update --check (just asks), update --rollback.

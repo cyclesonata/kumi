@@ -19,11 +19,27 @@
   function Step([string]$Text) { Write-Host "› $Text" -ForegroundColor DarkGray }
   function Fail([string]$Text) { Write-Host ''; Write-Host "Kumi couldn't be installed: $Text" -ForegroundColor Red; throw 'KumiInstallFailed' }
 
+  # 'ok', 'missing' (the server answered 404: nothing there to get) or 'failed' (no answer, after three tries).
   function Fetch([string]$Url, [string]$File) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-      try { Invoke-WebRequest -Uri $Url -OutFile $File -UseBasicParsing -TimeoutSec 600; return $true }
-      catch { if ($attempt -eq 3) { return $false }; Start-Sleep -Seconds 2 }
+      try { Invoke-WebRequest -Uri $Url -OutFile $File -UseBasicParsing -TimeoutSec 600; return 'ok' }
+      catch {
+        $response = $_.Exception.Response
+        if ($response -and [int]$response.StatusCode -eq 404) { return 'missing' }
+        if ($attempt -eq 3) { return 'failed' }
+        Start-Sleep -Seconds 2
+      }
     }
+  }
+  # Windows tells programs (Explorer, new windows) that the environment changed only when asked to.
+  function Send-EnvironmentChange {
+    try {
+      if (-not ('Kumi.Env' -as [Type])) {
+        Add-Type -Namespace Kumi -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'
+      }
+      $result = [UIntPtr]::Zero
+      [void][Kumi.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+    } catch { }
   }
   function Sha([string]$File) { (Get-FileHash -Algorithm SHA256 -LiteralPath $File).Hash.ToLowerInvariant() }
   function Swap([string]$Fresh, [string]$Target) {
@@ -71,7 +87,10 @@
       # ── Which Kumi ─────────────────────────────────────────────────────
       Step 'Finding the latest Kumi…'
       $manifestFile = Join-Path $work 'release.json'
-      if (-not (Fetch "$base/kumi-release.json" $manifestFile)) { Fail "couldn't reach GitHub ($base). Check your internet connection and try again." }
+      switch (Fetch "$base/kumi-release.json" $manifestFile) {
+        'missing' { Fail "there's no Kumi release to install at $($base -replace '^https://', '') yet. Try again later." }
+        'failed' { Fail "couldn't reach GitHub ($base). Check your internet connection and try again." }
+      }
       $release = Get-Content -Raw -LiteralPath $manifestFile | ConvertFrom-Json
       if (-not ($release.kumi -and $release.bundle -and $release.sha256 -and $release.node)) { Fail "the release description didn't make sense; try again later." }
 
@@ -85,8 +104,8 @@
         Step "Downloading Node $($release.node) for Kumi (about 30 MB, once)…"
         $nodeName = "node-v$($release.node)-win-$arch"
         $sums = Join-Path $work 'SHASUMS256.txt'; $zip = Join-Path $work 'node.zip'
-        if (-not (Fetch "https://nodejs.org/dist/v$($release.node)/SHASUMS256.txt" $sums)) { Fail "couldn't reach nodejs.org. Check your internet connection and try again." }
-        if (-not (Fetch "https://nodejs.org/dist/v$($release.node)/$nodeName.zip" $zip)) { Fail "couldn't download Node from nodejs.org." }
+        if ((Fetch "https://nodejs.org/dist/v$($release.node)/SHASUMS256.txt" $sums) -ne 'ok') { Fail "couldn't reach nodejs.org. Check your internet connection and try again." }
+        if ((Fetch "https://nodejs.org/dist/v$($release.node)/$nodeName.zip" $zip) -ne 'ok') { Fail "couldn't download Node from nodejs.org." }
         $want = (Select-String -LiteralPath $sums -Pattern " $([regex]::Escape("$nodeName.zip"))$" | Select-Object -First 1).Line
         if (-not $want -or ($want.Split(' ')[0] -ne (Sha $zip))) { Fail "Node's download didn't match its checksum, so it wasn't used. Try again." }
         $unpacked = Join-Path $work 'node'
@@ -102,7 +121,7 @@
       # ── Kumi ───────────────────────────────────────────────────────────
       Step "Downloading Kumi $($release.kumi)…"
       $bundle = Join-Path $work 'kumi.tar.gz'
-      if (-not (Fetch "$base/$($release.bundle)" $bundle)) { Fail "couldn't download Kumi from GitHub." }
+      if ((Fetch "$base/$($release.bundle)" $bundle) -ne 'ok') { Fail "couldn't download Kumi from GitHub." }
       if ((Sha $bundle) -ne $release.sha256) { Fail "Kumi's download didn't match its checksum, so it wasn't used. Try again." }
       $freshApp = Join-Path $work 'app'
       New-Item -ItemType Directory -Force -Path $freshApp | Out-Null
@@ -136,12 +155,17 @@ set "KUMI_INSTALLED=1"
     # ── PATH ─────────────────────────────────────────────────────────────
     $added = $false
     if (-not $env:KUMI_NO_MODIFY_PATH) {
-      $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+      # The user PATH as the registry keeps it: %VAR% entries stay unexpanded, and it's written back as a
+      # REG_EXPAND_SZ, so they keep working (the .NET round trip would store them expanded, for good).
+      $key = (Get-Item -LiteralPath 'HKCU:\').OpenSubKey('Environment', $true)
+      $userPath = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
       $parts = @(); if ($userPath) { $parts = $userPath.Split(';') | Where-Object { $_ } }
       if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $bin })) {
-        [Environment]::SetEnvironmentVariable('Path', ((@($bin) + $parts) -join ';'), 'User')
+        $key.SetValue('Path', ((@($bin) + $parts) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        Send-EnvironmentChange
         $added = $true
       }
+      $key.Close()
     }
     # This window too, so kumi works right away.
     if (-not (($env:Path.Split(';')) | Where-Object { $_.TrimEnd('\') -ieq $bin })) { $env:Path = "$bin;$env:Path" }

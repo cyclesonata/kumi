@@ -74,15 +74,17 @@ jobs:
           set -eux
           # As producers run it: piped into sh, with no Node of its own on PATH.
           env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
-          kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm "$KUMI_HOME/bin/kumi" "$@"; }
+          kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm KUMI_RELEASES="$KUMI_RELEASES" "$KUMI_HOME/bin/kumi" "$@"; }
           kumi --version | grep -q "Kumi $(node -p 'require("./package.json").version')"
           kumi --help | grep -q "kumi bridge"
           kumi doctor || true
-          # PATH line added once, and not again on a second run (which repairs).
-          rc="$HOME/.bashrc"; [ "$RUNNER_OS" = macOS ] && rc="$HOME/.bash_profile"
-          grep -c "Added by the Kumi installer" "$rc" | grep -qx 1
+          # The bridge Kumi runs from its own tree loads (it reads protocol/ from the app folder).
+          (cd "$KUMI_HOME/app" && "$KUMI_HOME/node/bin/node" --input-type=module -e 'await import("./apps/mcp-server/dist/src/host.js"); console.log("bridge host loads")')
+          # PATH line added once, in the startup file bash reads, and not again on a second run (which repairs).
+          marked() { grep -c "Added by the Kumi installer" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" 2>/dev/null | awk -F: '{ n += $NF } END { print n + 0 }'; }
+          test "$(marked)" = 1
           env -i HOME="$HOME" PATH=/usr/bin:/bin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
-          grep -c "Added by the Kumi installer" "$rc" | grep -qx 1
+          test "$(marked)" = 1
           ls -la "$KUMI_HOME"
           test -d "$KUMI_HOME/app.previous"
           # The bridge from the bundle, into a scratch Remote Scripts folder (no Live here).
@@ -96,7 +98,7 @@ jobs:
           kumi uninstall --yes
           test ! -e "$KUMI_HOME/app" && test ! -e "$KUMI_HOME/node" && test ! -e "$KUMI_HOME/bin"
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
-          ! grep -q "Added by the Kumi installer" "$rc"
+          test "$(marked)" = 0
 
       - name: Install, use, update and remove (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
@@ -113,8 +115,16 @@ jobs:
           $version = & $kumi --version; Write-Host $version
           if ($version -notmatch 'Kumi \d+\.\d+\.\d+') { throw "unexpected version: $version" }
           if (-not (([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' | Where-Object { $_ -eq (Join-Path $env:KUMI_HOME 'bin') })) { throw 'PATH not updated' }
+          # Kept as a REG_EXPAND_SZ, so %VAR% entries in it still expand.
+          if ((Get-Item -LiteralPath 'HKCU:\Environment').GetValueKind('Path') -ne 'ExpandString') { throw 'PATH is no longer REG_EXPAND_SZ' }
           & $kumi --help | Select-String 'kumi bridge' | Out-Null
           & $kumi doctor; $global:LASTEXITCODE = 0
+          # The bridge Kumi runs from its own tree loads (it reads protocol\ from the app folder).
+          Push-Location (Join-Path $env:KUMI_HOME 'app')
+          & (Join-Path $env:KUMI_HOME 'node\node.exe') --input-type=module -e 'await import(''./apps/mcp-server/dist/src/host.js''); console.log(''bridge host loads'')'
+          $loaded = $LASTEXITCODE
+          Pop-Location
+          if ($loaded -ne 0) { throw 'the bridge host did not load' }
           # Again: a repair, keeping the one before.
           Get-Content -Raw install.ps1 | Invoke-Expression
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'app.previous'))) { throw 'no previous app after a second install' }

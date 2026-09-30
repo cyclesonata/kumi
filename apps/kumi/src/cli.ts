@@ -126,6 +126,11 @@ try {
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
+  else if (config.mode === "update" && config.rollback && !INSTALLED) {
+    // A checkout goes back with git; runUpdate would pull and rebuild, the opposite of what was asked.
+    process.stdout.write("This Kumi runs from a copy of its repository, so there's no earlier Kumi kept to go back to. Check out the commit you want with git, then run: npm run setup\n");
+    process.exitCode = 1;
+  }
   else if (config.mode === "update") process.exitCode = config.check ? await updateCheck() : !INSTALLED ? await runUpdate({ out: process.stdout, env: process.env })
     : config.rollback ? await rollbackInstalled({ out: process.stdout, env: process.env, input: process.stdin }) : await updateInstalled({ out: process.stdout, env: process.env, input: process.stdin });
   else if (config.mode === "uninstall") {

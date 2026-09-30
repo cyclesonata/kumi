@@ -40,6 +40,8 @@ for (const file of ["package.json", "package-lock.json", "LICENSE.md", "README.m
 copy("apps/kumi/package.json"); copy("apps/kumi/bin"); copy("apps/kumi/dist", "apps/kumi/dist", noTests);
 copy("packages/runtime/package.json"); copy("packages/runtime/dist", "packages/runtime/dist", noTests);
 copy("apps/mcp-server/package.json"); copy("apps/mcp-server/package-lock.json"); copy("apps/mcp-server/dist", "apps/mcp-server/dist", noTests);
+// The bridge Kumi runs from its own tree reads Live's operations from protocol/, with the app as its working folder.
+copy("protocol");
 
 say("Production dependencies…");
 sh(npm, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], stage);

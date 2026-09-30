@@ -76,7 +76,12 @@ main() {
 
   # ── Which Kumi ─────────────────────────────────────────────────────────
   step "Finding the latest Kumi…"
-  fetch "$base/kumi-release.json" "$work/release.json" || fail "couldn't reach GitHub ($base). Check your internet connection and try again."
+  fetch "$base/kumi-release.json" "$work/release.json"; got=$?
+  if [ "$got" -ne 0 ]; then
+    # curl -f exits 22, and wget 8, when the server answered with an error (no release there) rather than not at all.
+    if [ "$got" -eq 22 ] || [ "$got" -eq 8 ]; then fail "there's no Kumi release to install at ${base#https://} yet. Try again later."; fi
+    fail "couldn't reach GitHub ($base). Check your internet connection and try again."
+  fi
   field() { sed -n "s/.*\"$1\" *: *\"\\([^\"]*\\)\".*/\\1/p" "$work/release.json" | head -n 1; }
   kumi_version="$(field kumi)"; bundle="$(field bundle)"; bundle_sha="$(field sha256)"; node_version="$(field node)"
   [ -n "$kumi_version" ] && [ -n "$bundle" ] && [ -n "$bundle_sha" ] && [ -n "$node_version" ] || fail "the release description didn't make sense; try again later."
@@ -127,8 +132,17 @@ LAUNCHER
     shell_name="$(basename "${SHELL:-sh}")"
     case "$shell_name" in
       zsh) rc="${ZDOTDIR:-$HOME}/.zshrc"; line="export PATH=\"$bin:\$PATH\"" ;;
-      bash) if [ "$platform" = "darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi; line="export PATH=\"$bin:\$PATH\"" ;;
-      fish) rc="$HOME/.config/fish/conf.d/kumi.fish"; line="fish_add_path \"$bin\"" ;;
+      bash)
+        # A bash login shell (every Terminal window on a Mac) reads only the first of these that exists, so
+        # Kumi adds to that one and never makes a .bash_profile that would hide someone's .profile. On Linux,
+        # new terminal windows read .bashrc.
+        rc="$HOME/.profile"
+        if [ "$platform" = "linux" ] && [ -f "$HOME/.bashrc" ]; then rc="$HOME/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then rc="$HOME/.bash_profile"
+        elif [ -f "$HOME/.bash_login" ]; then rc="$HOME/.bash_login"; fi
+        line="export PATH=\"$bin:\$PATH\"" ;;
+      # For each fish session (fish_add_path would keep it in fish's own saved PATH, past an uninstall).
+      fish) rc="$HOME/.config/fish/conf.d/kumi.fish"; line="contains -- \"$bin\" \$PATH; or set -gx PATH \"$bin\" \$PATH" ;;
       *) rc="$HOME/.profile"; line="export PATH=\"$bin:\$PATH\"" ;;
     esac
     if ! grep -qs "$marker" "$rc"; then
@@ -140,7 +154,8 @@ LAUNCHER
   # ── Done ───────────────────────────────────────────────────────────────
   say ""
   say "${bold}Kumi $kumi_version is installed.${reset}"
-  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in ~/${added#"$HOME"/}.${reset}"; fi
+  case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
+  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in $added.${reset}"; fi
   say ""
   if [ -z "$on_path" ]; then
     say "Open a new terminal window (or run: export PATH=\"$bin:\$PATH\"), then:"

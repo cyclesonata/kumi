@@ -41,27 +41,29 @@ function absoluteFile(env: Env, variable: string, fallback: string): string {
   }
   return file;
 }
-export const loadAuthFile = (env: Env = process.env) => absoluteFile(env, "KUMI_AUTH_FILE", join(homedir(), ".kumi", "auth.json"));
-export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_SETTINGS_FILE", join(homedir(), ".kumi", "settings.json"));
+/** Where Kumi keeps what it keeps: KUMI_HOME (an installed Kumi's folder, set by its launcher), else ~/.kumi. */
+export const kumiDir = (env: Env = process.env) => env.KUMI_HOME || join(homedir(), ".kumi");
+export const loadAuthFile = (env: Env = process.env) => absoluteFile(env, "KUMI_AUTH_FILE", join(kumiDir(env), "auth.json"));
+export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_SETTINGS_FILE", join(kumiDir(env), "settings.json"));
 /** What Kumi remembers about the producer, in any project (each Set's notes are in its project folder). */
-export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(homedir(), ".kumi", "memory.json"));
+export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(kumiDir(env), "memory.json"));
 /** What Kumi learned building things the producer liked (techniques), in any project. */
-export const loadTechniquesFile = (env: Env = process.env) => absoluteFile(env, "KUMI_TECHNIQUES_FILE", join(homedir(), ".kumi", "techniques.json"));
-export const loadRestoreFile = (env: Env = process.env) => absoluteFile(env, "KUMI_RESTORE_FILE", join(homedir(), ".kumi", "audition-restore.json"));
-export const loadGoalsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_GOALS_DIR", join(homedir(), ".kumi", "goals"));
-export const loadPlaybookFile = (env: Env = process.env) => absoluteFile(env, "KUMI_PLAYBOOK_FILE", join(homedir(), ".kumi", "playbook.json"));
+export const loadTechniquesFile = (env: Env = process.env) => absoluteFile(env, "KUMI_TECHNIQUES_FILE", join(kumiDir(env), "techniques.json"));
+export const loadRestoreFile = (env: Env = process.env) => absoluteFile(env, "KUMI_RESTORE_FILE", join(kumiDir(env), "audition-restore.json"));
+export const loadGoalsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_GOALS_DIR", join(kumiDir(env), "goals"));
+export const loadPlaybookFile = (env: Env = process.env) => absoluteFile(env, "KUMI_PLAYBOOK_FILE", join(kumiDir(env), "playbook.json"));
 /** What Kumi couldn't do for lack of a tool, logged on this computer for Kumi's developers (not a memory). */
-export const loadGapsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_GAPS_FILE", join(homedir(), ".kumi", "gaps.jsonl"));
+export const loadGapsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_GAPS_FILE", join(kumiDir(env), "gaps.jsonl"));
 /** The producer's recipes, one file each. */
-export const loadRecipesDir = (env: Env = process.env) => absoluteFile(env, "KUMI_RECIPES_DIR", join(homedir(), ".kumi", "recipes"));
+export const loadRecipesDir = (env: Env = process.env) => absoluteFile(env, "KUMI_RECIPES_DIR", join(kumiDir(env), "recipes"));
 /** Videos Kumi watched (their words, frames and sound), kept so watching again is quick. */
-export const loadVideosDir = (env: Env = process.env) => absoluteFile(env, "KUMI_VIDEOS_DIR", join(homedir(), ".kumi", "videos"));
+export const loadVideosDir = (env: Env = process.env) => absoluteFile(env, "KUMI_VIDEOS_DIR", join(kumiDir(env), "videos"));
 /** Programs Kumi fetches for itself (yt-dlp, a speech model). */
-export const loadToolsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_TOOLS_DIR", join(homedir(), ".kumi", "tools"));
+export const loadToolsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_TOOLS_DIR", join(kumiDir(env), "tools"));
 /** What the producer typed, for the up arrow (secrets kept out). */
-export const loadInputHistoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_INPUT_HISTORY_FILE", join(homedir(), ".kumi", "input-history"));
+export const loadInputHistoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_INPUT_HISTORY_FILE", join(kumiDir(env), "input-history"));
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
-export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(homedir(), ".kumi", "projects"));
+export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(kumiDir(env), "projects"));
 
 /** Non-secret preferences: the chosen model and how hard it thinks. */
 export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string;

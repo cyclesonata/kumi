@@ -57,7 +57,9 @@ const newer = (left: string, right: string) => {
 function nodeCheck(version: string): Check {
   return SUPPORTED_NODE_MAJORS.includes(major(version))
     ? { status: "ok", text: `Node.js ${version.replace(/^v/, "")}` }
-    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or 24)`, next: `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
+    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or 24)`,
+      // An installed Kumi brings its own Node: running the installer again is the whole fix.
+      next: INSTALLED ? `Run ${KUMI_REPAIR}, which brings Kumi's own Node back` : `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
 }
 
 async function signInCheck(env: Env): Promise<Check> {
@@ -134,7 +136,7 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
       const current = Boolean(server.version && io.bundledBridgeVersion && !newer(io.bundledBridgeVersion, server.version));
       checks.push(node.status === "fix" ? { status: "note", text: "The bridge didn't start; it needs Node 22 or 24 too" }
         : current ? { status: "fix", text: "Kumi's bridge couldn't reach Live", next: `Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it first. Then: ${KUMI} doctor` }
-        : { status: "fix", text: "The bridge didn't start", next: `Build it (${KUMI_REPAIR}), and bring Live's part up to date: quit Live, then run ${KUMI} bridge. Then: ${KUMI} doctor` });
+        : { status: "fix", text: "The bridge didn't start", next: `${INSTALLED ? `Run ${KUMI_REPAIR} to repair Kumi` : `Build it (${KUMI_REPAIR})`}, and bring Live's part up to date: quit Live, then run ${KUMI} bridge. Then: ${KUMI} doctor` });
     }
     else if (!live.connected) checks.push({ status: "fix", text: "Live isn't connected", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI)" });
     else {

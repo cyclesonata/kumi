@@ -227,7 +227,9 @@ test("an audio effect: plugin~ into the model's gen~, Kumi's fixed output stage 
   assert.equal(effect.text, "gen~"); assert.equal(effect.patcher.classnamespace, "dsp.gen"); assert.equal(effect.numinlets, 2);
   assert.match(codeOf(patcher, "obj-effect"), /\r\n/, "Max's line endings");
   const stage = codeOf(patcher, "obj-output");
-  for (const line of ["Param kumi_mix(100", "Param kumi_output(0", "fixnan(fixdenorm(in1))", "dcblock(l)", "clamp(", "-0.891, 0.891"]) assert.ok(stage.includes(line), line);
+  for (const line of ["Param kumi_mix(100", "Param kumi_output(0", "clamp(dcblock(fixnan(fixdenorm(in1))), -2, 2)"]) assert.ok(stage.includes(line), line);
+  // The dry signal passes untouched: a hot track isn't clipped by a Kumi effect at Mix 0.
+  assert.match(stage, /out1 = mix\(in3, clamp\(dcblock\(fixnan\(fixdenorm\(in1\)\)\), -2, 2\), wet\) \* gain;/);
   const lines = wires(patcher);
   for (const expected of ["obj-plugin:0>obj-effect:0", "obj-plugin:1>obj-effect:1", "obj-effect:0>obj-output:0", "obj-plugin:0>obj-output:2", "obj-plugin:1>obj-output:3", "obj-output:1>obj-plugout:1"]) assert.ok(lines.includes(expected), expected);
   const faces = (patcher as { patcher: { boxes: { box: Record<string, unknown> }[] } }).patcher.boxes.filter((item) => item.box.parameter_enable === 1).map((item) => item.box);
@@ -279,6 +281,8 @@ test("Kumi's checks for an audio effect or an instrument say what's wrong, each 
   assert.match(problems({ ...PLUCK, code: "out1 = cycle(440); out2 = out1;" }), /plays the note it's given/);
   assert.match(problems({ ...PLUCK, voices: 9 }), /1 \(mono\) to 8/);
   assert.match(problems({ ...PLUCK, code: "Param note(60);\nout1 = cycle(mtof(note)); out2 = out1;" }), /Kumi's; use them without declaring/);
+  // A control's Param declared by the model too (as gen~ code usually is) would be declared twice.
+  assert.match(problems({ ...GRIT, code: "Param drive(1, min=1, max=20);\nout1 = tanh(in1 * drive); out2 = tanh(in2 * drive);" }), /drive is the Drive control's Param, which Kumi declares/);
   assert.equal(problems({ ...GRIT, tests: [{ name: "ignored", input: [], expect: [] }] }), "", "an audio effect isn't tested with MIDI; its tests are left out");
 });
 

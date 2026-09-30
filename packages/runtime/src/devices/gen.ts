@@ -6,9 +6,10 @@
  * - An instrument: notein → poly (voice allocation) → one gen~ per voice (the model's voice) →
  *   Kumi's output stage → plugout~.
  *
- * Kumi's output stage is fixed and always there: NaN and denormals out, DC blocked, the level set by
- * an Output knob and held under -1 dBFS (a runaway feedback patch can't blast anyone), and on an
- * effect a Mix knob against the dry signal. Each of the model's controls is a Param in the code, named
+ * Kumi's output stage is fixed and always there: the model's own output has NaN, denormals and DC
+ * taken out and is held under +6 dBFS (a runaway feedback patch is caught); on an effect a Mix knob
+ * blends it with the dry signal, which passes untouched (a hot track isn't clipped by Kumi's device);
+ * an Output knob sets the level. Each of the model's controls is a Param in the code, named
  * like the control ("Decay Time" is decay_time), and an ordinary Live parameter on the device's face.
  *
  * GenExpr's order is fixed: function definitions, then declarations (Param, History…), then
@@ -76,7 +77,7 @@ export function inputsRead(code: string): number {
 }
 
 /** What Kumi checks in the model's GenExpr before building (Max compiles it when Live loads the device). */
-export function checkGenCode(code: string, kind: "audio_effect" | "instrument"): string[] {
+export function checkGenCode(code: string, kind: "audio_effect" | "instrument", controls: readonly Control[] = []): string[] {
   const problems: string[] = [];
   const bare = withoutComments(code);
   if (!/\bout1\s*=/.test(bare) || !/\bout2\s*=/.test(bare)) problems.push("code: assign out1 (left) and out2 (right), every sample.");
@@ -88,6 +89,11 @@ export function checkGenCode(code: string, kind: "audio_effect" | "instrument"):
   }
   if (broken || braces !== 0 || parens !== 0) problems.push("code: its braces or parentheses don't pair up.");
   if (/\bParam\s+(note|velocity|strike|bend|mod_wheel|kumi_\w*)\b/.test(bare)) problems.push("code: note, velocity, strike, bend and mod_wheel are Kumi's; use them without declaring them.");
+  // Kumi declares each control's Param (its default and range come from the control); declared again, gen~ refuses the code.
+  for (const control of controls) {
+    const id = paramName(control.name);
+    if (new RegExp(`\\b(?:Param|History|Delay|Data|Buffer)\\s+${id}\\b`).test(bare)) problems.push(`code: ${id} is the ${control.name} control's Param, which Kumi declares from the control; use ${id} without declaring it.`);
+  }
   if (kind === "audio_effect" && inputsRead(code) === 0) problems.push("code: an audio effect reads its input, in1 (left) and in2 (right).");
   if (kind === "audio_effect" && /\b(note|velocity|strike|mod_wheel)\b/.test(bare)) problems.push("code: an audio effect gets no notes; note, velocity, strike and mod_wheel are an instrument's.");
   if (kind === "instrument" && inputsRead(code) > 0) problems.push("code: an instrument has no audio input; make sound from note, velocity, bend and mod_wheel.");
@@ -114,23 +120,22 @@ export function withParams(code: string, lines: readonly string[], heading: stri
 }
 
 const OUTPUT_STAGE_EFFECT = [
-  "// Kumi's output stage (fixed): the dry signal mixed back, NaN and DC out, the level held under -1 dBFS.",
+  "// Kumi's output stage (fixed): the effect's output made safe (NaN, denormals and DC out, held under +6 dBFS),",
+  "// mixed with the dry signal, which passes untouched, then Output.",
   "Param kumi_mix(100, min=0, max=100);",
   "Param kumi_output(0, min=-36, max=12);",
   "gain = dbtoa(kumi_output);",
   "wet = kumi_mix * 0.01;",
-  "l = mix(fixnan(fixdenorm(in3)), fixnan(fixdenorm(in1)), wet);",
-  "r = mix(fixnan(fixdenorm(in4)), fixnan(fixdenorm(in2)), wet);",
-  "out1 = clamp(dcblock(l) * gain, -0.891, 0.891);",
-  "out2 = clamp(dcblock(r) * gain, -0.891, 0.891);",
+  "out1 = mix(in3, clamp(dcblock(fixnan(fixdenorm(in1))), -2, 2), wet) * gain;",
+  "out2 = mix(in4, clamp(dcblock(fixnan(fixdenorm(in2))), -2, 2), wet) * gain;",
 ].join("\n");
 
 const OUTPUT_STAGE_INSTRUMENT = [
-  "// Kumi's output stage (fixed): NaN and DC out, the level held under -1 dBFS.",
+  "// Kumi's output stage (fixed): the voices made safe (NaN, denormals and DC out, held under +6 dBFS), then Output.",
   "Param kumi_output(0, min=-36, max=12);",
   "gain = dbtoa(kumi_output);",
-  "out1 = clamp(dcblock(fixnan(fixdenorm(in1))) * gain, -0.891, 0.891);",
-  "out2 = clamp(dcblock(fixnan(fixdenorm(in2))) * gain, -0.891, 0.891);",
+  "out1 = clamp(dcblock(fixnan(fixdenorm(in1))), -2, 2) * gain;",
+  "out2 = clamp(dcblock(fixnan(fixdenorm(in2))), -2, 2) * gain;",
 ].join("\n");
 
 /**
