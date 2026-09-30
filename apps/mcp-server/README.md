@@ -37,11 +37,11 @@ and audio analysis. **Kumi currently uses four of them: Live status, snapshot an
 Server confirmations are not independent human approval; do not auto-approve
 playback, recording, routing, capture or realtime work. See:
 
-- [User guide](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/USER_GUIDE.md)
-- [Live safety](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/LIVE_SAFETY.md)
-- [Operations](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/OPERATIONS.md) and [recovery](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/RECOVERY.md)
-- [Capabilities](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/CAPABILITY_MATRIX.md) and [support matrix](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/SUPPORT_MATRIX.md)
-- [Delivery lifecycle](https://github.com/user1303836/ableton-mcp-beyond/blob/main/docs/en/DELIVERY.md)
+- [User guide](https://github.com/user1303836/kumi/blob/main/docs/en/USER_GUIDE.md)
+- [Live safety](https://github.com/user1303836/kumi/blob/main/docs/en/LIVE_SAFETY.md)
+- [Operations](https://github.com/user1303836/kumi/blob/main/docs/en/OPERATIONS.md) and [recovery](https://github.com/user1303836/kumi/blob/main/docs/en/RECOVERY.md)
+- [Capabilities](https://github.com/user1303836/kumi/blob/main/docs/en/CAPABILITY_MATRIX.md) and [support matrix](https://github.com/user1303836/kumi/blob/main/docs/en/SUPPORT_MATRIX.md)
+- [Delivery lifecycle](https://github.com/user1303836/kumi/blob/main/docs/en/DELIVERY.md)
 
 Installed tarballs include matching local guides under `release-docs/`; prefer
 those over online `main` documentation when versions differ. The package keeps

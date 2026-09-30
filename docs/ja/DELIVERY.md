@@ -38,11 +38,11 @@ CI は `exact-local-candidate` と `candidate-verification-*` を **90 日**保�
 目的のコミットで完了・成功した run を選び、新しい空の保存先を使います（GitHub CLI が必要）:
 
 ```sh
-gh run view "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run view "$RUN_ID" --repo user1303836/kumi \
   --json headSha,status,conclusion,url
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --name exact-local-candidate --dir "$CANDIDATE_DIR"
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --pattern 'candidate-verification-*' --dir "$EVIDENCE_DIR"
 ```
 

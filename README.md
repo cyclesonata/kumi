@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/user1303836/ableton-mcp-beyond/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/ableton-mcp-beyond?label=release"></a>
+  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
   <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
   <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
   <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>

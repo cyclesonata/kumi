@@ -33,11 +33,11 @@ CI 为 `exact-local-candidate` 与匹配的 `candidate-verification-*` 请求 **
 选择目标提交的已完成成功 run，使用新的空下载目录（需 GitHub CLI）：
 
 ```sh
-gh run view "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run view "$RUN_ID" --repo user1303836/kumi \
   --json headSha,status,conclusion,url
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --name exact-local-candidate --dir "$CANDIDATE_DIR"
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --pattern 'candidate-verification-*' --dir "$EVIDENCE_DIR"
 ```
 

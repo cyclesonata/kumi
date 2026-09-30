@@ -25,9 +25,9 @@ test("mapping-based transform handles packaged, root, repository-only, HTML, ref
   ].join("\n");
   const transformed = transformReleaseDocument(markdown, { repositoryRoot, sourceRelative: "README.md", revision });
   assert.match(transformed, /\(USER_GUIDE\.md#install\)/);
-  assert.match(transformed, new RegExp(`github\\.com/user1303836/ableton-mcp-beyond/tree/${revision}/docs/evidence/`));
-  assert.match(transformed, new RegExp(`raw\\.githubusercontent\\.com/user1303836/ableton-mcp-beyond/${revision}/docs/assets/logo\\.svg`));
-  assert.match(transformed, new RegExp(`github\\.com/user1303836/ableton-mcp-beyond/blob/${revision}/README\\.ja\\.md`));
+  assert.match(transformed, new RegExp(`github\\.com/user1303836/kumi/tree/${revision}/docs/evidence/`));
+  assert.match(transformed, new RegExp(`raw\\.githubusercontent\\.com/user1303836/kumi/${revision}/docs/assets/logo\\.svg`));
+  assert.match(transformed, new RegExp(`github\\.com/user1303836/kumi/blob/${revision}/README\\.ja\\.md`));
   assert.match(transformed, /href="\.\.\/LICENSE\.md"/);
   assert.match(transformed, /href="\.\.\/package\.json"/);
   assert.match(transformed, /\.\.\/remote-script\/AbletonMcpBridge\/ableton-live-v1\.operations\.json/);
@@ -41,7 +41,7 @@ test("mapping-based transform handles packaged, root, repository-only, HTML, ref
 
 test("docs-relative evidence and mapped sibling links are transformed structurally", () => {
   const transformed = transformReleaseDocument("[oracle](../evidence/phase-8-audio-oracle.json) [delivery](DELIVERY.md)", { repositoryRoot, sourceRelative: "docs/en/AUDIO_INTELLIGENCE.md", revision });
-  assert.match(transformed, new RegExp(`github\\.com/user1303836/ableton-mcp-beyond/blob/${revision}/docs/evidence/phase-8-audio-oracle\\.json`));
+  assert.match(transformed, new RegExp(`github\\.com/user1303836/kumi/blob/${revision}/docs/evidence/phase-8-audio-oracle\\.json`));
   assert.match(transformed, /\(DELIVERY\.md\)/);
 });
 
