@@ -7,14 +7,12 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
-import { Readable as ReadableStream } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { KUMI, KUMI_VERSION } from "@kumi/runtime";
 import { isLiveRunning, runProgram, type Ran } from "./bridge-setup.js";
@@ -74,8 +72,11 @@ const unasked = (asked: "none" | "offline" | "invalid", env: Env) => ({
 
 async function download(url: string, file: string, fetcher: typeof fetch): Promise<void> {
   const response = await fetcher(url, { signal: AbortSignal.timeout(10 * 60_000), redirect: "follow" });
-  if (!response.ok || !response.body) throw new Error(`the download failed (${response.status})`);
-  await pipeline(ReadableStream.fromWeb(response.body as import("node:stream/web").ReadableStream), createWriteStream(file));
+  if (!response.ok) throw new Error(`the download failed (${response.status})`);
+  // Read whole (a bundle is a few MB), not streamed to the file: a body read slower than it arrives pauses
+  // Node's HTTP parser, and a server that closes the connection then trips an assertion inside Node that
+  // ends the process, past any catch (seen with a plain HTTP/1.0 server).
+  writeFileSync(file, Buffer.from(await response.arrayBuffer()));
 }
 
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
