@@ -41,7 +41,7 @@ try {
   const payloadNames = Object.keys(manifest.files).sort();
   const expected = ["release-manifest.json", ...payloadNames].sort();
   if (JSON.stringify(inventory) !== JSON.stringify(expected)) throw new Error("installed candidate inventory differs from the strict release manifest");
-  const expectedRole = (name) => name === "LICENSE.md" ? "license" : name === "package.json" ? "package-metadata" : name.startsWith("dist/src/") ? "compiled-runtime" : (name === "README.md" || name.startsWith("release-docs/")) ? "documentation" : name.startsWith("remote-script/") ? "ableton-remote-script" : null;
+  const expectedRole = (name) => name === "LICENSE.md" ? "license" : name === "package.json" ? "package-metadata" : name.startsWith("dist/src/") ? "compiled-runtime" : (name === "README.md" || name.startsWith("release-docs/")) ? "documentation" : name.startsWith("remote-script/") ? "ableton-remote-script" : name.startsWith("live-extension/") ? "ableton-live-extension" : null;
   if (JSON.stringify(Object.keys(manifest.roles ?? {}).sort()) !== JSON.stringify(payloadNames) || payloadNames.some((name) => manifest.roles[name] !== expectedRole(name))) throw new Error("candidate release roles do not exactly classify the payload");
   for (const [name, expectedDigest] of Object.entries(manifest.files)) {
     const path = join(packageRoot, ...name.split("/"));

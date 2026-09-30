@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { assertSupportedNodeRuntime, readAnyConfig, readSecretFile } from "./delivery.js";
+import { dirname, join } from "node:path";
+import { withExtension } from "./bridge/extension-setup.js";
 import { RemoteScriptLiveAdapter } from "./bridge/remote-adapter.js";
 import { serve } from "./host.js";
 
@@ -30,7 +32,13 @@ if (process.exitCode === undefined) {
       const config = readAnyConfig(configPath);
       if (config.version !== 2) throw new Error("version-1 configuration does not enable a Live adapter");
       const secret = readSecretFile(config.bridge.secretFile);
-      adapter = await RemoteScriptLiveAdapter.connect({ ...config.bridge, secret });
+      const remoteScript = await RemoteScriptLiveAdapter.connect({ ...config.bridge, secret });
+      // Kumi's Live extension (the Extensions SDK channel) beside the Remote Script, unless turned off.
+      adapter = process.env.ABLETON_MCP_EXTENSION === "off" ? remoteScript : withExtension(remoteScript, {
+        storageDirectory: process.env.ABLETON_MCP_EXTENSION_DIR ?? join(dirname(configPath), "live-extension"),
+        launch: process.env.ABLETON_MCP_EXTENSION !== "external",
+        log: (line) => process.stderr.write(`mcp-host: ${line}\n`),
+      });
     }
     await serve(process.stdin, process.stdout, process.stderr, adapter);
   } catch (error) {

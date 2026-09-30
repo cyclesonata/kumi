@@ -46,6 +46,8 @@ export async function deactivate(): Promise<void> {
 }
 
 export function activate(activation: ActivationContext): void {
+  // Tells the bridge's launch script this extension started (it ends the host otherwise).
+  (globalThis as { __kumiLiveExtensionActive?: boolean }).__kumiLiveExtensionActive = true;
   const context = initialize(activation, "1.0.0");
   const storage = context.environment.storageDirectory ?? join(tmpdir(), "kumi-live-extension");
   const temp = context.environment.tempDirectory ?? join(storage, "tmp");

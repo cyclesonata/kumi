@@ -17241,6 +17241,7 @@ async function deactivate() {
   await current.server.close();
 }
 function activate(activation) {
+  globalThis.__kumiLiveExtensionActive = true;
   const context = (0, import_sdk4.initialize)(activation, "1.0.0");
   const storage = context.environment.storageDirectory ?? (0, import_node_path2.join)((0, import_node_os.tmpdir)(), "kumi-live-extension");
   const temp = context.environment.tempDirectory ?? (0, import_node_path2.join)(storage, "tmp");

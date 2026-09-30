@@ -27,6 +27,7 @@
     "!dist/src/benchmark.*",
     "!dist/src/analysis-worker.*",
     "remote-script/AbletonMcpBridge",
+    "live-extension",
     "remote-script/README.md",
     "release-docs",
     "release-manifest.json",
@@ -55,7 +56,7 @@
     "diagnostics": "node dist/src/diagnostics.js",
     "start": "node dist/src/cli.js",
     "demo": "node scripts/demo.mjs",
-    "prepack": "npm run policy:verify && npm run build && node scripts/stage-remote-script.mjs && node scripts/stage-release-artifact.mjs",
+    "prepack": "npm run policy:verify && npm run build && node scripts/stage-remote-script.mjs && node scripts/stage-live-extension.mjs && node scripts/stage-release-artifact.mjs",
     "capability:manifest": "node scripts/generate-capability-manifest.mjs"
   },
   "devDependencies": {
