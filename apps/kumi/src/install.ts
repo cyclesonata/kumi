@@ -213,7 +213,8 @@ export async function uninstallInstalled(io: InstalledIo, options: { all: boolea
   if (process.platform === "win32") {
     // Windows won't delete the Node this is running on: a moment after Kumi exits, cmd does it.
     const list = parts.map((path) => `rmdir /s /q "${path}"`).join(" & ");
-    spawn("cmd.exe", ["/d", "/c", `timeout /t 2 /nobreak >nul & ${list}`], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    // `timeout` quits at once without a console window, so ping is the pause.
+    spawn("cmd.exe", ["/d", "/c", `ping -n 4 127.0.0.1 >nul & ${list}`], { detached: true, stdio: "ignore", windowsHide: true }).unref();
   } else for (const path of parts) rmSync(path, { recursive: true, force: true });
   say(options.all ? "Kumi is removed, with everything it kept." : `Kumi is removed. Your files are still in ${home.replace(homedir(), "~")}; delete that folder to remove them too.`);
   say("Open a new terminal window so the `kumi` command is gone there too.");

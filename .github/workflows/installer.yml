@@ -60,7 +60,7 @@ jobs:
       - name: Serve the release locally
         shell: bash
         run: |
-          cd release && (python3 -m http.server 8765 >/dev/null 2>&1 &) && sleep 2
+          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &) && sleep 2
           curl -fsS http://127.0.0.1:8765/kumi-release.json
 
       - name: Install, use, update and remove (macOS, Linux)
@@ -83,6 +83,7 @@ jobs:
           grep -c "Added by the Kumi installer" "$rc" | grep -qx 1
           env -i HOME="$HOME" PATH=/usr/bin:/bin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
           grep -c "Added by the Kumi installer" "$rc" | grep -qx 1
+          ls -la "$KUMI_HOME"
           test -d "$KUMI_HOME/app.previous"
           # The bridge from the bundle, into a scratch Remote Scripts folder (no Live here).
           mkdir -p "$RUNNER_TEMP/User Library/Remote Scripts"
@@ -127,7 +128,7 @@ jobs:
           if ($update -notmatch 'up to date') { throw 'update did not say up to date' }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
           & $kumi uninstall --yes
-          Start-Sleep -Seconds 8
+          Start-Sleep -Seconds 15
           foreach ($gone in 'app', 'node', 'bin') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
