@@ -725,6 +725,46 @@ test("accepts cancellation notifications without manufacturing a response", () =
   assert.equal(host.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 99 } }), null);
 });
 
+test("transactions are kept by the memory they hold: the oldest unprotected go first, whatever their kind, and applied ones stay", async () => {
+  const host = new McpHost(new DeterministicLiveSimulator());
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const body = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const retention = (host as any).retention;
+  const mixers = (host as any).clipLifecycleTransactions as Map<string, unknown>; const tempos = (host as any).transactions as Map<string, unknown>;
+  const mixer = body(await call(11, "live_mixer_preview", { trackRef: "track:track-1", volume: 0.5 }));
+  const mixerBytes = retention.bytes; assert.ok(mixerBytes > 0);
+  const tempo1 = body(await call(12, "live_tempo_preview", { tempo: 121 }));
+  const tempoBytes = retention.bytes - mixerBytes; assert.ok(tempoBytes > 0);
+  // Room for exactly one more tempo preview: it fits, and nothing goes.
+  retention.capacity = retention.bytes + tempoBytes;
+  const tempo2 = body(await call(13, "live_tempo_preview", { tempo: 122 }));
+  assert.ok(mixers.has(mixer.transactionId) && tempos.has(tempo1.transactionId) && tempos.has(tempo2.transactionId));
+  // The next makes room: the oldest record nothing depends on goes first, though it's another kind.
+  const tempo3 = body(await call(14, "live_tempo_preview", { tempo: 123 }));
+  assert.equal(mixers.has(mixer.transactionId), false);
+  assert.ok(tempos.has(tempo3.transactionId));
+  assert.ok(retention.bytes <= retention.capacity);
+  // An applied change keeps its undo: with only its own bytes of room, it stays and new previews are refused.
+  assert.equal(body(await call(15, "live_tempo_apply", { transactionId: tempo3.transactionId, confirmation: "apply", idempotencyKey: "retention-apply" })).state, "applied");
+  retention.capacity = retentionBytesOf(retention, tempos, tempo3.transactionId);
+  const refused = await call(16, "live_tempo_preview", { tempo: 124 }) as any;
+  assert.match(JSON.stringify(refused), /capacity is exhausted/);
+  assert.ok(tempos.has(tempo3.transactionId));
+  // Releasing it gives its bytes back.
+  const held = retention.bytes;
+  assert.deepEqual(body(await call(17, "live_transaction_release", { transactionIds: [tempo3.transactionId] })), { released: 1 });
+  assert.ok(retention.bytes < held);
+  assert.equal(body(await call(18, "live_tempo_preview", { tempo: 125 })).proposedTempo, 125);
+});
+
+/** The bytes the retention counts for one kept record. */
+function retentionBytesOf(retention: any, map: Map<string, unknown>, key: string): number {
+  const entry = [...retention.kept.values()].find((candidate: any) => candidate.map === map && candidate.key === key) as { bytes: number } | undefined;
+  assert.ok(entry, "the record is kept");
+  return entry.bytes;
+}
+
 test("completes a simulator tempo preview, confirmed apply, verification, and conflict-aware undo", () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);

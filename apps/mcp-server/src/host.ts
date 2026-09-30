@@ -233,7 +233,6 @@ const MAX_DRUM_PAD_LOADS = 16;
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 /** A pad's note as Live labels it: 36 is C1. */
 const noteLabel = (note: number): string => `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 2}`;
-const MAX_TRANSACTIONS = 256;
 const AUDITION_TTL_MS = 30_000;
 // Real-Live snapshot reads take seconds on populated sets, and launch/stop
 // state propagates asynchronously at quantization boundaries; the deadline
@@ -260,7 +259,9 @@ const BROWSER_SEARCH_CACHE_MAX_ENTRIES = 16;
 const BROWSER_SEARCH_MAX_TOKENS = 8;
 // Applied transactions keep their undo until released or undone: room for a long session's changes (a
 // search renders hundreds of times; its own steps are released as it goes, see live_transaction_release).
-const MAX_AUDITION_TRANSACTIONS = 512;
+// What bounds them is the memory they hold, not how many there are: 1 GiB of records, each counted by its
+// JSON length when it is kept (its prior state is most of it).
+const MAX_RETAINED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
 const MONITORABLE_TRACK_KINDS = new Set(["regular", "audio", "midi"]);
 // Deadlines grow with the Set: what reads every track on Live's thread takes longer on a big one. Each
 // deadline is its base plus this per track (the count at the last read), within the Remote Script's 60 s.
@@ -384,10 +385,47 @@ function isRetirableAppliedTransaction(candidate: unknown): boolean {
     default: return false;
   }
 }
+/** What a kept record costs: its JSON length when it is kept, an estimate (64 KiB when it can't be written). */
+function retainedBytes(value: unknown): number {
+  try { return JSON.stringify(value)?.length ?? 0; } catch { return 64 * 1024; }
+}
+
+/**
+ * One byte budget for every transaction map. A record that doesn't fit makes room by evicting the oldest
+ * records nothing depends on, whichever map holds them; recovery-protected records (applied, uncertain or in
+ * flight) are never evicted, so a budget full of them refuses the new record instead.
+ */
+class TransactionRetention {
+  private readonly kept = new Map<string, { map: BoundedTransactionMap<{ expiresAt: number; state: string }>; key: string; bytes: number }>();
+  private readonly ids = new WeakMap<object, number>();
+  private nextId = 0;
+  private retained = 0;
+  public constructor(private readonly capacity = MAX_RETAINED_TRANSACTION_BYTES) {}
+  /** Bytes the kept records hold. */
+  public get bytes(): number { return this.retained; }
+  private id(map: object, key: string): string { let id = this.ids.get(map); if (id === undefined) { id = ++this.nextId; this.ids.set(map, id); } return `${id}:${key}`; }
+  public admit(map: BoundedTransactionMap<{ expiresAt: number; state: string }>, key: string, bytes: number): void {
+    this.release(map, key);
+    while (this.retained + bytes > this.capacity) {
+      const oldest = [...this.kept.values()].find((entry) => entry.map.evictable(entry.key));
+      if (!oldest) throw new Error("transaction capacity is exhausted by recovery-protected work");
+      oldest.map.delete(oldest.key); this.release(oldest.map, oldest.key);
+    }
+    this.kept.set(this.id(map, key), { map, key, bytes }); this.retained += bytes;
+  }
+  public release(map: object, key: string): void {
+    const id = this.id(map, key); const entry = this.kept.get(id);
+    if (entry) { this.retained -= entry.bytes; this.kept.delete(id); }
+  }
+}
+
 class BoundedTransactionMap<T extends { expiresAt: number; state: string }> extends Map<string, T> {
-  public constructor(private readonly capacity = MAX_AUDITION_TRANSACTIONS, private readonly onDelete?: (value: T) => void) { super(); }
+  public constructor(private readonly retention: TransactionRetention, private readonly onDelete?: (value: T) => void) { super(); }
+  /** Whether a record may go to make room: no recovery depends on it and nothing is applying it. */
+  public evictable(key: string): boolean { const value = this.get(key); return value !== undefined && !RECOVERY_PROTECTED_STATES.has(value.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key); }
   public override delete(key: string): boolean {
     const value = this.get(key);
+    this.retention.release(this, key);
     if (!super.delete(key)) return false;
     // Terminal cleanup hook (staged-file release); never let cleanup break bookkeeping.
     if (value !== undefined) { try { this.onDelete?.(value); } catch { /* best-effort transaction cleanup hook */ } }
@@ -400,11 +438,7 @@ class BoundedTransactionMap<T extends { expiresAt: number; state: string }> exte
     // permanently; undoable applied records keep their replay/undo authority,
     // and uncertain records stay protected until explicit recovery.
     for (const [candidateKey, candidate] of this) if (candidate.expiresAt <= now && (!RECOVERY_PROTECTED_STATES.has(candidate.state) || isRetirableAppliedTransaction(candidate)) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey)) this.delete(candidateKey);
-    if (!this.has(key)) while (this.size >= this.capacity) {
-      const oldest = [...this].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error("transaction capacity is exhausted by recovery-protected work");
-      this.delete(oldest[0]);
-    }
+    this.retention.admit(this as unknown as BoundedTransactionMap<{ expiresAt: number; state: string }>, key, retainedBytes(value));
     return super.set(key, value);
   }
 }
@@ -489,21 +523,23 @@ export class McpHost {
   private readonly seenIds = new Set<string>();
   private readonly idOrder: string[] = [];
   private readonly analysisRunner = new AnalysisRunner();
-  private readonly audioCaptureTransactions = new BoundedTransactionMap<AudioCaptureTransaction>();
-  private readonly transactions = new BoundedTransactionMap<TempoTransaction>(MAX_TRANSACTIONS);
-  private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>();
-  private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>();
-  private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>();
-  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>();
+  /** The memory every transaction map below shares (see TransactionRetention). */
+  private readonly retention = new TransactionRetention();
+  private readonly audioCaptureTransactions = new BoundedTransactionMap<AudioCaptureTransaction>(this.retention);
+  private readonly transactions = new BoundedTransactionMap<TempoTransaction>(this.retention);
+  private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>(this.retention);
+  private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>(this.retention);
+  private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>(this.retention);
+  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>(this.retention);
   private readonly midiTransactions: SessionMidiTransactionManager;
   private readonly batchTransactions: BatchTransactionManager;
   private readonly deviceStateTransactions: DeviceStateTransactionManager;
   private readonly inFlightMutations = new Map<string, { idempotencyKey: string; argumentDigest: string; promise: Promise<JsonObject | null>; controller: AbortController; waiters: number; settled: boolean }>();
-  private readonly auditionTransactions = new BoundedTransactionMap<SessionAuditionTransaction>();
-  private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>();
-  private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>();
-  private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
-  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
+  private readonly auditionTransactions = new BoundedTransactionMap<SessionAuditionTransaction>(this.retention);
+  private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>(this.retention);
+  private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>(this.retention);
+  private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>(this.retention);
+  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(this.retention, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
     if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
     if (value.kind === "drum-pad" && Array.isArray(value.payload?.pads)) for (const pad of value.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
@@ -1548,14 +1584,7 @@ export class McpHost {
   }
 
   private retainAuditionTransaction(transaction: SessionAuditionTransaction): void {
-    const now = Date.now();
-    for (const [key, candidate] of this.auditionTransactions) if (candidate.expiresAt <= now && !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key)) this.auditionTransactions.delete(key);
-    while (this.auditionTransactions.size >= MAX_AUDITION_TRANSACTIONS) {
-      const oldest = [...this.auditionTransactions].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error("audition transaction capacity is exhausted by in-flight auditions");
-      this.auditionTransactions.delete(oldest[0]);
-    }
-    this.auditionTransactions.set(transaction.id, transaction);
+    this.retainBoundedTransaction(this.auditionTransactions, transaction, "audition");
   }
 
   private async liveSessionAuditionApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -1876,15 +1905,12 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport undo is uncertain; perform fresh discovery."); }
   }
 
-  private retainBoundedTransaction<T extends { id: string; expiresAt: number; state: string }>(map: Map<string, T>, transaction: T, kind: string): void {
+  /** Keeps a new transaction: expired previews go, and the shared byte budget makes room (see TransactionRetention). */
+  private retainBoundedTransaction<T extends { id: string; expiresAt: number; state: string }>(map: BoundedTransactionMap<T>, transaction: T, kind: string): void {
     const now = Date.now();
     for (const [key, candidate] of map) if (candidate.expiresAt <= now && !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key)) map.delete(key);
-    while (map.size >= MAX_AUDITION_TRANSACTIONS) {
-      const oldest = [...map].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`);
-      map.delete(oldest[0]);
-    }
-    map.set(transaction.id, transaction);
+    try { map.set(transaction.id, transaction); }
+    catch (cause) { if (cause instanceof Error && /capacity is exhausted/.test(cause.message)) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`); throw cause; }
   }
 
   private validateOutputSafety(outputSafety: unknown): void {
@@ -9344,7 +9370,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   private newTransactionId(): string { return `tempo_${randomBytes(18).toString("base64url")}`; }
   private evictTransactions(): void {
     const now = Date.now();
-    for (const [id, transaction] of this.transactions) if ((transaction.state === "previewed" && transaction.expiresAt <= now) || (transaction.state === "previewed" && this.transactions.size > MAX_TRANSACTIONS)) this.transactions.delete(id);
+    for (const [id, transaction] of this.transactions) if (transaction.state === "previewed" && transaction.expiresAt <= now) this.transactions.delete(id);
   }
   private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Preview the change again, then apply the new transaction." }) }], isError: true }); }
   private recoveryFinalizeError(id: RequestId, reason: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence." }) }], isError: true }); }
