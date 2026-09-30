@@ -89,7 +89,7 @@ function auditionFixture() {
     subscribe: () => () => undefined, reconnect: () => base.status(),
     getAsync: async (ref: LiveRef) => base.get(ref), reconnectAsync: async () => base.status(),
     snapshotAsync: async () => structuredClone(state),
-    discoverAsync: async () => ({ epoch: 1, items: [], truncated: false, revision: "1:empty", kind: "track" }),
+    discoverAsync: async (request?: { kind?: string }) => request?.kind === "session-playback" ? { epoch: 1, items: [structuredClone(state.playback)], truncated: false, revision: state.playback.revision, kind: "session-playback" } : { epoch: 1, items: [], truncated: false, revision: "1:empty", kind: "track" },
     invokeAsync: async (invocation) => {
       if (invocation.operation === "session.audition-launch") {
         counts.launches += 1;

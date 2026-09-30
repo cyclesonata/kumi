@@ -343,13 +343,16 @@ export class LiveViews {
     if (scope === "all") return this.wholeSet(context, parts);
     const focus = [...new Set(scope)].filter((index) => Number.isInteger(index) && index >= 0 && index <= MAX_SNAPSHOT_INDEX).sort((left, right) => left - right);
     const wanted = parts ? [...new Set(parts)] : undefined;
-    const snapshot = await this.adapter().snapshotAsync(context, wanted && !wanted.includes("tracks") ? { parts: wanted } : { focus, ...(wanted ? { parts: wanted } : {}) });
+    // The focus also limits the Arrangement's clips to the focus tracks' (none, for a read of locators).
+    const snapshot = await this.adapter().snapshotAsync(context, wanted && !wanted.includes("tracks") && !wanted.includes("arrangement") ? { parts: wanted } : { focus, ...(wanted ? { parts: wanted } : {}) });
     this.note(snapshot);
     return snapshot;
   }
 
   /** A view whole for the tracks holding `refs` (and the tracks at `indices`), light for the rest. References
-   * outside every track (the Set, a scene, a locator) need no track. */
+   * outside every track (the Set, a scene, a locator) need no track. A reference placed by where it was last
+   * seen, or not placed at all beside ones that are (a device just made on a known track), is looked for in
+   * the tracks read, and in the whole Set when it isn't there. */
   public async viewFor(context: LiveOperationContext | undefined, refs: readonly unknown[], parts?: readonly LiveSnapshotPart[], indices: readonly number[] = []): Promise<LiveSnapshot> {
     if (parts && !parts.includes("tracks")) return this.view(context, [], parts);
     const focus = new Set(indices); const unplaced: string[] = []; let unknown = false;
@@ -363,7 +366,7 @@ export class LiveViews {
       if (seen !== undefined) focus.add(seen); else unknown = true;
       unplaced.push(ref);
     }
-    if (unknown && indices.length === 0) return this.view(context, "all", parts);
+    if (unknown && focus.size === 0) return this.view(context, "all", parts);
     const view = await this.view(context, [...focus], parts);
     return unplaced.length === 0 || LiveViews.wholeRowsHold(view, unplaced) ? view : this.view(context, "all", parts);
   }
@@ -379,7 +382,8 @@ export class LiveViews {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const first = await read({ focus: Array.from({ length: WHOLE_SET_PAGE_TRACKS }, (_, index) => index), ...(wanted ? { parts: wanted } : {}) });
       // Without a window the answer is the whole Set (a Remote Script from before focus); a small Set fits one page.
-      if (!first.window?.focus || !Array.isArray(first.tracks) || first.tracks.every((track) => track.light !== true)) return first;
+      if (!first.window?.focus || !Array.isArray(first.tracks)) return first;
+      if (first.tracks.every((track) => track.light !== true)) { const whole: LiveSnapshot = { ...first }; delete whole.window; return whole; }
       const count = first.tracks.length;
       const tracks = [...first.tracks]; const clips = new Map<unknown, Record<string, unknown>>(); const heldClips = new Map<unknown, { clip: Clip; trackRef: LiveRef }>();
       const keep = (snapshot: LiveSnapshot): void => {
@@ -409,7 +413,9 @@ export class LiveViews {
 
   /** Session playback alone (transport, fired and playing slots): what playback polls read. */
   public async playback(context?: LiveOperationContext): Promise<SessionPlaybackState> {
-    const result = await this.adapter().discoverAsync({ kind: "session-playback" }, context);
+    const adapter = this.adapter();
+    if (typeof adapter.discoverAsync !== "function") throw new Error("live adapter does not support asynchronous operations");
+    const result = await adapter.discoverAsync({ kind: "session-playback" }, context);
     const state = result.items?.[0] as unknown as SessionPlaybackState | undefined;
     if (!state || typeof state !== "object" || typeof state.revision !== "string" || !state.transport || typeof state.transport !== "object" || !Array.isArray(state.firedTargets) || !Array.isArray(state.playingTargets)) throw new Error("authoritative Session playback is unavailable");
     return state;

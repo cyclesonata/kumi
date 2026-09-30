@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { ownedTrackFingerprintRow, withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus } from "../live.js";
+import { LiveViews, ownedTrackFingerprintRow, withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus } from "../live.js";
 
 /**
  * Compound batch transactions: one preview/apply/undo cycle over an ordered,
@@ -322,7 +322,9 @@ export class BatchTransactionManager {
   private static readonly MAX_RECORDS = 64;
   private readonly records = new Map<string, BatchRecord>();
   private readonly idempotency = new Map<string, { transactionId: string; result: unknown }>();
-  constructor(private readonly adapter: LiveAdapter, private readonly assertPolicy: (kinds: readonly BatchOperationKind[]) => void = () => {}) {}
+  private readonly views: LiveViews;
+  /** `views` are the host's shared reads (see LiveViews); a manager of its own reads through its own. */
+  constructor(private readonly adapter: LiveAdapter, private readonly assertPolicy: (kinds: readonly BatchOperationKind[]) => void = () => {}, views?: LiveViews) { this.views = views ?? new LiveViews(() => this.asyncAdapter()); }
 
   private retain(record: BatchRecord): void {
     const now = Date.now(); const protectedStates = new Set(["applying", "applied", "undoing", "uncertain"]);
@@ -348,6 +350,16 @@ export class BatchTransactionManager {
     const value = this.adapter as Partial<AsyncLiveAdapter>;
     if (typeof value.snapshotAsync !== "function" || typeof value.getAsync !== "function" || typeof value.invokeAsync !== "function") throw new Error("live adapter does not support asynchronous operations");
     return this.adapter as AsyncLiveAdapter;
+  }
+
+  /** A view whole for every track the operations name (and the tracks the batch made), light for the rest. */
+  private operationsView(context: LiveOperationContext | undefined, operations: readonly BatchOperation[], also: readonly unknown[] = []): Promise<LiveSnapshot> {
+    const refs = operations.flatMap((operation) => operation.kind === "mixer.set" || operation.kind === "track.rename" || operation.kind === "routing.arm" ? [operation.trackRef] : operation.kind === "device.parameter.set" ? [operation.deviceRef, operation.parameterRef] : operation.kind === "clip.set" ? [operation.clipRef] : []);
+    return this.views.viewFor(context, [...refs, ...also]);
+  }
+
+  private recordView(context: LiveOperationContext | undefined, record: BatchRecord, also: readonly unknown[] = []): Promise<LiveSnapshot> {
+    return this.operationsView(context, record.operations, [...(record.created ?? []).map((item) => item.ref), ...also]);
   }
 
   private require(capabilities: string[], operations: string[]): LiveStatus {
@@ -434,7 +446,7 @@ export class BatchTransactionManager {
     const requiredOperations = [...new Set(operations.flatMap((operation) => BATCH_OPERATION_REQUIREMENTS[operation.kind].operations))];
     const status = this.require(requiredCapabilities, requiredOperations);
     const adapter = this.asyncAdapter();
-    const snapshot = await adapter.snapshotAsync();
+    const snapshot = await this.operationsView(undefined, operations);
     const plans = operations.map((operation, index) => this.planOperation(snapshot, operation, index));
     const record: BatchRecord = { transactionId: `batch_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, expiresAt: Date.now() + BATCH_TRANSACTION_TTL_MS, state: "previewed", operations: clone(operations), plans, requiredCapabilities, requiredOperations, steps: plans.map(() => ({ completed: false })) };
     this.retain(record);
@@ -549,7 +561,7 @@ export class BatchTransactionManager {
   private async verifyStepAsync(adapter: AsyncLiveAdapter, context: LiveOperationContext | undefined, record: BatchRecord, index: number, result: unknown): Promise<Record<string, unknown>> {
     const operation = record.operations[index]!;
     const plan = record.plans[index]!;
-    const snapshot = await adapter.snapshotAsync(context);
+    const snapshot = await this.recordView(context, record, [isObject(result) ? result.ref : undefined]);
     if (operation.kind !== "track.create" && !this.stepPostconditionPresent(snapshot, record, index)) throw new Error(`transaction batch step ${index} identity or postcondition was not confirmed`);
     switch (operation.kind) {
       case "mixer.set": {
@@ -609,10 +621,10 @@ export class BatchTransactionManager {
       const checkpoint = steps[index]!;
       if (checkpoint.invocation) {
         await invokeCheckpoint(adapter, checkpoint, context);
-        this.verifyRestoration(await adapter.snapshotAsync(context), record, index);
+        this.verifyRestoration(await this.recordView(context, record), record, index);
         checkpoint.completed = true; reverted += 1; continue;
       }
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.recordView(context, record);
       this.assertPolicy(record.operations.map((item) => item.kind));
       switch (operation.kind) {
         case "mixer.set": {
@@ -621,7 +633,7 @@ export class BatchTransactionManager {
           for (const [field, value] of Object.entries(plan.proposed)) if (JSON.stringify(target.mixer[field] ?? null) !== JSON.stringify(value ?? null)) throw new Error(`transaction batch ${mode} step ${index} mixer state changed after apply`);
           checkpoint.invocation = { operation: "mixer.set", args: { ref: operation.trackRef, ...Object.fromEntries(Object.keys(plan.proposed).map((field) => [field, plan.prior[field] ?? null])), ...mixerAuthority(target) } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          const verified = mixerTarget(await adapter.snapshotAsync(context), operation.trackRef);
+          const verified = mixerTarget(await this.recordView(context, record), operation.trackRef);
           for (const field of Object.keys(plan.proposed)) if (JSON.stringify(verified.mixer[field] ?? null) !== JSON.stringify(plan.prior[field] ?? null)) throw new Error(`transaction batch ${mode} step ${index} mixer prior-state restoration was not confirmed`);
           break;
         }
@@ -631,7 +643,7 @@ export class BatchTransactionManager {
           if (!sameParameterValue(target.parameter.value, plan.proposed.value) || fingerprint(authority) !== plan.prior.authorityDigest) throw new Error(`transaction batch ${mode} step ${index} parameter value or identity changed after apply`);
           checkpoint.invocation = { operation: "device.parameter.set", args: { ref: operation.parameterRef, value: plan.prior.value, expectedRevision: parameterRevision(target.parameter), expectedObjectIdentity: authority.parameterIdentity, expectedOwnerRef: authority.ownerRef, expectedOwnerIdentity: authority.ownerIdentity, expectedTrackRef: authority.trackRef, expectedTrackIdentity: authority.trackIdentity, expectedSiblings: clone(authority.siblings) } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          const verified = parameterTarget((await adapter.snapshotAsync(context)), operation.deviceRef, operation.parameterRef);
+          const verified = parameterTarget((await this.recordView(context, record)), operation.deviceRef, operation.parameterRef);
           if (!sameParameterValue(verified.parameter.value, plan.prior.value)) throw new Error(`transaction batch ${mode} step ${index} parameter prior-value restoration was not confirmed`);
           break;
         }
@@ -641,7 +653,7 @@ export class BatchTransactionManager {
           for (const [field, value] of Object.entries(plan.proposed)) if (JSON.stringify(located.clip[field] ?? null) !== JSON.stringify(value ?? null)) throw new Error(`transaction batch ${mode} step ${index} clip state changed after apply`);
           checkpoint.invocation = { operation: "clip.set", args: { ref: operation.clipRef, ...Object.fromEntries(Object.keys(plan.proposed).map((field) => [field, plan.prior[field] ?? null])), ...clipPropertiesMutationAuthority(snapshot, operation.clipRef) } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          const verified = clipRow(await adapter.snapshotAsync(context), operation.clipRef);
+          const verified = clipRow(await this.recordView(context, record), operation.clipRef);
           for (const field of Object.keys(plan.proposed)) if (JSON.stringify(verified.clip[field] ?? null) !== JSON.stringify(plan.prior[field] ?? null)) throw new Error(`transaction batch ${mode} step ${index} clip prior-state restoration was not confirmed`);
           break;
         }
@@ -653,7 +665,7 @@ export class BatchTransactionManager {
           if (!row || row.objectIdentity !== identity || row.name !== operation.name) throw new Error(`transaction batch ${mode} step ${index} rename target identity or name changed after apply`);
           checkpoint.invocation = { operation: operation.kind, args: { ref: reference, name: plan.prior.name, expectedName: operation.name, expectedObjectIdentity: identity, expectedAuthorityRevision: structureRevision(snapshot) } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          const verified = (operation.kind === "track.rename" ? (await adapter.snapshotAsync(context)).tracks : (await adapter.snapshotAsync(context)).scenes) as unknown as Row[];
+          const verified = (operation.kind === "track.rename" ? (await this.recordView(context, record)).tracks : (await this.recordView(context, record)).scenes) as unknown as Row[];
           if (verified.find((item) => item.ref === reference)?.name !== plan.prior.name) throw new Error(`transaction batch ${mode} step ${index} rename prior-name restoration was not confirmed`);
           break;
         }
@@ -664,7 +676,7 @@ export class BatchTransactionManager {
           if (!track || track.objectIdentity !== owned.objectIdentity || trackCreatedFingerprint(snapshot, owned.ref) !== owned.fingerprint) throw new Error(`transaction batch ${mode} step ${index} created track changed after creation; deletion refused`);
           checkpoint.invocation = { operation: "track.delete", args: { ref: owned.ref, expectedStructureRevision: structureRevision(snapshot), expectedObjectIdentity: owned.objectIdentity } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          if ((await adapter.snapshotAsync(context)).tracks.some((item) => item.ref === owned.ref)) throw new Error(`transaction batch ${mode} step ${index} created-track deletion was not confirmed`);
+          if ((await this.recordView(context, record)).tracks.some((item) => item.ref === owned.ref)) throw new Error(`transaction batch ${mode} step ${index} created-track deletion was not confirmed`);
           break;
         }
         case "routing.arm": {
@@ -673,12 +685,12 @@ export class BatchTransactionManager {
           if (track.armed !== operation.armed) throw new Error(`transaction batch ${mode} step ${index} arm state changed after apply`);
           checkpoint.invocation = { operation: "routing.set", args: { ref: operation.trackRef, arm: plan.prior.armed, expectedObjectIdentity: track.objectIdentity, expectedStateRevision: routingStateRevision(track) } };
           await invokeCheckpoint(adapter, checkpoint, context);
-          const verified = routingTarget(await adapter.snapshotAsync(context), operation.trackRef);
+          const verified = routingTarget(await this.recordView(context, record), operation.trackRef);
           if (verified.armed !== plan.prior.armed) throw new Error(`transaction batch ${mode} step ${index} arm prior-state restoration was not confirmed`);
           break;
         }
       }
-      this.verifyRestoration(await adapter.snapshotAsync(context), record, index);
+      this.verifyRestoration(await this.recordView(context, record), record, index);
       checkpoint.completed = true;
       reverted += 1;
     }
@@ -721,7 +733,7 @@ export class BatchTransactionManager {
     if (record.state === "uncertain" && !reconciliation) throw new Error("transaction batch state is uncertain; reconcile with the exact original idempotency key");
     if ((record.state !== "previewed" && !reconciliation)) throw new Error("transaction batch is no longer applicable");
     const adapter = this.asyncAdapter();
-    if (reconciliation) await adapter.snapshotAsync(context);
+    if (reconciliation) await this.views.view(context, [], ["set"]);
     const status = this.require(record.requiredCapabilities, record.requiredOperations);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; preview again");
     if (reconciliation && record.recoveryMode === "compensate") {
@@ -737,7 +749,7 @@ export class BatchTransactionManager {
         const checkpoint = record.steps[index]!;
         const replayed = checkpoint.invocation !== undefined;
         if (!checkpoint.invocation) {
-          const snapshot = await adapter.snapshotAsync(context);
+          const snapshot = await this.recordView(context, record);
           checkpoint.invocation = clone(this.stepArgs(snapshot, record, index));
         }
         this.assertPolicy(record.operations.map((item) => item.kind));
@@ -783,7 +795,7 @@ export class BatchTransactionManager {
     const reconciliation = record.state === "uncertain" && record.recoveryMode === "undo" && record.undoKey === idempotencyKey;
     if (!reconciliation && record.state !== "applied") throw new Error("Only an applied or exact-key uncertain batch transaction can be undone");
     const adapter = this.asyncAdapter();
-    if (reconciliation) await adapter.snapshotAsync(context);
+    if (reconciliation) await this.views.view(context, [], ["set"]);
     const status = this.require(record.requiredCapabilities, record.requiredOperations);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
     if (!record.steps.every((step) => step.completed)) throw new Error("transaction batch has unapplied steps and cannot be undone as a whole");
