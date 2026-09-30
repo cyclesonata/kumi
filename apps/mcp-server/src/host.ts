@@ -227,16 +227,18 @@ interface ClipLifecycleTransaction {
 
 const REQUEST_ID_MAX_LENGTH = 128;
 const SERVER_VERSION = PACKAGE_VERSION;
-const TRANSACTION_TTL_MS = 30_000;
-/** Pads one load-samples change fills: a Drum Rack shows 16 at a time. */
-const MAX_DRUM_PAD_LOADS = 16;
+// How long a preview stays applicable: a streamed plan's preview may wait on the steps before it.
+const TRANSACTION_TTL_MS = 600_000;
+/** Pads one load-samples change fills: a whole Drum Rack. */
+const MAX_DRUM_PAD_LOADS = 128;
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 /** A pad's note as Live labels it: 36 is C1. */
 const noteLabel = (note: number): string => `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 2}`;
-const AUDITION_TTL_MS = 30_000;
+const AUDITION_TTL_MS = 600_000;
 // Real-Live snapshot reads take seconds on populated sets, and launch/stop
 // state propagates asynchronously at quantization boundaries; the deadline
-// must cover snapshot + dispatch + polled verification.
+// must cover snapshot + dispatch + polled verification. Every deadline is its
+// base plus 20 ms per track in the Set (see McpHost.deadline).
 const AUDITION_DEADLINE_MS = 15_000;
 // Mirrors the Remote Script's _LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS: a
 // momentary jump can land a few milliseconds off the cue-point time, so the
@@ -969,9 +971,9 @@ export class McpHost {
     const parsed = this.encodedAnalysisSource({ pcmBase64: params.pcmBase64, sampleRate: params.sampleRate, ...(params.channels === undefined ? {} : { channels: params.channels }), ...(params.channelLayout === undefined ? {} : { channelLayout: params.channelLayout }) }, 2, false);
     if (!parsed || parsed.sampleCount > 4_000_000) return error(id, -32602, "diagnosis PCM metadata is invalid or exceeds the bounded source limit");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.epoch === null || !(status.capabilities ?? []).includes("session.read")) throw new Error("fresh Live context is unavailable");
-      const snapshot = await this.viewForAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [params.trackRef]);
+      const snapshot = await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.trackRef]);
       const analysis = await this.analysisRunner.run({ mode: "analyze", source: parsed.source }, signal) as PcmAnalysis;
       if (signal?.aborted) return null;
       const diagnosis = diagnoseAudioWithLiveContext(analysis, snapshot, status.epoch, params.trackRef as LiveRef, { kind: "caller-supplied-pcm", observedAt: params.provenance.observedAt, description: params.provenance.description });
@@ -986,10 +988,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["setName", "sourceSlotRef", "destinationSlotRef", "durationSeconds", "consent", "outputSafety"]) || !isNonEmptyString(params.setName, 256) || !isNonEmptyString(params.sourceSlotRef, 256) || !isNonEmptyString(params.destinationSlotRef, 256) || typeof params.durationSeconds !== "number" || !Number.isFinite(params.durationSeconds) || params.durationSeconds < 1 || params.durationSeconds > 9 || params.consent !== "ephemeral-analysis-and-delete") return error(id, -32602, "exact Set/slots, 1-9 second duration, consent, and output safety are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status);
       const adapter = this.asyncAdapter();
-      const plan = await adapter.invokeAsync({ operation: "audio.capture.inspect", args: { setName: params.setName, sourceSlotRef: params.sourceSlotRef, destinationSlotRef: params.destinationSlotRef } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+      const plan = await adapter.invokeAsync({ operation: "audio.capture.inspect", args: { setName: params.setName, sourceSlotRef: params.sourceSlotRef, destinationSlotRef: params.destinationSlotRef } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
       if (plan.supported !== true || !isNonEmptyString(plan.fence, 64) || !isNonEmptyString(plan.destinationTrackRef, 256) || !isObject(plan.prior)) throw new Error("capture mapper did not return a complete authoritative plan");
       const transaction: AudioCaptureTransaction = {
         id: `audio_capture_${randomBytes(18).toString("base64url")}`,
@@ -1013,7 +1015,7 @@ export class McpHost {
   }
 
   private async captureMapperStatus(adapter: AsyncLiveAdapter): Promise<JsonObject> {
-    return await adapter.invokeAsync({ operation: "audio.capture.status", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+    return await adapter.invokeAsync({ operation: "audio.capture.status", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
   }
 
   private async waitForCapturedMedia(adapter: AsyncLiveAdapter, signal?: AbortSignal, deadline = Date.now() + 5_000): Promise<JsonObject> {
@@ -1056,7 +1058,7 @@ export class McpHost {
       includeMapperResidual(status, "mapper");
       if (status.active === true || status.playbackStopped !== true || status.state === "active" || status.state === "failed") {
         try {
-          await adapter.invokeAsync({ operation: "audio.capture.emergency-stop", args: { captureId: transaction.captureId, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+          await adapter.invokeAsync({ operation: "audio.capture.emergency-stop", args: { captureId: transaction.captureId, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
         } catch { residual.push("capture-emergency-stop-unverified"); }
         status = await this.captureMapperStatus(adapter);
         if (status.captureId !== transaction.captureId) {
@@ -1086,7 +1088,7 @@ export class McpHost {
       const token = transaction.mapperToken ?? (typeof status.recoveryToken === "string" ? status.recoveryToken : undefined);
       if (!media && clip && isNonEmptyString(clip.filePath, 4_096)) {
         try {
-          const snapshot = await this.viewAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [], ["set"]);
+          const snapshot = await this.viewAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [], ["set"]);
           if (typeof snapshot.set.filePath === "string" && snapshot.set.filePath) {
             transaction.projectFilePath = snapshot.set.filePath;
             media = await decodeOwnedWaveFile(clip.filePath, snapshot.set.filePath, transaction.startedAt ?? Date.now());
@@ -1094,7 +1096,7 @@ export class McpHost {
           else residual.push("saved-project-path-unavailable");
         } catch {
           try {
-            const snapshot = await this.viewAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [], ["set"]);
+            const snapshot = await this.viewAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [], ["set"]);
             if (typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0) transaction.projectFilePath = snapshot.set.filePath;
             rawConfirmedAbsent = typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0 && await captureMediaIsAbsent(clip.filePath as string, snapshot.set.filePath);
             if (!rawConfirmedAbsent) residual.push("raw-media-could-not-be-verified-for-unlink");
@@ -1113,7 +1115,7 @@ export class McpHost {
       let liveCleanupSafe = status.state === "cleaned";
       if (clip && isNonEmptyString(clip.ref, 256) && token && rawCleanupSafe) {
         try {
-          const cleaned = await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token, expectedClipRef: clip.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+          const cleaned = await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token, expectedClipRef: clip.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
           includeMapperResidual(cleaned, "mapper-cleanup");
           liveCleanupSafe = true;
         } catch { residual.push("transaction-owned-live-clip-not-cleaned"); }
@@ -1133,7 +1135,7 @@ export class McpHost {
       if (isObject(finalStatus.clip)) residual.push("capture-clip-remains-present");
 
       try {
-        const snapshot = await this.viewForAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [finalStatus.destinationTrackRef, transaction.destinationTrackRef, transaction.destinationSlotRef]);
+        const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [finalStatus.destinationTrackRef, transaction.destinationTrackRef, transaction.destinationSlotRef]);
         const transport = snapshot.playback.transport;
         if (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || snapshot.playback.firedTargets.length > 0 || snapshot.playback.playingTargets.length > 0) residual.push("fresh-playback-readback-not-stopped");
         const destinationTrackRef = isNonEmptyString(finalStatus.destinationTrackRef, 256) ? finalStatus.destinationTrackRef : transaction.destinationTrackRef;
@@ -1204,23 +1206,23 @@ export class McpHost {
     let acquired: DecodedCaptureFile | undefined;
     try {
       this.validateOutputSafety(transaction.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status);
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; capture must be previewed again");
       const adapter = this.asyncAdapter();
       if (signal?.aborted) throw new Error("audio capture cancelled before audible dispatch");
       transaction.startedAt = Date.now();
       transaction.startDispatched = true;
-      const started = await adapter.invokeAsync({ operation: "audio.capture.start", args: { captureId: transaction.captureId, setName: transaction.setName, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef, fence: transaction.fence, maxDurationMs: Math.min(10_000, transaction.durationMs + 3_000), outputSafety: transaction.outputSafety } }, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as JsonObject;
+      const started = await adapter.invokeAsync({ operation: "audio.capture.start", args: { captureId: transaction.captureId, setName: transaction.setName, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef, fence: transaction.fence, maxDurationMs: Math.min(10_000, transaction.durationMs + 3_000), outputSafety: transaction.outputSafety } }, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as JsonObject;
       if (!isNonEmptyString(started.token, 128) || started.state !== "active") throw new Error("capture mapper did not confirm bounded authority");
       transaction.mapperToken = started.token;
       transaction.state = "capturing";
       await this.waitFor(transaction.durationMs, signal);
-      await adapter.invokeAsync({ operation: "audio.capture.stop", args: { captureId: transaction.captureId, token: transaction.mapperToken } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id });
+      await adapter.invokeAsync({ operation: "audio.capture.stop", args: { captureId: transaction.captureId, token: transaction.mapperToken } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id });
       const captureStatus = await this.waitForCapturedMedia(adapter, signal);
       if (Array.isArray(captureStatus.residual) && captureStatus.residual.length > 0) throw new Error("capture mapper reported residual state");
       const clip = captureStatus.clip as JsonObject;
-      const snapshot = await this.viewForAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }, [transaction.sourceSlotRef]);
+      const snapshot = await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }, [transaction.sourceSlotRef]);
       if (typeof snapshot.set.filePath !== "string" || !snapshot.set.filePath) throw new Error("capture requires an authoritatively saved Live Set path");
       transaction.projectFilePath = snapshot.set.filePath;
       acquired = await decodeOwnedWaveFile(clip.filePath as string, snapshot.set.filePath, transaction.startedAt);
@@ -1234,12 +1236,12 @@ export class McpHost {
       // descriptor-fenced raw media has been quarantined and unlinked.
       await unlinkOwnedCaptureFile(acquired);
       transaction.rawPrimaryUnlinked = true;
-      await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token: transaction.mapperToken, expectedClipRef: clip.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id });
+      await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token: transaction.mapperToken, expectedClipRef: clip.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id });
       await unlinkLateCaptureCompanions(acquired);
       if (!await captureMediaIsAbsent(acquired.realPath, transaction.projectFilePath)) throw new Error("capture media did not verify absent after Live clip cleanup");
       acquired = undefined;
       const finalStatus = await this.captureMapperStatus(adapter);
-      const finalSnapshot = await this.viewForAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [transaction.destinationTrackRef]);
+      const finalSnapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [transaction.destinationTrackRef]);
       const transport = finalSnapshot.playback.transport;
       const destination = finalSnapshot.tracks.find((track) => track.ref === transaction.destinationTrackRef);
       if (finalStatus.state !== "cleaned" || finalStatus.active !== false || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || !destination || destination.armed !== transaction.prior.arm || destination.monitoringState !== transaction.prior.monitoring || destination.routing?.inputType !== transaction.prior.route) throw new Error("capture teardown did not verify the exact stopped baseline");
@@ -1275,7 +1277,7 @@ export class McpHost {
   private async liveAudioCaptureStatusAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!this.utilityParams(params)) return error(id, -32602, "capture status takes no arguments");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status, true);
       const capture = await this.captureMapperStatus(this.asyncAdapter());
       return this.successText(id, this.captureStatusRedacted(capture));
@@ -1286,7 +1288,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["confirmation", "captureId", "sourceSlotRef", "destinationSlotRef"]) || params.confirmation !== "emergency-stop-and-clean" || !isNonEmptyString(params.captureId, 128) || !isNonEmptyString(params.sourceSlotRef, 256) || !isNonEmptyString(params.destinationSlotRef, 256)) return error(id, -32602, "exact fresh capture identities and confirmation are required");
     const synthetic: AudioCaptureTransaction = { id: `recovery_${params.captureId}`, captureId: params.captureId, epoch: 0, setName: "recovery", sourceSlotRef: params.sourceSlotRef as LiveRef, destinationSlotRef: params.destinationSlotRef as LiveRef, destinationTrackRef: params.destinationSlotRef as LiveRef, fence: "", prior: {}, durationMs: 0, outputSafety: {}, confirmation: "", expiresAt: Date.now() + 10_000, state: "uncertain" };
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); this.requireCaptureCapability(status, true);
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); this.requireCaptureCapability(status, true);
       const observed = await this.captureMapperStatus(this.asyncAdapter());
       if (observed.captureId !== params.captureId || observed.sourceSlotRef !== params.sourceSlotRef || observed.destinationSlotRef !== params.destinationSlotRef) throw new Error("capture emergency observation is stale or inexact");
       synthetic.epoch = status.epoch!; synthetic.startedAt = typeof observed.startedAt === "number" ? observed.startedAt : Date.now(); synthetic.mapperToken = typeof observed.recoveryToken === "string" ? observed.recoveryToken : undefined;
@@ -1405,7 +1407,7 @@ export class McpHost {
 
   private async compensateSessionStructureAsync(transaction: SessionStructureTransaction, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
     const created = transaction.created ?? []; transaction.compensationSteps ??=[]; transaction.recoveryMode = "compensate";
-    const boundedContext = (): LiveOperationContext => ({ ...context, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS });
+    const boundedContext = (): LiveOperationContext => ({ ...context, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS) });
     for (let index = 0; index < [...created].reverse().length; index += 1) { const item = [...created].reverse()[index]!; let step = transaction.compensationSteps[index];
       if (!step) { const snapshot = await this.structureOwnedViewAsync(boundedContext(), [item]); const row = this.sessionStructureOwnedRow(snapshot, item); if (!row) continue; if (this.sessionStructureCreatedFingerprint(snapshot, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before compensation"); step = { operation: item.kind === "track" ? "track.delete" : "scene.delete", args: { ref: item.ref, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: item.objectIdentity }, completed: false }; transaction.compensationSteps[index] = step; }
       if (!step.completed) { await adapter.invokeAsync({ operation: step.operation, args: step.args }, boundedContext()); step.completed = true; }
@@ -1421,9 +1423,9 @@ export class McpHost {
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Session-structure preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.structure"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       if (reconciliation && transaction.recoveryMode === "compensate") { try { await this.compensateSessionStructureAsync(transaction, adapter, context()); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "compensated", residuals: [], idempotent: false }); } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure compensation remains uncertain; inspect authoritative structure."); } }
       const current = await this.structureViewAsync(context());
       if (!reconciliation && this.structureRevision(current) !== transaction.revision) return this.transactionError(id, "Session structure changed since preview");
@@ -1479,9 +1481,9 @@ export class McpHost {
     try {
       this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
       const status = await this.requireOperation(operation);
-      const adapter = this.asyncAdapter(); const snapshot = await this.viewForAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, [params.ref]);
+      const adapter = this.asyncAdapter(); const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.ref]);
       if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
-      const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
+      const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       if (!current || current.ref !== params.ref || !isNonEmptyString(current.objectIdentity, 256) || typeof current.name !== "string") throw new Error("rename target lacks exact authoritative object identity");
       // Live shows return tracks with their letter ("A-Reverb") and prepends it to any name it is given,
       // so the name to expect afterwards carries that prefix whether or not the caller included it.
@@ -1503,8 +1505,8 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Uncertain rename apply requires the exact original idempotency key");
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Rename transaction is no longer applicable");
     try {
-      const status = reconciliation ? await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) : this.requireConnected("session.read"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const status = reconciliation ? await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) : this.requireConnected("session.read"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const current = await adapter.getAsync(transaction.clipRef, context) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       const exactIdentity = current?.ref === transaction.clipRef && current?.objectIdentity === transaction.prior?.objectIdentity;
       const priorState = exactIdentity && current?.name === transaction.prior?.name; const appliedState = exactIdentity && current?.name === transaction.payload.name;
@@ -1570,7 +1572,7 @@ export class McpHost {
   private async liveSessionAuditionPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["sceneRef", "setName", "outputSafety"]) || !isNonEmptyString(params.sceneRef, 256) || !isNonEmptyString(params.setName, 256) || !isObject(params.outputSafety)) return error(id, -32602, "sceneRef, setName, and outputSafety are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.wholeSetAsync(undefined, TRACK_CONTENT_PARTS);
       const state = this.auditionSnapshot(snapshot, params.sceneRef as LiveRef);
@@ -1629,11 +1631,11 @@ export class McpHost {
     // preview (mirroring the capture apply path).
     let dispatched = reconciliation;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id };
       const before = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS); const state = this.auditionSnapshot(before, transaction.sceneRef);
       // Reconciliation after a real acknowledgement loss: if every active
       // target belongs to this transaction (matching scene, subset of the
@@ -1720,7 +1722,7 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; stop refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.stopKey, transactionId: transaction.id };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.stopKey, transactionId: transaction.id };
       const beforeSnapshot = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS); const before = this.auditionSnapshot(beforeSnapshot, transaction.sceneRef);
       if (JSON.stringify(before.scene) !== transaction.sceneRevision || before.set.name !== transaction.setName || before.set.objectIdentity !== transaction.setIdentity || this.auditionAuthorityRevision(beforeSnapshot, transaction.sceneRef, transaction.eligibleTargetKeys) !== transaction.authorityRevision || before.playback.transport.arrangementRecord !== false || before.playback.transport.sessionRecord !== false || before.tracks.some((track) => MONITORABLE_TRACK_KINDS.has(String(track.kind)) ? (track.armed !== false || !["off", "auto"].includes(String(track.monitoringState))) : (track.armed === true || track.monitoringState === "in"))) throw new Error("audition ownership or safety state changed; stop refused");
       const activeTargets = [...before.playback.firedTargets, ...before.playback.playingTargets];
@@ -1752,11 +1754,11 @@ export class McpHost {
   private async liveSessionEmergencyStopAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     if (!isObject(params) || !hasOnly(params, ["confirmation", "expectedTargets", "expectedRecording", "idempotencyKey"]) || params.confirmation !== "emergency-stop" || !["stopped", "session", "arrangement", "both"].includes(String(params.expectedRecording)) || !Array.isArray(params.expectedTargets) || params.expectedTargets.length > 256 || new Set(params.expectedTargets).size !== params.expectedTargets.length || !params.expectedTargets.every((item) => isNonEmptyString(item, 1024)) || (params.idempotencyKey !== undefined && !isIdempotencyKey(params.idempotencyKey))) return error(id, -32602, "confirmation=emergency-stop plus exact freshly observed active playback targets and recording mode are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("session.emergency-stop")) throw new Error("emergency stop operation is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const playback = await this.playbackAsync(context);
       // Session playback alone: the targets and recording to stop.
       if (!playback || !Array.isArray(playback.firedTargets) || !Array.isArray(playback.playingTargets)) throw new Error("authoritative Session playback is unavailable");
@@ -1837,11 +1839,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("transport");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
       if (!reconciliation && (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity || snapshot.playback.revision !== transaction.playbackRevision)) return this.transactionError(id, "transport Set identity or state changed since preview; preview again");
       const result = await adapter.invokeAsync({ operation: "transport.set", args: { ...transaction.proposed, expectedRevision: transaction.playbackRevision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity } }, context) as { changed?: unknown; revision?: unknown };
@@ -1870,7 +1872,7 @@ export class McpHost {
       const status = this.requireConnected("transport");
       if (status.epoch !== transaction.epoch) return refuse("Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
       const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
       const prior = transaction.prior;
@@ -1921,7 +1923,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["slotRef", "outputSafety"]) || !isNonEmptyString(params.slotRef, 256)) return error(id, -32602, "slotRef and outputSafety evidence are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("session.clip-launch")) throw new Error("clip launch operation is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.slotRef]);
@@ -1961,7 +1963,7 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Uncertain clip-launch apply requires the exact original confirmation and idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || transaction.confirmation !== params.confirmation) return this.transactionError(id, "Exact clip-launch confirmation is required");
     if (signal?.aborted) return null;
-    if (reconciliation) { const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; clip-launch reconciliation refused"); }
+    if (reconciliation) { const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; clip-launch reconciliation refused"); }
     transaction.state = "applying";
     transaction.applyKey = params.idempotencyKey as string;
     const inflight = this.dispatchClipLaunchApply(transaction, signal, reconciliation);
@@ -1980,7 +1982,7 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id };
       const snapshot = await this.viewForAsync(context, [transaction.trackRef, transaction.slotRef]);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
@@ -2055,7 +2057,7 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; stop refused");
       if (!(status.operations ?? []).includes("session.clip-stop")) throw new Error("track stop operation is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.stopKey, transactionId: transaction.id };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.stopKey, transactionId: transaction.id };
       const before = await this.viewForAsync(context, [transaction.trackRef, transaction.slotRef]);
       const ours = [...before.playback.firedTargets, ...before.playback.playingTargets].some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
       if (ours) {
@@ -2152,7 +2154,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one routing field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("routing.set")) throw new Error("routing editing is unavailable");
       const snapshot = await this.routingViewAsync(undefined, params.trackRef, proposed);
@@ -2177,11 +2179,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.routingViewAsync(context, transaction.clipRef, transaction.payload); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.clipRef);
         if (!track || JSON.stringify({ ref: transaction.clipRef, objectIdentity: track.objectIdentity, routing: track.routing, armed: track.armed, monitoringState: track.monitoringState }) !== transaction.fence) return this.transactionError(id, "routing target or state changed since preview; preview again");
         if (this.routingWouldCreateCycle(snapshot, transaction.clipRef as string, transaction.payload)) return this.transactionError(id, "routing would create a direct or transitive feedback loop"); }
@@ -2477,13 +2479,13 @@ export class McpHost {
     const validTypes = !isObject(params) || params.types === undefined || (Array.isArray(params.types) && params.types.length <= types.length && new Set(params.types).size === params.types.length && params.types.every((item: unknown) => typeof item === "string" && types.includes(item)));
     if (!isObject(params) || !hasOnly(params, ["types"]) || !validTypes) return error(id, -32602, "types must be a unique bounded subset of transport, object, reset");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("subscriptions")) throw new Error("subscriptions are unavailable");
       if (!(status.operations ?? []).includes("subscribe")) throw new Error("subscription operation is unavailable");
       const adapter = this.asyncAdapter();
       const subscribeArgs: Record<string, unknown> = {};
       if (params.types !== undefined) subscribeArgs.types = params.types;
-      const result = await adapter.invokeAsync({ operation: "subscribe", args: subscribeArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { subscribed?: unknown; subscriptionId?: unknown };
+      const result = await adapter.invokeAsync({ operation: "subscribe", args: subscribeArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { subscribed?: unknown; subscriptionId?: unknown };
       if (result.subscribed !== true || typeof result.subscriptionId !== "string") throw new Error("subscription was not confirmed");
       return this.successText(id, { subscribed: true, subscriptionId: result.subscriptionId, epoch: status.epoch, resnapshot: "use live_snapshot for a fresh authoritative state at any point" });
     } catch (cause) { return this.adapterToolError(id, cause, "Subscription requires a connected Live adapter."); }
@@ -2493,7 +2495,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "no arguments accepted");
     try {
       const adapter = this.asyncAdapter();
-      const result = await adapter.invokeAsync({ operation: "subscribe", args: { types: [] } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { subscribed?: unknown };
+      const result = await adapter.invokeAsync({ operation: "subscribe", args: { types: [] } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { subscribed?: unknown };
       return this.successText(id, { subscribed: result.subscribed === true });
     } catch (cause) { return this.adapterToolError(id, cause, "Unsubscribe failed."); }
   }
@@ -2503,7 +2505,7 @@ export class McpHost {
       || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 7 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.lane === "session" ? "recording.session" : "recording.arrangement";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} control is unavailable`);
@@ -2547,11 +2549,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = await this.viewAsync(context, []);
       const transport = snapshot.playback?.transport;
       if (!reconciliation && (!transport || JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing }) !== transaction.fence)) { transaction.state = "uncertain"; return this.transactionError(id, "recording state changed since preview; preview again"); }
@@ -2691,12 +2693,12 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["ttlMs", "channels", "parameterRefs", "sourcePorts", "outputSafety"]) || !validChannels || !validParameterRefs || !validSourcePorts || (params.ttlMs !== undefined && !isIntegerInRange(params.ttlMs, 1000, 30000))) return error(id, -32602, "channels, parameterRefs, optional ttlMs/sourcePorts, and outputSafety are invalid");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.provenance !== "real-live") throw new Error("realtime control requires authoritative real-Live provenance");
       for (const operation of ["realtime.arm", "realtime.disarm", "realtime.stats"]) if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
       const ttlMs = (params.ttlMs as number | undefined) ?? 10_000;
       const parameterRefs = [...(params.parameterRefs as string[])];
-      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, parameterRefs), parameterRefs) : [];
+      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, parameterRefs), parameterRefs) : [];
       const targetAuthorities = targets.map((target) => structuredClone(target.authority));
       const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: structuredClone(params.outputSafety as JsonObject) };
       if (params.sourcePorts !== undefined) payload.sourcePorts = structuredClone(params.sourcePorts);
@@ -2735,15 +2737,15 @@ export class McpHost {
   private async dispatchRealtimeArmApply(transaction: ClipLifecycleTransaction, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
       this.validateOutputSafety(transaction.payload.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.provenance !== "real-live" || status.epoch !== transaction.epoch) throw new Error("Live connection or provenance changed; preview again");
       const parameterRefs = transaction.payload.parameterRefs as string[];
-      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }, parameterRefs), parameterRefs) : [];
+      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }, parameterRefs), parameterRefs) : [];
       if (JSON.stringify({ epoch: status.epoch, registryHash: status.registryHash, operations: ["realtime.arm", "realtime.disarm", "realtime.stats"], targets }) !== transaction.fence) throw new Error("realtime control contract or parameter targets changed; preview again");
       if (signal?.aborted) throw new Error("realtime arm cancelled before dispatch");
       const args: Record<string, unknown> = { ttlMs: transaction.payload.ttlMs, channels: transaction.payload.channels, parameterRefs, targetAuthorities: targets.map((target) => target.authority), outputSafety: transaction.payload.outputSafety };
       if (transaction.payload.sourcePorts !== undefined) args.sourcePorts = transaction.payload.sourcePorts;
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.arm", args }, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.arm", args }, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as Record<string, unknown>;
       if (!isIntegerInRange(result.port, 1, 65535) || !isNonEmptyString(result.host, 64) || !isNonEmptyString(result.token, 128) || !Number.isInteger(result.expiresAt) || (result.expiresAt as number) <= Date.now() || !Array.isArray(result.channels) || JSON.stringify(result.channels) !== JSON.stringify(transaction.payload.channels) || !Array.isArray(result.parameterRefs) || JSON.stringify(result.parameterRefs) !== JSON.stringify(parameterRefs)) throw new Error("realtime arming was not confirmed with the requested bounded endpoint and exact targets");
       transaction.created = structuredClone(result);
       transaction.state = "applied";
@@ -2758,9 +2760,9 @@ export class McpHost {
   private async liveRealtimeDisarmAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["confirmation"]) || params.confirmation !== "disarm") return error(id, -32602, "confirmation=disarm is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.operations ?? []).includes("realtime.disarm")) throw new Error("realtime disarm is unavailable");
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.disarm", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.disarm", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as Record<string, unknown>;
       if (result.armed !== false) throw new Error("realtime disarm was not confirmed");
       return this.successText(id, { armed: false, disarmed: true });
     } catch (cause) { return this.adapterToolError(id, cause, "Realtime disarm failed; use the separately authorized emergency-stop path if playback may be active."); }
@@ -2769,9 +2771,9 @@ export class McpHost {
   private async liveRealtimeStatsAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "no arguments accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.operations ?? []).includes("realtime.stats")) throw new Error("realtime stats are unavailable");
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as Record<string, unknown>;
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Realtime stats require the configured loopback control plane."); }
   }
@@ -2902,7 +2904,7 @@ export class McpHost {
     const categories = ["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"];
     if (!isObject(params) || !hasOnly(params, ["category", "query", "limit", "matchMode", "refresh"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.matchMode !== undefined && params.matchMode !== "ranked" && params.matchMode !== "substring") || (params.refresh !== undefined && typeof params.refresh !== "boolean")) return error(id, -32602, "category, query, limit, matchMode, and refresh are invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.search")) throw new Error("the Live Browser is unavailable");
       const adapter = this.asyncAdapter();
@@ -2911,7 +2913,7 @@ export class McpHost {
         if (params.category !== undefined) searchArgs.category = params.category;
         if (params.query !== undefined) searchArgs.query = params.query;
         if (params.limit !== undefined) searchArgs.limit = params.limit;
-        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { items?: unknown };
         return this.successText(id, { items: Array.isArray(result.items) ? result.items : [] });
       }
       const epoch = (status.epoch ?? 0) as number;
@@ -2927,7 +2929,7 @@ export class McpHost {
       } else {
         const searchArgs: Record<string, unknown> = { query: "", limit: BROWSER_SEARCH_CANDIDATE_LIMIT };
         if (params.category !== undefined) searchArgs.category = params.category;
-        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { items?: unknown };
         if (!Array.isArray(result.items) || result.items.length > BROWSER_SEARCH_CANDIDATE_LIMIT) throw new Error("browser search returned an unbounded or malformed candidate set");
         const rows = result.items.filter(isObject).map((item) => ({ id: item.id, objectIdentity: item.objectIdentity, name: item.name, category: item.category, path: item.path, isDevice: item.isDevice }));
         if (rows.length !== result.items.length || rows.some((item) => !isNonEmptyString(item.id, 256) || !isNonEmptyString(item.objectIdentity, 256) || typeof item.name !== "string" || item.name.length > 256 || !isNonEmptyString(item.category, 64) || typeof item.path !== "string" || item.path.length > 512 || typeof item.isDevice !== "boolean")) throw new Error("browser search returned a malformed candidate set");
@@ -2984,7 +2986,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     if (signal?.aborted) return null;
     try {
-      const result = await this.batchTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const result = await this.batchTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Batch apply may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
   }
@@ -3102,7 +3104,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     if (signal?.aborted) return null;
     try {
-      const result = await this.deviceStateTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const result = await this.deviceStateTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Device-state recall may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
   }
@@ -3230,11 +3232,11 @@ export class McpHost {
   private async liveArrangementAutomationReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "parameterRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256) || !isNonEmptyString(params.parameterRef, 256)) return error(id, -32602, "clipRef and parameterRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("arrangement.read")) throw new Error("arrangement read capability is unavailable");
       if (!(status.operations ?? []).includes("arrangement.automation.read")) throw new Error("arrangement automation read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const snapshot = await this.viewForAsync(context, [params.clipRef, params.parameterRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (!located.arrangement) throw new Error("arrangement automation requires an exact Arrangement clip reference");
@@ -3270,11 +3272,11 @@ export class McpHost {
   private async liveTakeLaneReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["trackRef", "limit", "cursor"]) || !isNonEmptyString(params.trackRef, 256)) return error(id, -32602, "trackRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("takes")) throw new Error("take-lane read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.take-lane.read")) throw new Error("take-lane read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "audio.take-lane.read", args: { trackRef: params.trackRef } }, context) as { lanes?: unknown };
       if (!Array.isArray(read.lanes) || read.lanes.length > 128) throw new Error("take-lane read returned an unbounded or malformed result");
       const advertised = read.lanes.filter(isObject).map((lane) => ({ ref: lane.ref, name: lane.name }));
@@ -3306,11 +3308,11 @@ export class McpHost {
   private async liveCompReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("takes")) throw new Error("comp read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.comp.read")) throw new Error("comp read is unavailable on this Live shape (the public LOM exposes no comp-region API)");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const snapshot = await this.viewForAsync(context, [params.clipRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (!isNonEmptyString(located.clip.objectIdentity, 256)) throw new Error("comp read requires exact clip identity");
@@ -3340,11 +3342,11 @@ export class McpHost {
   private async liveWarpMarkerReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("warp")) throw new Error("warp capability is unavailable");
       if (!(status.operations ?? []).includes("audio.warp-marker.read")) throw new Error("warp-marker read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const snapshot = await this.viewForAsync(context, [params.clipRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (located.clip.kind !== "audio" && located.clip.isAudio !== true) throw new Error("warp markers require an audio clip");
@@ -3377,11 +3379,11 @@ export class McpHost {
   private async liveBrowserInspectAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["itemId"]) || !isNonEmptyString(params.itemId, 256)) return error(id, -32602, "itemId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("browser")) throw new Error("browser capability is unavailable");
       if (!(status.operations ?? []).includes("browser.inspect")) throw new Error("browser item inspection is unavailable");
       const adapter = this.asyncAdapter();
-      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; category?: unknown; path?: unknown; isDevice?: unknown };
+      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; category?: unknown; path?: unknown; isDevice?: unknown };
       if (item.id !== params.itemId || !isNonEmptyString(item.objectIdentity, 256) || typeof item.name !== "string" || typeof item.category !== "string" || typeof item.isDevice !== "boolean") throw new Error("browser item lacks exact authoritative identity");
       // The browser-internal path (e.g. "instruments/Drum Rack") is metadata, not
       // a filesystem path; raw private paths are never returned by this surface.
@@ -3401,11 +3403,11 @@ export class McpHost {
   private async liveBrowserLoadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef", "chainRef"]) || !isNonEmptyString(params.itemId, 256) || (params.trackRef === undefined && params.chainRef === undefined) || (params.trackRef !== undefined && !isNonEmptyString(params.trackRef, 256)) || (params.chainRef !== undefined && !isNonEmptyString(params.chainRef, 256))) return error(id, -32602, "itemId and a trackRef or chainRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.load") || !(status.operations ?? []).includes("browser.inspect")) throw new Error("browser loading or item inspection is unavailable");
       const adapter = this.asyncAdapter();
-      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
+      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
       if (item.id !== params.itemId || item.isDevice !== true || typeof item.name !== "string" || !isNonEmptyString(item.objectIdentity, 256)) throw new Error("browser item lacks exact track-loadable identity");
       const snapshot = await this.viewForAsync(undefined, [params.chainRef, params.trackRef]);
       // Into a rack's chain: the chain's track is the one checked, and the chain's devices are the siblings.
@@ -3431,11 +3433,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef, transaction.payload.chainRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
         let current: string | undefined;
         try { current = track ? JSON.stringify({ track: transaction.payload.trackRef, ...(typeof transaction.payload.chainRef === "string" ? this.chainDeviceAuthority(track, this.chainOnTrack(snapshot, transaction.payload.chainRef as LiveRef).chain) : this.trackDeviceAuthority(track)) }) : undefined; } catch { current = undefined; }
@@ -3479,7 +3481,7 @@ export class McpHost {
     if ((params.filePath !== undefined || params.allowedRoot !== undefined) && (params.action !== "insert" || params.deviceName !== "Simpler")) return error(id, -32602, "a sample file goes only with inserting a Simpler");
     let stagingPath: string | undefined;
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.trackRef, params.deviceRef]);
       const payload: Record<string, unknown> = { action: params.action };
@@ -3530,11 +3532,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef, transaction.payload.ref]);
         if (action === "insert") { const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
@@ -3591,7 +3593,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("mixer.set")) throw new Error("mixer editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
@@ -3631,11 +3633,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const target = this.mixerTarget(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!); const mixer = target.mixer;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: target.track.objectIdentity, mixer }) !== transaction.fence) return this.transactionError(id, "mixer target or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -3657,7 +3659,7 @@ export class McpHost {
     if (params.view !== undefined && !isNonEmptyString(params.view, 64)) return error(id, -32602, "view must be a 1-64 character string");
     if (params.action !== undefined && !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = (params.view !== undefined && params.action === undefined) ? "view.set" : "view.control";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -3691,11 +3693,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const operation = transaction.payload.operation;
       if (operation !== "view.set" && operation !== "view.control") return this.transactionError(id, "view transaction payload is invalid");
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "operation"));
@@ -3715,7 +3717,7 @@ export class McpHost {
     if (params.direction !== undefined && params.direction !== "next" && params.direction !== "previous") return error(id, -32602, "direction must be next or previous");
     if (params.ref !== undefined && !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (params.ref !== undefined) {
         if (!(status.operations ?? []).includes("locator.jump-to")) throw new Error("locator jump-to is unavailable");
@@ -3750,11 +3752,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const snapshot = await this.viewAsync(context, [], ["arrangement", "playback"]);
         if (transaction.payload.jumpTo === true) {
@@ -3805,7 +3807,7 @@ export class McpHost {
     if (params.grooveRef !== undefined) proposed.grooveRef = params.grooveRef;
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one clip field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.set")) throw new Error("clip editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
@@ -3837,11 +3839,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount"] as const;
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "clip identity or state changed since preview; preview again"); }
@@ -3964,7 +3966,7 @@ export class McpHost {
     const adapter = this.asyncAdapter(); const deadline = Date.now() + 8_000;
     for (const itemId of itemIds) {
       for (;;) {
-        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); break; }
+        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); break; }
         catch (cause) { if (Date.now() > deadline) throw new Error("drum pad loading into Drum Sampler timed out waiting for Live's Browser to see the preset; try again or use Simpler", { cause }); }
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -4115,7 +4117,7 @@ export class McpHost {
       // The staged copy is transaction-owned: every preview exit that does not
       // retain a transaction must release it, or the bytes leak in $TMPDIR.
       try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (params.takeLaneRef !== undefined) {
         if (!(status.operations ?? []).includes("take-lane.audio-clip.create")) throw new Error("take-lane audio import is unavailable");
@@ -4155,7 +4157,7 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const previewFile = (transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string } }).file;
@@ -4165,7 +4167,7 @@ export class McpHost {
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, previewFile);
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation && transaction.payload.takeLaneRef !== undefined) {
         const snapshot = await this.viewForAsync(context, [transaction.payload.takeLaneRef]);
         const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef);
@@ -4216,7 +4218,7 @@ export class McpHost {
     if (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime)) return error(id, -32602, "beatTime is invalid");
     if (params.action === "move" && (typeof params.distance !== "number" || !Number.isFinite(params.distance))) return error(id, -32602, "distance is required for move");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "add" ? "audio.warp-marker.add" : params.action === "move" ? "audio.warp-marker.move" : "audio.warp-marker.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -4224,7 +4226,7 @@ export class McpHost {
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.kind !== "audio" && row.clip.isAudio !== true) return this.transactionError(id, "warp markers require an audio clip");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: params.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }>; revision?: string };
       const markers = Array.isArray(read.markers) ? read.markers : [];
       const beats = new Set(markers.map((marker) => marker.beatTime));
@@ -4255,11 +4257,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const before = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: transaction.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
         const snapshot = await this.viewForAsync(context, [transaction.clipRef]);
@@ -4286,7 +4288,7 @@ export class McpHost {
     const actions = ["crop", "duplicate-loop", "duplicate-region", "scrub-start", "scrub-stop", "move-playing-position"] as const;
     if (!isObject(params) || !hasOnly(params, ["clipRef", "action", "regionStart", "regionEnd", "destination", "offset"]) || !isNonEmptyString(params.clipRef, 256) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "clipRef and a valid action are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.action")) throw new Error("clip actions are unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
@@ -4324,11 +4326,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
         const contentFingerprint = ["crop", "duplicate-loop", "duplicate-region"].includes(transaction.payload.action as string) ? this.captureObjectFingerprint(row.clip) : null;
@@ -4365,7 +4367,7 @@ export class McpHost {
     const actions = ["quantize", "quantize-pitch", "duplicate"] as const;
     if (!isObject(params) || !hasOnly(params, ["clipRef", "action", "noteIds", "grid", "amount", "pitch"]) || !isNonEmptyString(params.clipRef, 256) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "clipRef and a valid action are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "duplicate" ? "note.duplicate" : "note.quantize";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -4402,11 +4404,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const beforeCount = (transaction.prior as { notes: unknown[] }).notes.length;
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const current = this.noteClip(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, notes: current.notes, notesRevision: current.notesRevision, authority: current.authority }) !== transaction.fence) return this.transactionError(id, "clip identity or notes changed since preview; preview again"); }
@@ -4640,7 +4642,7 @@ export class McpHost {
     const generative = GENERATIVE_TRANSFORMS.includes(transform);
     const probe = midiExpressionProbe();
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.midi_note.write") || !(status.capabilities ?? []).includes("session.midi_note.read")) throw new Error("midi note read/write capability is unavailable");
       for (const operation of ["snapshot", "note.update", "note.delete", "note.add-batch"]) if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
       const scope = params.scope === undefined ? undefined : params.scope as "in-place" | "duplicate";
@@ -4711,11 +4713,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.midi_note.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const scope = transaction.payload.scope as string;
       const diff = transaction.payload.diff as { add: Array<Record<string, unknown>>; update: Array<Record<string, unknown>>; delete: number[] };
       if (scope === "in-place") {
@@ -4785,10 +4787,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "noteIds", "selected"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     if (params.noteIds !== undefined && params.selected === true) return error(id, -32602, "noteIds and selected are mutually exclusive");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       if (params.selected === true) {
         if (!(status.operations ?? []).includes("note.read-selected")) throw new Error("selected note reads are unavailable");
         return this.successText(id, await adapter.invokeAsync({ operation: "note.read-selected", args: { ref: params.clipRef } }, context));
@@ -4805,13 +4807,13 @@ export class McpHost {
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one tuning field is required");
     if (params.noteTunings !== undefined && (!Array.isArray(params.noteTunings) || params.noteTunings.length !== 128 || !params.noteTunings.every((row) => isObject(row) && hasOnly(row, ["note", "deviation"]) && Number.isInteger(row.note) && (row.note as number) >= 0 && (row.note as number) <= 127 && typeof row.deviation === "number" && Number.isFinite(row.deviation) && Math.abs(row.deviation) <= 1200))) return error(id, -32602, "noteTunings must contain exactly 128 valid entries");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("tuning.read") || !(status.operations ?? []).includes("tuning.set")) throw new Error("tuning editing is unavailable");
       const adapter = this.asyncAdapter();
       const snapshot = await this.viewAsync(undefined, [], ["set"]);
       if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "tuning.read", args: { setRef: snapshot.set.ref } }, context) as { tuningSystem?: unknown; scale?: unknown; revision?: unknown };
       if (!isNonEmptyString(read.revision, 64)) throw new Error("tuning revision is unavailable");
       const proposed: Record<string, unknown> = {};
@@ -4833,11 +4835,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const snapshot = await this.viewAsync(context, [], ["set"]);
         const before = await adapter.invokeAsync({ operation: "tuning.read", args: { setRef: transaction.payload.setRef } }, context) as { revision?: unknown };
@@ -4862,14 +4864,14 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "grooveAmount", "grooveRef", "name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"])) return error(id, -32602, "action is required");
     if (params.action !== "set-amount" && params.action !== "edit") return error(id, -32602, "action must be set-amount or edit");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "set-amount" ? "groove.set" : "groove.edit";
       if (!(status.operations ?? []).includes(operation) || !(status.operations ?? []).includes("groove.read")) throw new Error(`${operation} is unavailable`);
       const adapter = this.asyncAdapter();
       const snapshot = await this.viewAsync(undefined, [], ["set"]);
       if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>>; revision?: unknown };
       if (!isNonEmptyString(read.revision, 64)) throw new Error("groove revision is unavailable");
       let payload: Record<string, unknown>;
@@ -4913,11 +4915,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const snapshot = await this.viewAsync(context, [], ["set"]);
         const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown };
@@ -4969,7 +4971,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one scene field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("scene.set")) throw new Error("scene editing is unavailable");
       const snapshot = await this.viewAsync(undefined, [], ["scenes"]);
@@ -4998,11 +5000,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["colorIndex", "tempo", "tempoEnabled", "signatureNumerator", "signatureDenominator", "timeSignatureEnabled"];
       if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["scenes"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!scene || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: scene.objectIdentity, state: fields.map((field) => scene[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "scene identity or state changed since preview; preview again"); }
@@ -5021,7 +5023,7 @@ export class McpHost {
   private async liveSceneFirePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("scene.fire-selected")) throw new Error("scene fire-as-selected is unavailable");
       const snapshot = await this.viewAsync(undefined, [], ["scenes", "playback"]);
@@ -5049,11 +5051,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["scenes", "playback"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const fireState = { isTriggered: scene?.isTriggered ?? null, playing: snapshot.playback.transport.playing };
         if (!scene || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: scene.objectIdentity, fireState }) !== transaction.fence) return this.transactionError(id, "scene identity or fire state changed since preview; preview again"); }
@@ -5087,12 +5089,12 @@ export class McpHost {
     if (params.conversion !== undefined && !conversions.includes(params.conversion as typeof conversions[number])) return error(id, -32602, "conversion is invalid");
     if (params.smpteFormat !== undefined && !smpteFormats.includes(params.smpteFormat as typeof smpteFormats[number])) return error(id, -32602, "smpteFormat is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("song.read")) throw new Error("song state reads are unavailable");
       const adapter = this.asyncAdapter();
       const snapshot = await this.viewAsync(undefined, [], ["set"]);
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const state = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as Record<string, unknown>;
       if (params.conversion !== undefined && (status.operations ?? []).includes("song.time-convert")) {
         const args: Record<string, unknown> = { setRef: snapshot.set.ref, query: params.conversion };
@@ -5106,12 +5108,12 @@ export class McpHost {
   private async livePerformanceReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (params !== undefined && (!isObject(params) || Object.keys(params).length > 0)) return error(id, -32602, "no arguments are accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("performance.read")) throw new Error("performance reads are unavailable");
       const adapter = this.asyncAdapter();
       const snapshot = await this.viewAsync(undefined, [], ["set"]);
-      return this.successText(id, await adapter.invokeAsync({ operation: "performance.read", args: { setRef: snapshot.set.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await adapter.invokeAsync({ operation: "performance.read", args: { setRef: snapshot.set.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Performance read requires a fresh connection."); }
   }
 
@@ -5121,7 +5123,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "beatTime"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     if ((params.action === "force-link-beat-time" || params.action === "scrub") && (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime))) return error(id, -32602, `beatTime is required for ${params.action === "scrub" ? "the scrub distance" : "force-link-beat-time"}`);
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("transport.action")) throw new Error("transport actions are unavailable");
       const snapshot = await this.viewAsync(undefined, [], ["set", "playback"]);
@@ -5143,11 +5145,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
         if (JSON.stringify({ setRef: transaction.payload.setRef, identity: snapshot.set.objectIdentity, playbackRevision: snapshot.playback.revision }) !== transaction.fence) return this.transactionError(id, "transport state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -5164,7 +5166,7 @@ export class McpHost {
     const actions = ["create-return", "delete-return", "duplicate-track", "duplicate-scene"] as const;
     if (!actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "create-return" ? "track.create-return" : params.action === "delete-return" ? "track.delete-return" : params.action === "duplicate-track" ? "track.duplicate" : "scene.duplicate";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -5208,11 +5210,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const structureRevision = this.structureRevision(await this.structureViewAsync(context));
         if (JSON.stringify({ action: transaction.payload.action, payload: transaction.payload, structureRevision }) !== transaction.fence) return this.transactionError(id, "structure changed since preview; preview again"); }
       const action = transaction.payload.action as string;
@@ -5240,7 +5242,7 @@ export class McpHost {
   private async liveDeviceDeletePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("device.delete")) throw new Error("device deletion is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.ref]);
@@ -5264,11 +5266,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, trackRef: row.track.ref, trackIdentity: row.track.objectIdentity }) !== transaction.fence) return this.transactionError(id, "device or sibling hierarchy changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -5286,7 +5288,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["ref", "collapsed", "deviceInsertMode", "selectInstrument"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     if (params.collapsed === undefined && params.deviceInsertMode === undefined && params.selectInstrument !== true) return error(id, -32602, "at least one view field or selectInstrument is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
@@ -5316,11 +5318,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const viewState = { collapsed: (track?.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track?.view as JsonObject | undefined)?.deviceInsertMode ?? null };
         if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, viewState }) !== transaction.fence) return this.transactionError(id, "track identity or view state changed since preview; preview again"); }
@@ -5358,7 +5360,7 @@ export class McpHost {
     if (params.colorIndex === undefined) return error(id, -32602, "at least one track property is required");
     if (!Number.isInteger(params.colorIndex) || (params.colorIndex as number) < 0 || (params.colorIndex as number) > 69) return error(id, -32602, "colorIndex is out of bounds");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("track.set")) throw new Error("track property editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.ref]);
@@ -5382,11 +5384,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, state: [track.colorIndex ?? null] }) !== transaction.fence) return this.transactionError(id, "track identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -5428,7 +5430,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one song settings field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("song.set")) throw new Error("song settings editing is unavailable");
       const adapter = this.asyncAdapter();
@@ -5456,11 +5458,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = await this.viewAsync(context, [], ["set"]);
       if (snapshot.set.ref !== transaction.payload.setRef || snapshot.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed since preview");
       const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"];
@@ -5500,7 +5502,7 @@ export class McpHost {
     if (!isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef or notes are required");
     if (params.expectedNotesRevision !== undefined && (typeof params.expectedNotesRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedNotesRevision))) return error(id, -32602, "expectedNotesRevision must be a 64-character hex digest");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
@@ -5524,7 +5526,7 @@ export class McpHost {
     if (fields.every((field) => params[field] === undefined) && params.drawMode === undefined) return error(id, -32602, "at least one selection field or drawMode is required");
     if (params.drawMode !== undefined && typeof params.drawMode !== "boolean") return error(id, -32602, "drawMode must be boolean");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewAsync(undefined, [], ["set", "selection"]);
       const proposed: Record<string, unknown> = {};
@@ -5557,11 +5559,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["set", "selection"]);
         const proposed = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => !["expectedStateRevision", "drawMode"].includes(key)));
         if (JSON.stringify({ proposed, selectionRevision: this.selectionRevision(snapshot), drawMode: snapshot.view?.drawMode ?? null }) !== transaction.fence) return this.transactionError(id, "selection state changed since preview; preview again"); }
@@ -5609,7 +5611,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "showLoop", ...fields]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     if (fields.every((field) => params[field] === undefined) && params.showLoop !== true) return error(id, -32602, "at least one clip view field or showLoop is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.view.set")) throw new Error("clip view editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
@@ -5641,11 +5643,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         const viewState = { gridQuantization: (row.clip.clipView as JsonObject | undefined)?.gridQuantization ?? null, gridIsTriplet: (row.clip.clipView as JsonObject | undefined)?.gridIsTriplet ?? null };
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, viewState }) !== transaction.fence) return this.transactionError(id, "clip identity or view state changed since preview; preview again"); }
@@ -5664,7 +5666,7 @@ export class McpHost {
   private async liveDeviceViewPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref", "collapsed"]) || !isNonEmptyString(params.ref, 256) || typeof params.collapsed !== "boolean") return error(id, -32602, "ref and collapsed are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("device.view.set")) throw new Error("device view editing is unavailable on this Live shape");
       const snapshot = await this.viewForAsync(undefined, [params.ref]);
@@ -5688,11 +5690,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, collapsed: current }) !== transaction.fence) return this.transactionError(id, "device identity or view state changed since preview; preview again"); }
@@ -5711,11 +5713,11 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["button"])) return error(id, -32602, "button is optional; omit for a read-only dialog state check");
     if (params.button !== undefined && (!Number.isInteger(params.button) || (params.button as number) < 0 || (params.button as number) > 16)) return error(id, -32602, "button is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("application.dialog")) throw new Error("application dialog surface is unavailable");
       const adapter = this.asyncAdapter();
-      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
+      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
       const dialogState = { buttonCount: read.buttonCount ?? null, message: read.message ?? null, openDialogCount: read.openDialogCount ?? null };
       const done = read.done === undefined ? true : read.done === true;
       if (params.button === undefined) return this.successText(id, { ...dialogState, done });
@@ -5739,11 +5741,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, context) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
       const done = read.done === undefined ? true : read.done === true;
       if (!done) return this.adapterToolError(id, new Error("dialog observation is incomplete; the press was refused"), "Wait for a complete dialog observation, then request a fresh preview.");
@@ -5772,7 +5774,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one extended mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("mixer.extended.set")) throw new Error("extended mixer editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
@@ -5800,11 +5802,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef);
         const mixer = track?.mixer as JsonObject | undefined;
         const state = { crossfadeAssign: mixer?.crossfadeAssign ?? null, panningMode: mixer?.panningMode ?? null };
@@ -5835,7 +5837,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one chain mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("chain-mixer.set")) throw new Error("chain mixer editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.chainRef]);
@@ -5862,11 +5864,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const found = this.chainRow(snapshot, transaction.clipRef!);
         const mixer = found.chain.mixer as JsonObject | undefined;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: found.chain.objectIdentity, mixerIdentity: mixer?.mixerIdentity, sends: mixer?.sends ?? [] }) !== transaction.fence) return this.transactionError(id, "chain or mixer state changed since preview; preview again"); }
@@ -5909,7 +5911,7 @@ export class McpHost {
     if (params.action !== "routing" && params.action !== "sidechain") return error(id, -32602, "action must be routing or sidechain");
     if (params.action === "routing" && params.routingChannel !== undefined && !isNonEmptyString(params.routingChannel, 128)) return error(id, -32602, "routingChannel is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "routing" ? "device-io.set" : "compressor.sidechain.set";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
@@ -5943,11 +5945,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const device = row.device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
         const state = transaction.payload.action === "routing" ? { routingType: device.deviceIo?.routingType ?? null, routingChannel: device.deviceIo?.routingChannel ?? null } : { routingType: device.sidechainRoutingType };
@@ -5972,7 +5974,7 @@ export class McpHost {
     const actions = ["set-bank", "re-enable-automation", "save-comparison", "insert-chain", "move-cross"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "ref", "bank", "slot", "trackRef", "chainRef", "deviceName", "index", "targetTrackRef", "targetChainRef"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.ref, params.trackRef, params.chainRef, params.targetTrackRef, params.targetChainRef]);
       let payload: Record<string, unknown>;
@@ -6049,11 +6051,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => !["action", "priorOwnerRef", "priorIndex"].includes(key)));
@@ -6094,7 +6096,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one chain field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("chain.set")) throw new Error("chain editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.chainRef]);
@@ -6119,11 +6121,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const found = this.chainRow(snapshot, transaction.clipRef!);
         const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: found.chain.objectIdentity, state }) !== transaction.fence) return this.transactionError(id, "chain identity or state changed since preview; preview again"); }
@@ -6177,7 +6179,7 @@ export class McpHost {
     if (!loading && (params.deviceRef !== undefined || params.filePath !== undefined || params.allowedRoot !== undefined)) return error(id, -32602, "deviceRef and a sample file go only with load-sample");
     let stagingPath: string | undefined;
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.padRef]);
       const pad = loading ? this.drumRackPad(snapshot, params.deviceRef as LiveRef, params.note as number) : this.drumPadRow(snapshot, params.padRef as LiveRef);
@@ -6232,7 +6234,7 @@ export class McpHost {
     if (new Set(notes).size !== notes.length) return error(id, -32602, "each pad takes one sample");
     const staged: string[] = []; const presets: string[] = [];
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("drum-pad.load-samples")) throw new Error("drum pad sample loading is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
@@ -6284,11 +6286,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       if (action === "load-sample" && !reconciliation) {
         const current = this.drumPadRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef);
@@ -6351,7 +6353,7 @@ export class McpHost {
     const actions = ["set", "add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "rackRef", "selectedVariationIndex", "index", "sourceIndex", "targetIndex"]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.rackRef, 256)) return error(id, -32602, "action and rackRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.rackRef]);
       const row = this.deviceRow(snapshot, params.rackRef as LiveRef);
@@ -6390,11 +6392,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         if (JSON.stringify({ action: transaction.payload.action, ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, stateRevision: this.rackStateRevision(row.device) }) !== transaction.fence) return this.transactionError(id, "rack identity or state changed since preview; preview again"); }
       const action = transaction.payload.action as string;
@@ -6430,7 +6432,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["rackRef", ...fields]) || !isNonEmptyString(params.rackRef, 256)) return error(id, -32602, "rackRef is required");
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one rack view field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("rack.view.set")) throw new Error("rack view editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.rackRef]);
@@ -6461,11 +6463,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const view = row.device.rackView as JsonObject | undefined;
         const state = { padScrollPosition: view?.padScrollPosition ?? null, showChainDevices: view?.showChainDevices ?? null };
@@ -6507,7 +6509,7 @@ export class McpHost {
     if (!hasOnly(params, ["family", "deviceRef", ...fields])) return error(id, -32602, `only ${params.family} fields are accepted`);
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = `${params.family}.set`;
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
@@ -6545,11 +6547,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const family = transaction.payload.family as string;
       const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
@@ -6574,7 +6576,7 @@ export class McpHost {
     const fields = ["overdubAfterRecord", "recordLengthIndex"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "deviceRef", "slotRef", ...fields]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "action and deviceRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.slotRef]);
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
@@ -6617,11 +6619,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       if (action === "set") {
@@ -6645,7 +6647,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["deviceRef", "filePath", "allowedRoot"]) || !isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "deviceRef, filePath, and allowedRoot are required");
     try {
       const authority = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("simpler.replace-sample")) throw new Error("sample replacement is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
@@ -6671,7 +6673,7 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const prior = transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string }; samplePath: string };
@@ -6681,7 +6683,7 @@ export class McpHost {
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, prior.file);
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, filePath: currentPath }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "device identity or sample state changed since preview; preview again"); } }
@@ -6708,43 +6710,43 @@ export class McpHost {
     }
     if (params.minIntervalMs !== undefined && (!Number.isInteger(params.minIntervalMs) || (params.minIntervalMs as number) < 100 || (params.minIntervalMs as number) > 60000)) return error(id, -32602, "minIntervalMs is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.subscribe")) throw new Error("observer subscriptions are unavailable");
       const adapter = this.asyncAdapter();
       const args: Record<string, unknown> = { topics: params.topics };
       if (params.minIntervalMs !== undefined) args.minIntervalMs = params.minIntervalMs;
-      return this.successText(id, await adapter.invokeAsync({ operation: "observe.subscribe", args }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await adapter.invokeAsync({ operation: "observe.subscribe", args }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer subscription requires a fresh connection."); }
   }
 
   private async liveObservePollAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["subscriptionId"]) || !isNonEmptyString(params.subscriptionId, 128)) return error(id, -32602, "subscriptionId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.poll")) throw new Error("observer polling is unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.poll", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.poll", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer poll requires a fresh connection."); }
   }
 
   private async liveObserveUnsubscribeAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["subscriptionId"]) || !isNonEmptyString(params.subscriptionId, 128)) return error(id, -32602, "subscriptionId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.unsubscribe")) throw new Error("observer unsubscribe is unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.unsubscribe", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.unsubscribe", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer unsubscribe requires a fresh connection."); }
   }
 
   private async liveBrowserRootsAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (params !== undefined && (!isObject(params) || Object.keys(params).length > 0)) return error(id, -32602, "no arguments are accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.roots")) throw new Error("browser roots are unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "browser.roots", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "browser.roots", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Browser roots requires a fresh connection."); }
   }
 
@@ -6776,7 +6778,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "clipRef", "parameterRef", "points", "from", "to"]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "action and clipRef are required");
     if (params.action === "clear-envelopes" ? params.parameterRef !== undefined : !isNonEmptyString(params.parameterRef, 256)) return error(id, -32602, params.action === "clear-envelopes" ? "clear-envelopes takes no parameterRef" : "parameterRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const adapter = this.asyncAdapter();
       if (params.action === "clear-envelopes") {
@@ -6792,7 +6794,7 @@ export class McpHost {
       }
       const operation = params.action === "insert" ? "automation.point.insert" : params.action === "delete-range" ? "automation.point.delete" : params.action === "create-envelope" ? "automation.envelope.create" : "automation.envelope.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const before = await this.viewForAsync(context, [params.clipRef, params.parameterRef]); const authorityDigest = this.automationAuthorityDigest(before, params.clipRef as LiveRef, params.parameterRef as LiveRef);
       const read = await adapter.invokeAsync({ operation: "automation.envelope.read", args: { clipRef: params.clipRef, parameterRef: params.parameterRef } }, context) as { available?: unknown; exists?: unknown; points?: unknown; revision?: unknown };
       if (read.available !== true || !isNonEmptyString(read.revision, 64)) throw new Error("clip envelope revision is unavailable");
@@ -6825,11 +6827,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       if (action === "clear-envelopes") {
         if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.clipRef]); const authorityDigest = this.clipAuthorityDigest(snapshot, transaction.payload.clipRef as LiveRef); const presence = this.envelopePresenceRevision(snapshot, transaction.payload.clipRef as LiveRef);
@@ -6931,7 +6933,7 @@ export class McpHost {
     if (toArrangement && (typeof params.arrangementPosition !== "number" || !Number.isFinite(params.arrangementPosition) || params.arrangementPosition < 0)) return error(id, -32602, "arrangementPosition is out of bounds");
     if (!toArrangement && (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > 10000)) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for Session duplication");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.duplicate")) throw new Error("clip duplication is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef, params.targetTrackRef]);
@@ -6978,11 +6980,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = await this.viewForAsync(context, [transaction.clipRef, transaction.payload.targetTrackRef]);
       if (!reconciliation && transaction.payload.arrangementPosition !== null) {
         const source = this.clipRow(snapshot, transaction.clipRef!);
@@ -7013,7 +7015,7 @@ export class McpHost {
     if (createKind !== "midi" && createKind !== "audio") return error(id, -32602, "kind must be midi or audio");
     if (params.takeLaneRef !== undefined && (createKind !== "midi" || !isNonEmptyString(params.takeLaneRef, 256))) return error(id, -32602, "takeLaneRef requires kind=midi");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.takeLaneRef !== undefined ? "take-lane.clip.create" : createKind === "audio" ? "arrangement.audio-clip.create" : "arrangement.clip.create";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -7052,11 +7054,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation && transaction.kind !== "arrangement-take-lane-create" && this.arrangementFence(await this.viewForAsync(context, [transaction.payload.trackRef]), [transaction.payload.trackRef]) !== transaction.fence) return this.transactionError(id, "Arrangement changed since preview; preview again");
       if (!reconciliation && transaction.kind === "arrangement-take-lane-create") { const snapshot = await this.viewForAsync(context, [transaction.payload.takeLaneRef]); const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef); const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity })); if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) return this.transactionError(id, "take lane or its clips changed since preview; preview again"); }
       const operation = transaction.kind === "arrangement-create" ? "arrangement.clip.create" : transaction.kind === "arrangement-audio-create" ? "arrangement.audio-clip.create" : transaction.kind === "arrangement-take-lane-create" ? "take-lane.clip.create" : "arrangement.clip.delete";
@@ -7075,7 +7077,7 @@ export class McpHost {
   private async liveClipMovePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "position", "targetTrackRef", "targetSceneIndex"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef, params.targetTrackRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
@@ -7122,11 +7124,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = reconciliation ? undefined : await this.viewForAsync(context, [transaction.clipRef, (transaction.payload.duplicate as JsonObject | undefined)?.targetTrackRef]);
       if (transaction.payload.position !== undefined) {
         const row = reconciliation ? undefined : this.clipRow(snapshot!, transaction.clipRef!);
@@ -7171,7 +7173,7 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one audio clip field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.clip.set")) throw new Error("audio clip editing is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
@@ -7198,11 +7200,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["gain", "pitchCoarse", "pitchFine", "loopStart", "loopEnd", "warpMode", "warping", "fadeInLength", "fadeOutLength"] as const;
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "audio clip identity or state changed since preview; preview again"); }
@@ -7237,7 +7239,7 @@ export class McpHost {
     const requiredKeys = kind === "update" ? ["clipRef", "notes"] : ["clipRef", "noteIds"];
     if (!isObject(params) || !hasOnly(params, requiredKeys) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, `${requiredKeys.join(" and ")} are required`);
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = kind === "update" ? "note.update" : "note.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -7291,11 +7293,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const current = this.noteClip(snapshot, transaction.clipRef);
         if (this.noteFence(current.notes) !== transaction.fence || current.notesRevision !== transaction.notesRevision || JSON.stringify(current.authority) !== JSON.stringify(transaction.authority)) return this.transactionError(id, "clip identity or notes changed since preview; preview again"); }
       const operation = kind === "update" ? "note.update" : "note.delete";
@@ -7320,7 +7322,7 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
       const current = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef);
       if (applyRecovery) {
@@ -7381,11 +7383,11 @@ export class McpHost {
   private async liveCapturePreviewAsync(id: RequestId, params: unknown, kind: "capture-midi" | "scene-capture"): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "capture preview accepts no arguments");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const operation = kind === "capture-midi" ? "session.capture-midi" : "scene.capture";
       const recoveryOperation = kind === "capture-midi" ? "clip.delete" : "scene.delete";
       if (!status.connected || !(status.capabilities ?? []).includes("session.read") || !(status.operations ?? []).includes(operation) || !(status.operations ?? []).includes(recoveryOperation)) throw new Error(`${kind} is unavailable`);
-      const snapshot = await this.wholeSetAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }, TRACK_CONTENT_PARTS);
+      const snapshot = await this.wholeSetAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, TRACK_CONTENT_PARTS);
       const transaction: ClipLifecycleTransaction = { id: `${kind === "capture-midi" ? "capturemidi" : "scenecapture"}_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind, fence: this.captureFence(snapshot), payload: { expectedStateRevision: this.captureAuthorityRevision(snapshot) }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, kind);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, impact: kind === "capture-midi" ? "creates-session-midi-clips" : "creates-one-session-scene", confirmation: "apply", expiresAt: transaction.expiresAt });
@@ -7402,10 +7404,10 @@ export class McpHost {
     if (signal?.aborted) return null;
     transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string; let dispatched = reconciliation;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { transaction.state = "previewed"; delete transaction.applyKey; return this.transactionError(id, "Live connection epoch changed; preview again"); }
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const before = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS);
         if (this.captureFence(before) !== transaction.fence) { transaction.state = "previewed"; delete transaction.applyKey; return this.transactionError(id, "Session state changed since capture preview; preview again"); } }
       dispatched = true;
@@ -7526,10 +7528,10 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("device.parameter.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const current = await this.viewForAsync(context, [transaction.deviceRef, ...transaction.parameters.map((parameter) => parameter.ref)]);
         for (const parameter of transaction.parameters) {
@@ -7568,10 +7570,10 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("device.parameter.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const currentSnapshot = await this.viewForAsync(context, [transaction.deviceRef, transaction.parameterRef]);
       const target = this.parameterTarget(currentSnapshot, transaction.deviceRef, transaction.parameterRef);
       const currentRevision = reconciliation ? transaction.priorRevision : this.parameterRevision(target.parameter);
@@ -7600,7 +7602,7 @@ export class McpHost {
 
   private async liveMidiApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
-    return this.successText(id, await this.midiTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + SESSION_MIDI_TRANSACTION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    return this.successText(id, await this.midiTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(SESSION_MIDI_TRANSACTION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
   }
 
   private locatorRevision(snapshot: LiveSnapshot): string {
@@ -7649,10 +7651,10 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Arrangement apply is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Arrangement preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("arrangement.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation && transaction.recoveryMode === "compensate") { try { await this.compensateArrangementAsync(transaction, adapter, context); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "compensated", residuals: [], idempotent: false }); } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Arrangement compensation remains uncertain; inspect authoritative locators."); } }
       let currentSnapshot = await this.viewAsync(context, [], ["arrangement"]);
       if (!reconciliation && this.locatorRevision(currentSnapshot) !== transaction.revision) return this.transactionError(id, "Arrangement locators changed since preview");
@@ -7704,9 +7706,9 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if ((transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Tempo preview expired; preview again");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!reconciliation && (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== transaction.priorTempo)) return this.transactionError(id, "Set identity or tempo changed since preview; preview again");
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -7764,9 +7766,9 @@ export class McpHost {
       const deviceStateFinalizable = !owner && !midiFinalizable && !batchFinalizable && this.deviceStateTransactions.isFinalizable(transactionId);
       if (!owner && !midiFinalizable && !batchFinalizable && !deviceStateFinalizable) return this.recoveryFinalizeError(id, "Recovery transaction was not found or is not finalizable.");
       const retireRemote = async (): Promise<boolean> => { const retire = (this.adapter as Partial<{ retireTransactionAsync(transactionId: string, context?: LiveOperationContext, terminal?: boolean): Promise<unknown> }>).retireTransactionAsync; if (typeof retire !== "function") return true; try { await retire.call(this.adapter, transactionId, { deadlineMs: Date.now() + 5_000 }, true); return true; } catch { return false; } };
-      const adapter = this.asyncAdapter(); const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const safety = await this.playbackAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const transport = safety.transport;
+      const adapter = this.asyncAdapter(); const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); const safety = await this.playbackAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); const transport = safety.transport;
       if (!transport || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || safety.playingTargets.length > 0 || safety.firedTargets.length > 0) return this.recoveryFinalizeError(id, "Recovery finalization requires authoritative stopped playback and recording with no active Session targets.");
-      if (status.operations?.includes("realtime.stats")) { const realtime = await adapter.invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { armed?: unknown; pending?: unknown }; if (realtime.armed !== false || realtime.pending !== 0) return this.recoveryFinalizeError(id, "Recovery finalization requires realtime authority to be disarmed with no pending writes."); }
+      if (status.operations?.includes("realtime.stats")) { const realtime = await adapter.invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { armed?: unknown; pending?: unknown }; if (realtime.armed !== false || realtime.pending !== 0) return this.recoveryFinalizeError(id, "Recovery finalization requires realtime authority to be disarmed with no pending writes."); }
       if (midiFinalizable) {
         if (!await retireRemote()) return this.recoveryFinalizeError(id, "Remote replay authority could not be retired; finalization refused.");
         const finalized = this.midiTransactions.finalize(transactionId); return this.successText(id, { ...finalized, resolution: params.resolution, evidence: params.evidence, liveMutated: false, recoveryAuthorityRetired: true });
@@ -7807,9 +7809,9 @@ export class McpHost {
     const undoOwnerTool = this.transactionOwnerTool(String(params.transactionId));
     if (undoOwnerTool !== undefined && !this.policyAllowsTool(undoOwnerTool)) return this.transactionError(id, "The current deployment policy no longer allows this transaction's tool domain; reconcile manually or restore the policy before undo.");
     const transaction = this.transactions.get(params.transactionId as string);
-    if (!transaction && String(params.transactionId).startsWith("midi_")) return this.successText(id, await this.midiTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + SESSION_MIDI_TRANSACTION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
-    if (!transaction && String(params.transactionId).startsWith("batch_")) return this.successText(id, await this.batchTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
-    if (!transaction && String(params.transactionId).startsWith("devstate_")) return this.successText(id, await this.deviceStateTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("midi_")) return this.successText(id, await this.midiTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(SESSION_MIDI_TRANSACTION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("batch_")) return this.successText(id, await this.batchTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("devstate_")) return this.successText(id, await this.deviceStateTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
     if (!transaction && String(params.transactionId).startsWith("transport_")) {
       const transport = this.transportTransactions.get(params.transactionId as string);
       if (!transport) return this.transactionError(id, "Unknown or expired transport transaction");
@@ -7828,7 +7830,7 @@ export class McpHost {
       if (capture.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain capture transaction can be undone");
       try {
         this.beginUndoRecovery(capture, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== capture.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; capture.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(capture, adapter, context); let snapshot = capture.kind === "capture-midi" ? await this.viewForAsync(context, (Array.isArray(capture.created?.clips) ? capture.created.clips : []).filter(isObject).map((owned) => owned.ref)) : await this.wholeSetAsync(context, TRACK_CONTENT_PARTS);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; capture.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(capture, adapter, context); let snapshot = capture.kind === "capture-midi" ? await this.viewForAsync(context, (Array.isArray(capture.created?.clips) ? capture.created.clips : []).filter(isObject).map((owned) => owned.ref)) : await this.wholeSetAsync(context, TRACK_CONTENT_PARTS);
         capture.state = "undoing";
         if (capture.kind === "capture-midi") {
           const clips = Array.isArray(capture.created?.clips) ? capture.created.clips.filter(isObject) : []; const current = new Map(snapshot.tracks.flatMap((track) => track.clips.map((clip) => [clip.ref, clip] as const)));
@@ -7852,7 +7854,7 @@ export class McpHost {
       if ((duplicate.state !== "applied" && !reconciliation) || !isNonEmptyString(duplicate.created?.ref, 256) || !isNonEmptyString(duplicate.created?.objectIdentity, 256)) return this.transactionError(id, "Only an applied or exact-key uncertain identity-bound clip duplicate can be undone");
       try {
         this.beginUndoRecovery(duplicate, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== duplicate.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; duplicate.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(duplicate, adapter, context); duplicate.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; duplicate.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(duplicate, adapter, context); duplicate.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, duplicate.created.ref as LiveRef, duplicate.created.objectIdentity as string, context, duplicate.created.fingerprint as string, duplicate, reconciliation);
         duplicate.state = "undone"; return this.successText(id, { transactionId: duplicate.id, state: "undone", deleted: duplicate.created.ref, idempotent: false });
       } catch (cause) { duplicate.state = "uncertain"; return this.adapterToolError(id, cause, "Clip-duplicate undo is uncertain; inspect the exact destination."); }
@@ -7866,7 +7868,7 @@ export class McpHost {
       if ((arrangementClip.state !== "applied" && !reconciliation) || !isNonEmptyString(arrangementClip.created?.ref, 256) || !isNonEmptyString(arrangementClip.created?.objectIdentity, 256)) return this.transactionError(id, "Arrangement clip creation lacks exact undo identity");
       try {
         this.beginUndoRecovery(arrangementClip, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== arrangementClip.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; arrangementClip.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(arrangementClip, adapter, context); arrangementClip.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; arrangementClip.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(arrangementClip, adapter, context); arrangementClip.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, arrangementClip.created.ref as LiveRef, arrangementClip.created.objectIdentity as string, context, arrangementClip.created.fingerprint as string, arrangementClip, reconciliation);
         arrangementClip.state = "undone"; return this.successText(id, { transactionId: arrangementClip.id, state: "undone", idempotent: false });
       } catch (cause) { arrangementClip.state = "uncertain"; return this.adapterToolError(id, cause, "Arrangement clip undo is uncertain; inspect the exact created clip."); }
@@ -7879,7 +7881,7 @@ export class McpHost {
       if ((move.state !== "applied" && !reconciliation) || !isNonEmptyString(move.created?.ref, 256) || !isNonEmptyString(move.created?.objectIdentity, 256) || !isNonEmptyString(move.created?.fingerprint, 64)) return this.transactionError(id, "Clip move lacks exact applied identity and content fingerprint");
       try {
         const plan = this.beginUndoRecovery(move, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== move.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; move.undoKey = params.idempotencyKey as string; move.payload.appliedRef ??= move.created.ref; if (reconciliation) await this.replayUndoRecovery(move, adapter, context); move.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; move.undoKey = params.idempotencyKey as string; move.payload.appliedRef ??= move.created.ref; if (reconciliation) await this.replayUndoRecovery(move, adapter, context); move.state = "undoing";
         if (move.payload.position !== undefined) {
           let result: JsonObject;
           if (reconciliation) { const replayed = plan.steps.at(-1)?.result; if (!isObject(replayed)) throw new Error("Arrangement clip move replay result is unavailable"); result = replayed; }
@@ -7903,7 +7905,7 @@ export class McpHost {
       if ((audioImport.state !== "applied" && !reconciliation) || !isNonEmptyString(audioImport.created?.ref, 256) || !isNonEmptyString(audioImport.created?.objectIdentity, 256)) return this.transactionError(id, "Session audio import lacks exact undo identity");
       try {
         this.beginUndoRecovery(audioImport, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audioImport.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audioImport.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audioImport, adapter, context); audioImport.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audioImport.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audioImport, adapter, context); audioImport.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, audioImport.created.ref as LiveRef, audioImport.created.objectIdentity as string, context, audioImport.created.createdFingerprint as string, audioImport, reconciliation);
         this.releaseStagedImportFile(audioImport.payload.filePath);
         audioImport.state = "undone"; return this.successText(id, { transactionId: audioImport.id, state: "undone", deleted: audioImport.created.ref, idempotent: false });
@@ -7917,7 +7919,7 @@ export class McpHost {
       if ((warp.state !== "applied" && !reconciliation) || !warp.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain warp-marker transaction can be undone");
       try {
         this.beginUndoRecovery(warp, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== warp.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; warp.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(warp, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; warp.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(warp, adapter, context);
         const snapshot = await this.viewForAsync(context, [warp.clipRef]); const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: warp.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
         const action = warp.payload.action as string;
         const inverse = action === "add" ? { operation: "audio.warp-marker.delete", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : action === "delete" ? { operation: "audio.warp-marker.add", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : { operation: "audio.warp-marker.move", args: { ref: warp.clipRef, beatTime: (warp.payload.beatTime as number) + (warp.payload.distance as number), distance: -(warp.payload.distance as number) } };
@@ -7945,7 +7947,7 @@ export class McpHost {
       if ((noteTarget.state !== "applied" && !reconciliation) || !noteTarget.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain note-edit transaction can be undone");
       try {
         this.beginUndoRecovery(noteTarget, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== noteTarget.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; noteTarget.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(noteTarget, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; noteTarget.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(noteTarget, adapter, context);
         const current = this.noteClip(await this.viewForAsync(context, [noteTarget.clipRef]), noteTarget.clipRef);
         const prior = (noteTarget.prior as { notes: Array<Record<string, unknown>> }).notes;
         const action = noteTarget.payload.action as string;
@@ -7979,7 +7981,7 @@ export class McpHost {
       if ((transform.state !== "applied" && !reconciliation) || !transform.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain MIDI-transform transaction can be undone");
       try {
         const status = this.requireConnected("session.read"); if (status.epoch !== transform.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
         // Refusal-only checks run before any state change: a refused undo keeps
         // the record applied so the operator can retry after restoring the
         // transformed state (never wedged in an active state).
@@ -8022,7 +8024,7 @@ export class McpHost {
       if ((sceneset.state !== "applied" && !reconciliation) || !sceneset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain scene transaction can be undone");
       try {
         this.beginUndoRecovery(sceneset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== sceneset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
         const snapshot = await this.viewAsync(context, [], ["scenes"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === sceneset.payload.ref);
         if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is unavailable");
         if (scene.objectIdentity !== sceneset.payload.expectedObjectIdentity) return this.transactionError(id, "scene identity changed after apply; undo refused");
@@ -8046,7 +8048,7 @@ export class McpHost {
       if ((trackset.state !== "applied" && !reconciliation) || !trackset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain track-properties transaction can be undone");
       try {
         this.beginUndoRecovery(trackset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackset, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackset, adapter, context);
         const snapshot = await this.viewForAsync(context, [trackset.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
         if (!track || track.objectIdentity !== trackset.payload.expectedObjectIdentity) throw new Error("track identity changed after apply; undo refused");
         if (!reconciliation && (track.colorIndex ?? null) !== trackset.payload.colorIndex) return this.transactionError(id, "track changed after apply; undo refused");
@@ -8067,7 +8069,7 @@ export class McpHost {
       if ((songset.state !== "applied" && !reconciliation) || !songset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain song-settings transaction can be undone");
       try {
         this.beginUndoRecovery(songset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== songset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; songset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(songset, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; songset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(songset, adapter, context);
         const snapshot = await this.viewAsync(context, [], ["set"]);
         if (snapshot.set.ref !== songset.payload.setRef || snapshot.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply; undo refused");
         const rawSong = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject; const song = this.songSettingsFields(rawSong);
@@ -8091,7 +8093,7 @@ export class McpHost {
       if ((trackstruct.state !== "applied" && !reconciliation) || !isNonEmptyString(trackstruct.created?.ref, 256) || !isNonEmptyString(trackstruct.created?.objectIdentity, 256)) return this.transactionError(id, "Only an applied track-structure creation has automatic undo authority");
       try {
         this.beginUndoRecovery(trackstruct, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackstruct.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackstruct.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackstruct, adapter, context); trackstruct.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackstruct.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackstruct, adapter, context); trackstruct.state = "undoing";
         const action = trackstruct.payload.action as string;
         const snapshot = await this.structureOwnedViewAsync(context, [{ kind: action === "duplicate-scene" ? "scene" : "track", ref: trackstruct.created.ref as LiveRef }]);
         const structureRevision = this.structureRevision(snapshot);
@@ -8117,7 +8119,7 @@ export class McpHost {
       if (trackview.payload.collapsed === undefined && trackview.payload.deviceInsertMode === undefined) return this.transactionError(id, "Instrument selection is momentary and not undoable");
       try {
         this.beginUndoRecovery(trackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
         const snapshot = await this.viewForAsync(context, [trackview.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackview.payload.ref);
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is unavailable");
         if (!reconciliation) { const view = track.view as JsonObject | undefined;
@@ -8142,7 +8144,7 @@ export class McpHost {
       if ((selection.state !== "applied" && !reconciliation) || !selection.prior) return this.transactionError(id, "Only an applied or exact-key uncertain selection transaction can be undone");
       try {
         this.beginUndoRecovery(selection, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== selection.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; selection.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(selection, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; selection.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(selection, adapter, context);
         const snapshot = await this.viewAsync(context, [], ["set", "selection"]);
         if (!reconciliation) { for (const [field, value] of Object.entries(selection.payload)) { if (["expectedStateRevision", "drawMode"].includes(field)) continue; if (((snapshot.selection as Record<string, unknown> | undefined)?.[field] ?? null) !== value) return this.transactionError(id, "selection changed after apply; undo refused"); }
           if (selection.payload.drawMode !== undefined && snapshot.view?.drawMode !== selection.payload.drawMode) return this.transactionError(id, "draw mode changed after apply; undo refused"); }
@@ -8168,7 +8170,7 @@ export class McpHost {
       if (clipview.payload.gridQuantization === undefined && clipview.payload.gridIsTriplet === undefined) return this.transactionError(id, "show-loop and envelope visibility are momentary and not undoable");
       try {
         this.beginUndoRecovery(clipview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipview, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipview, adapter, context);
         const snapshot = await this.viewForAsync(context, [clipview.clipRef]); const row = this.clipRow(snapshot, clipview.clipRef);
         if (!reconciliation) { const view = row.clip.clipView as JsonObject | undefined;
           for (const field of ["gridQuantization", "gridIsTriplet"]) if (clipview.payload[field] !== undefined && view?.[field] !== clipview.payload[field]) return this.transactionError(id, "clip view changed after apply; undo refused"); }
@@ -8190,7 +8192,7 @@ export class McpHost {
       if ((devview.state !== "applied" && !reconciliation) || !devview.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-view transaction can be undone");
       try {
         this.beginUndoRecovery(devview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devview, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devview, adapter, context);
         const snapshot = await this.viewForAsync(context, [devview.payload.ref]); const row = this.deviceRow(snapshot, devview.payload.ref as LiveRef);
         const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
         if (!reconciliation && current !== devview.payload.collapsed) return this.transactionError(id, "device view changed after apply; undo refused");
@@ -8210,7 +8212,7 @@ export class McpHost {
       if ((mixerext.state !== "applied" && !reconciliation) || !mixerext.prior) return this.transactionError(id, "Only an applied or exact-key uncertain extended-mixer transaction can be undone");
       try {
         this.beginUndoRecovery(mixerext, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== mixerext.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
         const snapshot = await this.viewForAsync(context, [mixerext.clipRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
         if (!track || !mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("extended mixer authority is unavailable");
         if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
@@ -8230,7 +8232,7 @@ export class McpHost {
       if ((chainmix.state !== "applied" && !reconciliation) || !chainmix.clipRef || !chainmix.prior) return this.transactionError(id, "Only an applied or exact-key uncertain chain-mixer transaction can be undone");
       try {
         this.beginUndoRecovery(chainmix, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== chainmix.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
         const snapshot = await this.viewForAsync(context, [chainmix.clipRef]); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
         if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer authority is unavailable");
         if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
@@ -8249,7 +8251,7 @@ export class McpHost {
       if ((devio.state !== "applied" && !reconciliation) || !devio.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-IO transaction can be undone");
       try {
         this.beginUndoRecovery(devio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devio, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devio, adapter, context);
         const snapshot = await this.viewForAsync(context, [devio.payload.ref]); const row = this.deviceRow(snapshot, devio.payload.ref as LiveRef);
         const device = row.device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
         const operation = devio.payload.action === "routing" ? "device-io.set" : "compressor.sidechain.set";
@@ -8276,7 +8278,7 @@ export class McpHost {
         if ((devadv.state !== "applied" && !reconciling) || !made || !isNonEmptyString(made.ref as string, 256) || !isNonEmptyString(made.objectIdentity as string, 256)) return this.transactionError(id, "Chain insertion lacks exact created device identity");
         try {
           this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
+          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
           await this.deleteOwnedDeviceAsync(adapter, made.ref as LiveRef, made.objectIdentity as string, context, typeof made.createdFingerprint === "string" ? made.createdFingerprint : undefined, devadv, reconciling);
           devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
         } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Chain-insertion undo is uncertain; inspect the exact created device."); }
@@ -8285,7 +8287,7 @@ export class McpHost {
       if ((devadv.state !== "applied" && !reconciliation) || !devadv.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-advanced transaction can be undone");
       try {
         this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devadv, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devadv, adapter, context);
         const snapshot = await this.viewForAsync(context, [(devadv.created as JsonObject | undefined)?.ref, (devadv.prior as JsonObject | undefined)?.ownerRef]);
         const created = devadv.created as Record<string, unknown> | undefined;
         if (!created || !isNonEmptyString(created.ref as string, 256) || !isNonEmptyString(created.objectIdentity as string, 256)) return this.transactionError(id, "device move lacks exact applied identity");
@@ -8312,7 +8314,7 @@ export class McpHost {
       if ((chainset.state !== "applied" && !reconciliation) || !chainset.clipRef || !chainset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain chain transaction can be undone");
       try {
         this.beginUndoRecovery(chainset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== chainset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainset, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainset, adapter, context);
         const snapshot = await this.viewForAsync(context, [chainset.clipRef]); const found = this.chainRow(snapshot, chainset.clipRef);
         if (!reconciliation) { for (const [field, value] of Object.entries(chainset.payload)) { if (["ref", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (found.chain[field] !== value) return this.transactionError(id, "chain changed after apply; undo refused"); } }
         const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
@@ -8331,7 +8333,7 @@ export class McpHost {
       if ((drumpad.state !== "applied" && !reconciliation) || !drumpad.prior) return this.transactionError(id, "Only an applied or exact-key uncertain drum-pad transaction can be undone");
       try {
         this.beginUndoRecovery(drumpad, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== drumpad.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
         const snapshot = await this.viewForAsync(context, [drumpad.payload.ref, drumpad.payload.deviceRef, ...(Array.isArray(drumpad.payload.pads) ? drumpad.payload.pads : []).filter(isObject).map((pad) => pad.ref)]);
         if (drumpad.payload.action === "load-samples") {
           // Each pad back to empty, last loaded first; only while each still holds just what the change put there.
@@ -8382,7 +8384,7 @@ export class McpHost {
       if ((rackview.state !== "applied" && !reconciliation) || !rackview.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack-view transaction can be undone");
       try {
         this.beginUndoRecovery(rackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rackview, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rackview, adapter, context);
         const snapshot = await this.viewForAsync(context, [rackview.payload.ref]); const row = this.deviceRow(snapshot, rackview.payload.ref as LiveRef);
         const view = row.device.rackView as JsonObject | undefined;
         if (!reconciliation) { for (const field of ["padScrollPosition", "showChainDevices"]) if (rackview.payload[field] !== undefined && view?.[field] !== rackview.payload[field]) return this.transactionError(id, "rack view changed after apply; undo refused"); }
@@ -8406,7 +8408,7 @@ export class McpHost {
       if ((rack.state !== "applied" && !reconciliation) || !rack.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack transaction can be undone");
       try {
         this.beginUndoRecovery(rack, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rack.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
         const snapshot = await this.viewForAsync(context, [rack.payload.ref]); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
         if (!reconciliation) { if (rack.payload.selectedVariationIndex !== undefined && row.device.selectedVariationIndex !== rack.payload.selectedVariationIndex) return this.transactionError(id, "rack changed after apply; undo refused"); }
         if (macroAction) {
@@ -8432,7 +8434,7 @@ export class McpHost {
       if ((devspec.state !== "applied" && !reconciliation) || !devspec.prior) return this.transactionError(id, "Only an applied or exact-key uncertain specialized-device transaction can be undone");
       try {
         this.beginUndoRecovery(devspec, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devspec.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devspec.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devspec, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devspec.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devspec, adapter, context);
         const family = devspec.payload.family as string;
         const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
         const snapshot = await this.viewForAsync(context, [devspec.payload.ref]); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
@@ -8453,7 +8455,7 @@ export class McpHost {
       if ((simpler.state !== "applied" && !reconciliation) || !simpler.prior) return this.transactionError(id, "Only an applied or exact-key uncertain simpler transaction can be undone");
       try {
         this.beginUndoRecovery(simpler, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== simpler.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; simpler.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(simpler, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; simpler.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(simpler, adapter, context);
         const prior = simpler.prior as { samplePath: string };
         if (typeof prior.samplePath !== "string" || prior.samplePath.length < 1) return this.transactionError(id, "prior sample path is unavailable");
         const snapshot = await this.viewForAsync(context, [simpler.payload.ref]); const row = this.deviceRow(snapshot, simpler.payload.ref as LiveRef);
@@ -8475,7 +8477,7 @@ export class McpHost {
       if ((looper.state !== "applied" && !reconciliation) || !looper.prior) return this.transactionError(id, "Only an applied or exact-key uncertain looper transaction can be undone");
       try {
         this.beginUndoRecovery(looper, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== looper.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; looper.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(looper, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; looper.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(looper, adapter, context);
         const snapshot = await this.viewForAsync(context, [looper.payload.ref]); const row = this.deviceRow(snapshot, looper.payload.ref as LiveRef);
         const looperRow = (((row.device as unknown as Record<string, unknown>).looper) ?? {}) as Record<string, unknown>;
         if (!reconciliation) { for (const field of ["overdubAfterRecord", "recordLengthIndex"]) if (looper.payload[field] !== undefined && looperRow[field] !== looper.payload[field]) return this.transactionError(id, "looper changed after apply; undo refused"); }
@@ -8495,7 +8497,7 @@ export class McpHost {
       if ((groove.state !== "applied" && !reconciliation) || !groove.prior) return this.transactionError(id, "Only an applied or exact-key uncertain groove transaction can be undone");
       try {
         this.beginUndoRecovery(groove, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== groove.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; groove.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(groove, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; groove.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(groove, adapter, context);
         const snapshot = await this.viewAsync(context, [], ["set"]);
         if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
         const action = groove.payload.action as string;
@@ -8536,7 +8538,7 @@ export class McpHost {
       if ((tuning.state !== "applied" && !reconciliation) || !tuning.prior) return this.transactionError(id, "Only an applied or exact-key uncertain tuning transaction can be undone");
       try {
         this.beginUndoRecovery(tuning, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== tuning.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; tuning.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(tuning, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; tuning.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(tuning, adapter, context);
         const prior = tuning.prior as { tuningSystem: Record<string, unknown>; scale: Record<string, unknown> };
         const snapshot = await this.viewAsync(context, [], ["set"]);
         if (!reconciliation) {
@@ -8565,7 +8567,7 @@ export class McpHost {
       if ((clipset.state !== "applied" && !reconciliation) || !clipset.clipRef || !clipset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain clip-properties edit can be undone");
       try {
         this.beginUndoRecovery(clipset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.viewForAsync(context, [clipset.clipRef]); const row = this.clipRow(snapshot, clipset.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.viewForAsync(context, [clipset.clipRef]); const row = this.clipRow(snapshot, clipset.clipRef);
         const expected = reconciliation ? clipset.prior : clipset.payload; for (const [field, value] of Object.entries(expected)) { if (field === "ref" || field.startsWith("expected")) continue; if (field === "grooveRef") { const observedRef = (row.clip.groove as { ref?: unknown } | null | undefined)?.ref ?? null; if (observedRef !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (field === "groove") { if (JSON.stringify(row.clip.groove ?? null) !== JSON.stringify(value)) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (row.clip[field] !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); }
         if (!reconciliation) { clipset.state = "undoing"; const priorFields = { ...(clipset.prior as Record<string, unknown>) }; if (Object.prototype.hasOwnProperty.call(priorFields, "groove")) { const priorGroove = priorFields.groove as { ref?: unknown } | null; delete priorFields.groove; priorFields.grooveRef = priorGroove?.ref ?? null; } const result = await this.invokeUndoRecovery(clipset, adapter, "clip.set", { ref: clipset.clipRef, ...priorFields, ...this.clipPropertiesMutationAuthority(snapshot, clipset.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Clip-properties restoration was not confirmed"); }
         const restoredRow = this.clipRow(await this.viewForAsync(context, [clipset.clipRef]), clipset.clipRef); for (const [field, value] of Object.entries(clipset.prior)) { if (field === "groove") { if (JSON.stringify(restoredRow.clip.groove ?? null) !== JSON.stringify(value)) throw new Error("Clip exact prior state was not restored"); } else if (restoredRow.clip[field] !== value) throw new Error("Clip exact prior state was not restored"); }
@@ -8580,7 +8582,7 @@ export class McpHost {
       if ((audio.state !== "applied" && !reconciliation) || !audio.clipRef || !audio.prior) return this.transactionError(id, "Only an applied or exact-key uncertain audio-clip edit can be undone");
       try {
         this.beginUndoRecovery(audio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await this.viewForAsync(context, [audio.clipRef]); const row = this.clipRow(snapshot, audio.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await this.viewForAsync(context, [audio.clipRef]); const row = this.clipRow(snapshot, audio.clipRef);
         const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && !sameLiveValue(row.clip[field], value)) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
         if (!reconciliation) { audio.state = "undoing"; const result = await this.invokeUndoRecovery(audio, adapter, "audio.clip.set", { ref: audio.clipRef, ...audio.prior, ...this.audioClipMutationAuthority(snapshot, audio.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Audio clip restoration was not confirmed"); }
         const restoredRow = this.clipRow(await this.viewForAsync(context, [audio.clipRef]), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
@@ -8595,7 +8597,7 @@ export class McpHost {
       if ((browser.state !== "applied" && !reconciliation) || !isNonEmptyString(browser.created?.deviceRef, 256) || !isNonEmptyString(browser.created?.objectIdentity, 256)) return this.transactionError(id, "Browser load lacks exact created device identity");
       try {
         this.beginUndoRecovery(browser, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== browser.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; browser.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(browser, adapter, context); browser.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; browser.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(browser, adapter, context); browser.state = "undoing";
         await this.deleteOwnedDeviceAsync(adapter, browser.created.deviceRef as LiveRef, browser.created.objectIdentity as string, context, browser.created.fingerprint as string, browser, reconciliation); browser.state = "undone";
         return this.successText(id, { transactionId: browser.id, state: "undone", idempotent: false });
       } catch (cause) { browser.state = "uncertain"; return this.adapterToolError(id, cause, "Browser-load undo is uncertain; inspect the exact created device."); }
@@ -8608,7 +8610,7 @@ export class McpHost {
       if (device.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain device transaction can be undone");
       try {
         const plan = this.beginUndoRecovery(device, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== device.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; const action = device.payload.action; device.undoKey = params.idempotencyKey as string; if (reconciliation) { await this.replayUndoRecovery(device, adapter, context); const replayed = plan.steps.at(-1)?.result; if (action === "move" && isObject(replayed) && isNonEmptyString(replayed.ref, 256)) device.created = replayed; }
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; const action = device.payload.action; device.undoKey = params.idempotencyKey as string; if (reconciliation) { await this.replayUndoRecovery(device, adapter, context); const replayed = plan.steps.at(-1)?.result; if (action === "move" && isObject(replayed) && isNonEmptyString(replayed.ref, 256)) device.created = replayed; }
         device.state = "undoing";
         if (action === "insert") {
           if (!isNonEmptyString(device.created?.ref, 256) || !isNonEmptyString(device.created?.objectIdentity, 256)) throw new Error("inserted device identity is unavailable");
@@ -8635,7 +8637,7 @@ export class McpHost {
       if ((routing.state !== "applied" && !reconciliation) || !routing.clipRef || !routing.prior) return this.transactionError(id, "Only an applied or exact-key uncertain routing transaction can be undone");
       try {
         this.beginUndoRecovery(routing, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== routing.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await this.routingIdentityViewAsync(context, routing.payload.expectedObjectIdentity, routing.prior ?? {});
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await this.routingIdentityViewAsync(context, routing.payload.expectedObjectIdentity, routing.prior ?? {});
         // The track by identity: its positional reference changes when tracks are added or removed before it.
         const matches = (snapshot.tracks as unknown as JsonObject[]).filter((candidate) => candidate.objectIdentity === routing.payload.expectedObjectIdentity); const track = matches.length === 1 ? matches[0] : undefined;
         if (!track || !isNonEmptyString(track.ref, 256)) return this.transactionError(id, "routing track identity changed after apply; undo refused");
@@ -8660,7 +8662,7 @@ export class McpHost {
       if (rename.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain rename transaction can be undone");
       try {
         this.beginUndoRecovery(rename, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rename.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
         const current = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
         if (!current || current.objectIdentity !== rename.prior?.objectIdentity || current.name !== (reconciliation ? rename.prior?.name : rename.payload.name)) return this.transactionError(id, reconciliation ? "Rename undo replay did not restore prior name" : "Renamed object identity or name changed after apply; undo refused");
         const operation = (rename.payload.kind === "takeLane" ? "take-lane.rename" : `${rename.payload.kind}.rename`) as LiveInvocation["operation"];
@@ -8679,7 +8681,7 @@ export class McpHost {
       if (mixer.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain mixer transaction can be undone");
       try {
         this.beginUndoRecovery(mixer, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== mixer.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
         let currentTarget = this.mixerTarget(await this.viewForAsync(context, [mixer.clipRef]), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
         for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
@@ -8698,7 +8700,7 @@ export class McpHost {
       if (automation.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain automation transaction can be undone");
       try {
         const plan = this.beginUndoRecovery(automation, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== automation.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; automation.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(automation, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; automation.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(automation, adapter, context);
         const action = automation.payload.action as string;
         const prior = automation.prior as { exists?: unknown; points?: unknown };
         const guarded = async (extra: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -8739,7 +8741,7 @@ export class McpHost {
       if (structure?.state === "undone" && structure.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: structure.id, state: "undone", idempotent: true });
       if (!structure || (structure.state !== "applied" && !reconciliation) || !structure.created) return this.transactionError(id, "Only an applied or exact-key uncertain Session-structure transaction can be undone");
       const status = this.requireConnected("session.structure"); if (status.epoch !== structure.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
+      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
       try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await this.structureOwnedViewAsync(context(), structure.created);
         // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
         const discard = params.discard === true;
@@ -8762,7 +8764,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!arrangement || (arrangement.state !== "applied" && !reconciliation) || !arrangement.created) return this.transactionError(id, "Only an applied or exact-key uncertain Arrangement transaction can be undone");
       try {
         const status = this.requireConnected("arrangement.write"); if (status.epoch !== arrangement.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; this.beginUndoRecovery(arrangement, params.idempotencyKey as string); arrangement.undoKey = params.idempotencyKey as string;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; this.beginUndoRecovery(arrangement, params.idempotencyKey as string); arrangement.undoKey = params.idempotencyKey as string;
         if (reconciliation) await this.replayUndoRecovery(arrangement, adapter, context);
         let current = (await this.viewAsync(context, [], ["arrangement"])).arrangement.locators;
         for (const locator of arrangement.created) { const found = current.find((item) => item.ref === locator.ref); if (found && (found.objectIdentity !== locator.objectIdentity || found.name !== locator.name || found.position !== locator.position)) return this.transactionError(id, "Arrangement locator identity or content changed after apply; undo refused"); }
@@ -8779,7 +8781,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!batch || (batch.state !== "applied" && !reconciliation) || batch.parameters.some((parameter) => parameter.appliedRevision === undefined)) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
       try {
         this.beginUndoRecovery(batch, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== batch.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
         const currentSnapshot = await this.viewForAsync(context, [batch.deviceRef, ...batch.parameters.map((item) => item.ref)]);
         const currents = batch.parameters.map((parameter) => this.parameterTarget(currentSnapshot, batch.deviceRef, parameter.ref).parameter);
         const unchanged = (index: number) => JSON.stringify(this.parameterAuthority(currentSnapshot, batch.parameters[index]!.ref)) === JSON.stringify(batch.parameters[index]!.authority);
@@ -8805,7 +8807,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!parameter || (parameter.state !== "applied" && !reconciliation) || parameter.appliedRevision === undefined) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
       try {
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (reconciliation) { if (current.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) throw new Error("device-parameter undo replay did not restore exact prior state"); }
         else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
         const restoredSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
@@ -8820,7 +8822,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     if (transaction.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain tempo transaction can be undone");
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string); const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== (reconciliation ? transaction.priorTempo : transaction.appliedTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "Set identity or tempo changed after apply; undo refused");
       if (!reconciliation) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: transaction.appliedTempo, expectedObjectIdentity: transaction.setIdentity }, context); }
       const restored = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
@@ -9331,7 +9333,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
    */
   private async requireOperation(operation: LiveInvocation["operation"]): Promise<LiveStatus> {
     let status = this.requireConnected();
-    if (!status.operations?.includes(operation)) status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+    if (!status.operations?.includes(operation)) status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
     if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
     return status;
   }
