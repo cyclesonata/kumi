@@ -1000,7 +1000,12 @@ export function createAbletonIntegration(options: Options): Integration {
       // The bridge offers some tools only once the Set has what they work on (edit_rack once there's a
       // rack): a plan that just loaded one may be ahead of the bridge's catalog-changed notice, so the
       // catalog is read again before saying the change isn't available.
-      if (!tools.has(kind.preview) || !tools.has(kind.apply)) { await tools.refresh(signal); assertLease(lease, signal); }
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) {
+        // tools/list uses the host's cached capabilities. Refresh Live status first so a newly
+        // created clip or loaded device can advertise the operations it now supports.
+        await guardEpoch(signal, currentEpoch, lease);
+        await tools.refresh(signal); assertLease(lease, signal);
+      }
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);

@@ -726,3 +726,33 @@ test("chain mixer discovery accepts a fresh chain and mapping targets require fr
     assert(!b.requests.slice(before).some(request => request.name.endsWith("_preview") || request.name.endsWith("_apply")));
   } finally { await b.integration.close(); }
 });
+
+
+test("launch Legato can be planned before clips exist without bypassing bridge readiness", async () => {
+  const b = await opened();
+  try {
+    const edit = tool(b.tools, "set_clip");
+    assert.equal((edit.inputSchema.properties as JsonObject).legato && ((edit.inputSchema.properties as JsonObject).legato as JsonObject).type, "boolean");
+    const result = await edit.execute({ clipRef: "clip:missing", legato: true }, signal());
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Create a clip first/);
+    assert.match(CHANGES.find(kind => kind.tool === "set_clip_follow_actions")!.description, /set_clip with legato: true/);
+  } finally { await b.integration.close(); }
+});
+
+
+test("new MIDI clip aliases feed Legato and Follow Actions in the same plan", async () => {
+  const b = await opened({ midiClips: true });
+  try {
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "write_midi_clip", as: "a", input: { trackRef: "track:1", sceneIndex: 0, name: "A", length: 8, notes: [] } },
+      { tool: "write_midi_clip", as: "b", input: { trackRef: "track:1", sceneIndex: 1, name: "B", length: 8, notes: [] } },
+      { tool: "set_clip", input: { clipRef: "@a", legato: true } },
+      { tool: "set_clip_follow_actions", input: { clipRef: "@b", followActionEnabled: true } },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.equal(JSON.parse(result.text).done.length, 4);
+    assert.equal(b.requests.find(r => r.name === "live_clip_properties_preview")?.args.clipRef, "7:clip:0:0");
+    assert.equal(b.requests.find(r => r.name === "live_follow_actions_preview")?.args.clipRef, "7:clip:0:1");
+  } finally { await b.integration.close(); }
+});

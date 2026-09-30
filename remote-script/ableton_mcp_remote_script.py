@@ -8889,8 +8889,7 @@ class LiveObjectMapper:
             raise ValueError("note batch is invalid")
         notes = [self._validated_note(clip, value) for value in values]; prior_rows = self._read_notes(clip)
         if len(prior_rows) + len(notes) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("note batch would exceed the authoritative clip-note bound")
-        prior_candidates = list(clip.get_all_notes_extended()) if hasattr(clip, "get_all_notes_extended") else []
-        prior_ids = {int(candidate.note_id) for candidate in prior_candidates if isinstance(getattr(candidate, "note_id", None), int) and not isinstance(candidate.note_id, bool)}
+        prior_ids = {row["id"] for row in prior_rows}
         try:
             spec_class = getattr(__import__("Live.Clip", fromlist=["MidiNoteSpecification"]), "MidiNoteSpecification", None)
         except Exception:
@@ -8905,15 +8904,33 @@ class LiveObjectMapper:
             elif hasattr(clip, "set_notes"): raise ValueError("legacy set_notes replacement is refused because additive completeness cannot be proven")
             else:
                 clip.add_new_notes([{"pitch": note["pitch"], "start_time": float(note["start"]), "duration": float(note["duration"]), "velocity": note["velocity"], "mute": bool(note.get("mute", False)), "channel": note["channel"], "probability": float(note.get("probability", 1.0)), "velocityDeviation": float(note.get("velocityDeviation", 0.0)), "velocity_deviation": float(note.get("velocityDeviation", 0.0)), "releaseVelocity": float(note.get("releaseVelocity", 64.0)), "release_velocity": float(note.get("releaseVelocity", 64.0))} for note in notes])
-            after_rows = self._read_notes(clip); content = lambda row: {"pitch": int(row.get("pitch", 0)), "start": float(row.get("start", row.get("start_time", 0))), "duration": float(row.get("duration", 0)), "velocity": row.get("velocity", 0), "channel": int(row.get("channel", 1)), "mute": bool(row.get("mute", False)), "probability": float(row.get("probability", 1.0) if row.get("probability") is not None else 1.0), "velocityDeviation": float(row.get("velocityDeviation", 0.0) if row.get("velocityDeviation") is not None else 0.0), "releaseVelocity": float(row.get("releaseVelocity", 64.0) if row.get("releaseVelocity") is not None else 64.0)}; canonical_content = lambda rows: self._bounded_canonical(sorted([content(row) for row in rows], key=lambda row: self._bounded_canonical(row)))
+            after_rows = self._read_notes(clip)
+            # Readback rounds decimal note values to Live's native precision.
+            # Keep identities and existing notes exact; tolerate only numeric
+            # representation changes when matching the newly requested notes.
+            def content(row):
+                defaults = {"channel": 1, "mute": False, "probability": 1.0, "velocityDeviation": 0.0, "releaseVelocity": 64.0}
+                return {key: row.get(key) if row.get(key) is not None else defaults.get(key)
+                        for key in ("pitch", "start", "duration", "velocity", *defaults)}
+
+            def matches(row, wanted):
+                actual, expected = content(row), content(wanted)
+                return all(_same_number(actual[key], expected[key])
+                           if key in {"start", "duration", "probability", "velocityDeviation", "releaseVelocity"}
+                           and isinstance(actual[key], (int, float)) and isinstance(expected[key], (int, float))
+                           else actual[key] == expected[key] for key in expected)
+
             unmatched = [row for row in after_rows if isinstance(row.get("id"), int) and row["id"] not in prior_ids]
             for note in notes:
-                expected_note = content(note); match = next((index for index, row in enumerate(unmatched) if self._bounded_canonical(content(row)) == self._bounded_canonical(expected_note)), None)
+                match = next((index for index, row in enumerate(unmatched) if matches(row, note)), None)
                 if match is None: note_ids.append(None)
-                else: note_ids.append(int(unmatched[match]["id"])); unmatched.pop(match)
-            expected_content = canonical_content(prior_rows + notes)
+                else: note_ids.append(int(unmatched.pop(match)["id"]))
             after_ids = [row.get("id") for row in after_rows]
-            if len(after_rows) != len(prior_rows) + len(notes) or any(not isinstance(note_id, int) for note_id in after_ids) or len(set(after_ids)) != len(after_ids) or any(note_id is None for note_id in note_ids) or canonical_content(after_rows) != expected_content: raise ValueError("note batch did not produce the exact complete expected state")
+            prior_after = [row for row in after_rows if row.get("id") in prior_ids]
+            prior_unchanged = sorted(prior_after, key=lambda row: row["id"]) == sorted(prior_rows, key=lambda row: row["id"])
+            if (len(after_rows) != len(prior_rows) + len(notes) or any(not isinstance(note_id, int) or isinstance(note_id, bool) for note_id in after_ids)
+                    or len(set(after_ids)) != len(after_ids) or any(note_id is None for note_id in note_ids) or unmatched or not prior_unchanged):
+                raise ValueError("note batch did not produce the exact complete expected state")
             notes_revision = hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()
             return {"added": len(notes), "noteIds": note_ids, "notesRevision": notes_revision}
         except BaseException as error:

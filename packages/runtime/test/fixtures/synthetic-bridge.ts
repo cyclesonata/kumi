@@ -13,7 +13,8 @@ import { join } from "node:path";
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
 /** A device on a fixture track: its knobs by name. */
 export interface FixtureDevice { name: string; className: string; params: { name: string; value: number; min: number; max: number }[] }
-type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** Rack tools only once a rack is loaded, with the bridge's catalog notice arriving late (as on real Live). */ lateRacks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
+type Options = {
+  midiClips?: boolean; padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** Rack tools only once a rack is loaded, with the bridge's catalog notice arriving late (as on real Live). */ lateRacks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
   /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
   /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string;
   /** The Set's saved file, which the bridge can back up (live_project_backup_*). */ savedSet?: string;
@@ -53,7 +54,7 @@ export function bridge(options: Options = {}) {
   let undoRefusal: string | undefined;
   let applyFailure: "throw" | "uncertain" | "unreadable" | undefined;
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
-  const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo", ...(options.renders ? ["live_transaction_release"] : []),
+  const names = [...(options.midiClips ? ["live_midi_clip_preview", "live_midi_clip_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_follow_actions_preview", "live_follow_actions_apply"] : []), "server_status", "live_status", "live_discover", "live_snapshot", "live_undo", ...(options.renders ? ["live_transaction_release"] : []),
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
@@ -76,17 +77,19 @@ export function bridge(options: Options = {}) {
   const pending = new Map<string, { name: string; args: JsonObject }>();
   const catalogListeners = new Set<() => void>();
   let rackLoaded = false;
+  let clipCreated = false;
+  let clipAdvertised = false;
   let transactions = 0;
   /** Transactions the client gave up the undo of. */
   const released: string[] = [];
   const endpoint: McpEndpoint = {
     pid: null, serverInfo: { name: "kumi-synthetic-bridge", version: options.version ?? "1" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
-    async list() { return { tools: catalog.filter((tool) => (drumRack || !tool.name.startsWith("live_drum_pad_")) && (!options.lateRacks || rackLoaded || !/^live_(rack|chain_mixer)_/.test(tool.name))) }; },
+    async list() { return { tools: catalog.filter((tool) => (clipAdvertised || !tool.name.startsWith("live_clip_properties_")) && (drumRack || !tool.name.startsWith("live_drum_pad_")) && (!options.lateRacks || rackLoaded || !/^live_(rack|chain_mixer)_/.test(tool.name))) }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
       if (failStep && (name === failStep || (name === "live_transport_action_preview" && args.action === failStep))) { failStep = undefined; return refusal("adapter request failed"); }
       if (name === "live_song_state") return wrap({ songLength: 64, signatureNumerator: 4, signatureDenominator: 4 });
-      if (name === "live_status") return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null });
+      if (name === "live_status") { clipAdvertised = clipCreated; return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null }); }
       if (name === "live_snapshot") return wrap({ epoch, snapshot: { set: { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set" },
         playback: { transport: { playing: transport.playing, sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, firedTargets: [],
           playingTargets: transport.playing ? [{ trackRef: "7:track:0", clipSlotRef: "7:clip_slot:0:0", sceneRef: "7:scene:0" }] : [] } } });
@@ -262,6 +265,7 @@ export function bridge(options: Options = {}) {
             placement: { owner: "rack", rack: "Instrument Rack", chain: 2, chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Chain", devices: [] }] } });
           return wrap({ transactionId: args.transactionId, state: "applied", visibleMacroCount: 9 });
         }
+        if (transaction.name === "live_midi_clip_preview") { clipCreated = true; return wrap({ transactionId: args.transactionId, state: "applied", clipRef: `7:clip:0:${String(transaction.args.sceneIndex)}` }); }
         if (transaction.name === "live_device_preview") return wrap({ transactionId: args.transactionId, state: "applied", result: { ref: "7:device:0:0", objectIdentity: "device-identity", samplePath: "/staged/Kick Deep.wav" } });
         if (transaction.name === "live_track_properties_preview") {
           const track = tracks[Number(String(transaction.args.ref).split(":").at(-1))]!;

@@ -77,7 +77,7 @@ export interface ChangeKind {
   /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
   explain?(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
-  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" } | undefined;
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "clip" } | undefined;
   /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
   permanent?(input: JsonObject): string | undefined;
   /**
@@ -285,6 +285,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "write_midi_clip", preview: "live_midi_clip_preview", apply: "live_midi_clip_apply", family: "clip",
+    produces(applied) { return typeof applied.clipRef === "string" ? { ref: applied.clipRef, kind: "clip" } : undefined; },
     description: "Write a new MIDI clip into an empty Session slot. trackRef is a MIDI track from discovery in this turn; sceneIndex 0 is the first scene; length and every note's start and duration are in beats from the clip start (a 4/4 bar is 4 beats); pitch 60 is middle C (C3 in Live); velocity is 1–127.",
     summarize(preview, input, track) {
       const proposed = record(preview.proposed);

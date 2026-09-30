@@ -2065,6 +2065,40 @@ class ControlSurfaceTests(unittest.TestCase):
         result = mapper.invoke("note.add-batch", {"ref": clip_ref, "notes": [{"pitch": 36, "start": 0, "duration": 0.25, "velocity": 100, "channel": 1}], **self.note_authority(mapper, clip_ref)})
         self.assertEqual(result["added"], 1); self.assertEqual(result["noteIds"], [8]); self.assertRegex(result["notesRevision"], r"^[a-f0-9]{64}$")
 
+    def test_note_batch_accepts_float32_readback_and_preserves_existing_ids(self):
+        class NativePrecisionClip(FakeClip):
+            def add_new_notes(self, notes):
+                super().add_new_notes(notes)
+                for note in self.notes:
+                    for field in ("start_time", "duration", "probability", "velocityDeviation", "releaseVelocity"):
+                        if field in note: note[field] = struct.unpack("f", struct.pack("f", note[field]))[0]
+
+        song = FakeSong(); clip = NativePrecisionClip(8); song.tracks[0].clip_slots[0].clip = clip
+        mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        note = {"pitch": 29, "start": 0.1, "duration": 0.35, "velocity": 110, "channel": 1, "probability": 0.7}
+        first = mapper.invoke("note.add-batch", {"ref": ref, "notes": [note], **self.note_authority(mapper, ref)})
+        before = mapper._read_notes(clip)
+        second = mapper.invoke("note.add-batch", {"ref": ref, "notes": [note, {**note, "start": 1.5, "duration": 0.22}], **self.note_authority(mapper, ref)})
+        self.assertEqual(first["noteIds"], [1]); self.assertEqual(second["noteIds"], [2, 3])
+        self.assertEqual(mapper._read_notes(clip)[0], before[0])
+        self.assertNotEqual(mapper._read_notes(clip)[0]["duration"], note["duration"])
+
+    def test_note_batch_still_rejects_wrong_values_extra_notes_and_duplicate_ids(self):
+        for corruption in ("duration", "pitch", "extra", "duplicate"):
+            with self.subTest(corruption=corruption):
+                class BadClip(FakeClip):
+                    def add_new_notes(self, notes):
+                        super().add_new_notes(notes)
+                        if corruption == "duration": self.notes[-1]["duration"] += 0.01
+                        elif corruption == "pitch": self.notes[-1]["pitch"] += 1
+                        elif corruption == "extra": super().add_new_notes(notes)
+                        else: self.notes.append(dict(self.notes[-1]))
+                song = FakeSong(); clip = BadClip(4); song.tracks[0].clip_slots[0].clip = clip
+                mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+                with self.assertRaisesRegex(ValueError, "exact complete expected state"):
+                    mapper.invoke("note.add-batch", {"ref": ref, "notes": [{"pitch": 36, "start": 0, "duration": 0.35, "velocity": 100, "channel": 1}], **self.note_authority(mapper, ref)})
+                self.assertEqual(clip.notes, [])
+
     def test_midi_reads_cover_exact_clip_length_and_refuse_unbounded_or_replacing_fallbacks(self):
         class LegacyClip:
             def __init__(self, count=1): self.length = 6000.0; self.calls = []; self.count = count; self.set_called = False

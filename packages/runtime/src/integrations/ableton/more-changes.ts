@@ -109,13 +109,21 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "set_clip_follow_actions", preview: "live_follow_actions_preview", apply: "live_follow_actions_apply", family: "clip",
-    description: "Set Session clip Follow Actions with experimental Willington support. Requires stopped playback. Actions: 0 none, 1 stop, 2 again, 3 previous, 4 next, 5 first, 6 last, 7 any, 8 other, 9 jump. Chances are percentages; supplying one sets the complementary chance. Linked timing uses loop count; unlinked time uses beats. Jump targets are 1-based scene numbers. Does not change scene Follow Actions or the global switch.",
+    description: "Set Session clip Follow Actions with experimental Willington support. Requires stopped playback. Actions: 0 none, 1 stop, 2 again, 3 previous, 4 next, 5 first, 6 last, 7 any, 8 other, 9 jump. Chances are percentages; supplying one sets the complementary chance. Linked timing uses loop count; unlinked time uses beats. Jump targets are 1-based scene numbers. For launch Legato, use set_clip with legato: true after creating the clip. Does not change scene Follow Actions or the global switch.",
     summarize(_preview, input, track) {
       return withTrack({ title: "Changed clip Follow Actions" }, ownerTrack(input.clipRef, track));
     },
   },
   {
     tool: "set_clip", preview: "live_clip_properties_preview", apply: "live_clip_properties_apply", family: "clip",
+    inputSchema: { type: "object", required: ["clipRef"], additionalProperties: false, properties: {
+      clipRef: REF, muted: { type: "boolean" }, colorIndex: { type: "integer", minimum: 0, maximum: 69 },
+      looping: { type: "boolean" }, loopStart: { type: "number", minimum: 0 }, loopEnd: { type: "number", minimum: 0 },
+      launchMode: { type: "integer", minimum: 0, maximum: 3 }, launchQuantization: { type: "integer", minimum: 0, maximum: 14 },
+      legato: { type: "boolean" }, ramMode: { type: "boolean" }, velocityAmount: { type: "number", minimum: 0, maximum: 1 },
+    } },
+    always: true,
+    unavailable: "Create a clip first with write_midi_clip, then discover its clipRef and use set_clip for launch Legato and other clip settings. The current bridge does not yet advertise clip editing.",
     description: "Change a clip's settings: muted, colorIndex (0–69), looping with loopStart and loopEnd (beats from the clip's start), launchMode (0 trigger, 1 gate, 2 toggle, 3 repeat), launchQuantization (0 global, then none, 8 bars, 4, 2, 1 bar, 1/2, 1/2T, 1/4, 1/4T, 1/8, 1/8T, 1/16, 1/16T, 1/32), legato, ramMode and velocityAmount (0–1). clipRef comes from discovery (a clip-slot's clipRef).",
     summarize(preview, input, track) {
       const prior = record(preview.prior); const proposed = record(preview.proposed);
