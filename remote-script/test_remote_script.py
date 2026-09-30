@@ -7162,16 +7162,22 @@ class SetDataTests(unittest.TestCase):
 
     def test_what_isnt_text_or_isnt_there_is_refused_and_an_unconfirmed_write_goes_back(self):
         song = FakeDataSong(); mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); set_ref = snapshot["set"]["ref"]
-        song.data["other.script"] = {"not": "text"}
-        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.get", {"ref": set_ref, "key": "other.script"})
-        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.set", {"ref": set_ref, "key": "other.script", "value": "mine"})
-        self.assertEqual(song.data["other.script"], {"not": "text"})
+        song.data["kumi.odd"] = {"not": "text"}
+        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.get", {"ref": set_ref, "key": "kumi.odd"})
+        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.set", {"ref": set_ref, "key": "kumi.odd", "value": "mine"})
+        self.assertEqual(song.data["kumi.odd"], {"not": "text"})
+        # Another control surface's data in the Set can be read, never written or cleared.
+        song.data["other.script"] = "theirs"
+        self.assertEqual(mapper.invoke("data.get", {"ref": set_ref, "key": "other.script"})["value"], "theirs")
+        for value in ("mine", None):
+            with self.assertRaisesRegex(ValueError, "Kumi writes only its own keys"): mapper.invoke("data.set", {"ref": set_ref, "key": "other.script", "value": value})
+        self.assertEqual(song.data["other.script"], "theirs")
         with self.assertRaisesRegex(ValueError, "track reference is stale or invalid"): mapper.invoke("data.get", {"ref": f"{mapper.refs.epoch}:track:9", "key": "k"})
         with self.assertRaisesRegex(ValueError, "track reference is stale or invalid"): mapper.invoke("data.get", {"ref": "0:track:0", "key": "k"})
         # Live keeps something else than was written: the prior value goes back and the change fails.
-        song.data["k"] = "before"; song.set_data = lambda key, value: song.data.__setitem__(key, value if value == "before" else value.upper())
-        with self.assertRaisesRegex(ValueError, "^data change was not confirmed$"): mapper.invoke("data.set", {"ref": set_ref, "key": "k", "value": "after"})
-        self.assertEqual(song.data["k"], "before")
+        song.data["kumi.k"] = "before"; song.set_data = lambda key, value: song.data.__setitem__(key, value if value == "before" else value.upper())
+        with self.assertRaisesRegex(ValueError, "^data change was not confirmed$"): mapper.invoke("data.set", {"ref": set_ref, "key": "kumi.k", "value": "after"})
+        self.assertEqual(song.data["kumi.k"], "before")
         self.assertTrue(mapper._operation_supported("data.set")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("data.get"))
 
 

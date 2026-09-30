@@ -23,6 +23,7 @@ type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters,
   /** Recording starts this many beats after it's asked for, once (a bridge whose steps outlast a render's lead-in). */ lateRecord?: number;
   /** Live's Start Playback with Record turned off: recording on while stopped doesn't start playing. */ noPlayOnRecord?: boolean;
   /** Tracks beyond the two fixtures, with their devices (goal candidates). */ extraTracks?: { name: string; devices: FixtureDevice[] }[];
+  /** A big Set: this many more tracks, every fourth a group holding the three after it, each with four devices that discovery lists without a parent. */ bigSet?: number;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
   /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
 export function bridge(options: Options = {}) {
@@ -31,7 +32,9 @@ export function bridge(options: Options = {}) {
   let tempo = options.tempo ?? 120;
   let live = true; let epoch = 7;
   let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
-    ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) }))];
+    ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) })),
+    ...Array.from({ length: options.bigSet ?? 0 }, (_, index) => ({ name: index % 4 === 0 ? `Bus ${index / 4 + 1}` : `Part ${index + 1}`, color: 0x808080,
+      devices: ["Operator", "EQ Eight", "Compressor", "Reverb"].map((name) => ({ name, className: name.replace(/ /g, ""), params: [] })) }))];
   // Main's fader and the playhead, as auditions use them, moving as Live's does: "continue" plays on from where
   // playback last stopped and "start" from the start marker, wherever the playhead was moved while stopped; a
   // jump while playing is honoured, and one while recording ends the take there; stopping while stopped goes
@@ -108,7 +111,11 @@ export function bridge(options: Options = {}) {
       if (name === "live_discover") {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo, position: now(), playing: transport.playing, ...(options.savedSet ? { filePath: options.savedSet } : {}) };
         const items = args.kind === "set" ? [set] : args.kind === "track"
-          ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true }))
+          ? tracks.map((track, index) => {
+            // In a big Set, every fourth track (from the third) is a group holding the three after it.
+            const big = index - 2; const group = options.bigSet && big >= 0 ? (big % 4 === 0 ? undefined : `7:track:${index - (big % 4)}`) : undefined;
+            return { ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true, ...(options.bigSet && big >= 0 && big % 4 === 0 ? { kind: "group" } : {}), ...(group ? { groupTrackRef: group } : {}) };
+          })
           : args.kind === "selection" ? [{ ref: "7:selection:0", selectedTrackRef: "7:track:0" }]
           : args.kind === "main-track" ? [{ ref: "7:main_track:0", parentRef: set.ref, name: "Main", kind: "main", mixer: { volume: main.volume } }]
           : args.kind === "device" && options.renders && typeof args.parent === "string" ? (tracks[Number(args.parent.split(":").at(-1))]?.devices ?? []).map((device, index) => ({ ref: `${args.parent as string}:d${index}`.replace(":track:", ":device:"), parentRef: args.parent, name: device.name, className: device.className }))
@@ -117,6 +124,7 @@ export function bridge(options: Options = {}) {
             return (tracks[Number(t)]?.devices?.[Number(d)]?.params ?? []).map((param, index) => ({ ref: `7:parameter:${t}:${d}:${index}`, parentRef: args.parent, name: param.name, value: param.value, min: param.min, max: param.max }));
           })()
           : args.kind === "arrangement-clip" && options.renders ? tracks.flatMap((track, index) => (track.clips ?? []).map((clip, at) => ({ ref: `7:arrangement_clip:${index}:${at}`, parentRef: `7:track:${index}`, name: "Take", isAudio: true, start: clip.start, length: 16, filePath: clip.filePath ?? null })))
+          : args.kind === "device" && options.bigSet && args.parent === undefined ? tracks.flatMap((track, index) => (track.devices ?? []).map((device, at) => ({ ref: `7:device:${index}:${at}`, parentRef: `7:track:${index}`, name: device.name, className: device.className })))
           : args.kind === "device" && options.racks ? [
             { ref: "7:device:0:0", parentRef: "7:track:0", name: "Instrument Rack", className: "InstrumentGroupDevice", chainList: [{ ref: "7:chain:0:0:0", name: "Keys" }, { ref: "7:chain:0:0:1", name: "Pad" }] },
             { ref: "7:device:0:0:0:0", parentRef: "7:chain:0:0:0", name: "Operator", className: "Operator" },

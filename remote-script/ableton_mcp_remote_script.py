@@ -3745,6 +3745,8 @@ class LiveObjectMapper:
         expectedValue, only while the key still holds what was read then."""
         key = args.get("key")
         if set(args) - {"ref", "key", "value", "expectedValue"} or not isinstance(key, str) or not 1 <= len(key) <= 256 or "value" not in args: raise ValueError("data arguments are invalid")
+        # Kumi writes only its own keys: other control surfaces keep their data in the same Set.
+        if not key.startswith("kumi."): raise ValueError("Kumi writes only its own keys (kumi.…); other keys are read-only")
         for field in ("value", "expectedValue"):
             item = args.get(field)
             if item is not None and (not isinstance(item, str) or len(item) > self.MAX_DATA_TEXT): raise ValueError(f"{field} must be text of at most 1 MiB, or null")
