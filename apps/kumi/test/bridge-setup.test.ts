@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -29,7 +29,7 @@ function world(options: { bundled: string; installed?: string }) {
   const output = new PassThrough(); output.on("data", (chunk) => { out += String(chunk); });
   const lifecycle: Ran[] = [];
   const io = (extra: Partial<BridgeSetupIo> = {}): BridgeSetupIo => ({
-    out: output, env: { KUMI_REMOTE_SCRIPTS_DIR: scripts }, bridgeDir, home: join(root, "kumi"), waitMs: 0, yes: true,
+    out: output, env: { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_LIVE_EXTENSIONS_DIR: join(root, "Ableton", "Extensions") }, bridgeDir, home: join(root, "kumi"), waitMs: 0, yes: true,
     liveRunning: async () => false, sleep: async () => {},
     async run(command, args, cwd) {
       calls.push({ command, args });
@@ -38,7 +38,13 @@ function world(options: { bundled: string; installed?: string }) {
         writeFileSync(join(destination, "ableton-mcp-mcp-server.tgz"), "tarball bytes");
         return { code: 0, stdout: "ableton-mcp-mcp-server.tgz\n", stderr: "" };
       }
-      if (command === "npm") return { code: 0, stdout: "added 1 package\n", stderr: "" };
+      if (command === "npm") {
+        // The bridge's package carries Kumi's Live extension (staged when it's packed).
+        const extension = join(args[args.indexOf("--prefix") + 1]!, "node_modules", "@ableton-mcp", "mcp-server", "live-extension");
+        mkdirSync(join(extension, "dist"), { recursive: true });
+        writeFileSync(join(extension, "manifest.json"), JSON.stringify({ name: "kumi", author: "Kumi", version: "1.0.0" })); writeFileSync(join(extension, "dist", "extension.js"), "module.exports = {};\n");
+        return { code: 0, stdout: "added 1 package\n", stderr: "" };
+      }
       assert.equal(command, process.execPath, "the lifecycle runs on Kumi's own Node");
       void cwd;
       return lifecycle.shift() ?? { code: 0, stdout: JSON.stringify({ version: "ableton-mcp-lifecycle/v1", state: "completed" }), stderr: "" };
@@ -132,5 +138,46 @@ test("a User Library without a Remote Scripts folder gets one; without a User Li
       assert.match(lost.out, /couldn't find Live's User Library \(it looked for .*Nowhere.*User Library\)/);
       assert.equal(lost.calls.length, 0, "nothing was packed or installed");
     } finally { lost.done(); }
+  } finally { w.done(); }
+});
+
+test("installing the bridge puts Kumi's extension in Live's Extensions folder; an installed bridge without it gets it", async () => {
+  const w = world({ bundled: "1.0.57" });
+  try {
+    mkdirSync(join(w.root, "Ableton"), { recursive: true });
+    assert.equal(await setupBridge(w.io()), 0);
+    const placed = join(w.root, "Ableton", "Extensions", "kumi.kumi");
+    assert.equal(readFileSync(join(placed, "dist", "extension.js"), "utf8"), "module.exports = {};\n");
+    assert.match(readFileSync(join(placed, "package.json"), "utf8"), /"main": "dist\/extension\.js"/);
+    assert.match(w.out, /Added Kumi's extension to Live: it renders tracks without playing them/);
+    assert.doesNotMatch(w.out, /next time you open Live/);
+  } finally { w.done(); }
+  const current = world({ bundled: "1.0.57", installed: "1.0.57" });
+  try {
+    mkdirSync(join(current.root, "Ableton"), { recursive: true });
+    const carried = join(current.root, "installed", "node_modules", "@ableton-mcp", "mcp-server", "live-extension");
+    mkdirSync(join(carried, "dist"), { recursive: true });
+    writeFileSync(join(carried, "manifest.json"), JSON.stringify({ version: "1.0.0" })); writeFileSync(join(carried, "dist", "extension.js"), "installed();\n");
+    assert.equal(await setupBridge(current.io({ liveRunning: async () => true })), 0);
+    assert.equal(readFileSync(join(current.root, "Ableton", "Extensions", "kumi.kumi", "dist", "extension.js"), "utf8"), "installed();\n");
+    assert.match(current.out, /It starts the next time you open Live\./);
+    assert.equal(current.calls.length, 0, "nothing runs");
+    // A newer extension replaces the one there, and says so.
+    writeFileSync(join(carried, "dist", "extension.js"), "newer();\n");
+    assert.equal(await setupBridge(current.io()), 0);
+    assert.match(current.out, /Updated Kumi's extension in Live\./);
+    // Once it's there, the same again changes nothing and says nothing more.
+    const before = current.out.length;
+    assert.equal(await setupBridge(current.io()), 0);
+    assert.doesNotMatch(current.out.slice(before), /extension/);
+  } finally { current.done(); }
+});
+
+test("without Live's own folder (Live never opened), the extension isn't placed and the bridge still installs", async () => {
+  const w = world({ bundled: "1.0.57" });
+  try {
+    assert.equal(await setupBridge(w.io()), 0);
+    assert.equal(existsSync(join(w.root, "Ableton", "Extensions")), false);
+    assert.match(w.out, /Kumi couldn't add its extension to Live \(Live's folder isn't there .*open Live once\); everything else works/);
   } finally { w.done(); }
 });

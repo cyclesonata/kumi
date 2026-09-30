@@ -23,7 +23,9 @@ const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
 const EVENT_TYPES = new Set(["transport", "object", "reset"]);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
-export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit"]);
+export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"]);
+/** Changes the Remote Script makes without mutation authority: its own undo steps, and a message in Live's status bar. */
+export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end", "application.message"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into
@@ -34,9 +36,7 @@ const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "s
 // they carry explicitDeletion instead of a creating transaction's ownership token, and the Remote
 // Script checks the exact identity fences in their arguments. Mirrors _EXPLICIT_DELETIONS there.
 const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return"]);
-// Changes to Live's own undo history, not to the Set: plain invokes, as the Remote Script's _AUTHORITY_FREE_INVOKES.
-// The step belongs to the connection that opened it; the Remote Script closes it when that connection goes.
-export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end"]);
+// An undo step belongs to the connection that opened it; the Remote Script closes it when that connection goes.
 function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation) && !AUTHORITY_FREE_INVOKES.has(operation); }
 // The Remote Script keeps every change's reply (its MAX_MUTATION_LEDGER, 65,536) so a lost one can be
 // replayed; a reply the host has seen is only memory there. With single-tick mutations the adapter frees

@@ -6111,6 +6111,18 @@ var ableton_live_v1_operations_default = {
             type: "string",
             minLength: 1,
             maxLength: 256
+          },
+          createdFingerprint: {
+            type: "string",
+            minLength: 64,
+            maxLength: 64,
+            pattern: "^[0-9a-f]{64}$"
+          },
+          ownershipToken: {
+            type: "string",
+            minLength: 32,
+            maxLength: 128,
+            pattern: "^[A-Za-z0-9_-]{32,128}$"
           }
         },
         required: [

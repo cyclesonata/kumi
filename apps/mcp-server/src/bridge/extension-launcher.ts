@@ -102,30 +102,37 @@ function takeLock(storageDirectory: string): (() => void) | undefined {
 }
 
 /**
+ * What a launch came to: an extension already answered, another bridge's was used, Live runs its own
+ * Extension Host, nothing could be started here, one was started and reached Live, or one was started
+ * and didn't (Live lets another host in only in Developer Mode).
+ */
+export type LaunchOutcome = "answering" | "shared" | "live-host" | "unavailable" | "started" | "failed";
+
+/**
  * Starts Live's Extension Host with Kumi's extension, unless one already answers, and waits for its
  * endpoint. Resolves either way; the channel then connects or says why it couldn't.
  */
-export async function launchExtension(options: LaunchOptions): Promise<void> {
+export async function launchExtension(options: LaunchOptions): Promise<LaunchOutcome> {
   const log = options.log ?? (() => undefined);
   mkdirSync(options.storageDirectory, { recursive: true, mode: 0o700 });
-  if (readExtensionEndpoint(options.storageDirectory)) return;
+  if (readExtensionEndpoint(options.storageDirectory)) return "answering";
   // One Extension Host reaches a Live: a Kumi one another bridge started (with its own storage folder)
   // is used where it is; Live's own (a producer's installed extensions) leaves Kumi's to kumi.ablx.
   const running = options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts();
   const shared = running.kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
-  if (shared) { options.onShared?.(shared); return; }
+  if (shared) { options.onShared?.(shared); return "shared"; }
   // Live runs the extensions installed in it (kumi bridge installs Kumi's) and lets no other host in.
-  if (running.live) { log("extension channel: Live runs its own Extension Host; Kumi's extension runs there once installed (kumi bridge, then restart Live)"); return; }
+  if (running.live) { log("extension channel: Live runs its own Extension Host; Kumi's extension runs there once installed (kumi bridge, then restart Live)"); return "live-host"; }
   const extension = options.extension ?? findExtensionBundle();
   const host = findExtensionHost(options.liveApp);
-  if (!extension || !isExtension(extension)) { log("extension channel: Kumi's Live extension isn't with this bridge"); return; }
-  if (!host) { log("extension channel: this Live has no Extension Host (Live 12.4 or later has one)"); return; }
+  if (!extension || !isExtension(extension)) { log("extension channel: Kumi's Live extension isn't with this bridge"); return "unavailable"; }
+  if (!host) { log("extension channel: this Live has no Extension Host (Live 12.4 or later has one)"); return "unavailable"; }
   const unlock = takeLock(options.storageDirectory);
   const deadline = Date.now() + (options.waitMs ?? 15_000);
   if (!unlock) {
     // Another bridge is starting it: wait for its endpoint.
     while (Date.now() < deadline && !readExtensionEndpoint(options.storageDirectory)) await pause(100);
-    return;
+    return readExtensionEndpoint(options.storageDirectory) ? "answering" : "failed";
   }
   try {
     ensureSecret(options.storageDirectory);
@@ -150,12 +157,13 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
     log(`extension channel: started Live's Extension Host (pid ${child.pid}) with ${extension}`);
     while (Date.now() < deadline) {
       const endpoint = readExtensionEndpoint(options.storageDirectory);
-      if (endpoint?.pid === child.pid) return;
-      if (child.exitCode !== null) { log(`extension channel: the Extension Host stopped (${child.exitCode})`); return; }
+      if (endpoint?.pid === child.pid) return "started";
+      if (child.exitCode !== null) { log(`extension channel: the Extension Host stopped (${child.exitCode})`); return "failed"; }
       await pause(100);
     }
     // It never reached Live (another Extension Host holds Live, or Live isn't running): don't leave it waiting.
     log("extension channel: the Extension Host didn't reach Live in time; stopping it");
     try { if (child.pid) process.kill(child.pid); } catch { /* already gone */ }
+    return "failed";
   } finally { unlock(); }
 }

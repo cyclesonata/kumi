@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { expandPadChains, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
+import { expandPadChains, AUTHORITY_FREE_INVOKES, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
 import { LIVE_REGISTRY_HASH, LiveMutationNotDispatchedError } from "../src/live.js";
 
 const secret = "0123456789abcdef0123456789abcdef";
@@ -381,6 +381,9 @@ test("read-only invoke classification is identical across the TS adapter and the
   assert.ok(match, "python read-only invoke set not found");
   const pythonSet = new Set([...match[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]));
   assert.deepEqual([...pythonSet].sort(), [...READ_ONLY_INVOKES].sort());
+  const free = python.match(/_AUTHORITY_FREE_INVOKES = \{([^}]*)\}/);
+  assert.ok(free, "python authority-free invoke set not found");
+  assert.deepEqual([...free[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]).sort(), [...AUTHORITY_FREE_INVOKES].sort());
 });
 
 function authorityServer(operations: string[], seen: Record<string, unknown>[], answer: (request: Record<string, unknown>) => unknown) {
