@@ -1,9 +1,9 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import {
-  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, liveCapabilitiesForOperations,
+  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, checkSnapshotAnswer, liveCapabilitiesForOperations,
   type AsyncLiveAdapter, type LiveDiscoveryKind, type LiveDiscoveryRequest, type LiveDiscoveryResult,
-  type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus,
+  type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotRequest, type LiveStatus,
 } from "../live.js";
 import { LOOPBACK_PROTOCOL_VERSION, type RemoteBridgeRequest, type LoopbackResponse } from "../loopback.js";
 import { validateLiveOperationRequest, validateLiveOperationResult } from "../registry.js";
@@ -13,6 +13,11 @@ import { validateLiveOperationRequest, validateLiveOperationResult } from "../re
 const MAX_FRAME_BYTES = 256 * 1_048_576;
 const MAX_PENDING = 4096;
 const DEFAULT_TIMEOUT_MS = 5_000;
+// A snapshot or discovery page of a big Set legitimately takes longer than one change: without a caller's
+// deadline such reads get six times the configured timeout (30 s on the 5 s default), within the Remote
+// Script's 60 s deadline maximum.
+const LARGE_READ_TIMEOUT_FACTOR = 6;
+const MAX_DEADLINE_MS = 60_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
@@ -108,8 +113,19 @@ function verifySigned(secret: string, response: LoopbackResponse): void {
   const received = Buffer.from(response.mac);
   if (expected.length !== received.length || !timingSafeEqual(expected, received)) throw new Error("remote response authentication failed");
 }
+/** A snapshot request's wire args: only the fields given (the registry checks their bounds), none for the whole Set. */
+function snapshotArgs(request: LiveSnapshotRequest | undefined): Record<string, unknown> | undefined {
+  if (request === undefined) return undefined;
+  const args: Record<string, unknown> = {};
+  if (request.tracks !== undefined) args.tracks = { from: request.tracks.from, count: request.tracks.count };
+  if (request.scenes !== undefined) args.scenes = { from: request.scenes.from, count: request.scenes.count };
+  if (request.focus !== undefined) args.focus = [...request.focus];
+  if (request.parts !== undefined) args.parts = [...request.parts];
+  return Object.keys(args).length > 0 ? args : undefined;
+}
 function registryRequest(operationId: string, fields: Omit<RemoteBridgeRequest, "version" | "id" | "nonce" | "sequence" | "bridgeEpoch" | "connectionChallenge" | "deadlineMs" | "mac">): unknown {
-  if (operationId === "status" || operationId === "snapshot" || operationId === "reconnect" || operationId === "session.playback") return {};
+  if (operationId === "status" || operationId === "reconnect" || operationId === "session.playback") return {};
+  if (operationId === "snapshot") return fields.args ?? {};
   if (operationId === "discover") return fields.args ?? {};
   if (operationId === "get") return { ref: fields.ref };
   if (operationId === "authority.preflight") return { operation: fields.operation, argsDigest: createHash("sha256").update(canonical(fields.args ?? {})).digest("hex"), transactionId: fields.transactionId };
@@ -156,7 +172,13 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   invoke(): never { throw new Error("remote adapter is asynchronous; use invokeAsync"); }
   subscribe(listener: (event: LiveEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   reconnect(): LiveStatus { throw new Error("remote adapter is asynchronous; use reconnectAsync"); }
-  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return snapshot; }) as Promise<LiveSnapshot>; }
+  /** A snapshot; `request` (windows, focus, parts) goes as the wire args, checked against the registry
+   * before anything is sent. No request sends none: the whole Set, as before. The answer is checked
+   * against what was asked (checkSnapshotAnswer): without a window it must be the whole Set. */
+  snapshotAsync(context?: LiveOperationContext, request?: LiveSnapshotRequest): Promise<LiveSnapshot> {
+    const args = snapshotArgs(request);
+    return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot", ...(args ? { args } : {}) }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return checkSnapshotAnswer(snapshot as LiveSnapshot, (args ?? {}) as LiveSnapshotRequest); });
+  }
   async discoverAsync(request: LiveDiscoveryRequest, context?: LiveOperationContext): Promise<LiveDiscoveryResult> {
     await this.ensureConnectedAsync(context);
     const wireKind = KIND_TO_WIRE[request.kind];
@@ -333,7 +355,8 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (this.pending.size >= MAX_PENDING) return Promise.reject(new Error("remote adapter queue is full"));
     if (this.sequence >= MAX_SEQUENCE) return Promise.reject(new Error("remote adapter sequence exhausted"));
     if (context?.signal?.aborted) return Promise.reject(new Error("remote adapter request cancelled before dispatch"));
-    const timeoutMs = this.endpoint.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const configured = this.endpoint.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = fields.method === "snapshot" || fields.method === "discover" ? Math.min(MAX_DEADLINE_MS, configured * LARGE_READ_TIMEOUT_FACTOR) : configured;
     const deadlineMs = context?.deadlineMs ?? Date.now() + timeoutMs;
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now() || deadlineMs > Date.now() + 60_000) return Promise.reject(new Error("remote adapter deadline is invalid or expired"));
     validateLiveOperationRequest(operationId, registryRequest(operationId, fields));
