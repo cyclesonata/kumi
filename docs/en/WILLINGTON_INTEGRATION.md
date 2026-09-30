@@ -4,7 +4,7 @@ This is an experimental, separately installed native provider for the exact Live
 
 ## Development alignment
 
-Implemented against Kumi main `8bac909`. Reviewed DEVELOPMENT.md, DEVELOPER_GUIDE.md, LIVE_SAFETY.md, the API coverage issue #36, macro parameter issue #83 and partial-write recovery issue #90. Rechecked open installer PR [#104](https://github.com/user1303836/kumi/pull/104) at `9676710`; it does not implement these features. Its installer/runtime work remains separate. No open issues were returned at the final review. No PR or issue was posted.
+Originally implemented against Kumi main `8bac909`, then merged with `e7f27ef` (Kumi 1.1.0) before publication. Reviewed DEVELOPMENT.md, DEVELOPER_GUIDE.md, LIVE_SAFETY.md, the API coverage issue #36, macro parameter issue #83 and partial-write recovery issue #90. Installer PR #104 is now merged. Open [PR #105](https://github.com/user1303836/kumi/pull/105) changes registry bounds, bridge code and the generated capability manifest; regenerate that manifest and rerun transaction tests when combining the branches. Its Live 12.4.15b5 evidence does not extend this provider's exact-build b4 support.
 
 The canonical protocol registry defines the extension operations; regenerate the capability manifest with `node apps/mcp-server/scripts/generate-capability-manifest.mjs`. Package the bridge and host from the same revision because they negotiate the registry hash.
 
