@@ -25,9 +25,11 @@ export interface Slot {
   /** How far a nudge goes, in the knob's own range (0–1), and generations without gain. */
   sigma: number;
   stale: number;
+  /** How many renders its best score is the mean of: a render varies, so a lucky one is heard again. */
+  heard?: number;
 }
 
-export interface Trial { slot: string; values: number[]; how: "start" | "nudge" | "cross" | "random" }
+export interface Trial { slot: string; values: number[]; how: "start" | "nudge" | "cross" | "random" | "recheck" }
 
 /** Names of knobs the search leaves alone: switching a device off, levels the score ignores, safety. */
 const LEAVE = /^(device on|on|power|output|out|volume|gain|master|global volume|limiter.*|ceiling|macro \d+|chain selector|pan|panorama)$/i;
@@ -55,6 +57,8 @@ export function seeded(seed: number): () => number {
 }
 
 export interface EvolveOptions {
+  /** Every this many generations without gain, a slot's best is rendered again (up to four times). */
+  recheck: number;
   /** Knobs nudged per trial, at most. */
   moves: number;
   /** How often a trial is a crossover (when a same-chain partner exists), or a fresh random draw. */
@@ -63,7 +67,7 @@ export interface EvolveOptions {
   /** Generations a slot may go without gain before the weakest is reseeded from the leader. */
   patience: number;
 }
-export const EVOLVE: EvolveOptions = { moves: 3, crossover: 0.2, random: 0.1, patience: 6 };
+export const EVOLVE: EvolveOptions = { moves: 3, crossover: 0.2, random: 0.1, patience: 6, recheck: 3 };
 
 export class Evolution {
   readonly slots: Slot[] = [];
@@ -102,6 +106,8 @@ export class Evolution {
   propose(): Trial[] {
     return this.slots.map((slot) => {
       if (slot.score === undefined || !slot.knobs.length) return { slot: slot.name, values: [...slot.elite], how: "start" };
+      // Renders vary: a best that has held for a while is heard again, so one lucky render can't hold the search.
+      if (slot.stale > 0 && slot.stale % this.options.recheck === 0 && (slot.heard ?? 1) < 4) return { slot: slot.name, values: [...slot.elite], how: "recheck" };
       const roll = this.random();
       const partner = this.slots.filter((other) => other !== slot && other.chain === slot.chain && other.score !== undefined);
       if (partner.length && roll < this.options.crossover) {
@@ -130,8 +136,14 @@ export class Evolution {
       const score = scores.get(trial.slot);
       if (!slot || score === undefined) continue;
       this.rendered++;
+      if (trial.how === "recheck" && slot.score !== undefined) {
+        // The best's score becomes the mean of its renders.
+        const heard = (slot.heard ?? 1) + 1;
+        slot.score = (slot.score * (heard - 1) + score) / heard; slot.heard = heard; slot.stale++;
+        continue;
+      }
       if (slot.score === undefined || score > slot.score) {
-        slot.elite = [...trial.values]; slot.score = score; slot.stale = 0;
+        slot.elite = [...trial.values]; slot.score = score; slot.stale = 0; slot.heard = 1;
         slot.sigma = Math.min(0.5, slot.sigma * 1.25);
       } else { slot.stale++; slot.sigma = Math.max(0.01, slot.sigma * 0.85); }
     }

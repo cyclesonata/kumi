@@ -114,6 +114,17 @@ old line-by-line interface (`terminal.ts`).
    `/memory` opens all of it in the panel above the input box; `/recipes` the
    recipes.
 
+6. ~~**Matching and goals**~~: done. An audition is a line in the conversation
+   per round ("Round 2 · 58% → 71% · brighter overall", then each candidate's
+   score, quietly) and one `♪` line in HISTORY with its score where an undo would
+   be. A match run keeps "matching · 58→71% · 2:05" in NOW while it works and
+   says how it ended. `/goal` opens the GOAL tab beside HISTORY, the first tab
+   after it: what the goal is after, its state, generations, candidates heard and
+   time, the best score with a sparkline of its trend (`▁▂▃▅▇█`), the leader and
+   its chain, what the model tried last, where the best was kept, and tokens on
+   an API key; NOW keeps "goal · 81% · gen 12 · 3:05". Lessons from matching are
+   `✦` lines, listed in `/memory` with forget.
+
 Done alongside: the welcome screen catches you up on a saved Set ("Since you were
 last here · 3 days ago", a few plain-words lines); once the conversation has
 started, the same summary arrives as a note.

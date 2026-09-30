@@ -5,6 +5,7 @@ import type { KernelTool, SessionEvent } from "../src/core/contracts.js";
 import { createSession } from "../src/core/session.js";
 import { seeded } from "../src/core/evolve.js";
 import type { GoalState, GoalStatus, GoalStore } from "../src/core/goal.js";
+import type { Lesson, PlaybookStore } from "../src/core/playbook.js";
 import { bridge, type FixtureDevice } from "./fixtures/synthetic-bridge.js";
 import { saw, silence, wav } from "./fixtures/synthetic-audio.js";
 
@@ -29,7 +30,7 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals(), renderWith: typeof render = render) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
@@ -39,7 +40,7 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render) {
     onConnection: (state) => connection?.(state), onAudition: (event) => session.watch?.(event) });
   const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
   session = createSession({
-    onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goals, goalRandom: seeded(5),
+    onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goals, goalRandom: seeded(5), ...(playbook ? { playbook } : {}),
     goalBudget: { target: 99, leapEvery: 3, stallGenerations: 99 },
     kernelFactory: async ({ tools }) => ({
       async run(input, _signal, emit) {
@@ -60,7 +61,9 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render) {
 }
 
 test("a goal: the model sets up candidates, the search renders a generation at a time and climbs, the model leaps, and stop leaves the best on a track of its own", async () => {
-  const r = rig();
+  const lessons: Lesson[] = [];
+  const playbook: PlaybookStore = { async list() { return structuredClone(lessons); }, async save(next) { lessons.splice(0, lessons.length, ...structuredClone([...next])); } };
+  const r = rig(memoryGoals(), render, playbook);
   await r.session.start();
   const running = r.session.goal!("make my pad sound like the reference");
   // Let it search a few generations, past a leap.
@@ -90,6 +93,11 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   const muted = r.b.requests.filter((request) => request.name === "live_mixer_preview" && request.args.mute === true).length;
   assert.equal(muted, 3);
   assert.ok(r.events.some((event) => event.type === "notice" && /stays, muted/.test(event.message)));
+  // A lesson for the next match or goal: what led, and the generations that raised it.
+  await delay(20);
+  assert.equal(lessons.length, 1);
+  assert.match(lessons[0]!.winner, /Operator \(Operator → Limiter\)/);
+  assert.ok(lessons[0]!.to > lessons[0]!.from);
   // Kept on disk as done.
   assert.equal([...r.goals.kept.values()][0]!.status, "done");
   assert.ok(r.events.some((event) => event.type === "notice" && /^Goal done: .*% \(.*\) · \d+ generations · \d+ candidates · the best is on “Kumi · Goal best”/.test(event.message)));

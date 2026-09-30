@@ -103,6 +103,9 @@ yet.
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
 | `KUMI_INPUT_HISTORY_FILE` | What you sent, for the up arrow (keys and tokens left out); default `~/.kumi/input-history` |
 | `KUMI_TECHNIQUES_FILE` | Techniques Kumi learned from what it built that you liked; default `~/.kumi/techniques.json` |
+| `KUMI_PLAYBOOK_FILE` | Kumi's own lessons from matching sounds; default `~/.kumi/playbook.json` |
+| `KUMI_GOALS_DIR` | Goals in progress, one per Set, so `/goal` picks them up after a restart; default `~/.kumi/goals` |
+| `KUMI_RESTORE_FILE` | Main's level while Kumi renders, to put it back after a crash; default `~/.kumi/audition-restore.json` |
 | `KUMI_GAPS_FILE` | What Kumi couldn't do for lack of a tool, logged for Kumi's developers (not a memory); default `~/.kumi/gaps.jsonl` |
 | `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
 | `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
@@ -293,6 +296,7 @@ and a tempo change about 4 s
 | `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
 | `/memory` | What Kumi remembers, about you and this Set; choose a note to forget it |
+| `/goal` and what to reach | Go after a sound until Kumi gets there (a reference and words); `/goal` alone picks a paused one up, `/goal stop` ends it, Esc pauses it; the GOAL tab shows how it's going |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/stop` | Stop Live: clips, the transport and recording (works while Kumi answers) |
 | `/recipes` | Your recipes; choose one to run or forget it |

@@ -41,6 +41,8 @@ export interface GoalState {
   idea?: string;
   bestTrack?: string;
   why?: string;
+  /** Its lesson in the playbook, updated as the goal goes on. */
+  lesson?: string;
 }
 
 /** What the app shows of a goal: the dashboard's numbers. */

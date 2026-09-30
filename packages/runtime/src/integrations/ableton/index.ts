@@ -1362,7 +1362,7 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   interface Rig {
     tag: string;
-    sources: { track: string; name: string; scratch: string; label: string }[];
+    sources: { track: string; name: string; scratch: string; label: string; clip?: string }[];
     /** The candidates play Session clips, copied to a free stretch of the Arrangement at `from`. */
     clips: boolean;
     from: number; beats: number;
@@ -1388,7 +1388,9 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!found || typeof found.name !== "string") throw new ObservationError(`${candidate.track} isn't a track in this turn's discovery; discover again.`);
       // Live routes by name: two tracks of one name can't be told apart.
       if (tracks.filter((track) => track.name === found.name).length > 1) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
-      rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${index + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}` });
+      // Named twice (by reference and by name): rendered once.
+      if (rig.sources.some((source) => source.name === found.name)) continue;
+      rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}`, ...(candidate.clip ? { clip: candidate.clip } : {}) });
     }
     await quietly(rig.steps, async () => {
       // Session clips play from a free stretch of the Arrangement, after everything in it. When any
@@ -1398,7 +1400,7 @@ export function createAbletonIntegration(options: Options): Integration {
         const end = typeof song.songLength === "number" ? song.songLength : 0;
         rig.from = (Math.ceil(end / beatsPerBar) + 2) * beatsPerBar;
         let longest = 0;
-        for (const [index, candidate] of candidates.entries()) longest = Math.max(longest, await copyClip(rig, rig.sources[index]!.track, candidate.clip, signal));
+        for (const source of rig.sources) longest = Math.max(longest, await copyClip(rig, source.track, source.clip, signal));
         rig.beats = beats ?? Math.min(32, longest || 8);
       }
       await addScratch(rig, rig.sources, signal);
@@ -1568,6 +1570,14 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!read.devices.at(-1) || read.devices.at(-1)!.className !== "Limiter") {
         await quietly(undefined, () => step("load_device", { itemId: "audio_effects/Limiter", trackRef: read.ref }, signal));
         read = await readKnobs(source.name, signal);
+        // Its input well down: a hot synth into a limiter at 0 dB is limited all the time, and that's heard
+        // (a sine chord came back with its upper mids up 20 dB). Down here it only catches a runaway.
+        const limiter = read.devices.at(-1);
+        const gain = read.knobs.find((knob) => knob.device === `${read.devices.length - 1}:${String(limiter?.name ?? "Limiter")}` && knob.name === "Gain");
+        if (gain && typeof limiter?.ref === "string" && gain.min < 0) {
+          await quietly(undefined, () => step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: gain.ref, value: Math.max(gain.min, -12) }] }, signal)).catch(() => undefined);
+          read = await readKnobs(source.name, signal);
+        }
       }
       current.set(source.name, new Map(read.knobs.map((knob) => [key(knob), knob.value])));
       const slot = { name: source.name, label: source.label, chain: read.chain, knobs: read.knobs };

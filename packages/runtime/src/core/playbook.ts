@@ -87,6 +87,15 @@ export function lessonFrom(run: MatchRun, at: number): Lesson | undefined {
   return { id: `l${randomUUID().replaceAll("-", "").slice(0, 8)}`, at, matched, winner: run.best.label, from: run.first, to: run.best.score, moves: moves.slice(-12) };
 }
 
+/** A goal's lesson: what it was after, which candidate led, and each generation's best that raised it. */
+export function lessonFromGoal(goal: string, reference: string | undefined, leader: { label: string; chain: string; score: number } | undefined, first: number | undefined, trend: readonly number[], at: number): Lesson | undefined {
+  if (!leader || first === undefined) return undefined;
+  const moves: Lesson["moves"] = []; let best = -1;
+  for (const [generation, score] of trend.entries()) if (score > best) { moves.push({ label: `generation ${generation + 1}`, score }); best = score; }
+  return { id: `l${randomUUID().replaceAll("-", "").slice(0, 8)}`, at, matched: `${matchedFrom(goal)}${reference ? ` (${reference})` : ""}`.slice(0, 160),
+    winner: `${leader.label} (${leader.chain})`.slice(0, 60), from: Math.round(first), to: Math.round(leader.score), moves: moves.slice(-12).map((move) => ({ ...move, score: Math.round(move.score) })) };
+}
+
 /** One lesson in a line, as the model and /memory read it. */
 export function lessonLine(lesson: Lesson): string {
   const path = lesson.moves.length > 1 ? `; ${lesson.moves.map((move) => `${move.label} ${move.score}%`).join(" → ")}` : "";

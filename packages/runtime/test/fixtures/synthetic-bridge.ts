@@ -245,6 +245,9 @@ export function bridge(options: Options = {}) {
         if (transaction?.name === "live_session_structure_preview") {
           const made = tracks.filter((track) => track.made === String(args.transactionId));
           if (made.some((track) => track.clips?.length) && args.discard !== true) return refusal("created Session structure was modified after apply; undo refused");
+          // Like the bridge: tracks another change made above these must go first.
+          const highest = Math.max(...made.map((track) => tracks.indexOf(track)));
+          if (tracks.some((track, index) => index > highest && track.made !== undefined && track.made !== String(args.transactionId))) return refusal("request failed: transaction-owned structure cleanup must proceed from the highest positional authority");
           // Like the bridge: the undo is tied to where it made them.
           if (made.some((track) => track.madeAt !== undefined && tracks.indexOf(track) !== track.madeAt)) return refusal("transaction-owned Session structure shifted from its exact reference", { state: "uncertain" });
           tracks = tracks.filter((track) => !made.includes(track));

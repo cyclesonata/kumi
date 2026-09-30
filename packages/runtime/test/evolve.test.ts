@@ -21,7 +21,7 @@ test("the search climbs toward what scores best, keeps each slot's best, and nev
     evolution.scored(trials, scores);
     bests.push(evolution.best!);
   }
-  assert.ok(bests.every((value, index) => index === 0 || value >= bests[index - 1]!), "the best never goes down");
+  assert.ok(bests.every((value, index) => index === 0 || value >= bests[index - 1]! - 1e-9), "the best never goes down (hearing it again only averages the same score)");
   assert.ok(bests[0]! < 75 && bests.at(-1)! > 88, `from ${bests[0]} to ${bests.at(-1)}`);
   assert.equal(evolution.leader!.chain, "Operator");
   assert.ok(evolution.slots.some((slot) => slot.chain === "Drift"), "the other family keeps its slot");
@@ -30,7 +30,7 @@ test("the search climbs toward what scores best, keeps each slot's best, and nev
 });
 
 test("crossover only mixes slots of one chain; a slot never scored plays as it is; stuck slots are reseeded", () => {
-  const evolution = new Evolution(seeded(3), { moves: 2, crossover: 1, random: 0, patience: 2 });
+  const evolution = new Evolution(seeded(3), { moves: 2, crossover: 1, random: 0, patience: 2, recheck: 99 });
   evolution.add({ name: "A", label: "A", chain: "Operator", knobs: knobs("Operator", [0, 0, 0]) });
   evolution.add({ name: "B", label: "B", chain: "Drift", knobs: knobs("Drift", [1, 1, 1]) });
   assert.deepEqual(evolution.propose().map((trial) => trial.how), ["start", "start"]);
@@ -54,7 +54,7 @@ test("the search leaves switches that silence a chain, levels and the safety lim
     { ref: "6", device: "Operator", name: "Fixed", min: 1, max: 1, value: 1 },
   ];
   assert.deepEqual(searchable(all).map((knob) => knob.name), ["Filter Freq", "Algorithm"]);
-  const evolution = new Evolution(seeded(11), { moves: 2, crossover: 0, random: 1, patience: 9 });
+  const evolution = new Evolution(seeded(11), { moves: 2, crossover: 0, random: 1, patience: 9, recheck: 99 });
   evolution.add({ name: "A", label: "A", chain: "Operator", knobs: all });
   evolution.scored(evolution.propose(), new Map([["A", 10]]));
   for (let round = 0; round < 20; round++) {
@@ -77,4 +77,19 @@ test("knobs Live won't set leave a slot's search; a chain offers its most sound-
   const chosen = searchable(many);
   assert.equal(chosen.length, 24);
   assert.equal(chosen[0]!.name, "Filter Freq", "what shapes the sound comes first");
+});
+
+test("a best that holds is heard again: one lucky render can't hold the search", () => {
+  const evolution = new Evolution(seeded(4), { moves: 1, crossover: 0, random: 0, patience: 99, recheck: 2 });
+  evolution.add({ name: "A", label: "A", chain: "Operator", knobs: knobs("Operator", [0.5]) });
+  // Its first render is lucky (90); it really sounds like 70, and every trial after scores 60.
+  evolution.scored(evolution.propose(), new Map([["A", 90]]));
+  const hows: string[] = [];
+  for (let round = 0; round < 6; round++) {
+    const trials = evolution.propose();
+    hows.push(trials[0]!.how);
+    evolution.scored(trials, new Map([["A", trials[0]!.how === "recheck" ? 70 : 60]]));
+  }
+  assert.ok(hows.includes("recheck"));
+  assert.ok(evolution.best! < 90, `the lucky 90 is averaged down: ${evolution.best}`);
 });

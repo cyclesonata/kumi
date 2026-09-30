@@ -12,7 +12,7 @@ import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
 import { GOAL_BUDGET, goalLeap, goalSetup, type GoalBudget, type GoalState, type GoalStatus, type GoalStore } from "./goal.js";
 import { Evolution, type Knob } from "./evolve.js";
-import { lessonFrom, lessonLine, playbookBrief, type Lesson, type PlaybookStore } from "./playbook.js";
+import { lessonFrom, lessonFromGoal, lessonLine, playbookBrief, type Lesson, type PlaybookStore } from "./playbook.js";
 import { NEGATIVE, POSITIVE } from "./techniques.js";
 import { KEEP_GOING, MATCH_BUDGET, MatchRun, startsMatch, type MatchBudget } from "./match-run.js";
 
@@ -103,6 +103,8 @@ export function createSession(options: Options): SessionController {
   let goalStatusNow: GoalStatus | undefined;
   /** The running goal's operation, and whether /goal stop (not Esc) ended it. */
   let goalOp: Operation | undefined; let goalStopped = false;
+  /** The goal's reference as heard, for its lesson. */
+  let goalReference: string | undefined;
   /** The last run's lesson, for "keep going" to update and the producer's next words to judge. */
   let lastLesson: { id: string; judged: boolean } | undefined;
   let playbookQueue: Promise<unknown> = Promise.resolve();
@@ -495,9 +497,9 @@ export function createSession(options: Options): SessionController {
     const started = Date.now() - (state?.elapsedMs ?? 0);
     const status = (next: GoalStatus["state"], evolution?: Evolution) => {
       const leader = evolution?.leader;
-      goalStatusNow = { type: "goal", state: next, goal: state?.goal ?? text ?? "", generation: state?.generation ?? 0, rendered: state?.rendered ?? 0, trend: state?.trend.slice(-60) ?? [],
-        ...(leader?.score !== undefined ? { best: { label: leader.label, score: leader.score }, leader: `${leader.label} · ${leader.chain}` } : {}),
-        ...(state?.first !== undefined ? { first: state.first } : {}), ...(state?.idea ? { idea: state.idea } : {}), elapsedMs: Date.now() - started,
+      goalStatusNow = { type: "goal", state: next, goal: state?.goal ?? text ?? "", generation: state?.generation ?? 0, rendered: state?.rendered ?? 0, trend: (state?.trend.slice(-60) ?? []).map(Math.round),
+        ...(leader?.score !== undefined ? { best: { label: leader.label, score: Math.round(leader.score) }, leader: `${leader.label} · ${leader.chain}` } : {}),
+        ...(state?.first !== undefined ? { first: Math.round(state.first) } : {}), ...(state?.idea ? { idea: state.idea } : {}), elapsedMs: Date.now() - started,
         candidates: evolution?.slots.length ?? state?.slots.length ?? 0, ...(state?.bestTrack ? { bestTrack: state.bestTrack } : {}), ...(state?.why ? { why: state.why } : {}) };
       emit(goalStatusNow);
     };
@@ -506,7 +508,9 @@ export function createSession(options: Options): SessionController {
     let request: AuditionRequest;
     if (!state) {
       heardLast = undefined;
-      const setup = await ask(goalSetup(text!));
+      // What won in earlier matches and goals, first.
+      const brief = playbookBrief(await playbookSerial((store) => store.list()) ?? [], text!);
+      const setup = await ask(`${goalSetup(text!)}${brief ? `\n\n${brief}` : ""}`);
       if (setup.stopReason !== "completed" || op.controller.signal.aborted) return { ...setup, usage };
       const heard = heardLast as AuditionEvent | undefined;
       if (!heard?.request?.reference) {
@@ -514,6 +518,7 @@ export function createSession(options: Options): SessionController {
         return { stopReason: "completed", usage };
       }
       request = heard.request;
+      goalReference = heard.reference;
       state = { version: 1, goal: text!, request: { ...request, candidates: [] }, ...(request.candidates.some((candidate) => candidate.clip) ? { clips: true } : {}), slots: [], generation: 0, rendered: 0, trend: [], elapsedMs: 0, status: "running", ...(heard.best ? { first: heard.best.score } : {}) };
     } else {
       // Picked up again: its candidates by their tracks' names.
@@ -521,7 +526,7 @@ export function createSession(options: Options): SessionController {
       state.status = "running";
     }
     goalOp = op;
-    const rig = await integration.goal(request, op.controller.signal);
+    let rig = await integration.goal(request, op.controller.signal);
     if (typeof rig === "string") { emit({ type: "notice", message: `The goal couldn't start its search: ${rig}` }); state.status = "paused"; persist(); return { stopReason: "completed", usage }; }
     const evolution = new Evolution(options.goalRandom ?? Math.random);
     const knobKey = (knob: Pick<Knob, "device" | "name">) => `${knob.device}|${knob.name}`;
@@ -545,6 +550,8 @@ export function createSession(options: Options): SessionController {
     };
     let gaps: string[] = []; let lastLeap = evolution.generation;
     let silentRuns = 0;
+    /** Whether the rig is open (it closes around the model's leaps), and what closing it said. */
+    let open = true; const closedNotes: string[] = [];
     op.linger = 180_000;
     try {
       sync(); persist(); status("running", evolution);
@@ -572,16 +579,20 @@ export function createSession(options: Options): SessionController {
         if (evolution.generation - lastLeap >= goalBudget.leapEvery || (stalled && evolution.generation - lastLeap >= goalBudget.stallGenerations)) {
           lastLeap = evolution.generation;
           heardLast = undefined;
-          const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: leader.score } : undefined, gaps.slice(0, 3), stalled));
+          // The model's new tracks go after the render tracks, and Live undoes tracks from the last one back:
+          // the render tracks go first, and come back after, with the new candidates.
+          closedNotes.push(...await rig.close().catch(() => [] as string[])); open = false;
+          const leap = await ask(goalLeap(state, leader?.score !== undefined ? { label: leader.label, score: Math.round(leader.score) } : undefined, gaps.slice(0, 3), stalled));
           if (leap.stopReason === "cancelled" || op.controller.signal.aborted) break;
           // What it tried: its "Tried:" line, or its first line.
           const idea = (/Tried:\s*(.+)/i.exec(said)?.[1] ?? said.trim().split(/\n+/).find(Boolean))?.replace(/[*_`]/g, "").trim().slice(0, 200);
           if (idea) state.idea = idea;
           const offered = (heardLast as AuditionEvent | undefined)?.request?.candidates ?? [];
-          for (const candidate of offered) {
-            const joined = await rig.add(candidate, op.controller.signal);
-            if (typeof joined !== "string") join(joined);
-          }
+          const reopened = await integration.goal({ ...request, candidates: [...evolution.slots.map((slot) => ({ track: slot.name, label: slot.label, ...(state!.clips ? { clip: "first" } : {}) })),
+            ...offered.map((candidate) => ({ ...candidate, ...(state!.clips && !candidate.clip ? { clip: "first" } : {}) }))] }, op.controller.signal);
+          if (typeof reopened === "string") { state.status = "paused"; state.why = `the search couldn't start again after the model's idea: ${reopened}`.slice(0, 200); break; }
+          rig = reopened; open = true;
+          for (const slot of rig.slots) if (!evolution.slots.some((item) => item.name === slot.name)) join(slot);
           sync(); persist(); status("running", evolution);
         }
       }
@@ -594,7 +605,7 @@ export function createSession(options: Options): SessionController {
       // In this order, so nothing moves a track whose undo is tied to its place: the render tracks go; then
       // (done, not paused) the top two candidates stay muted for the producer to A/B and the rest go, newest
       // first; then the best is copied to a track of its own, so stopping at any moment leaves a result.
-      const notes = await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."]);
+      const notes = [...closedNotes, ...(open ? await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."]) : [])];
       if (state.status === "done") notes.push(...await rig.tidy([...evolution.slots].filter((slot) => slot.score !== undefined).sort((a, b) => b.score! - a.score!).slice(0, 2).map((slot) => slot.name), cleanup).catch(() => [] as string[]));
       if (leader?.score !== undefined) {
         const kept = await rig.keepBest(leader.name, leader.knobs, leader.elite, cleanup).catch(() => "");
@@ -603,8 +614,15 @@ export function createSession(options: Options): SessionController {
       sync(); persist(); status(state.status, evolution);
       const best = evolution.leader;
       goalOp = undefined; goalStopped = false;
-      emit({ type: "notice", message: `Goal ${state.status === "paused" ? "paused" : "done"}: ${best?.score !== undefined ? `${state.first !== undefined && state.first !== best.score ? `${state.first}% → ` : ""}${best.score}% (${best.label})` : "no score yet"} · ${state.generation} generations · ${state.rendered} candidates${state.bestTrack ? ` · the best is on “${state.bestTrack}”` : ""}${state.status === "paused" ? " · /goal carries on" : ""}.${notes.length ? ` ${notes.join(" ")}` : ""}` });
+      emit({ type: "notice", message: `Goal ${state.status === "paused" ? "paused" : "done"}: ${best?.score !== undefined ? `${state.first !== undefined && Math.round(state.first) !== Math.round(best.score) ? `${Math.round(state.first)}% → ` : ""}${Math.round(best.score)}% (${best.label})` : "no score yet"} · ${state.generation} generations · ${state.rendered} candidates${state.bestTrack ? ` · the best is on “${state.bestTrack}”${state.status === "done" ? " (say if you want it on one of your tracks)" : ""}` : ""}${state.status === "paused" ? " · /goal carries on" : ""}.${notes.length ? ` ${notes.join(" ")}` : ""}` });
       goalState = state;
+      // The goal's lesson, for the next match or goal: kept (replacing this goal's earlier one) once it has a leader.
+      const lesson = lessonFromGoal(state.goal, goalReference, best?.score !== undefined ? { label: best.label, chain: best.chain, score: best.score } : undefined, state.first, state.trend, Date.now());
+      if (lesson) {
+        const kept = { ...lesson, ...(state.lesson ? { id: state.lesson } : {}) };
+        state.lesson = kept.id; persist();
+        void playbookSerial(async (store) => { const lessons = await store.list(); await store.save([...lessons.filter((item) => item.id !== kept.id), kept]); emit({ type: "lesson", action: lessons.some((item) => item.id === kept.id) ? "updated" : "learned", id: kept.id, line: lessonLine(kept) }); });
+      }
     }
     return { stopReason: op.controller.signal.aborted ? "cancelled" : "completed", usage };
   }
