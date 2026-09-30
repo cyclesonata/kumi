@@ -177,11 +177,14 @@ export interface GoalSlotInfo { name: string; label: string; chain: string; knob
 /** A render rig a goal keeps open: its slots, a generation rendered and scored in one pass, the best kept, and closing. */
 export interface GoalRig {
   readonly slots: GoalSlotInfo[];
+  /** The part is long enough to screen: early generations can render a short, characteristic window of it. */
+  readonly screens: boolean;
   /** A candidate the model built mid-search joins (with a safety limiter at the end of its chain). */
   add(candidate: AuditionCandidate, signal: AbortSignal): Promise<GoalSlotInfo | string>;
   /** Each trial's values set on its slot, all rendered in one silent pass, each scored against the reference. */
-  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[]; frozen: Map<string, Set<string>>;
-    /** Each slot's gap no knob closes, when it has one. */ structural: Map<string, { gap: string; move: string }> }>;
+  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[]; /** Hear it again, not from the cache. */ fresh?: boolean }[], signal: AbortSignal, options?: { screen?: boolean }): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[]; frozen: Map<string, Set<string>>;
+    /** Each slot's gap no knob closes, when it has one. */ structural: Map<string, { gap: string; move: string }>;
+    /** Rendered on the short window, and how many trials were heard from the cache. */ screened: boolean; cached: number }>;
   /** The best so far on a track of its own ("Kumi · Goal best"), replacing the last copy; its name, or why not. */
   keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
   /** A finished goal's candidates: the top ones muted for the producer to A/B, the rest removed; what it did. */

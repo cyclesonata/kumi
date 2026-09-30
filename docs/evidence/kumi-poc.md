@@ -1098,3 +1098,20 @@ every few generations or on a stall (about four minutes a leap).
 
 Throughput: up to six candidates rendered in one silent pass on this Mac; a generation is bounded by
 the bridge's per-step round trips more than by the audio (a one-bar part).
+
+## Goal throughput on real Live (bridge 1.0.51, 2026-09-30)
+
+`.pi/kumi-evidence/kernel/goal-timing-probe.mjs` with `KUMI_TIMING=1`: four candidates (Operator,
+Drift, Wavetable, Analog) playing a one-bar chord, a goal rig over them, generations of real
+mutations. Every bridge step costs about 2.5 s; the audio itself is 4.9 s of a pass.
+
+| | render pass | knobs set | candidates a minute |
+| --- | --- | --- | --- |
+| before (1.0.50: Main, transport, recording set and reset every pass) | 30 s | 10–19 s | 5.9 |
+| after (held rig: play, wait, stop) | 12 s | 10–17 s | 10.8 |
+
+Setting a generation's knobs in one batch (the host's live_batch) was tried and dropped: a knob
+Live won't take failed the whole batch after its 15 s deadline and left the host uncertain.
+Snippet screening only pays for parts of six seconds or more; it's covered by the goal tests
+(a quiet-then-loud reference, the window found later in it), not measured on Live here, where the
+part was one bar.

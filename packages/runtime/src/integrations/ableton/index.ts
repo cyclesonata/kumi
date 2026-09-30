@@ -1365,6 +1365,10 @@ export function createAbletonIntegration(options: Options): Integration {
     sources: { track: string; name: string; scratch: string; label: string; clip?: string }[];
     /** The candidates play Session clips, copied to a free stretch of the Arrangement at `from`. */
     clips: boolean;
+    /** A goal's rig holds Main down, the transport primed and recording on between passes (see renderPass). */
+    hold?: { main?: { ref: string; prior: number }; primed?: string; recording?: boolean; rearm?: string[] };
+    /** The stretch rendered now, when it's not the whole part (a snippet, screening a generation). */
+    window?: { from: number; beats: number };
     from: number; beats: number;
     /** The rig's own changes, undone at close. */
     steps: string[];
@@ -1448,53 +1452,97 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   async function renderPass(rig: Rig, signal: AbortSignal): Promise<Map<string, { file: string; start: number }>> {
     const tempo = currentTempo!;
+    // Where a pass's time goes, for probing throughput (KUMI_TIMING=1 prints it).
+    let lapAt = Date.now(); const laps: string[] = [];
+    const lap = (what: string) => { laps.push(`${what} ${Date.now() - lapAt}`); lapAt = Date.now(); };
     const files = new Map<string, { file: string; start: number }>();
-    const main = await mainVolume(signal);
-    if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
-    const prior = main.volume;
+    // A held rig (a goal's) keeps Main down, the transport primed and recording on between passes: a pass is
+    // then play, wait, stop. Every step through the bridge costs a couple of seconds.
+    const held = rig.hold;
+    let prior = held?.main?.prior;
+    let mainRef = held?.main?.ref;
+    if (prior === undefined) {
+      const main = await mainVolume(signal);
+      if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
+      prior = main.volume; mainRef = main.ref;
+    }
+    lap("main read");
     let started = false;
-    const span = renderSpan(rig.from, rig.beats, beatsPerBar);
+    const window = rig.window ?? { from: rig.from, beats: rig.beats };
+    const span = renderSpan(window.from, window.beats, beatsPerBar);
     /** The producer's own armed tracks: disarmed for the pass (Live records exactly the armed ones), armed again after. */
-    const rearm: string[] = [];
+    const rearm: string[] = held?.rearm ?? [];
+    let failed = true;
     try {
       await quietly(undefined, async () => {
-        restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior, at: now().getTime(), scratch: rig.sources.map((source) => source.scratch) });
-        await step("set_mixer", { trackRef: main.ref, volume: 0 }, signal);
+        if (!held?.main) {
+          restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior!, at: now().getTime(), scratch: rig.sources.map((source) => source.scratch) });
+          await step("set_mixer", { trackRef: mainRef!, volume: 0 }, signal);
+          if (held) held.main = { ref: mainRef!, prior: prior! };
+        }
+        lap("main down");
         // Scratch tracks something else disarmed (another recording) are armed again.
         const tracks = await rows("track", { fields: ["name", "armed"] }, signal);
+        lap("tracks read");
         const refs = rig.sources.map((source) => { const found = tracks.find((track) => track.name === source.scratch); if (typeof found?.ref !== "string") throw new ObservationError(`Kumi's render track “${source.scratch}” is gone.`); return found; });
-        for (const track of refs) if (track.armed !== true) await step("set_routing", { trackRef: track.ref, arm: true }, signal);
+        let rearmed = false;
+        for (const track of refs) if (track.armed !== true) { await step("set_routing", { trackRef: track.ref, arm: true }, signal); rearmed = true; }
         for (const track of tracks) {
           if (track.armed !== true || typeof track.ref !== "string" || refs.includes(track)) continue;
-          await step("set_routing", { trackRef: track.ref, arm: false }, signal); rearm.push(track.ref);
+          await step("set_routing", { trackRef: track.ref, arm: false }, signal); rearm.push(track.ref); rearmed = true;
         }
-        await step("set_transport", { position: span.position, loopEnabled: false }, signal);
-        if (supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
+        const primeKey = `${span.position}`;
+        if (!held || held.primed !== primeKey) {
+          await step("set_transport", { position: span.position, loopEnabled: false }, signal);
+          lap("transport");
+          if (supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
+          lap("back to arrangement");
+          if (held) held.primed = primeKey;
+        }
         started = true;
-        await step("record", { action: "start", lane: "arrangement", destinationTrackRef: refs[0]!.ref as string, ...(refs.length > 1 ? { alsoTrackRefs: refs.slice(1).map((track) => track.ref as string) } : {}) }, signal);
-        await step("play", { action: "continue" }, signal);
+        // Recording stays on in a held rig; arming anew (something disarmed a track) starts it afresh.
+        if (!held?.recording || rearmed) {
+          if (held?.recording) { await step("record", { action: "stop", lane: "arrangement" }, signal); held.recording = false; }
+          await step("record", { action: "start", lane: "arrangement", destinationTrackRef: refs[0]!.ref as string, ...(refs.length > 1 ? { alsoTrackRefs: refs.slice(1).map((track) => track.ref as string) } : {}) }, signal);
+          if (held) held.recording = true;
+          lap("record start");
+        }
+        // From the start marker (the primed position) every pass; "continue" only once, before anything has played.
+        await step("play", { action: held ? "start" : "continue" }, signal);
+        lap("play");
         await delay(span.wait * 60 / tempo * 1000, undefined, { signal });
+        lap("wait");
         await step("play", { action: "stop" }, signal);
-        await step("record", { action: "stop", lane: "arrangement" }, signal);
+        lap("stop");
+        if (!held) { await step("record", { action: "stop", lane: "arrangement" }, signal); lap("record stop"); }
         started = false;
-        for (const [index, source] of rig.sources.entries()) {
-          // The take covering the part: the newest, as a pass records over the last.
+        // Each source's take covering the part (the newest: a pass records over the last), read together.
+        await Promise.all(rig.sources.map(async (source, index) => {
           const clips = (await rows("arrangement-clip", { parent: refs[index]!.ref, fields: ["start", "length", "isAudio"] }, signal)).filter((row) => row.isAudio === true && typeof row.ref === "string");
-          const clip = clips.map((row, order) => ({ row, order })).filter(({ row }) => typeof row.start === "number" && row.start <= rig.from)
+          const clip = clips.map((row, order) => ({ row, order })).filter(({ row }) => typeof row.start === "number" && row.start <= window.from)
             .sort((a, b) => (b.row.start as number) - (a.row.start as number) || b.order - a.order)[0]?.row ?? clips.at(-1);
-          if (!clip) continue;
+          if (!clip) return;
           const file = await clipFile(clip.ref as string, signal).catch(() => undefined);
           // A tenth of a second before the part: a window that opens right on the attack hears it as a flurry of onsets.
-          if (file) files.set(source.name, { file, start: Math.max(0, (rig.from - (typeof clip.start === "number" ? clip.start : span.position)) * 60 / tempo - LEAD_IN) });
-        }
+          if (file) files.set(source.name, { file, start: Math.max(0, (window.from - (typeof clip.start === "number" ? clip.start : span.position)) * 60 / tempo - LEAD_IN) });
+        }));
+        lap("clips and files");
       });
+      failed = false;
     } finally {
       const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
-      if (started) await stopEverything(cleanup);
-      for (const ref of rearm) await quietly(undefined, () => step("set_routing", { trackRef: ref, arm: true }, cleanup)).catch(() => rig.notes.push("A track Kumi disarmed to render may still be disarmed; arm it again in Live."));
-      const back = await quietly(undefined, () => putMainBack(prior, cleanup));
-      if (back) restore.clear();
-      else rig.notes.push(`Main may still be silent: set it back to ${faderDb(prior)} in Live.`);
+      if (started) { await stopEverything(cleanup); if (held) held.recording = false; }
+      if (!held || failed) {
+        // A one-off pass (an audition) puts everything back now; a held rig when it closes.
+        for (const ref of rearm.splice(0)) await quietly(undefined, () => step("set_routing", { trackRef: ref, arm: true }, cleanup)).catch(() => rig.notes.push("A track Kumi disarmed to render may still be disarmed; arm it again in Live."));
+        if (!held) {
+          const back = await quietly(undefined, () => putMainBack(prior!, cleanup));
+          lap("main back");
+          if (back) restore.clear();
+          else rig.notes.push(`Main may still be silent: set it back to ${faderDb(prior!)} in Live.`);
+        }
+      } else held.rearm = rearm;
+      if (process.env.KUMI_TIMING) console.error(`[render pass · ${rig.sources.length} sources${held ? " · held" : ""}] ${laps.join(" · ")} ms`);
     }
     return files;
   }
@@ -1502,6 +1550,19 @@ export function createAbletonIntegration(options: Options): Integration {
   async function closeRig(rig: Rig): Promise<void> {
     const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
     const scratch = rig.sources.map((source) => source.scratch);
+    // A held rig lets go first: recording off, playback stopped, the producer's armed tracks armed, Main back.
+    const held = rig.hold;
+    if (held) {
+      if (held.recording) { await quietly(undefined, () => step("record", { action: "stop", lane: "arrangement" }, cleanup)).catch(() => undefined); held.recording = false; }
+      await stopEverything(cleanup);
+      for (const ref of (held.rearm ?? []).splice(0)) await quietly(undefined, () => step("set_routing", { trackRef: ref, arm: true }, cleanup)).catch(() => rig.notes.push("A track Kumi disarmed to render may still be disarmed; arm it again in Live."));
+      if (held.main) {
+        const back = await quietly(undefined, () => putMainBack(held.main!.prior, cleanup));
+        if (back) restore.clear();
+        else rig.notes.push(`Main may still be silent: set it back to ${faderDb(held.main.prior)} in Live.`);
+        delete held.main;
+      }
+    }
     await quietly(undefined, async () => {
       for (const id of [...rig.steps].reverse()) {
         const entry = changes.get(id);
@@ -1551,6 +1612,9 @@ export function createAbletonIntegration(options: Options): Integration {
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
     const reference = await heardReference(request.reference, request, signal);
     const rig = await openRig(request.candidates, request.fromBeat, request.beats, signal);
+    // Held between passes: Main stays down while the goal searches (said once), the transport primed, recording on.
+    rig.hold = {};
+    try { options.onAction?.({ title: "Live stays quiet while the goal searches; it comes back when the goal stops or pauses" }); } catch { /* a listener failure must not affect Live */ }
     const slots: GoalSlotInfo[] = [];
     /** Each slot's values as last set, so a generation only sends what changes. */
     const current = new Map<string, Map<string, number>>();
@@ -1589,10 +1653,32 @@ export function createAbletonIntegration(options: Options): Integration {
     try { for (const source of rig.sources) await adopt(source, signal); }
     catch (error) { await closeRig(rig); throw error; }
     const focus = request.focus;
+    // A long part is screened on its most characteristic few seconds: the reference's loudest, most changing
+    // stretch, found in its loudness over time, and the same stretch of the part.
+    const tempo0 = currentTempo!;
+    let screen: { from: number; beats: number; reference: Analysis } | undefined;
+    if (rig.beats * 60 / tempo0 >= 6) {
+      const beats = Math.max(2, Math.round(3 * tempo0 / 60));
+      const lufs = reference.overTime.lufs; const slice = reference.seconds / Math.max(1, lufs.length);
+      const across = Math.max(1, Math.round(beats * 60 / tempo0 / slice));
+      let bestAt = 0; let bestScore = -Infinity;
+      for (let at = 0; at + across <= lufs.length; at++) {
+        const part = lufs.slice(at, at + across).map((value) => value ?? -70);
+        const mean = part.reduce((sum, value) => sum + value, 0) / part.length;
+        const change = part.slice(1).reduce((sum, value, index) => sum + Math.abs(value - part[index]!), 0);
+        if (mean + change > bestScore) { bestScore = mean + change; bestAt = at; }
+      }
+      const offset = Math.max(0, Math.min(rig.beats - beats, Math.round(bestAt * slice * tempo0 / 60)));
+      const snippet = await heardReference(request.reference, { ...request, referenceFrom: (request.referenceFrom ?? 0) + offset * 60 / tempo0, referenceSeconds: beats * 60 / tempo0 }, signal);
+      screen = { from: rig.from + offset, beats, reference: snippet };
+    }
+    /** Analyses by candidate settings (and window): a render already heard isn't heard again. */
+    const heardBefore = new Map<string, { score: number; gaps: string[]; structural?: { gap: string; move: string } }>();
     /** The current "Kumi · Goal best" copy's own steps: undone when a better one replaces it. */
     let bestSteps: string[] = [];
     return {
       slots,
+      screens: screen !== undefined,
       async add(candidate, given) {
         const signal = AbortSignal.any([given, lifetime.signal]);
         try {
@@ -1604,14 +1690,19 @@ export function createAbletonIntegration(options: Options): Integration {
           return await adopt({ name: track.name, label }, signal);
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "It couldn't join the search."; }
       },
-      async generation(trials, given) {
+      async generation(trials, given, options = {}) {
         const signal = AbortSignal.any([given, lifetime.signal]);
+        const screened = options.screen === true && screen !== undefined;
+        const cacheKey = (trial: (typeof trials)[number]) => `${trial.slot}|${screened ? "screen" : "full"}|${trial.values.map((value) => value.toFixed(4)).join(",")}`;
         if (rendering) throw new ObservationError("Another render is running.");
         rendering = true;
         let files: Map<string, { file: string; start: number }>;
         const frozen = new Map<string, Set<string>>();
+        let setFrom = Date.now(); let renderFrom = setFrom;
         try {
-          // Each trial's values onto its slot, one change per device, only what moved; references read fresh.
+          setFrom = Date.now();
+          // Each trial's values onto its slot, only what moved, references read fresh.
+          const plans: { trial: (typeof trials)[number]; last: Map<string, number>; moved: { knob: Knob; value: number }[]; byKey: Map<string, Knob>; byDevice: Map<string, { parameterRef: string; value: number }[]> }[] = [];
           for (const trial of trials) {
             const last = current.get(trial.slot)!;
             const moved = trial.knobs.map((knob, index) => ({ knob, value: trial.values[index]! })).filter(({ knob, value }) => Math.abs((last.get(key(knob)) ?? NaN) - value) > 1e-6 || !last.has(key(knob)));
@@ -1626,35 +1717,59 @@ export function createAbletonIntegration(options: Options): Integration {
               if (typeof device !== "string") continue;
               byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value }]);
             }
-            // A value Live won't take (a knob it keeps to steps it doesn't say, one off in this mode) is tried alone,
-            // and a knob that still won't move leaves the search rather than stopping it.
-            const refused = new Set<string>();
-            await quietly(undefined, async () => {
-              for (const [deviceRef, values] of byDevice) {
-                try { await step("set_device_parameters", { deviceRef, values }, signal); continue; } catch { signal.throwIfAborted(); }
-                for (const value of values) {
-                  try { await step("set_device_parameters", { deviceRef, values: [value] }, signal); }
-                  catch { signal.throwIfAborted(); const knob = moved.find(({ knob }) => byKey.get(key(knob))?.ref === value.parameterRef)?.knob; if (knob) refused.add(key(knob)); }
-                }
-              }
-            });
-            for (const { knob, value } of moved) if (!refused.has(key(knob))) last.set(key(knob), value);
-            if (refused.size) frozen.set(trial.slot, refused);
+            plans.push({ trial, last, moved, byKey, byDevice });
           }
-          files = await renderPass(rig, signal);
+          // One change per device: on real Live a batch that met a knob Live won't take left the host uncertain.
+          const settled = new Set<(typeof plans)[number]>();
+          for (const plan of plans) {
+            const refused = new Set<string>();
+            if (!settled.has(plan)) {
+              // A value Live won't take (a knob it keeps to steps it doesn't say, one off in this mode) is tried alone,
+              // and a knob that still won't move leaves the search rather than stopping it.
+              await quietly(undefined, async () => {
+                for (const [deviceRef, values] of plan.byDevice) {
+                  try { await step("set_device_parameters", { deviceRef, values }, signal); continue; } catch { signal.throwIfAborted(); }
+                  for (const value of values) {
+                    try { await step("set_device_parameters", { deviceRef, values: [value] }, signal); }
+                    catch { signal.throwIfAborted(); const knob = plan.moved.find(({ knob }) => plan.byKey.get(key(knob))?.ref === value.parameterRef)?.knob; if (knob) refused.add(key(knob)); }
+                  }
+                }
+              });
+            }
+            for (const { knob, value } of plan.moved) if (!refused.has(key(knob))) plan.last.set(key(knob), value);
+            if (refused.size) frozen.set(plan.trial.slot, refused);
+          }
+          renderFrom = Date.now();
+          // Every trial heard before at these settings: no pass at all.
+          if (trials.length && trials.every((trial) => !trial.fresh && heardBefore.has(cacheKey(trial)))) files = new Map();
+          else {
+            if (screened) rig.window = { from: screen!.from, beats: screen!.beats }; else delete rig.window;
+            files = await renderPass(rig, signal);
+          }
         } finally { rendering = false; }
+        const heardFrom = Date.now();
         const scores = new Map<string, number>(); const gaps = new Map<string, string[]>(); const silent: string[] = [];
         const structural = new Map<string, { gap: string; move: string }>();
         const tempo = currentTempo!;
-        await Promise.all([...files].map(async ([name, { file, start }]) => {
-          const heard = await hear(file, { start, seconds: rig.beats * 60 / tempo + LEAD_IN, ...(focus ? { focus: focus === "section" ? "mix" : "sound" } : {}), signal });
+        let cached = 0;
+        const against = screened ? screen!.reference : reference;
+        const beatsHeard = screened ? screen!.beats : rig.beats;
+        await Promise.all(trials.map(async (trial) => {
+          const name = trial.slot;
+          const known = !trial.fresh ? heardBefore.get(cacheKey(trial)) : undefined;
+          if (known) { cached++; scores.set(name, known.score); gaps.set(name, known.gaps); if (known.structural) structural.set(name, known.structural); return; }
+          const rendered = files.get(name);
+          if (!rendered) { silent.push(name); return; }
+          const heard = await hear(rendered.file, { start: rendered.start, seconds: beatsHeard * 60 / tempo + LEAD_IN, ...(focus ? { focus: focus === "section" ? "mix" : "sound" } : {}), signal });
           if (silentRender(heard)) { silent.push(name); return; }
-          const close = closeness(heard, reference, focus);
+          const close = closeness(heard, against, focus);
           scores.set(name, close.score); gaps.set(name, close.gaps);
           if (close.structural) structural.set(name, { gap: close.structural.gap, move: close.structural.move });
+          heardBefore.set(cacheKey(trial), { score: close.score, gaps: close.gaps, ...(close.structural ? { structural: { gap: close.structural.gap, move: close.structural.move } } : {}) });
+          if (heardBefore.size > 2_000) heardBefore.delete(heardBefore.keys().next().value!);
         }));
-        for (const trial of trials) if (!files.has(trial.slot) && !silent.includes(trial.slot)) silent.push(trial.slot);
-        return { scores, gaps, silent, frozen, structural };
+        if (process.env.KUMI_TIMING) console.error(`[generation · ${trials.length} trials] set ${renderFrom - setFrom} ms · render ${heardFrom - renderFrom} ms · hear ${Date.now() - heardFrom} ms`);
+        return { scores, gaps, silent, frozen, structural, screened, cached };
       },
       async keepBest(slot, knobs, values, given) {
         const signal = AbortSignal.any([given, lifetime.signal]);

@@ -33,6 +33,13 @@ export function bridge(options: Options = {}) {
   // Main's fader and the playhead, as auditions use them.
   const main = { volume: 0.85 }; let position = 0; let recordingFrom: number | undefined;
   let failStep: string | undefined;
+  /** A take on each armed track (what its source's Post FX made), from where recording started. */
+  const takes = () => {
+    if (recordingFrom === undefined || !options.renders) return;
+    const from = recordingFrom;
+    for (const track of tracks) if (track.armed) { const source = tracks.find((item) => item.name === track.input); const filePath = track.input ? options.renders(track.input, source?.devices ?? []) : undefined; track.clips = [...(track.clips ?? []).filter((clip) => clip.start !== from), { start: from, ...(filePath ? { filePath } : {}) }]; }
+    recordingFrom = undefined;
+  };
   let undoRefusal: string | undefined;
   let applyFailure: "throw" | "uncertain" | "unreadable" | undefined;
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
@@ -145,8 +152,9 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_project_backup_preview") return wrap({ transactionId: args.transactionId, state: "applied", backup: String(options.savedSet).replace(/\.als$/, `.backup-${transactions}.als`), verified: true });
         if (transaction.name === "live_transport_action_preview") {
           if (transaction.args.action === "stop" && transport.refuseStop && transport.playing) return refusal("request failed: missing, expired, stale, or mismatched mutation preflight");
-          if (transaction.args.action === "start" || transaction.args.action === "continue") transport.playing = true;
-          if (transaction.args.action === "stop") transport.playing = false;
+          // Like Live: playing with recording on records from where it starts; stopping writes the takes.
+          if (transaction.args.action === "start" || transaction.args.action === "continue") { transport.playing = true; if (transport.arrangementRecord) recordingFrom = position; }
+          if (transaction.args.action === "stop") { transport.playing = false; takes(); }
           return wrap({ transactionId: args.transactionId, state: "applied", done: transaction.args.action });
         }
         if (transaction.name === "live_transport_preview" && typeof transaction.args.position === "number") position = transaction.args.position;
@@ -162,11 +170,7 @@ export function bridge(options: Options = {}) {
           if (transaction.args.action === "start" && tracks.some((track, index) => track.armed && !recorded.includes(`7:track:${index}`))) return refusal("adapter request failed");
           const on = transaction.args.action === "start";
           if (transaction.args.lane === "arrangement" && on) recordingFrom = position;
-          // Stopping leaves a take on each armed track: what its source's Post FX made.
-          if (transaction.args.lane === "arrangement" && !on && recordingFrom !== undefined && options.renders) {
-            for (const track of tracks) if (track.armed) { const source = tracks.find((item) => item.name === track.input); const filePath = track.input ? options.renders(track.input, source?.devices ?? []) : undefined; track.clips = [...(track.clips ?? []).filter((clip) => clip.start !== recordingFrom), { start: recordingFrom, ...(filePath ? { filePath } : {}) }]; }
-            recordingFrom = undefined;
-          }
+          if (transaction.args.lane === "arrangement" && !on) takes();
           if (transaction.args.lane === "arrangement") transport.arrangementRecord = on; else transport.sessionRecord = on;
           // Like the bridge when Live doesn't confirm in time: it happened, but the answer can't say so.
           if (transport.recordUnsure) return refusal("Recording state is uncertain; perform fresh discovery.", { state: "uncertain" });

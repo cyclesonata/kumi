@@ -112,6 +112,12 @@ The first release for producers to use day to day. Ships with bridge 1.0.51.
   hours, or with /goal stop; Esc pauses it, and /goal picks it up again, after a
   restart too. The best so far lands on a "Kumi · Goal best" track, and every
   candidate's chain ends in a limiter. Needs bridge 1.0.50.
+- Goals try nearly twice as many candidates a minute on real Live (5.9 to
+  10.8 with four candidates): a goal's render rig keeps Main down (said once),
+  the transport primed and recording on between passes, so a pass is play,
+  wait, stop (about 12 s instead of 30). A long part (6 s or more) is screened on
+  its most characteristic few seconds, with the best heard at full length every
+  fourth generation, and settings already heard aren't heard again.
 - A gap no knob closes (a band 9 dB or more off, an attack three times off,
   the wrong register, far too wide) that costs the most is named with the
   structural change for it: a missing sub asks for a sub layer, an EQ low

@@ -500,8 +500,17 @@ export function createSession(options: Options): SessionController {
       return result;
     };
     const started = Date.now() - (state?.elapsedMs ?? 0);
+    /** Full-length scores while generations are screened on a short window: what's reported, and what ends a goal. */
+    const full = new Map<string, number>(); let screening = false; let lastConfirm = -1;
+    const reportedLeader = (evolution?: Evolution) => {
+      if (!evolution) return undefined;
+      if (!screening || !full.size) return evolution.leader;
+      const [name, score] = [...full].sort((a, b) => b[1] - a[1])[0]!;
+      const slot = evolution.slots.find((item) => item.name === name);
+      return slot ? { ...slot, score } : evolution.leader;
+    };
     const status = (next: GoalStatus["state"], evolution?: Evolution) => {
-      const leader = evolution?.leader;
+      const leader = reportedLeader(evolution);
       goalStatusNow = { type: "goal", state: next, goal: state?.goal ?? text ?? "", generation: state?.generation ?? 0, rendered: state?.rendered ?? 0, trend: (state?.trend.slice(-60) ?? []).map(Math.round),
         ...(leader?.score !== undefined ? { best: { label: leader.label, score: Math.round(leader.score) }, leader: `${leader.label} · ${leader.chain}` } : {}),
         ...(state?.first !== undefined ? { first: Math.round(state.first) } : {}), ...(state?.idea ? { idea: state.idea } : {}), elapsedMs: Date.now() - started,
@@ -561,11 +570,23 @@ export function createSession(options: Options): SessionController {
     try {
       sync(); persist(); status("running", evolution);
       while (!op.controller.signal.aborted) {
-        if ((evolution.best ?? 0) >= goalBudget.target) { state.status = "done"; state.why = `reached ${evolution.best}%`; break; }
+        const reached = screening ? reportedLeader(evolution)?.score ?? 0 : evolution.best ?? 0;
+        if (reached >= goalBudget.target) { state.status = "done"; state.why = `reached ${Math.round(reached)}%`; break; }
+        // Screening a long part: every fourth generation the slots' best settings are heard at full length.
+        screening = rig.screens;
+        if (screening && evolution.generation > 0 && evolution.generation % 4 === 0 && lastConfirm !== evolution.generation) {
+          lastConfirm = evolution.generation;
+          const elites = evolution.slots.filter((slot) => slot.score !== undefined);
+          const checked = await rig.generation(elites.map((slot) => ({ slot: slot.name, knobs: slot.knobs, values: slot.elite })), op.controller.signal, { screen: false });
+          for (const [name, score] of checked.scores) full.set(name, score);
+          evolution.rendered += checked.scores.size; sync();
+          status("running", evolution);
+          continue;
+        }
         if (Date.now() - started >= goalBudget.ms) { state.status = "done"; state.why = "the safety cap on its time"; break; }
         const trials = evolution.propose();
         const slots = new Map(evolution.slots.map((slot) => [slot.name, slot]));
-        const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: slots.get(trial.slot)!.knobs, values: trial.values })), op.controller.signal);
+        const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: slots.get(trial.slot)!.knobs, values: trial.values, ...(trial.how === "recheck" ? { fresh: true } : {}) })), op.controller.signal, { screen: screening });
         const { improved } = evolution.scored(trials, result.scores);
         // Nothing heard twice running: the renders aren't reaching Kumi, and searching on is pointless.
         silentRuns = result.scores.size ? 0 : silentRuns + 1;
@@ -609,7 +630,7 @@ export function createSession(options: Options): SessionController {
     } finally {
       const cleanup = AbortSignal.timeout(150_000);
       if (op.controller.signal.aborted) { state.status = goalStopped ? "done" : "paused"; state.why = goalStopped ? "stopped" : "paused"; }
-      const leader = evolution.leader;
+      const leader = reportedLeader(evolution);
       // In this order, so nothing moves a track whose undo is tied to its place: the render tracks go; then
       // (done, not paused) the top two candidates stay muted for the producer to A/B and the rest go, newest
       // first; then the best is copied to a track of its own, so stopping at any moment leaves a result.
@@ -620,7 +641,7 @@ export function createSession(options: Options): SessionController {
         if (kept && kept.startsWith("Kumi · Goal best")) state.bestTrack = kept;
       }
       sync(); persist(); status(state.status, evolution);
-      const best = evolution.leader;
+      const best = reportedLeader(evolution);
       goalOp = undefined; goalStopped = false;
       emit({ type: "notice", message: `Goal ${state.status === "paused" ? "paused" : "done"}: ${best?.score !== undefined ? `${state.first !== undefined && Math.round(state.first) !== Math.round(best.score) ? `${Math.round(state.first)}% → ` : ""}${Math.round(best.score)}% (${best.label})` : "no score yet"} · ${state.generation} generations · ${state.rendered} candidates${state.bestTrack ? ` · the best is on “${state.bestTrack}”${state.status === "done" ? " (say if you want it on one of your tracks)" : ""}` : ""}${state.status === "paused" ? " · /goal carries on" : ""}.${notes.length ? ` ${notes.join(" ")}` : ""}` });
       goalState = state;

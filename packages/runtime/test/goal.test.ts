@@ -30,7 +30,7 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number, options: { reference?: string; leapEvery?: number } = {}) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number, options: { reference?: string; leapEvery?: number; beats?: number } = {}) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
@@ -47,7 +47,7 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook
         asked.push(input.split("<current_observation")[0]!);
         const tracks = JSON.parse((await call(tools, "live_discover", { kind: "track", fields: ["name"] })).text).live.items as { ref: string; name: string }[];
         const ref = (name: string) => tracks.find((track) => track.name === name)!.ref;
-        const span = { from_beat: 8, beats: 4, reference: options.reference ?? reference, focus: "sound" };
+        const span = { from_beat: 8, beats: options.beats ?? 4, reference: options.reference ?? reference, focus: "sound" };
         if (input.includes("Set the search up")) await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Dark"), label: "Dark Operator" }, { track: ref("Kumi · Goal · Bright"), label: "Bright Operator" }], ...span });
         else if (input.includes("structural leap")) { emit({ type: "text", text: "A third Operator, wider open." }); await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Wide"), label: "Wide Operator" }], ...span }); }
         return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
@@ -175,5 +175,57 @@ test("a target with a sub the candidates lack leads to a structural leap in the 
   assert.ok(leap, "a leap came");
   assert.ok(leapAt <= 3, `at once, not after the usual eight generations: generation ${leapAt}`);
   assert.match(leap!, /Knobs can't close this: .*sub.*Change the structure: add a sub layer/);
+  await r.session.close();
+});
+
+test("a goal's analyses are kept by settings: a render already heard isn't heard again, and a generation of only those renders nothing", async () => {
+  const b = bridge({ transport: true, version: "1.0.49", tempo: 480, renders: render, extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }] });
+  await b.integration.start(new AbortController().signal);
+  const observation = await b.integration.observe(new AbortController().signal);
+  const tracks = JSON.parse((await observation.tools.find((tool) => tool.name === "live_discover")!.execute({ kind: "track", fields: ["name"] }, new AbortController().signal)).text).live.items as { ref: string; name: string }[];
+  const rig = await b.integration.goal!({ candidates: [{ track: tracks.find((track) => track.name === "Kumi · Goal · Dark")!.ref, label: "Dark" }], fromBeat: 8, beats: 4, reference, focus: "sound" }, new AbortController().signal);
+  assert.ok(typeof rig !== "string", String(rig));
+  if (typeof rig === "string") return;
+  const slot = rig.slots[0]!;
+  const trial = { slot: slot.name, knobs: slot.knobs, values: slot.knobs.map((knob) => knob.value) };
+  const passes = () => b.requests.filter((request) => request.name === "live_transport_action_preview" && request.args.action === "start").length;
+  const first = await rig.generation([trial], new AbortController().signal);
+  assert.equal(first.cached, 0);
+  const before = passes();
+  const again = await rig.generation([trial], new AbortController().signal);
+  assert.equal(again.cached, 1);
+  assert.equal(again.scores.get(slot.name), first.scores.get(slot.name));
+  assert.equal(passes(), before, "nothing new to hear: no render");
+  const fresh = await rig.generation([{ ...trial, fresh: true }], new AbortController().signal);
+  assert.equal(fresh.cached, 0, "a recheck is heard afresh");
+  assert.equal(passes(), before + 1);
+  // A held rig: Main went down once for all three passes, and comes back when it closes.
+  assert.equal(b.requests.filter((request) => request.name === "live_mixer_preview" && request.args.trackRef === "7:main_track:0" && request.args.volume === 0).length, 1);
+  assert.equal(b.main.volume, 0);
+  await rig.close();
+  assert.equal(b.main.volume, 0.85);
+  await b.integration.close();
+});
+
+test("a long part is screened on a short, characteristic window of it, with the best heard at full length every few generations", async () => {
+  // Eight seconds of the reference's sound; the part is 48 beats (six seconds at 480 BPM).
+  // Quiet for its first half: its characteristic stretch is later on, and the window goes there.
+  const long = wav("goal-long-reference.wav", saw(8, 110, 2600).map((value, index) => (index < 4 * 48000 ? value * 0.05 : value)));
+  const longRenders = new Map<number, string>();
+  const renderLong = (_source: string, devices: readonly FixtureDevice[]) => {
+    const hz = Math.round(cutoff(devices[0]?.params.find((param) => param.name === "Filter Freq")?.value ?? 0.5) / 50) * 50;
+    if (!longRenders.has(hz)) longRenders.set(hz, wav(`goal-long-${hz}.wav`, saw(8, 110, hz)));
+    return longRenders.get(hz)!;
+  };
+  const r = rig(memoryGoals(), renderLong, undefined, undefined, { reference: long, beats: 48, leapEvery: 99 });
+  await r.session.start();
+  const running = r.session.goal!("make my pad sound like the reference");
+  while ((r.statuses().at(-1)?.generation ?? 0) < 6) await delay(50);
+  await r.session.stopGoal!(); await running;
+  // Two kinds of pass: the whole part (the setup, confirmations) from beat 4, and the window from later on.
+  const positions = new Set(r.b.requests.filter((request) => request.name === "live_transport_preview").map((request) => request.args.position));
+  assert.ok(positions.size >= 2, `screened and full passes start at different places: ${[...positions]}`);
+  const last = r.statuses().at(-1)!;
+  assert.ok(last.best !== undefined, "the best reported is a full-length score");
   await r.session.close();
 });
