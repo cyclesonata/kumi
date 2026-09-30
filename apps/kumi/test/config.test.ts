@@ -45,7 +45,9 @@ test("sign-in commands: login (browser, device, Pi import, a key asked for), log
   assert.deepEqual(loadConfig(["auth"], isolated), { mode: "auth", authFile: defaultAuth, settingsFile: isolated.KUMI_SETTINGS_FILE });
   // A key is asked for, never read from the command line, where shell history would keep it.
   assert.throws(() => loadConfig(["login", "anthropic", secret], {}), (error: unknown) => error instanceof Error && /asks for the API key/.test(error.message) && !error.message.includes(secret));
-  for (const args of [["login"], ["login", secret], ["logout", secret], ["login", "anthropic", "--device"], ["login", "openai-codex", "--token", secret], ["login", "openai-codex", "--device", "--from-pi"], ["logout", "openai-codex", "--all"], ["auth", secret]]) {
+  // `login` alone asks which way to sign in.
+  assert.equal(loadConfig(["login"], isolated).mode, "login-choose");
+  for (const args of [["login", secret], ["logout", secret], ["login", "anthropic", "--device"], ["login", "openai-codex", "--token", secret], ["login", "openai-codex", "--device", "--from-pi"], ["logout", "openai-codex", "--all"], ["auth", secret]]) {
     assert.throws(() => loadConfig(args, {}), (error: unknown) => error instanceof Error && !error.message.includes(secret));
   }
 });

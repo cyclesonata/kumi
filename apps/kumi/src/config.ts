@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { EFFORTS, parseModelId, PROVIDER_INFO, PROVIDERS, type Effort, type ProviderId } from "@kumi/runtime";
+import { KUMI_START } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -27,7 +28,9 @@ export type AppConfig =
   | { mode: "model"; settingsFile: string; model?: string }
   | { mode: "doctor" }
   | { mode: "report" }
-  | { mode: "update" }
+  | { mode: "update"; rollback: boolean }
+  | { mode: "uninstall"; all: boolean; yes: boolean }
+  | { mode: "login-choose"; authFile: string; piAuthFile: string; settingsFile: string }
   | (InferenceConfig & { mode: "inference-only"; bridgeMissing?: true })
   | (InferenceConfig & { mode: "live"; bridgeConfig: string });
 
@@ -145,7 +148,15 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
   if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
   if (args.length === 1 && args[0] === "report") return { mode: "report" };
-  if (args.length === 1 && args[0] === "update") return { mode: "update" };
+  if (args[0] === "update") {
+    if (args.length > 2 || (args[1] !== undefined && args[1] !== "--rollback")) throw new Error("Use: update [--rollback].");
+    return { mode: "update", rollback: args[1] === "--rollback" };
+  }
+  if (args[0] === "uninstall") {
+    const flags = args.slice(1);
+    if (flags.some((flag) => flag !== "--all" && flag !== "--yes")) throw new Error("Use: uninstall [--all] [--yes].");
+    return { mode: "uninstall", all: flags.includes("--all"), yes: flags.includes("--yes") };
+  }
   if (args[0] === "bridge") {
     const flags = args.slice(1);
     if (flags.some((flag) => flag !== "--yes" && flag !== "--allow-dirty")) throw new Error("Use: bridge [--yes] [--allow-dirty].");
@@ -155,6 +166,8 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
     if (args[1] !== undefined && !validModel(args[1])) throw new Error(`Use: model <provider>/<model>, with provider one of ${PROVIDERS.join(", ")}.`);
     return { mode: "model", settingsFile: loadSettingsFile(env), ...(args[1] ? { model: args[1] } : {}) };
   }
+  // `login` alone asks which way to sign in: a producer shouldn't need to know provider names.
+  if (args.length === 1 && args[0] === "login") return { mode: "login-choose", authFile: loadAuthFile(env), piAuthFile: join(homedir(), ".pi", "agent", "auth.json"), settingsFile: loadSettingsFile(env) };
   if (args[0] === "login" || args[0] === "logout") {
     if (!(PROVIDERS as readonly (string | undefined)[]).includes(args[1])) throw new Error(`Use: ${args[0]} <provider>, with provider one of ${PROVIDERS.join(", ")}.`);
     const provider = args[1] as ProviderId;
@@ -178,7 +191,7 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
       : { mode: "inference-only", bridgeMissing: true, ...loadInferenceConfig(env) };
   }
   if (args.length !== 2 || args[0] !== "--bridge-config" || !args[1] || args[1].startsWith("-")) {
-    throw new Error("Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.");
+    throw new Error(`Use: ${KUMI_START} [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.`);
   }
   const bridgeConfig = args[1];
   if (!isAbsolute(bridgeConfig)) throw new Error("--bridge-config requires an absolute path.");

@@ -4,6 +4,7 @@ import {
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { dirname, join } from "node:path";
 import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadGoalsDir, loadMemoryFile, loadRestoreFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
@@ -11,31 +12,43 @@ import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { writeReport } from "./report.js";
 import { newerKumi, olderBridge, runUpdate } from "./update.js";
+import { newerRelease, rollbackInstalled, uninstallInstalled, updateInstalled } from "./install.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
+import { INSTALLED, KUMI, KUMI_START } from "@kumi/runtime";
 
+/** One row of help: the command (as this Kumi is run) and what it does, lined up in two columns. */
+const helpRows = (rows: readonly (readonly [string, string])[]) => {
+  const width = Math.max(...rows.map(([command]) => command.length)) + 3;
+  return rows.map(([command, about]) => `  ${command.padEnd(width)}${about.replaceAll("\n", `\n  ${" ".repeat(width)}`)}`).join("\n");
+};
+const sub = (rest: string) => `${KUMI} ${rest}`;
 const HELP = `Kumi ${KUMI_VERSION} — producer assistant for Ableton Live
 
-First run (Node.js 22 or 24):
-  npm run setup                          Install and build Kumi and the Ableton bridge
-  npm run kumi -- bridge                 With Live closed: put the bridge into Live, or bring it up to date
-  npm run kumi                           Talk about the open Live Set; the installed bridge is found automatically.
-                                         Sign in there with /login, and choose a model with /model.
+First run:
+${helpRows([
+  ...(INSTALLED ? [] : [["npm run setup", "Install and build Kumi and the Ableton bridge (Node.js 22 or 24)"] as const]),
+  [sub("bridge"), "With Live closed: put the bridge into Live, or bring it up to date"],
+  [KUMI_START, "Talk about the open Live Set; the installed bridge is found automatically.\nSign in there with /login, and choose a model with /model."],
+])}
 
 More:
-  npm run kumi -- --inference-only       Chat without Live
-  npm run kumi -- --bridge-config /absolute/path/bridge-config.json
-  npm run kumi -- login <provider>       Sign in from the shell: openai-codex with a ChatGPT plan (--device
-                                         without a browser); anthropic, openai, opencode with an API key (asked for)
-  npm run kumi -- logout <provider>      Remove Kumi's sign-in for that provider
-  npm run kumi -- model [<provider>/<model>]   Show or choose the model
-  npm run kumi -- auth                   Show which providers are usable (no secrets)
-  npm run kumi -- doctor                 Check Node, sign-in, the bridge, Live and the terminal
-  npm run kumi -- update                 Bring Kumi up to date, and the bridge in Live when it's older
-  npm run kumi -- report                 Write a file to send when something goes wrong (no keys in it)
-  npm run kumi -- --version              Show Kumi's version
+${helpRows([
+  [sub("--inference-only"), "Chat without Live"],
+  [sub("--bridge-config <path>"), "Use this bridge configuration (an absolute path)"],
+  [sub("login"), "Sign in: asks whether with ChatGPT or an API key"],
+  [sub("login <provider>"), "Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"],
+  [sub("logout <provider>"), "Remove Kumi's sign-in for that provider"],
+  [sub("model [<provider>/<model>]"), "Show or choose the model"],
+  [sub("auth"), "Show which providers are usable (no secrets)"],
+  [sub("doctor"), "Check sign-in, the bridge, Live and the terminal"],
+  [sub("update"), "Bring Kumi up to date, and the bridge in Live when it's older"],
+  ...(INSTALLED ? [[sub("update --rollback"), "Go back to the Kumi you had before the last update"] as const, [sub("uninstall"), "Remove Kumi (your conversations and notes stay unless you say)"] as const] : []),
+  [sub("report"), "Write a file to send when something goes wrong (no keys in it)"],
+  [sub("--version"), "Show Kumi's version"],
+])}
 
 Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
 a key). An API key in ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENCODE_API_KEY is used when set.
@@ -47,7 +60,7 @@ learns by watching you.
 In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /undo /refresh /reconnect /new /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
-const BRIDGE_MISSING = "The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: npm run kumi -- bridge";
+const BRIDGE_MISSING = `The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: ${KUMI} bridge`;
 const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY]
   .filter((value): value is string => Boolean(value));
 
@@ -86,19 +99,41 @@ try {
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
-  else if (config.mode === "update") process.exitCode = await runUpdate({ out: process.stdout, env: process.env });
+  else if (config.mode === "update") process.exitCode = !INSTALLED ? await runUpdate({ out: process.stdout, env: process.env })
+    : config.rollback ? await rollbackInstalled({ out: process.stdout, env: process.env, input: process.stdin }) : await updateInstalled({ out: process.stdout, env: process.env, input: process.stdin });
+  else if (config.mode === "uninstall") {
+    if (INSTALLED) process.exitCode = await uninstallInstalled({ out: process.stdout, env: process.env, input: process.stdin }, config);
+    else { process.stdout.write("This Kumi runs from a copy of its repository; delete that folder to remove it (your files are in ~/.kumi).\n"); process.exitCode = 1; }
+  }
   else if (config.mode === "report") process.exitCode = await writeReport({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
-  else if (config.mode === "bridge") process.exitCode = await setupBridge({ out: process.stdout, env: process.env, input: process.stdin, yes: config.yes, allowDirty: config.allowDirty });
+  else if (config.mode === "bridge") process.exitCode = await setupBridge({ out: process.stdout, env: process.env, input: process.stdin, yes: config.yes, allowDirty: config.allowDirty,
+    // How long to wait for Live afterwards; KUMI_BRIDGE_WAIT_SECONDS=0 doesn't (the installer's own tests, where there's no Live).
+    ...(/^\d+$/.test(process.env.KUMI_BRIDGE_WAIT_SECONDS ?? "") ? { waitMs: Number(process.env.KUMI_BRIDGE_WAIT_SECONDS) * 1000 } : {}) });
   else if (config.mode === "auth") await authStatus(config, { out: process.stdout, env: process.env });
   else if (config.mode === "logout") await logout(config, { out: process.stdout, env: process.env });
   else if (config.mode === "model") {
     const settings = readSettings(config.settingsFile);
     if (config.model) writeSettings(config.settingsFile, { ...settings, model: config.model });
     const chosen = config.model ?? settings.model;
-    process.stdout.write(config.model ? `Model set to ${config.model}.\n` : `Model: ${chosen ?? "not chosen"}. Change it with: npm run kumi -- model <provider>/<model>\n`);
+    process.stdout.write(config.model ? `Model set to ${config.model}.\n` : `Model: ${chosen ?? "not chosen"}. Change it with: ${KUMI} model <provider>/<model>\n`);
     if (process.env.KUMI_MODEL) process.stdout.write(`KUMI_MODEL=${process.env.KUMI_MODEL} currently overrides it.\n`);
+  } else if (config.mode === "login-choose") {
+    const choices = [["openai-codex", "ChatGPT: sign in with your ChatGPT plan (opens your browser)"], ["anthropic", "Anthropic: paste an API key"], ["openai", "OpenAI: paste an API key"], ["opencode", "OpenCode: paste an API key"]] as const;
+    if (!process.stdin.isTTY) throw new Error(`Use: ${KUMI} login <provider>, with provider one of ${choices.map(([id]) => id).join(", ")}.`);
+    process.stdout.write(`How do you want to sign in?\n${choices.map(([, about], index) => `  ${index + 1}  ${about}`).join("\n")}\n`);
+    const reader = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = (await reader.question(`Choose 1–${choices.length}: `)).trim(); reader.close();
+    const chosen = choices[Number(answer) - 1];
+    if (!chosen) { process.stdout.write("Nothing chosen; nothing changed.\n"); process.exitCode = 1; }
+    else {
+      const cancel = new AbortController(); const interrupt = () => cancel.abort(); process.once("SIGINT", interrupt);
+      try {
+        await login({ mode: "login", provider: chosen[0], method: chosen[0] === "openai-codex" ? "browser" : "key", authFile: config.authFile, piAuthFile: config.piAuthFile, settingsFile: config.settingsFile },
+          { out: process.stdout, env: process.env, signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(15 * 60_000)]), input: process.stdin, ...(process.stdout.isTTY ? { openBrowser } : {}) });
+      } finally { process.removeListener("SIGINT", interrupt); }
+    }
   } else if (config.mode === "login") {
     const cancel = new AbortController();
     const interrupt = () => cancel.abort();
@@ -163,14 +198,14 @@ try {
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,
       panelTab: { load: () => readSettings(loadSettingsFile()).panelTab, save: (id) => { try { writeSettings(loadSettingsFile(), { ...readSettings(loadSettingsFile()), panelTab: id }); } catch { /* next time, then */ } } },
-      ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: npm run kumi -- update` } : {}) });
+      ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: ${KUMI} update` } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };
     process.on("SIGINT", interrupt); process.on("SIGTERM", terminate);
     const running = terminal.run();
     // A newer Kumi, asked of git at most once a day while Kumi starts; nothing is said without one.
-    void newerKumi({ cacheFile: join(dirname(loadSettingsFile()), "update-check.json") })
-      .then((latest) => { if (latest) terminal?.handleEvent({ type: "notice", message: `Kumi ${latest} is out (this is ${KUMI_VERSION}). Quit Kumi, then run: npm run kumi -- update` }); }, () => {});
+    void (INSTALLED ? newerRelease(join(dirname(loadSettingsFile()), "update-check.json")) : newerKumi({ cacheFile: join(dirname(loadSettingsFile()), "update-check.json") }))
+      .then((latest) => { if (latest) terminal?.handleEvent({ type: "notice", message: `Kumi ${latest} is out (this is ${KUMI_VERSION}). Quit Kumi, then run: ${KUMI} update` }); }, () => {});
     try { process.exitCode = await running; }
     finally {
       process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", terminate);

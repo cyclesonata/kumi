@@ -11,6 +11,7 @@ import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCrede
 import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
+import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -56,7 +57,7 @@ const newer = (left: string, right: string) => {
 function nodeCheck(version: string): Check {
   return SUPPORTED_NODE_MAJORS.includes(major(version))
     ? { status: "ok", text: `Node.js ${version.replace(/^v/, "")}` }
-    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or 24)`, next: "Install Node 24 LTS from https://nodejs.org, then run: npm run setup" };
+    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or 24)`, next: `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
 }
 
 async function signInCheck(env: Env): Promise<Check> {
@@ -69,12 +70,12 @@ async function signInCheck(env: Env): Promise<Check> {
     for (const provider of OFFER_ORDER) {
       if (await signedIn(provider)) return { status: "ok", text: `Signed in to ${PROVIDER_INFO[provider].name} · Kumi starts with its first model (/model changes it)` };
     }
-    return { status: "fix", text: "Not signed in to a provider", next: "npm run kumi -- login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key" };
+    return { status: "fix", text: "Not signed in to a provider", next: `${KUMI} login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key` };
   }
   const parsed = parseModelId(model);
   if (!parsed) return { status: "fix", text: `The model "${model.slice(0, 80)}" isn't one Kumi knows`, next: "Choose one with /model in Kumi" };
   const info = PROVIDER_INFO[parsed.provider];
-  if (!(await signedIn(parsed.provider))) return { status: "fix", text: `Not signed in to ${info.name} (model ${model})`, next: `npm run kumi -- login ${parsed.provider}` };
+  if (!(await signedIn(parsed.provider))) return { status: "fix", text: `Not signed in to ${info.name} (model ${model})`, next: `${KUMI} login ${parsed.provider}` };
   if (info.signIn === "chatgpt") return { status: "ok", text: `Signed in to ChatGPT · model ${model}` };
   const key = await apiKeyFor(parsed.provider, store, env).catch(() => undefined);
   return { status: "ok", text: `${parsed.provider} API key ${key?.source === "env" ? `from ${info.keyEnv}` : "saved in Kumi"} · model ${model}` };
@@ -98,19 +99,19 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const checks: Check[] = [node, await signInCheck(env)];
   const configPath = findBridgeConfig(env);
   if (!configPath) {
-    checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: "Quit Live, then run: npm run kumi -- bridge" });
+    checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: `Quit Live, then run: ${KUMI} bridge` });
   } else {
     let server: BridgeServer = {};
     try { server = readBridgeServer(configPath); } catch { /* reported below */ }
     const version = server.version ? ` ${server.version}` : "";
     checks.push({ status: "ok", text: `Ableton bridge${version} (${tilde(configPath)})` });
     if (server.version && io.bundledBridgeVersion && newer(io.bundledBridgeVersion, server.version)) {
-      checks.push({ status: "fix", text: `The installed bridge (${server.version}) is older than this Kumi's (${io.bundledBridgeVersion})`, next: "Quit Live, then run: npm run kumi -- bridge" });
+      checks.push({ status: "fix", text: `The installed bridge (${server.version}) is older than this Kumi's (${io.bundledBridgeVersion})`, next: `Quit Live, then run: ${KUMI} bridge` });
     }
     // Kumi starts this repository's bridge with its own Node; the configuration's command is how
     // other MCP apps start it, so problems there are notes. Only an install or an upgrade to a
     // newer bridge rewrites it (repair and activation keep it), hence "the next upgrade".
-    const later = "Kumi isn't affected. Install Node 24 LTS (nodejs.org); the next npm run kumi -- bridge records it";
+    const later = INSTALLED ? `Kumi isn't affected. The next ${KUMI} bridge records Kumi's own Node` : `Kumi isn't affected. Install Node 24 LTS (nodejs.org); the next ${KUMI} bridge records it`;
     if (!server.command) checks.push({ status: "note", text: "The bridge configuration names no Node for other MCP apps", next: later });
     else {
       let runnable = true;
@@ -132,8 +133,8 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
       // (said above), or Live not open, not using it, or held by a dialog.
       const current = Boolean(server.version && io.bundledBridgeVersion && !newer(io.bundledBridgeVersion, server.version));
       checks.push(node.status === "fix" ? { status: "note", text: "The bridge didn't start; it needs Node 22 or 24 too" }
-        : current ? { status: "fix", text: "Kumi's bridge couldn't reach Live", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it first. Then: npm run kumi -- doctor" }
-        : { status: "fix", text: "The bridge didn't start", next: "Build it (npm run setup), and bring Live's part up to date: quit Live, then run npm run kumi -- bridge. Then: npm run kumi -- doctor" });
+        : current ? { status: "fix", text: "Kumi's bridge couldn't reach Live", next: `Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it first. Then: ${KUMI} doctor` }
+        : { status: "fix", text: "The bridge didn't start", next: `Build it (${KUMI_REPAIR}), and bring Live's part up to date: quit Live, then run ${KUMI} bridge. Then: ${KUMI} doctor` });
     }
     else if (!live.connected) checks.push({ status: "fix", text: "Live isn't connected", next: "Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI)" });
     else {

@@ -5,6 +5,7 @@ import {
 } from "@kumi/runtime";
 import { readSettings, type AppConfig } from "./config.js";
 import { createModelControl, OFFER_ORDER } from "./models.js";
+import { KUMI, KUMI_START } from "@kumi/runtime";
 
 /** Where a key is typed or piped from. */
 export interface KeyInput extends NodeJS.EventEmitter {
@@ -46,7 +47,7 @@ export async function login(config: Extract<AppConfig, { mode: "login" }>, io: I
     }
   }
   const model = io.env.KUMI_MODEL ?? readSettings(config.settingsFile).model;
-  if (!model) io.out.write(`Next: npm run kumi. It starts with ${info.name}'s first model; /model changes it.\n`);
+  if (!model) io.out.write(`Next: ${KUMI_START}. It starts with ${info.name}'s first model; /model changes it.\n`);
   else if (!model.startsWith(`${config.provider}/`)) io.out.write(`Kumi still talks to ${model}; choose one of ${info.name}'s models with /model in Kumi.\n`);
 }
 
@@ -71,10 +72,10 @@ export async function authStatus(config: Extract<AppConfig, { mode: "auth" }>, i
       const held = await store.get(OPENAI_CODEX);
       const codex = held?.type === "oauth" ? held : undefined;
       const hours = codex ? Math.floor((codex.expires - Date.now()) / 3_600_000) : 0;
-      status = !codex ? "not signed in (npm run kumi -- login openai-codex)" : hours >= 1 ? `signed in (token valid ~${hours} h; refreshes automatically)` : "signed in (token refreshes on next use)";
+      status = !codex ? `not signed in (${KUMI} login openai-codex)` : hours >= 1 ? `signed in (token valid ~${hours} h; refreshes automatically)` : "signed in (token refreshes on next use)";
     } else {
       const key = await apiKeyFor(provider, store, io.env);
-      status = key?.source === "env" ? `API key from ${info.keyEnv}` : key ? "API key saved in Kumi" : `not signed in (npm run kumi -- login ${provider})`;
+      status = key?.source === "env" ? `API key from ${info.keyEnv}` : key ? "API key saved in Kumi" : `not signed in (${KUMI} login ${provider})`;
     }
     lines.push(`${provider.padEnd(13)} ${status}`);
   }

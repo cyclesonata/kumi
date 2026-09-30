@@ -7,6 +7,7 @@ import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
 import { sanitizeText, StreamingText } from "./text.js";
+import { KUMI } from "@kumi/runtime";
 
 interface Options {
   controller: SessionController;
@@ -27,7 +28,7 @@ export interface Terminal {
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = `/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: ${KUMI} login <provider>.`;
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -234,7 +235,7 @@ export function createTerminal(options: Options): Terminal {
         if (!note) notice("[memory] Use: /forget <id>, with an id from /memory.");
         return;
       }
-      if (verb === "/login") { notice("[login] Sign in from a shell: npm run kumi -- login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here."); return; }
+      if (verb === "/login") { notice(`[login] Sign in from a shell: ${KUMI} login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here.`); return; }
       if (verb === "/logout") {
         if (!argument || !(PROVIDERS as readonly string[]).includes(argument)) { notice(`[logout] Use: /logout <provider> (${PROVIDERS.join(", ")}).`); return; }
         notice(await options.models.signOut(argument as ProviderId) ? `[logout] Signed out of ${argument}.` : `[logout] There was no sign-in for ${argument} to remove.`); return;
@@ -305,7 +306,7 @@ export function createTerminal(options: Options): Terminal {
       case "error":
         reportError(new Error(event.message)); text.discard();
         // Plain lines can't show the key box: say which command signs in there.
-        if (event.kind === "auth" && event.provider && (PROVIDERS as readonly string[]).includes(event.provider)) notice(`[login] Sign in from a shell: npm run kumi -- login ${event.provider}`);
+        if (event.kind === "auth" && event.provider && (PROVIDERS as readonly string[]).includes(event.provider)) notice(`[login] Sign in from a shell: ${KUMI} login ${event.provider}`);
         break;
       case "text": {
         if (suppressOutput) return;
@@ -362,7 +363,7 @@ export function createTerminal(options: Options): Terminal {
       // No model yet: the first one a signed-in provider lists.
       if (!options.models.current().model) {
         void options.models.chooseDefault().then((chosen) => {
-          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : "[model] Not signed in to a provider yet. Sign in with: npm run kumi -- login <provider>, then /model.");
+          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model.`);
         }, () => undefined);
       }
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { KumiError } from "../core/errors.js";
 import type { CredentialStore, OAuthCredential } from "./store.js";
+import { KUMI } from "../command.js";
 
 // ChatGPT-plan sign-in, as used by Codex. There is no third-party client registration, so Kumi uses
 // Codex's public client ID and identifies itself honestly through `originator` and its User-Agent.
@@ -17,7 +18,7 @@ export const DEVICE_VERIFICATION_URL = `${AUTH_BASE}/codex/device`;
 const SCOPE = "openid profile email offline_access";
 const REFRESH_MARGIN_MS = 5 * 60_000;
 const DEVICE_TIMEOUT_MS = 15 * 60_000;
-export const LOGIN_HINT = "Sign in with /login in Kumi, or: npm run kumi -- login openai-codex";
+export const LOGIN_HINT = `Sign in with /login in Kumi, or: ${KUMI} login openai-codex`;
 
 type Fetch = typeof fetch;
 export interface LoginOptions { signal: AbortSignal; fetch?: Fetch }

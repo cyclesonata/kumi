@@ -24,6 +24,7 @@ import type { Knob } from "../../core/evolve.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
+import { KUMI } from "../../command.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -2082,7 +2083,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       } catch {
         options.onConnection("error");
         // The usual cause after updating Kumi: Live's Remote Script is from an older bridge than Kumi's.
-        throw new KumiError("live", "Kumi couldn't start its bridge to Live. After updating Kumi, Live's part needs updating too: quit Live, then run npm run kumi -- bridge. Otherwise: npm run kumi -- doctor");
+        throw new KumiError("live", `Kumi couldn't start its bridge to Live. After updating Kumi, Live's part needs updating too: quit Live, then run ${KUMI} bridge. Otherwise: ${KUMI} doctor`);
       }
     },
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),
