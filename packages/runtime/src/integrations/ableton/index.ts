@@ -2141,8 +2141,10 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         const song = tools!.has("live_song_state") ? settle(tools!.call("live_song_state", {}, signal, { host: true }).then(payload)) : Promise.resolve(undefined);
         const discover = tools!.has("live_discover");
         const read = (args: JsonObject) => settle(discover ? tools!.call("live_discover", args, signal, { host: true }) : Promise.reject(new ObservationError("Required Set discovery capability is unavailable")));
-        const [statusRead, setRead, tracksRead, devicesRead] = await Promise.all([
-          settle(tools!.call("live_status", {}, signal, { host: true }).then(statusPayload)), read(setArgs), read(trackArgs), read(deviceArgs)]);
+        // And what's selected in Live, so "this track" means something.
+        const selectionArgs = discoveryArgs({ kind: "selection", limit: 1 });
+        const [statusRead, setRead, tracksRead, devicesRead, selectionRead] = await Promise.all([
+          settle(tools!.call("live_status", {}, signal, { host: true }).then(statusPayload)), read(setArgs), read(trackArgs), read(deviceArgs), read(selectionArgs)]);
         const songRead = await song;
         assertLease(lease, signal);
         if ("error" in statusRead) throw statusRead.error;
@@ -2202,6 +2204,16 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
             } catch (error) { if (lease !== observationGeneration) throw error; }
           }
         } catch (error) { if (lease !== observationGeneration) throw error; trackList = undefined; }
+        // What's selected in Live: its track (by the reference the model uses, and its name) and scene.
+        let selected: JsonObject | undefined;
+        try {
+          if ("value" in selectionRead && !selectionRead.value.isError) {
+            const row = discoveryPayload(selectionRead.value, "selection", epoch).items[0];
+            const trackRef = typeof row?.selectedTrackRef === "string" ? row.selectedTrackRef : undefined;
+            const track = trackRef ? known.get(trackRef) : undefined;
+            if (trackRef && track) selected = { track: { ref: shortRef(trackRef), name: track.name }, note: "\"This track\" or \"here\" in the producer's words means this one, unless they pointed at something in Kumi." };
+          }
+        } catch { selected = undefined; }
         options.onConnection("connected");
         const restored = await restoreAfterCrash(identity, typeof row.filePath === "string" ? row.filePath : undefined, signal); assertLease(lease, signal);
         const name = typeof row.name === "string" && row.name.trim() ? row.name.slice(0, 256) : "(unnamed/unsaved)";
@@ -2245,6 +2257,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
             ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             ...(pinned ? { pinned } : {}),
+            ...(selected ? { selectedInLive: selected } : {}),
             ...(restored ? { restoredAfterCrash: restored } : {}),
             // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
             ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),

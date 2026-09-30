@@ -20,7 +20,7 @@ test("budget: reading the Set before an answer is one round trip to Live", async
   const b = await opened();
   try {
     const { trips, calls } = await b.roundTrips(() => b.integration.observe(signal()));
-    assert.equal(calls, 4, "status, the Set, its tracks and their devices");
+    assert.equal(calls, 5, "status, the Set, its tracks, their devices and what's selected");
     assert.equal(trips, 1, `the observation's reads go together: ${trips} ${TICK}`);
   } finally { await b.integration.close(); }
 });
@@ -105,4 +105,12 @@ test("budget: keeping a note costs no model reply and no round trip to Live", as
     assert.equal(replies, 1, `model replies for an answer that keeps a note: ${replies}, each seconds long`);
     await kernel.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the observation says what's selected in Live, so \"this track\" means something", async () => {
+  const b = await opened();
+  try {
+    const context = JSON.parse(b.observation.context) as { selectedInLive?: { track: { name: string } } };
+    assert.equal(context.selectedInLive?.track.name, "Fixture Bass");
+  } finally { await b.integration.close(); }
 });

@@ -98,6 +98,7 @@ export function bridge(options: Options = {}) {
         const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo, ...(options.savedSet ? { filePath: options.savedSet } : {}) };
         const items = args.kind === "set" ? [set] : args.kind === "track"
           ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true }))
+          : args.kind === "selection" ? [{ ref: "7:selection:0", selectedTrackRef: "7:track:0" }]
           : args.kind === "main-track" ? [{ ref: "7:main_track:0", parentRef: set.ref, name: "Main", kind: "main", mixer: { volume: main.volume } }]
           : args.kind === "device" && options.renders && typeof args.parent === "string" ? (tracks[Number(args.parent.split(":").at(-1))]?.devices ?? []).map((device, index) => ({ ref: `${args.parent as string}:d${index}`.replace(":track:", ":device:"), parentRef: args.parent, name: device.name, className: device.className }))
           : args.kind === "parameter" && options.renders && typeof args.parent === "string" && /:device:\d+:d\d+$/.test(args.parent) ? (() => {
