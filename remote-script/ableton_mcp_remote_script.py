@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 PROTOCOL = "ableton-loopback/v1"
-_DIAGNOSTICS_MAX_BYTES = 256 * 1024
+_DIAGNOSTICS_MAX_BYTES = 16 * 1024 * 1024
 _DIAGNOSTICS_QUEUE_LIMIT = 64
 _DIAGNOSTICS_RECORD_LIMIT = 512
 _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure", "bridge-accept-failure"}

@@ -47,7 +47,7 @@ def _normalize_bridge_config(value: Any) -> dict[str, Any]:
         if realtime_port is not None and (not isinstance(realtime_port, int) or isinstance(realtime_port, bool) or not 1 <= realtime_port <= 65535 or realtime_port == bridge.get("port")):
             raise ValueError("unsupported bridge configuration")
         diagnostics = bridge.get("diagnostics")
-        if diagnostics is not None and (not isinstance(diagnostics, dict) or set(diagnostics) != {"path", "maxBytes"} or not isinstance(diagnostics.get("path"), str) or not Path(diagnostics["path"]).is_absolute() or diagnostics.get("maxBytes") != 256 * 1024):
+        if diagnostics is not None and (not isinstance(diagnostics, dict) or set(diagnostics) != {"path", "maxBytes"} or not isinstance(diagnostics.get("path"), str) or not Path(diagnostics["path"]).is_absolute() or diagnostics.get("maxBytes") != 16 * 1024 * 1024):
             raise ValueError("unsupported bridge diagnostics configuration")
         normalized = {"version": 1, "host": bridge["host"], "port": bridge["port"], "secretFile": bridge["secretFile"]}
         if realtime_port is not None:

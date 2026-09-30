@@ -52,10 +52,10 @@ class BridgeConfigNormalizationTests(unittest.TestCase):
     def test_version_two_accepts_only_the_bounded_diagnostics_shape(self):
         base = {"version": 2, "server": {"command": "node", "args": []}, "bridge": {"host": "127.0.0.1", "port": 9765, "secretFile": "/tmp/secret", "timeoutMs": 5000}}
         absolute_path = str((Path(tempfile.gettempdir()) / "owner" / "bridge-diagnostics.log").resolve())
-        diagnostics = {"path": absolute_path, "maxBytes": 256 * 1024}
+        diagnostics = {"path": absolute_path, "maxBytes": 16 * 1024 * 1024}
         normalized = _normalize_bridge_config({**base, "bridge": {**base["bridge"], "diagnostics": diagnostics}})
         self.assertEqual(normalized["diagnostics"], diagnostics)
-        for invalid in [{"path": "relative.log", "maxBytes": 256 * 1024}, {"path": absolute_path, "maxBytes": 1}, {"path": absolute_path, "maxBytes": 256 * 1024, "extra": True}, True]:
+        for invalid in [{"path": "relative.log", "maxBytes": 16 * 1024 * 1024}, {"path": absolute_path, "maxBytes": 1}, {"path": absolute_path, "maxBytes": 256 * 1024}, {"path": absolute_path, "maxBytes": 16 * 1024 * 1024, "extra": True}, True]:
             with self.assertRaises(ValueError):
                 _normalize_bridge_config({**base, "bridge": {**base["bridge"], "diagnostics": invalid}})
 
@@ -125,7 +125,7 @@ class DiagnosticsSecurityTests(unittest.TestCase):
     def test_thread_start_failure_and_prefilled_oversize_file_fail_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._owner_file(directory)
-            path.write_bytes(b"sensitive-canary" * 30000)
+            path.write_bytes(b"sensitive-canary" * (remote_module._DIAGNOSTICS_MAX_BYTES // 16 + 1))
             bounded = self._sink(path, start_writer=False)
             self.assertTrue(bounded.enabled); self.assertEqual(path.stat().st_size, 0)
             bounded.close()
@@ -165,9 +165,9 @@ class DiagnosticsSecurityTests(unittest.TestCase):
                 # One near-boundary write proves rotation without launching the
                 # Windows security verifier thousands of times.
                 self.assertIsNotNone(bounded._fd)
-                os.write(bounded._fd, b"x" * (256 * 1024 - 1))
+                os.write(bounded._fd, b"x" * (remote_module._DIAGNOSTICS_MAX_BYTES - 1))
                 bounded._write((1, "realtime-packet-failure", "internal-error"))
-                self.assertLessEqual(path.stat().st_size, 256 * 1024)
+                self.assertLessEqual(path.stat().st_size, remote_module._DIAGNOSTICS_MAX_BYTES)
                 self.assertNotIn(b"x", path.read_bytes())
             finally: bounded.close()
 
