@@ -17,7 +17,8 @@ export const PACKAGE_VERSION = PACKAGE_METADATA.version;
 export const SUPPORTED_NODE_MAJORS: readonly number[] = Object.freeze([...configuredNodeMajors] as number[]);
 export const NODE_ENGINE_RANGE = String(PACKAGE_METADATA.engines?.node ?? "");
 export const SUPPORTED_PLATFORMS = ["darwin", "linux", "win32"] as const;
-export const BRIDGE_DIAGNOSTICS_MAX_BYTES = 256 * 1024;
+/** The Remote Script's diagnostics log bound (its _DIAGNOSTICS_MAX_BYTES): the two must be equal. */
+export const BRIDGE_DIAGNOSTICS_MAX_BYTES = 16 * 1024 * 1024;
 export const REMOTE_SCRIPT_ASSET = "ableton_mcp_remote_script.py";
 export const REMOTE_SCRIPT_PACKAGE = "AbletonMcpBridge";
 export const OPERATION_REGISTRY_ASSET = "ableton-live-v1.operations.json";

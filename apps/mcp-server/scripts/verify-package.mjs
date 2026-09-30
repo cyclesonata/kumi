@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { npmExecutable } from "../dist/src/platform.js";
+import { BRIDGE_DIAGNOSTICS_MAX_BYTES } from "../dist/src/delivery.js";
 import { validatePackagedDocumentation } from "./release-documentation.mjs";
 
 const packageDirectory = new URL("..", import.meta.url);
@@ -172,7 +173,7 @@ try {
     encoding: "utf8",
   });
   const loadedBridgeConfig = JSON.parse(loaderOutput);
-  if (loadedBridgeConfig.host !== "127.0.0.1" || loadedBridgeConfig.port !== controlPort || loadedBridgeConfig.realtimePort !== realtimePort || loadedBridgeConfig.secretLength < 32 || loadedBridgeConfig.diagnostics?.maxBytes !== 256 * 1024 || loadedBridgeConfig.diagnostics?.path !== join(lifecycleState, "bridge-diagnostics.log")) throw new Error("installed Live loader rejected or misread the lifecycle bridge configuration");
+  if (loadedBridgeConfig.host !== "127.0.0.1" || loadedBridgeConfig.port !== controlPort || loadedBridgeConfig.realtimePort !== realtimePort || loadedBridgeConfig.secretLength < 32 || loadedBridgeConfig.diagnostics?.maxBytes !== BRIDGE_DIAGNOSTICS_MAX_BYTES || loadedBridgeConfig.diagnostics?.path !== join(lifecycleState, "bridge-diagnostics.log")) throw new Error("installed Live loader rejected or misread the lifecycle bridge configuration");
   const migratedV2Path = join(temporaryDirectory, "migrated-v2.json");
   execFileSync(process.execPath, [join(installedPackageDirectory, "dist", "src", "migrate.js"), "--input", configPath, "--output", migratedV2Path, "--bridge-host", "127.0.0.1", "--bridge-port", String(controlPort), "--realtime-port", String(realtimePort), "--secret-file", join(lifecycleState, "bridge.secret")], { encoding: "utf8" });
   const migratedV2 = JSON.parse(readFileSync(migratedV2Path, "utf8"));
@@ -223,7 +224,7 @@ secret_path = os.environ.get("ABLETON_MCP_SMOKE_SECRET_FILE")
 diagnostics_path = os.environ.get("ABLETON_MCP_SMOKE_DIAGNOSTICS_FILE")
 if not secret_path or not diagnostics_path:
     raise RuntimeError("package smoke owner files were not provided through the environment")
-bridge = AbletonMcpBridge(Instance(), {"host":"127.0.0.1", "port":port, "secret":pathlib.Path(secret_path).read_text(encoding="utf-8").strip(), "diagnostics":{"path":diagnostics_path,"maxBytes":256 * 1024}}, diagnostics_validator=_diagnostics_path_safe)
+bridge = AbletonMcpBridge(Instance(), {"host":"127.0.0.1", "port":port, "secret":pathlib.Path(secret_path).read_text(encoding="utf-8").strip(), "diagnostics":{"path":diagnostics_path,"maxBytes":${BRIDGE_DIAGNOSTICS_MAX_BYTES}}}, diagnostics_validator=_diagnostics_path_safe)
 try:
     raise RuntimeError("diagnostics-secret-canary /Users/example/Project.als browser-query token mac pcm")
 except RuntimeError:
@@ -235,7 +236,7 @@ while time.time() < diagnostics_deadline:
     time.sleep(0.02)
 else:
     bridge.disconnect(); raise RuntimeError("configured diagnostics sink produced no record")
-if "diagnostics-secret-canary" in logged or "Project.als" in logged or pathlib.Path(diagnostics_path).stat().st_size > 256 * 1024:
+if "diagnostics-secret-canary" in logged or "Project.als" in logged or pathlib.Path(diagnostics_path).stat().st_size > ${BRIDGE_DIAGNOSTICS_MAX_BYTES}:
     bridge.disconnect(); raise RuntimeError("configured diagnostics sink leaked or exceeded its bound")
 deadline = time.time() + 5.0
 while time.time() < deadline:
