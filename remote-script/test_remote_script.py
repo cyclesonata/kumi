@@ -638,7 +638,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "01eb8c0617599cf79982899247af498b064bc0e28cc0496c57fd972c3f4f5af2")
+        self.assertEqual(digest, "ac87e255f7396663f66d11965f42df57ddde755c6872e7370ed14f9eded87909")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -7621,3 +7621,51 @@ class ReadsMessagesAndPreviewTests(unittest.TestCase):
         self.assertEqual(browser.previews, ["Kick 808.wav", "Snare.wav", "stop"])
         with self.assertRaisesRegex(ValueError, "identity changed since it was found"): bridge.mapper.invoke("browser.preview.start", {"itemId": kick["id"], "expectedName": "Kick 909.wav", "expectedItemIdentity": kick["objectIdentity"]})
         self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("browser.preview.start"))
+
+
+def duplicable(owner, append=False):
+    """Give a track or chain Live's duplicate_device (the copy right after the device) and delete_device."""
+    def duplicate_device(index):
+        source = owner.devices[index]; copy = FakeDevice(); copy.name = source.name; copy.class_name = source.class_name
+        owner.devices.insert(len(owner.devices) if append else index + 1, copy)
+    owner.duplicate_device = duplicate_device; owner.delete_device = lambda index: owner.devices.pop(index)
+    return owner
+
+
+class DeviceDuplicationTests(unittest.TestCase):
+    """device.duplicate: a transaction creation fenced on the device, its owner and siblings."""
+
+    def request(self, mapper, device_row, owner_row, siblings, **fields):
+        return {"ref": device_row["ref"], "expectedName": device_row["name"], "expectedObjectIdentity": device_row["objectIdentity"], "expectedOwnerRef": owner_row["ref"], "expectedOwnerIdentity": owner_row["objectIdentity"], "expectedSiblings": [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for row in siblings], **fields}
+
+    def test_a_copy_lands_right_after_the_device_and_its_transaction_can_take_it_away(self):
+        song = FakeSong(); track = duplicable(song.tracks[0]); eq, comp = FakeDevice(), FakeDevice(); eq.name = "EQ Eight"; comp.name = "Compressor"; track.devices = [eq, comp]
+        bridge = immediate_bridge(song, provenance="real-live"); row = bridge.mapper.snapshot()["tracks"][0]
+        self.assertTrue(bridge.mapper._operation_supported("device.duplicate")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("device.duplicate"))
+        made = mutate_through(bridge, "device.duplicate", self.request(bridge.mapper, row["devices"][0], row, row["devices"]), "duplicate-key-0001", transaction="transaction-duplicate")
+        self.assertEqual((made["ref"], made["name"], made["index"]), (f"{bridge.mapper.refs.epoch}:device:0:1", "EQ Eight", 1))
+        self.assertEqual([device.name for device in track.devices], ["EQ Eight", "EQ Eight", "Compressor"]); self.assertIs(track.devices[0], eq)
+        self.assertRegex(made["ownershipToken"], r"^[A-Za-z0-9_-]{32,128}$"); self.assertEqual(made["createdFingerprint"], bridge.mapper._ownership_fingerprint(made["ref"]))
+        # Undo: the transaction that made the copy deletes it with its ownership.
+        row = bridge.mapper.snapshot()["tracks"][0]; copy_row = row["devices"][1]
+        delete = {"ref": copy_row["ref"], "expectedObjectIdentity": copy_row["objectIdentity"], "expectedOwnerRef": row["ref"], "expectedOwnerIdentity": row["objectIdentity"], "expectedSiblings": [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in row["devices"]], "expectedTrackRef": row["ref"], "expectedTrackIdentity": row["objectIdentity"]}
+        answer = bridge._dispatch_with_holder("mutate", {"operation": "device.delete", "transactionId": "transaction-duplicate", "idempotencyKey": "undo-duplicate-0001", "ownershipToken": made["ownershipToken"], "args": delete}, {})
+        self.assertEqual(answer, {"deleted": copy_row["ref"]}); self.assertEqual(track.devices, [eq, comp])
+
+    def test_a_misplaced_copy_is_taken_away_and_the_fences_hold(self):
+        song = FakeSong(); track = duplicable(song.tracks[0], append=True); eq, comp = FakeDevice(), FakeDevice(); eq.name = "EQ Eight"; comp.name = "Compressor"; track.devices = [eq, comp]
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        with self.assertRaisesRegex(ValueError, "isn't right after the device"): mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"]))
+        self.assertEqual(track.devices, [eq, comp])
+        with self.assertRaisesRegex(ValueError, "takes its identity, owner and siblings"): mapper.invoke("device.duplicate", {"ref": row["devices"][0]["ref"]})
+        with self.assertRaisesRegex(ValueError, "device name changed since preview"): mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"], expectedName="Old Name"))
+        with self.assertRaisesRegex(ValueError, "owner or siblings changed"): mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"][:1]))
+
+    def test_a_device_in_a_rack_chain_is_copied_within_its_chain(self):
+        song = FakeSong(); rack = FakeRackDevice(); inner = FakeDevice(); inner.name = "Saturator"
+        chain = duplicable(type("Chain", (), {"name": "Chain 1", "mute": False, "solo": False})()); chain.devices = [inner]; rack.chains = [chain]; song.tracks[0].devices = [rack]
+        mapper = LiveObjectMapper(song); rack_row = mapper.snapshot()["tracks"][0]["devices"][0]; chain_row = rack_row["chains"][0]; device_row = chain_row["devices"][0]
+        made = mapper.invoke("device.duplicate", self.request(mapper, device_row, chain_row, chain_row["devices"]))
+        validate_operation_payload("device.duplicate", "result", made)
+        self.assertEqual((made["ref"], [device.name for device in chain.devices]), (f"{mapper.refs.epoch}:device:0:0:0:1", ["Saturator", "Saturator"]))
+        self.assertIs(mapper._device_owner_of(made["ref"]), chain)

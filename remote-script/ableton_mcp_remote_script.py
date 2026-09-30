@@ -302,7 +302,7 @@ def _debug_trace(context: str) -> None:
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
 _READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
-_TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
+_TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "device.duplicate", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
 # Deletions of an existing object the producer previewed and confirmed, never an undo or a cleanup:
@@ -1106,6 +1106,8 @@ class LiveObjectMapper:
             return self._offers("track", "insert_device") or self._offers("chain", "insert_device")
         if operation == "device.delete":
             return self._offers("track", "delete_device")
+        if operation == "device.duplicate":
+            return self._offers("track", "duplicate_device", "delete_device") or self._offers("chain", "duplicate_device", "delete_device")
         if operation == "device.enable":
             if self._probe_classes("device"): return self._offers("device", "parameters", method=False)
             return any(self._device_on_parameter(device) is not None for device in self._shape_probe()["device"])
@@ -3402,6 +3404,8 @@ class LiveObjectMapper:
             return self._device_enable(args)
         if operation == "device.move":
             return self._device_move(args)
+        if operation == "device.duplicate":
+            return self._device_duplicate(args)
         if operation == "browser.search":
             return self._browser_search(args)
         if operation == "browser.roots":
@@ -4326,7 +4330,7 @@ class LiveObjectMapper:
                     if self._capture_object_identity(clip) != identity or not callable(getattr(owner, "delete_clip", None)): raise ValueError("unattached Arrangement clip is not exactly deletable")
                     owner.delete_clip(clip)
                 elif kind == "device":
-                    track_ref = (result.get("parentTrackRef") or args.get("trackRef")) if operation == "browser.load" and isinstance(result, dict) else args.get("trackRef"); track = self.refs.get(str(track_ref)); devices = self._items(getattr(track, "devices", [])); matches = [index for index, device in enumerate(devices) if self._capture_object_identity(device) == identity]
+                    track_ref = (result.get("parentTrackRef") or args.get("trackRef")) if operation == "browser.load" and isinstance(result, dict) else args.get("trackRef"); track = self._device_owner_of(reference) if operation == "device.duplicate" else self.refs.get(str(track_ref)); devices = self._items(getattr(track, "devices", [])); matches = [index for index, device in enumerate(devices) if self._capture_object_identity(device) == identity]
                     if len(matches) != 1 or not callable(getattr(track, "delete_device", None)): raise ValueError("unattached device is not exactly deletable")
                     track.delete_device(matches[0])
                 elif kind == "locator":
@@ -9043,6 +9047,52 @@ class LiveObjectMapper:
             raise
         owner_path = ":".join(owner_ref.split(":")[2:]); new_ref = self.refs.put("device", device, f"{owner_path}:{index}")
         return {"ref": new_ref, "objectIdentity": expected_identity, "index": index}
+
+    def _device_owner_of(self, reference: str) -> Any:
+        """The track or chain a device ref's place is in: its path without the device's own index."""
+        parts = reference.split(":")
+        if len(parts) < 4 or parts[0] != str(self.refs.epoch) or parts[1] != "device": raise ValueError("device reference is stale or invalid")
+        owner_path = parts[2:-1]
+        if len(owner_path) == 1 and owner_path[0].isdigit():
+            entry = self._track_entry(int(owner_path[0]))
+            if entry is None: raise ValueError("device owner is stale or unavailable")
+            return entry[0]
+        return self.refs.get(f"{self.refs.epoch}:chain:{':'.join(owner_path)}")
+
+    def _device_duplicate(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A copy of a device right after it, on its track or chain (Live's duplicate_device), as the
+        preview found the device, its owner and its siblings (and its name, when given). The copy must
+        be one new device of the same kind in that place with every other device where it was, or it
+        is taken away again. A transaction creation: its transaction owns the copy's cleanup."""
+        if set(args) - {"ref", "expectedName", "expectedObjectIdentity", "expectedOwnerRef", "expectedOwnerIdentity", "expectedSiblings"}: raise ValueError("device duplication arguments are invalid")
+        reference = args.get("ref")
+        if any(args.get(key) is None for key in ("expectedObjectIdentity", "expectedOwnerRef", "expectedOwnerIdentity", "expectedSiblings")): raise ValueError("duplicating a device takes its identity, owner and siblings as previewed")
+        track_index = self._ref_track_index(reference); entry = self._track_entry(track_index) if track_index is not None else None
+        if entry is None: raise ValueError("device reference is stale or invalid")
+        track_ref = self.refs.put("track", entry[0], str(track_index))
+        owner, device, _, index, owner_ref = self._device_location(str(reference), args.get("expectedObjectIdentity"), args.get("expectedOwnerRef"), args.get("expectedOwnerIdentity"), args.get("expectedSiblings"), track_ref, self._capture_object_identity(entry[0]))
+        name = str(self._read_attr(device, "name") or "")
+        if "expectedName" in args and args["expectedName"] != name: raise ValueError("device name changed since preview")
+        duplicator, deleter = getattr(owner, "duplicate_device", None), getattr(owner, "delete_device", None)
+        if not callable(duplicator) or not callable(deleter): raise ValueError("device duplication is unavailable on this Live shape")
+        before = self._items(self._read_attr(owner, "devices") or []); before_order = [self._capture_object_identity(candidate) for candidate in before]; known = set(before_order)
+        kind = self._read_attr(device, "class_name"); checkpoint = self.refs.checkpoint()
+        try:
+            duplicator(index)
+            after = self._items(self._read_attr(owner, "devices") or []); made = [(position, candidate) for position, candidate in enumerate(after) if self._capture_object_identity(candidate) not in known]
+            if len(after) != len(before) + 1 or len(made) != 1: raise ValueError("device duplication did not make exactly one new device")
+            position, copy = made[0]; copy_identity = self._capture_object_identity(copy)
+            if position != index + 1 or [self._capture_object_identity(candidate) for candidate in after] != before_order[:index + 1] + [copy_identity] + before_order[index + 1:]: raise ValueError("the copy isn't right after the device, or another device moved")
+            if self._read_attr(copy, "class_name") != kind: raise ValueError("the copy isn't the same kind of device")
+            created_ref = self.refs.put("device", copy, f"{':'.join(owner_ref.split(':')[2:])}:{position}")
+            return {"ref": created_ref, "name": str(self._read_attr(copy, "name") or "")[:256], "index": position, "objectIdentity": copy_identity, "createdFingerprint": self._mapped_fingerprint(created_ref)}
+        except BaseException as error:
+            current = self._items(self._read_attr(owner, "devices") or [])
+            for position in reversed([position for position, candidate in enumerate(current) if self._capture_object_identity(candidate) not in known]):
+                try: deleter(position)
+                except BaseException: pass
+            if [self._capture_object_identity(candidate) for candidate in self._items(self._read_attr(owner, "devices") or [])] != before_order: raise ValueError("device duplication failed and exact cleanup failed") from error
+            self.refs.restore(checkpoint); raise
 
     def _browser(self) -> Any:
         try:
