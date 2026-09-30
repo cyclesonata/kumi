@@ -7019,12 +7019,22 @@ class ShapeProbeTests(unittest.TestCase):
             parameters = property(lambda self: []); name = property(lambda self: ""); view = property(lambda self: None)
         live = types.ModuleType("Live")
         live.Clip = module(Clip=Clip); live.ClipSlot = module(ClipSlot=ClipSlot); live.Track = module(Track=Track); live.DeviceParameter = module(DeviceParameter=DeviceParameter); live.Device = module(Device=Device)
+        live.Song = module(Song=type("Song", (), {}))  # Live always has its Song class: that's what says this is Live
         song = FakeSong(); song.tracks = [FakeTrack() for _ in range(50)]; counter = ReadCounter(song.tracks)
         with patch.dict(sys.modules, {"Live": live}):
             operations = set(LiveObjectMapper(song).status()["operations"])
         self.assertEqual(counter.reads, {}, "Live's classes answer; the Set isn't read")
         self.assertTrue({"clip.create", "clip.delete", "clip.move", "note.add-batch", "note.update", "note.delete", "session.clip-launch", "session.clip-stop", "device.insert", "device.delete", "device.parameter.set", "parameter.re-enable-automation", "automation.envelope.create", "clip.action", "clip.set", "mixer.set", "track.set", "clip.rename", "device.rename"} <= operations, operations)
         self.assertNotIn("note.read-by-id", operations, "a member Live's class doesn't have isn't offered")
+
+    def test_a_stand_in_live_module_without_songs_class_is_not_live(self):
+        # A harness fakes a few of Live's modules (its browser): the Set's own objects answer.
+        live = types.ModuleType("Live"); live.Application = types.SimpleNamespace(Application=object)
+        with patch.dict(sys.modules, {"Live": live}):
+            stand_in = set(LiveObjectMapper(FakeSong()).status()["operations"])
+        # The same as with no Live module at all (but the module's own audit, which needs only a module).
+        self.assertEqual(stand_in - {"dev.lom-audit"}, set(LiveObjectMapper(FakeSong()).status()["operations"]))
+        self.assertIn("track.rename", stand_in)
 
 
 class OldBoundTests(unittest.TestCase):

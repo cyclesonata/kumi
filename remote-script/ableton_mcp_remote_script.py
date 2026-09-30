@@ -936,12 +936,15 @@ class LiveObjectMapper:
     def _shape_probe(self) -> dict[str, list[Any]]:
         """Representatives of each kind of Live object, to see what this Live offers without walking
         the Set. Inside Live, Live's own classes (they carry every member any object of the kind has).
-        Without Live's module (a test double), the first few objects of each kind at the Set's start."""
+        Without Live's module (a test double, or a stand-in without Live's Song class), the first few
+        objects of each kind at the Set's start."""
         cached = getattr(self, "_probe_cache", None)
         if cached is not None: return cached
         probe: dict[str, list[Any]] = {kind: [] for kind in self._PROBE_CLASSES}
         live = _live_module()
-        if live is not None:
+        # Inside Live, its module has the Song class; a stand-in with a few of Live's modules (a harness
+        # faking the browser) isn't Live, and its objects answer instead.
+        if live is not None and isinstance(getattr(getattr(live, "Song", None), "Song", None), type):
             for kind, path in self._PROBE_CLASSES.items():
                 found: Any = live
                 for name in path: found = getattr(found, name, None) if found is not None else None
