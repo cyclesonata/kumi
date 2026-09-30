@@ -886,6 +886,8 @@ class LiveObjectMapper:
             return True
         if operation == "dev.lom-audit":
             return _live_module() is not None
+        if operation == "authority.digest":
+            return True
         if operation == "subscribe":
             return bool(_supported_event_types(self.song) - {"reset"})
         if operation == "transport.set":
@@ -1418,6 +1420,24 @@ class LiveObjectMapper:
         if len(self._items(self._read_attr(clip, "warp_markers") or [])) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("complete warp-marker content exceeds its authoritative move bound")
         row = {"name": str(self._read_attr(clip, "name") or ""), "length": float(length), "kind": "midi" if callable(getattr(clip, "add_new_notes", None)) else "audio", "notes": notes, "audio": self._audio_fields(clip)}
         return hashlib.sha256(self._bounded_canonical(row).encode("utf-8")).hexdigest()
+
+    def _arrangement_identities(self, track_indices: list[int]) -> list[dict[str, Any]]:
+        """The Arrangement clips of the tracks at these snapshot indices (or the Song's own, on a shape
+        that lists them there) as an authority binds them: ref, identity, name, place and length.
+        No notes or markers are read."""
+        def number(value: Any) -> float | None:
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
+        def summary(clip: Any, reference: str, track_ref: str | None) -> dict[str, Any]:
+            return {"ref": reference, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "start": number(self._read_attr(clip, "start_time", "start")), "length": number(self._read_attr(clip, "length"))}
+        song_level = self._items(getattr(self.song, "arrangement_clips", []))
+        if song_level: return [summary(clip, self.refs.put("arrangement_clip", clip, str(index)), None) for index, clip in enumerate(song_level)]
+        tracks = self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", []))
+        rows = []
+        for track_index in track_indices:
+            if not 0 <= track_index < len(tracks): continue
+            track = tracks[track_index]; track_ref = self.refs.put("track", track, str(track_index))
+            rows.extend(summary(clip, self.refs.put("arrangement_clip", clip, f"{track_index}:{clip_index}"), track_ref) for clip_index, clip in enumerate(self._items(self._read_attr(track, "arrangement_clips") or [])))
+        return rows
 
     def _arrangement_clip_row(self, track: Any, clip: Any, track_index: int, clip_index: int) -> dict[str, Any]:
         track_ref = self.refs.put("track", track, str(track_index)); reference = self.refs.put("arrangement_clip", clip, f"{track_index}:{clip_index}"); notes = self._read_notes(clip)
@@ -3212,6 +3232,11 @@ class LiveObjectMapper:
             return self._device_parameters_set(args)
         if operation == "dev.lom-audit":
             return _lom_audit(_live_module(), int(args.get("maxDepth", 8)))
+        if operation == "authority.digest":
+            # The very digest a mutation of that operation, with those arguments, is checked against.
+            named, named_args = args.get("operation"), args.get("args")
+            if not isinstance(named, str) or not isinstance(named_args, dict): raise ValueError("authority digest arguments are invalid")
+            return {"stateDigest": _authority_state_digest(self, named_args, named), "epoch": self.refs.epoch}
         raise ValueError("live operation unavailable")
 
     def _check_parameter_authority(self, reference: str, args: dict[str, Any]) -> None:
@@ -9846,10 +9871,19 @@ def _authority_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
             }
         identity = {"epoch": mapper.refs.epoch, "capture": capture}
         return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(identity).encode("utf-8")).hexdigest()
-    return mapper._shared_reads(lambda: _reference_state_digest(mapper, args))
+    return mapper._shared_reads(lambda: _reference_state_digest(mapper, args, operation))
 
 
-def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> str:
+def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], operation: str | None = None) -> str:
+    """What a mutation is checked against: nothing it depends on changed since it was previewed.
+
+    It costs what the mutation names, not the Set: the row of every reference in its arguments
+    (each from its own track), the structure (light: tracks' and scenes' identities, names and
+    places), the song's transport state; what plays and is queued only for operations about
+    playback; the locators only for locator operations; and the Arrangement's clips (identity,
+    name, place and length; no notes or markers) only for Arrangement operations, and then only on
+    the tracks the arguments name. No collection's size refuses it. Without an operation, all of
+    those parts are bound (a caller that doesn't say what it will do gets the widest fence)."""
     references: list[str] = []
     def collect(value: Any, key: str = "") -> None:
         if isinstance(value, dict):
@@ -9873,16 +9907,26 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> s
             if tempo_automated and isinstance(row, dict) and mapper.refs.get(reference) is mapper.song: row = {key: value for key, value in row.items() if key != "tempo"}
             observed.append([reference, revision, _authority_row(row, mapper)])
         except (KeyError, ValueError, StopIteration): observed.append([reference, None, None])
-    playback = mapper._playback()
-    playback_transport = dict(playback.get("transport", {})); playback_transport.pop("position", None)
-    playback = {**playback, "transport": playback_transport}
     song_state = {key: mapper._read_attr(mapper.song, key) for key in ("tempo", "loop", "loop_start", "loop_length", "is_playing", "record_mode", "session_record") if not (key == "tempo" and tempo_automated)}
-    locator_items = mapper._locator_items(); arrangement_items = mapper._arrangement_clip_items()
-    locators = [{key: row.get(key) for key in ("ref", "name", "position")} for row in locator_items]
-    arrangement = [{key: row.get(key) for key in ("ref", "trackRef", "name", "start", "length")} for row in arrangement_items]
-    identity = {"epoch": mapper.refs.epoch, "structure": mapper._structure_revision(), "song": song_state, "playback": playback, "locators": locators, "arrangement": arrangement, "references": observed}
+    identity: dict[str, Any] = {"epoch": mapper.refs.epoch, "structure": mapper._structure_revision(), "song": song_state, "references": observed}
+    if operation is None or operation in _PLAYBACK_BOUND_OPERATIONS:
+        playback = mapper._playback()
+        playback_transport = dict(playback.get("transport", {})); playback_transport.pop("position", None)
+        identity["playback"] = {**playback, "transport": playback_transport}
+    if operation is None or operation in _LOCATOR_BOUND_OPERATIONS:
+        identity["locators"] = [{key: row.get(key) for key in ("ref", "objectIdentity", "name", "position")} for row in mapper._locator_items()]
+    if operation is None or operation.startswith("arrangement.") or operation in _ARRANGEMENT_BOUND_OPERATIONS:
+        identity["arrangement"] = mapper._arrangement_identities(sorted({index for reference in references for index in [mapper._ref_track_index(reference)] if index is not None}))
     return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(identity).encode("utf-8")).hexdigest()
 
+
+# Operations whose outcome depends on what plays and is queued: their authority binds playback.
+_PLAYBACK_BOUND_OPERATIONS = frozenset({"transport.set", "transport.action", "tempo.set", "session.clip-launch", "session.clip-stop", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.capture-midi", "scene.capture", "scene.fire-selected", "recording.session", "recording.arrangement", "realtime.arm", "realtime.disarm", "locator.jump", "locator.jump-to", "fire-button.set"})
+# Operations on the locators: their authority binds every locator's identity, name and place.
+_LOCATOR_BOUND_OPERATIONS = frozenset({"locator.add", "locator.delete", "locator.rename", "locator.jump", "locator.jump-to", "arrangement.locator.create", "arrangement.locator.delete"})
+# Besides every arrangement.* operation, those that add, move or remove Arrangement clips (or the
+# tracks holding them): their authority binds the named tracks' Arrangement clips.
+_ARRANGEMENT_BOUND_OPERATIONS = frozenset({"clip.duplicate", "clip.move", "recording.arrangement", "track.delete", "track.delete-return", "track.duplicate", "take-lane.create", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete"})
 
 MAX_BRIDGE_CONNECTIONS = 64
 MAX_FRAMES_PER_PUMP = 1024

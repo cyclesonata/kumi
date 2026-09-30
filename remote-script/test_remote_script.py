@@ -4996,7 +4996,7 @@ class RackMacroDrumPadTests(unittest.TestCase):
         self.assertEqual(builds, [], "no whole-Set snapshot for 42 references")
         self.assertEqual(rows, [0], "only their track's row, once")
         self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
-        alone = remote_module._reference_state_digest(mapper, args)
+        alone = remote_module._reference_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(shared, alone, "the same digest as reading each reference on its own")
         device.parameters[3].value = 0.75
         self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "and a later change still shows")
@@ -6481,3 +6481,80 @@ class TargetedReadTests(unittest.TestCase):
         mapper.invoke("note.add-batch", note_args, "targeted-transaction")
         self.assertEqual(set(counter.reads), {11}, counter.reads)
         self.assertEqual(song.tracks[9].mixer_device.volume.value, 0.75); self.assertEqual(song.tracks[4].devices[1].parameters[0].value, 0.75)
+
+
+class ScopedAuthorityDigestTests(unittest.TestCase):
+    """WS2.1: a mutation's authority digest costs what it names: its references' rows, the light
+    structure and the transport; playback, locators and Arrangement clips only where they matter."""
+
+    def parameter_args(self, mapper, whole, track=4, device=1):
+        parameter = whole["tracks"][track]["devices"][device]["parameters"][0]
+        return {"ref": parameter["ref"], "value": 0.75, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(mapper, parameter["ref"])}
+
+    def test_a_parameter_change_is_fenced_by_its_own_track_and_reads_nothing_else(self):
+        song = rich_song(tracks=30, playing=False); song.view = None; mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        args = self.parameter_args(mapper, whole)
+        counter = ReadCounter(song.tracks); builds = []; build = LiveObjectMapper._build_snapshot
+        with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, arguments=None: builds.append(1) or build(self, arguments)):
+            digest = _authority_state_digest(mapper, args, "device.parameter.set")
+        self.assertEqual((builds, set(counter.reads)), ([], {4}), counter.reads)
+        song.tracks[20].devices[0].parameters[0].value = 0.25
+        song.tracks[7].clip_slots[0].clip = FakeClip(4.0); song.tracks[7].fired_slot_index = 0
+        self.assertEqual(_authority_state_digest(mapper, args, "device.parameter.set"), digest, "other tracks and what's queued don't concern it")
+        song.tracks[4].devices[1].parameters[0].value = 0.25
+        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), digest, "its own parameter does")
+        song.tracks[4].devices[1].parameters[0].value = 0.5
+        song.tempo = 99.0
+        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), digest, "and the transport does")
+
+    def test_playback_binds_the_operations_about_playback(self):
+        song = rich_song(playing=False); mapper = LiveObjectMapper(song); set_row = mapper.snapshot()["set"]
+        stop = {"setRef": set_row["ref"], "action": "stop", "expectedObjectIdentity": set_row["objectIdentity"], "expectedRevision": mapper._playback()["revision"]}
+        rename = {"ref": set_row["ref"]}
+        before = {operation: _authority_state_digest(mapper, stop, operation) for operation in ("transport.action", "track.set")}
+        song.tracks[3].fired_slot_index = 2
+        self.assertNotEqual(_authority_state_digest(mapper, stop, "transport.action"), before["transport.action"])
+        self.assertEqual(_authority_state_digest(mapper, stop, "track.set"), before["track.set"])
+        self.assertNotEqual(_authority_state_digest(mapper, rename), _authority_state_digest(mapper, rename, "track.set"), "no operation named: every part is bound")
+
+    def test_locators_and_arrangement_clips_bind_only_operations_about_them(self):
+        song = rich_song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        locator_args = {"name": "Chorus", "position": 32.0}
+        on_two = {"trackRef": whole["tracks"][2]["ref"], "position": 8.0, "length": 4.0, "name": "New"}
+        on_three = {**on_two, "trackRef": whole["tracks"][3]["ref"]}
+        parameter = self.parameter_args(mapper, whole)
+        def digests(): return (_authority_state_digest(mapper, locator_args, "locator.add"), _authority_state_digest(mapper, on_two, "arrangement.clip.create"), _authority_state_digest(mapper, on_three, "arrangement.clip.create"), _authority_state_digest(mapper, parameter, "device.parameter.set"))
+        before = digests()
+        song.cue_points.append(FakeLocator(24.0, "Bridge"))
+        after_locator = digests()
+        self.assertEqual([a == b for a, b in zip(before, after_locator)], [False, True, True, True])
+        song.tracks[2].arrangement_clips.append(FakeClip(1.0))
+        after_clip = digests()
+        self.assertEqual([a == b for a, b in zip(after_locator, after_clip)], [True, False, True, True])
+
+    def test_no_collection_size_refuses_it_and_no_notes_or_markers_are_read(self):
+        class Unreadable(FakeClip):
+            def get_all_notes_extended(self): raise RuntimeError("notes are not read for an authority")
+            @property
+            def warp_markers(self): raise RuntimeError("markers are not read for an authority")
+        song = rich_song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        song.cue_points = [FakeLocator(float(index), f"L{index}") for index in range(300)]
+        song.tracks[2].arrangement_clips = [Unreadable(1.0) for _ in range(300)]
+        args = {"trackRef": whole["tracks"][2]["ref"], "position": 8.0, "length": 4.0, "name": "New"}
+        for operation in ("arrangement.clip.create", "locator.add", None):
+            self.assertRegex(_authority_state_digest(mapper, args, operation), r"^[a-f0-9]{64}$")
+
+    def test_authority_digest_answers_the_digest_a_mutation_is_checked_against(self):
+        song = rich_song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot(); args = self.parameter_args(mapper, whole)
+        request = {"operation": "device.parameter.set", "args": args}
+        validate_operation_payload("authority.digest", "request", request)
+        result = mapper.invoke("authority.digest", request)
+        validate_operation_payload("authority.digest", "result", result)
+        self.assertEqual(result, {"stateDigest": _authority_state_digest(mapper, args, "device.parameter.set"), "epoch": mapper.refs.epoch})
+        self.assertTrue(mapper._operation_supported("authority.digest"))
+        # A read: no preflight, prepare or authority token.
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: AbletonMcpBridge._dispatch_main_for(method, frame, mapper))
+        unsigned = remote.bound({"version": PROTOCOL, "id": "digest-1", "method": "invoke", "operation": "authority.digest", "args": request, "nonce": "digest-nonce-0001", "sequence": 1})
+        answer = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"]["stateDigest"], result["stateDigest"])
+        with self.assertRaisesRegex(ValueError, "authority digest arguments are invalid"): mapper.invoke("authority.digest", {"operation": "device.parameter.set", "args": "not an object"})
