@@ -36,10 +36,11 @@ export const palette = {
   pulse: hex("#2f5a47"),
   warn: hex("#e7b45f"),
   error: hex("#ee8479"),
-  /** What Kumi keeps, by kind: notes, techniques, recipes. */
+  /** What Kumi keeps, by kind: notes, techniques, recipes, and its own lessons from matching. */
   note: hex("#8cc8ff"),
   technique: hex("#c7a6ff"),
   recipe: hex("#f2a6c4"),
+  lesson: hex("#e7c88f"),
 } as const;
 
 /** Chooses the colour depth from the environment; `NO_COLOR` keeps bold and dim only. */

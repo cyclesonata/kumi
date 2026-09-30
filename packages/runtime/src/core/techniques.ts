@@ -181,8 +181,8 @@ export function draftFromBuild(changes: readonly ChangeRecord[], request: string
   return "technique" in checked ? checked.technique : undefined;
 }
 
-const POSITIVE = /\b(love|loving|nice|great|perfect|awesome|amazing|beautiful|sick|dope|fire|exactly|cool|keep (it|that|this)|sounds? (good|great|right|sick|amazing|nice))\b|🔥|👍/i;
-const NEGATIVE = /\b(not like that|no[,.!]|nope|don'?t like|hate|scrap|start over|redo|remove (it|that|this)|delete (it|that|this)|undo|wrong|awful|terrible|doesn'?t (sound|work))\b|^no\b/i;
+export const POSITIVE = /\b(love|loving|nice|great|perfect|awesome|amazing|beautiful|sick|dope|fire|exactly|cool|keep (it|that|this)|sounds? (good|great|right|sick|amazing|nice))\b|🔥|👍/i;
+export const NEGATIVE = /\b(not like that|no[,.!]|nope|don'?t like|hate|scrap|start over|redo|remove (it|that|this)|delete (it|that|this)|undo|wrong|awful|terrible|doesn'?t (sound|work))\b|^no\b/i;
 
 /**
  * The drafts' judge, fed what happens after the build: loose on purpose, since tweaking means the

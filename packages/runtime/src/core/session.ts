@@ -10,6 +10,8 @@ import { videoTools } from "../video/tool.js";
 import { asksForTechnique, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE, TECHNIQUE_NUDGE, techniqueInstructions, techniqueTools, type TechniqueStore } from "./techniques.js";
 import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
+import { lessonFrom, lessonLine, playbookBrief, type Lesson, type PlaybookStore } from "./playbook.js";
+import { NEGATIVE, POSITIVE } from "./techniques.js";
 import { KEEP_GOING, MATCH_BUDGET, MatchRun, startsMatch, type MatchBudget } from "./match-run.js";
 
 interface Options {
@@ -44,6 +46,8 @@ interface Options {
   techniqueSettleMs?: number;
   /** Where missing capabilities are logged for Kumi's developers (JSON lines); without it they aren't. */
   gaps?: string;
+  /** Kumi's lessons from match runs; without it none are kept. */
+  playbook?: PlaybookStore;
   /** Match runs' budget (generous by default); false leaves matching to the model alone. */
   match?: Partial<MatchBudget> | false;
 }
@@ -82,6 +86,42 @@ export function createSession(options: Options): SessionController {
   const budget: MatchBudget = { ...MATCH_BUDGET, ...(options.match || {}) };
   /** The match run this answer is in, and the last one (for "keep going"). */
   let matching: MatchRun | undefined; let lastRun: MatchRun | undefined;
+  /** The last run's lesson, for "keep going" to update and the producer's next words to judge. */
+  let lastLesson: { id: string; judged: boolean } | undefined;
+  let playbookQueue: Promise<unknown> = Promise.resolve();
+  const playbookSerial = <T>(work: (store: PlaybookStore) => Promise<T>): Promise<T | undefined> => {
+    const store = options.playbook;
+    if (!store) return Promise.resolve(undefined);
+    const next = playbookQueue.then(() => work(store), () => work(store));
+    playbookQueue = next.catch(() => undefined);
+    return next.catch(() => undefined);
+  };
+  /** A run ended: its lesson is kept (a carried-on run's replaces the one before), and shown. */
+  function learnFrom(run: MatchRun, carried: boolean) {
+    const lesson = lessonFrom(run, Date.now());
+    if (!lesson) return;
+    const replacing = carried ? lastLesson?.id : undefined;
+    const kept: Lesson = replacing ? { ...lesson, id: replacing } : lesson;
+    lastLesson = { id: kept.id, judged: false };
+    void playbookSerial(async (store) => {
+      const lessons = await store.list();
+      await store.save([...lessons.filter((item) => item.id !== kept.id), kept]);
+      emit({ type: "lesson", action: replacing ? "updated" : "learned", id: kept.id, line: lessonLine(kept) });
+    });
+  }
+  /** The producer's first words after a run: liking it or not is evidence for its lesson. */
+  function judgeLesson(input: string) {
+    const lesson = lastLesson;
+    if (!lesson || lesson.judged) return;
+    lesson.judged = true;
+    const reaction = NEGATIVE.test(input) ? "disliked" as const : POSITIVE.test(input) ? "liked" as const : undefined;
+    if (!reaction) return;
+    void playbookSerial(async (store) => {
+      const lessons = await store.list();
+      if (!lessons.some((item) => item.id === lesson.id)) return;
+      await store.save(lessons.map((item) => (item.id === lesson.id ? { ...item, reaction } : item)));
+    });
+  }
   const closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
   const graceMs = options.cancelGraceMs ?? 500;
   const maxTurns = options.maxTurns;
@@ -518,15 +558,19 @@ export function createSession(options: Options): SessionController {
         // what they thought of the last build; and a new turn begins.
         learned?.drafts.said(input); learned?.drafts.turnStarted(input);
         // "Make it sound like this" starts a match run; "keep going" after one carries it on.
-        const run = options.match === false ? undefined : startsMatch(input) ? new MatchRun(input, budget)
-          : KEEP_GOING.test(input) && lastRun ? MatchRun.carryOn(lastRun, budget) : undefined;
+        const carried = options.match !== false && !startsMatch(input) && KEEP_GOING.test(input) && lastRun !== undefined;
+        if (!carried) judgeLesson(input);
+        const run = options.match === false ? undefined : startsMatch(input) ? new MatchRun(input, budget) : carried ? MatchRun.carryOn(lastRun!, budget) : undefined;
         matching = run;
+        // A new run reads what won in earlier ones first.
+        const brief = run && !carried ? playbookBrief(await playbookSerial((store) => store.list()) ?? [], input) : "";
+        assertCurrent(op);
         op.phase = "inference";
         const ask = (text: string, observation: string) => kernel!.value.run(`${text}${OBSERVATION_MARKER}\n${observation}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) { op.progress?.(event); emit(event); } });
-        let result = await ask(input, snapshot.context);
+        const result = await ask(brief ? `${input}\n\n${brief}` : input, snapshot.context);
         if (!run) return result;
-        try { return await runMatch(op, run, result, ask); } finally { matching = undefined; lastRun = run; }
+        try { return await runMatch(op, run, result, ask); } finally { matching = undefined; lastRun = run; learnFrom(run, carried); }
       }, undefined, input);
     },
     refresh() {
@@ -633,6 +677,18 @@ export function createSession(options: Options): SessionController {
       return learned ? (await learned.list()).map((technique) => ({ id: technique.id, name: technique.name, fits: technique.fits, ...(technique.source?.title ? { source: technique.source.title } : {}) })).reverse() : [];
     },
     async forgetTechnique(id) { return Boolean(await learned?.forget(id)); },
+    async lessons() {
+      return ((await playbookSerial((store) => store.list())) ?? []).map((lesson) => ({ id: lesson.id, line: lessonLine(lesson), at: lesson.at })).reverse();
+    },
+    async forgetLesson(id) {
+      return Boolean(await playbookSerial(async (store) => {
+        const lessons = await store.list(); const gone = lessons.find((lesson) => lesson.id === id);
+        if (!gone) return false;
+        await store.save(lessons.filter((lesson) => lesson.id !== id));
+        emit({ type: "lesson", action: "forgot", id, line: lessonLine(gone) });
+        return true;
+      }));
+    },
     async forgetRecipe(name) {
       const recipe = await options.recipes?.get(name);
       if (!recipe || !await options.recipes!.remove(recipe.name)) return false;

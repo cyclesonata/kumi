@@ -98,6 +98,12 @@ The first release for producers to use day to day. Ships with bridge 1.0.49.
   gaps. The run ends at the target, on a plateau (only after something
   genuinely different was tried), when its generous budget is spent, or on
   Esc; "keep going" carries it on. NOW shows the score and time as it works.
+- Kumi learns from its match runs: each leaves a short lesson with its
+  evidence ("plucked metallic percussion: Collision + parallel delays won,
+  52% → 74%; Operator FM 52% → Collision 64% → …"), which the next matching
+  run reads first. The producer's reaction after is noted with it. Lessons are
+  Kumi's own, kept apart from the producer's techniques, and /memory lists
+  them with forget.
 - Matching a sound is a search: Kumi builds several different candidates,
   auditions them together, refines the best on its biggest gaps, and says the
   score before and after. A technique drafted while matching is kept only once

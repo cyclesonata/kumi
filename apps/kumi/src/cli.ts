@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createPlaybookStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadMemoryFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadMemoryFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
@@ -149,6 +149,7 @@ try {
       listen: true,
       recipes: createRecipeStore(loadRecipesDir()),
       techniques: createTechniqueStore(loadTechniquesFile()),
+      playbook: createPlaybookStore(loadPlaybookFile()),
       gaps: loadGapsFile(),
       watch: { videosDir: loadVideosDir(), toolsDir: loadToolsDir() },
     });

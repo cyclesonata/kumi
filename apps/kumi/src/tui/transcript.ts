@@ -16,8 +16,8 @@ export interface Step {
 }
 
 /** What Kumi keeps: notes (✎), techniques (◆) and recipes (↻). */
-export type MemoryKind = "note" | "technique" | "recipe";
-export const MEMORY_GLYPHS: Record<MemoryKind, string> = { note: "✎", technique: "◆", recipe: "↻" };
+export type MemoryKind = "note" | "technique" | "recipe" | "lesson";
+export const MEMORY_GLYPHS: Record<MemoryKind, string> = { note: "✎", technique: "◆", recipe: "↻", lesson: "✦" };
 
 /** A frame's small picture: RGB, three bytes a pixel, row by row. */
 export interface Picture { width: number; height: number; rgb: Uint8Array }

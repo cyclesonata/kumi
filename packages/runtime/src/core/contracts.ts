@@ -380,6 +380,8 @@ export type SessionEvent = KernelEvent
   /** `kind` and `provider` say what failed and where, so an app can offer the fix (sign in, choose a model). */
   | { type: "error"; message: string; kind?: FailureKind; provider?: string }
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
+  /** A lesson Kumi learned from a match run (or forgot): its line, as /memory shows it. */
+  | { type: "lesson"; action: "learned" | "updated" | "forgot"; id: string; line: string }
   | MatchStatus
   | MemoryEvent
   | HeardEvent
@@ -503,6 +505,9 @@ export interface SessionController {
   /** The techniques Kumi learned, and forgetting one by id. */
   techniques?(): Promise<TechniqueSummary[]>;
   forgetTechnique?(id: string): Promise<boolean>;
+  /** What Kumi learned matching sounds, newest first, and forgetting one. */
+  lessons?(): Promise<{ id: string; line: string; at: number }[]>;
+  forgetLesson?(id: string): Promise<boolean>;
   /** Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't. */
   stopLive?(): Promise<boolean>;
   /** A track's device tree, for FOCUS (while connected). */

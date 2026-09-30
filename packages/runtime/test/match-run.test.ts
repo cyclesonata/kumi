@@ -4,6 +4,10 @@ import { test } from "node:test";
 import type { AuditionEvent, AuditionRequest, ChangeRecord, KernelEvent, Observation, SessionController, SessionEvent, TurnResult } from "../src/core/contracts.js";
 import { MatchRun, type MatchBudget, type MatchStatus } from "../src/core/match-run.js";
 import { createSession } from "../src/core/session.js";
+import { createPlaybookStore, matchedFrom, playbookBrief, type Lesson, type PlaybookStore } from "../src/core/playbook.js";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const request: AuditionRequest = { candidates: [{ track: "track:1", label: "Drift" }], fromBeat: 16, beats: 4, reference: "~/ref.wav" };
 const heard = (score: number, label = "Drift"): AuditionEvent => ({ type: "auditioned", round: 1, best: { label, score }, takes: [{ label, score }], gaps: ["attack too slow"], request });
@@ -14,12 +18,15 @@ const done: TurnResult = { stopReason: "completed", usage: { inputTokens: 10, ou
  * A session whose model, each time it's asked, runs `rounds[n]`: it may audition (the score given)
  * and change something after; the integration's own audition scores `harnessScore`.
  */
-function rig(rounds: ((session: SessionController, signal: AbortSignal) => Promise<void> | void)[], options: { budget?: Partial<MatchBudget>; harnessScore?: () => number } = {}) {
+function memoryPlaybook(lessons: Lesson[] = []): PlaybookStore & { lessons: Lesson[] } {
+  return { lessons, async list() { return structuredClone(this.lessons); }, async save(next) { this.lessons = structuredClone([...next]); } };
+}
+function rig(rounds: ((session: SessionController, signal: AbortSignal) => Promise<void> | void)[], options: { budget?: Partial<MatchBudget>; harnessScore?: () => number; playbook?: PlaybookStore } = {}) {
   const events: SessionEvent[] = []; const asked: string[] = []; const auditioned: AuditionRequest[] = [];
   const observation: Observation = { key: "set", label: "Set", context: "context", instructions: "instructions", tools: [] };
   let session!: SessionController;
   session = createSession({
-    onEvent: (event) => events.push(event), timeoutMs: 5_000, cancelGraceMs: 10, closeTimeoutMs: 25, match: { ...options.budget },
+    onEvent: (event) => events.push(event), timeoutMs: 5_000, cancelGraceMs: 10, closeTimeoutMs: 25, match: { ...options.budget }, ...(options.playbook ? { playbook: options.playbook } : {}),
     kernelFactory: async () => ({
       async run(input, signal, emit: (event: KernelEvent) => void) {
         asked.push(input.split("<current_observation")[0]!);
@@ -117,4 +124,58 @@ test("a run with nothing to compare asks for an audition twice, then stops", () 
   assert.match(String((run.decide() as { next: string }).next), /audition what you built/);
   assert.ok("next" in run.decide());
   assert.deepEqual(run.decide(), { stop: "no-audition" });
+});
+
+const heardAs = (label: string, score: number) => (session: SessionController) => { session.watch!(heard(score, label)); };
+
+test("each run leaves a lesson with its evidence; the next run reads it first; keep going updates it; the producer's words judge it; it can be forgotten", async () => {
+  const playbook = memoryPlaybook();
+  const r = rig([heardAs("Operator FM", 52), heardAs("Collision", 64), heardAs("Collision + parallel delays", 73), heardAs("Collision + parallel delays", 73), heardAs("Collision + parallel delays", 74), heardAs("Collision + parallel delays", 74), heardAs("Collision + parallel delays", 74), () => {},
+    // "keep going": two more rounds, then the next run.
+    heardAs("Collision, brighter", 93), () => {}, () => {}], { playbook });
+  await r.session.start();
+  await r.session.submit("make my plucked metallic percussion sound like this reference");
+  await delay(10);
+  assert.equal(playbook.lessons.length, 1);
+  const lesson = playbook.lessons[0]!;
+  assert.deepEqual([lesson.matched, lesson.winner, lesson.from, lesson.to], ["plucked metallic percussion", "Collision + parallel delays", 52, 74]);
+  assert.deepEqual(lesson.moves.map((move) => move.score), [52, 64, 73, 74], "only the rounds that raised the best");
+  assert.ok(r.events.some((event) => event.type === "lesson" && event.action === "learned" && /plucked metallic percussion: Collision \+ parallel delays won, 52% → 74%; Operator FM 52% → Collision 64%/.test(event.line)));
+  // Carried on: the same lesson, updated.
+  await r.session.submit("keep going");
+  await delay(10);
+  assert.equal(playbook.lessons.length, 1);
+  assert.equal(playbook.lessons[0]!.to, 93);
+  assert.ok(r.events.some((event) => event.type === "lesson" && event.action === "updated"));
+  // The producer's next words: they liked it.
+  await r.session.submit("love it, thanks");
+  await delay(10);
+  assert.equal(playbook.lessons[0]!.reaction, "liked");
+  // A new matching run reads it before anything else.
+  const r2 = rig([() => {}], { playbook, budget: { rounds: 0 } });
+  await r2.session.start();
+  await r2.session.submit("make this metallic percussion hit sound like the reference");
+  assert.match(r2.asked[0]!, /<kumi_playbook_untrusted>[\s\S]*plucked metallic percussion: Collision, brighter won, 52% → 93%.*\(the producer liked it\)/);
+  // Forgotten from /memory.
+  const [listed] = await r2.session.lessons!();
+  assert.equal(await r2.session.forgetLesson!(listed!.id), true);
+  assert.equal(playbook.lessons.length, 0);
+  await r.session.close(); await r2.session.close();
+});
+
+test("lessons are kept in a file only this user can read, checked on the way in; the brief picks those that share words", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "kumi-playbook-"));
+  try {
+    const store = createPlaybookStore(join(directory, "playbook.json"));
+    const lesson = (id: string, matched: string, winner: string): Lesson => ({ id, at: 1, matched, winner, from: 40, to: 70, moves: [] });
+    await store.save([lesson("l00000001", "a wobbly reese bass", "Operator + LFO filter"), lesson("l00000002", "an airy pad", "Wavetable + reverb"), { ...lesson("bad", "x", "y") }]);
+    if (process.platform !== "win32") assert.equal(statSync(join(directory, "playbook.json")).mode & 0o777, 0o600);
+    assert.deepEqual((await store.list()).map((item) => item.id), ["l00000001", "l00000002"], "an entry that isn't a lesson is left out");
+    const brief = playbookBrief(await store.list(), "recreate this reese bass", 1);
+    assert.match(brief, /a wobbly reese bass: Operator \+ LFO filter won/);
+    assert.ok(!brief.includes("airy pad"));
+    assert.equal(playbookBrief([], "anything"), "");
+    assert.equal(matchedFrom("Make my pad sound like this reference: ~/ref.wav"), "pad");
+    assert.equal(matchedFrom("recreate this sound"), "sound");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

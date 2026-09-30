@@ -22,3 +22,4 @@ export { withFallback } from "./integrations/fallback.js";
 export { parseFocus } from "./integrations/ableton/focus.js";
 export { createConversationStore, createProjectStore, since, type ProjectStore } from "./integrations/ableton/project.js";
 export { MATCH_BUDGET, MatchRun, startsMatch, type MatchBudget, type MatchStatus, type MatchStop } from "./core/match-run.js";
+export { createPlaybookStore, lessonLine, playbookBrief, type Lesson, type PlaybookStore } from "./core/playbook.js";

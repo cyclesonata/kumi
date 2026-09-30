@@ -460,6 +460,14 @@ export class TuiApp {
         this.memoryLine("note", `Forgot: ${event.note.text}`);
         this.forgotten(`note:${event.scope}:${event.note.id}`); this.forgotten(`note:${event.scope}:pending:${event.note.id}`);
         break;
+      case "lesson": {
+        // Kumi's own lesson from a match run: said once, and in HISTORY's kept rows with its forget.
+        const key = `lesson:${event.id}`; const id = event.id;
+        if (event.action === "forgot") { this.memoryLine("lesson", `Forgot a lesson: ${event.line}`); this.forgotten(key); break; }
+        this.memoryLine("lesson", `${event.action === "updated" ? "Updated what I learned" : "Learned from this match"}: ${event.line}`);
+        this.keep(key, "lesson", event.line, async () => Boolean(await this.options.controller.forgetLesson?.(id)));
+        break;
+      }
       case "technique": {
         const { technique } = event;
         this.memoryLine("technique", `${{ kept: "Kept a technique", updated: "Updated a technique", used: "Using your technique", forgot: "Forgot the technique" }[event.action]}: ${technique.name}`);
@@ -1112,7 +1120,8 @@ export class TuiApp {
    */
   private async openMemory(): Promise<void> {
     const { controller } = this.options;
-    const [memory, techniques, recipes] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([])]);
+    const [memory, techniques, recipes, lessons] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([]),
+      controller.lessons?.() ?? Promise.resolve([])]);
     if (!memory) return;
     const now = Date.now();
     const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
@@ -1129,20 +1138,23 @@ export class TuiApp {
       ...(controller.recipes ? [{ heading: true, label: "Recipes" }, ...(recipes.length
         ? recipes.map((recipe): PickerItem => ({ label: recipe.name, detail: recipe.about, value: `recipe:${recipe.name}`, note: `${recipe.steps} steps`, noteTone: "faint" }))
         : [{ label: "None yet", inert: true }])] : []),
+      ...(controller.lessons ? [{ heading: true, label: "What Kumi learned matching sounds" }, ...(lessons.length
+        ? lessons.map((lesson): PickerItem => ({ label: clean(lesson.line, 160), value: `lesson:${lesson.id}`, note: since(lesson.at, now), noteTone: "faint" }))
+        : [{ label: "None yet: what won when Kumi matched a sound to a reference", inert: true }])] : []),
     ];
     const picker = new Picker("What Kumi remembers · notes, techniques and recipes", items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => {
       const [kind, ...rest] = item.value!.split(":"); const id = rest.join(":");
       if (kind === "recipe") { const recipe = recipes.find((candidate) => candidate.name === id); if (recipe) this.recipeActions(recipe); return; }
-      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : "Forget this note?", [
+      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : kind === "lesson" ? "Forget this lesson?" : "Forget this note?", [
         { label: "Forget it", detail: item.label, value: "yes" },
         { label: "Keep it", value: "no" },
       ]);
       this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
         this.closePanel();
         if (answer.value !== "yes") return;
-        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : await controller.forget?.(id);
-        if (!gone) this.notice(`That ${kind === "technique" ? "technique" : "note"} was already gone.`, "info");
+        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : kind === "lesson" ? await controller.forgetLesson?.(id) : await controller.forget?.(id);
+        if (!gone) this.notice(`That ${kind === "technique" || kind === "lesson" ? kind : "note"} was already gone.`, "info");
       } };
       this.scheduler.request();
     } };
