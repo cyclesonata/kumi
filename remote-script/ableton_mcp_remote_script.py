@@ -852,13 +852,19 @@ class LiveObjectMapper:
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
-        operations = [item["id"] for item in registry["operations"] if self._operation_supported(item["id"])]
+        # One shape probe answers every operation: nothing in the Set is walked to advertise.
+        self._probe_cache = self._shape_probe() if self.song is not None else None
+        try:
+            operations = [item["id"] for item in registry["operations"] if self._operation_supported(item["id"])]
+            capabilities = self.capabilities(set(operations))
+        finally:
+            self._probe_cache = None
         return {
             "connected": self.song is not None,
             "adapter": "remote-script" if self.song is not None else "unavailable",
             "epoch": self.refs.epoch if self.song is not None else None,
             "protocol": "ableton-live/v1",
-            "capabilities": self.capabilities(set(operations)),
+            "capabilities": capabilities,
             "registryHash": registry_hash,
             "operations": operations,
             "provenance": self.provenance,
@@ -886,69 +892,158 @@ class LiveObjectMapper:
             pass
         return probe
 
+    # Where Live's module keeps the class each probe kind stands for.
+    _PROBE_CLASSES = {
+        "track": ("Track", "Track"), "track_view": ("Track", "Track", "View"), "slot": ("ClipSlot", "ClipSlot"), "clip": ("Clip", "Clip"),
+        "audio_clip": ("Clip", "Clip"), "midi_clip": ("Clip", "Clip"), "arrangement_clip": ("Clip", "Clip"),
+        "device": ("Device", "Device"), "parameter": ("DeviceParameter", "DeviceParameter"),
+        "rack": ("RackDevice", "RackDevice"), "chain": ("Chain", "Chain"), "pad": ("DrumPad", "DrumPad"),
+        "mixer": ("MixerDevice", "MixerDevice"), "chain_mixer": ("ChainMixerDevice", "ChainMixerDevice"), "scene": ("Scene", "Scene"),
+        "locator": ("Song", "CuePoint"), "take_lane": ("TakeLane", "TakeLane"), "groove": ("Groove", "Groove"),
+        "simpler": ("SimplerDevice", "SimplerDevice"), "plugin": ("PluginDevice", "PluginDevice"), "drift": ("DriftDevice", "DriftDevice"),
+        "eq8": ("Eq8Device", "Eq8Device"), "hybrid_reverb": ("HybridReverbDevice", "HybridReverbDevice"), "looper": ("LooperDevice", "LooperDevice"),
+        "meld": ("MeldDevice", "MeldDevice"), "drum_cell": ("DrumCellDevice", "DrumCellDevice"), "compressor": ("CompressorDevice", "CompressorDevice"),
+        "max": ("MaxDevice", "MaxDevice"),
+    }
+    # How far a probe looks into the Set when Live's module isn't there (a test double): a few of each kind.
+    _PROBE_SAMPLE = 8
+
+    def _shape_probe(self) -> dict[str, list[Any]]:
+        """Representatives of each kind of Live object, to see what this Live offers without walking
+        the Set. Inside Live, Live's own classes (they carry every member any object of the kind has).
+        Without Live's module (a test double), the first few objects of each kind at the Set's start."""
+        cached = getattr(self, "_probe_cache", None)
+        if cached is not None: return cached
+        probe: dict[str, list[Any]] = {kind: [] for kind in self._PROBE_CLASSES}
+        live = _live_module()
+        if live is not None:
+            for kind, path in self._PROBE_CLASSES.items():
+                found: Any = live
+                for name in path: found = getattr(found, name, None) if found is not None else None
+                if isinstance(found, type): probe[kind].append(found)
+            return probe
+        sample = self._PROBE_SAMPLE
+        tracks = self._items(getattr(self.song, "tracks", []))[:sample] + self._items(getattr(self.song, "return_tracks", []))[:2]
+        main = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
+        if main is not None: tracks.append(main)
+        probe["track"] = tracks
+        probe["scene"] = self._items(getattr(self.song, "scenes", []))[:sample]
+        probe["locator"] = self._items(getattr(self.song, "cue_points", []))[:sample]
+        probe["groove"] = self._items(self._read_attr(self._read_attr(self.song, "groove_pool"), "grooves") or [])[:sample]
+        def device_kind(device: Any) -> list[str]:
+            name = str(self._read_attr(device, "class_name") or device.__class__.__name__).lower().replace("_", "").replace(" ", "")
+            kinds = ["device"]
+            if self._read_attr(device, "can_have_chains") is True: kinds.append("rack")
+            for marker, kind in (("drift", "drift"), ("eq8", "eq8"), ("hybridreverb", "hybrid_reverb"), ("looper", "looper"), ("meld", "meld"), ("drumcell", "drum_cell"), ("compressor", "compressor"), ("maxdevice", "max"), ("simpler", "simpler"), ("plugin", "plugin")):
+                if marker in name: kinds.append(kind)
+            return kinds
+        def devices_of(owner: Any, depth: int) -> None:
+            for device in self._items(self._read_attr(owner, "devices") or [])[:sample * 2]:
+                for kind in device_kind(device): probe[kind].append(device)
+                probe["parameter"].extend(self._items(getattr(device, "parameters", []))[:sample])
+                if depth < 2:
+                    for chain in self._items(self._read_attr(device, "chains") or [])[:sample]:
+                        probe["chain"].append(chain)
+                        mixer = self._read_attr(chain, "mixer_device")
+                        if mixer is not None: probe["chain_mixer"].append(mixer)
+                        devices_of(chain, depth + 1)
+                    probe["pad"].extend(self._items(self._read_attr(device, "drum_pads") or [])[:sample * 2])
+        for track in tracks:
+            view = getattr(track, "view", None)
+            if view is not None: probe["track_view"].append(view)
+            mixer = self._read_attr(track, "mixer_device")
+            if mixer is not None: probe["mixer"].append(mixer)
+            for slot in self._items(getattr(track, "clip_slots", []))[:sample]:
+                probe["slot"].append(slot); clip = getattr(slot, "clip", None)
+                if clip is not None:
+                    probe["clip"].append(clip); probe["audio_clip" if self._read_attr(clip, "is_audio_clip") is True else "midi_clip"].append(clip)
+            for clip in self._items(self._read_attr(track, "arrangement_clips") or [])[:sample]:
+                probe["arrangement_clip"].append(clip)
+                if self._read_attr(clip, "is_audio_clip") is True: probe["audio_clip"].append(clip)
+            probe["take_lane"].extend(self._items(self._read_attr(track, "take_lanes") or [])[:sample])
+            devices_of(track, 0)
+        probe["arrangement_clip"].extend(self._items(getattr(self.song, "arrangement_clips", []))[:sample])
+        return probe
+
+    def _offers(self, kind: str, *members: str, method: bool = True) -> bool:
+        """Whether a representative of this kind has all these members: callable ones (method=True)
+        or readable attributes (method=False). A class answers for every object of its kind."""
+        for candidate in self._shape_probe().get(kind, []):
+            if isinstance(candidate, type):
+                if all(hasattr(candidate, member) and (not method or callable(getattr(candidate, member, None))) for member in members): return True
+            elif all(callable(getattr(candidate, member, None)) if method else self._read_attr(candidate, member) is not None for member in members): return True
+        return False
+
+    def _offers_any(self, kind: str, *members: str, method: bool = True) -> bool:
+        return any(self._offers(kind, member, method=method) for member in members)
+
+    def _probe_classes(self, kind: str) -> bool:
+        """Whether the probe stands on Live's own class for this kind (so values can't be read)."""
+        return any(isinstance(candidate, type) for candidate in self._shape_probe().get(kind, []))
+
     def _operation_supported(self, operation: str) -> bool:
-        """Advertise only operations executable against this observed Live shape."""
+        """Advertise only operations executable against this observed Live shape. Probed on the Song
+        and representatives of each kind (see _shape_probe): never by walking the Set."""
         if self.song is None:
             return operation in {"status", "reconnect"}
-        if operation in {"status", "snapshot", "discover", "get", "reconnect"}:
-            return True
-        if operation == "session.playback":
+        song = self.song
+        if operation in {"status", "snapshot", "discover", "get", "reconnect", "session.playback", "song.read", "performance.read", "authority.digest"} or operation in {"observe.subscribe", "observe.poll", "observe.unsubscribe"}:
             return True
         if operation == "dev.lom-audit":
             return _live_module() is not None
-        if operation == "authority.digest":
-            return True
         if operation in _AUTHORITY_FREE_INVOKES:
-            return callable(getattr(self.song, "begin_undo_step", None)) and callable(getattr(self.song, "end_undo_step", None))
+            return callable(getattr(song, "begin_undo_step", None)) and callable(getattr(song, "end_undo_step", None))
         if operation in {"song.undo", "song.redo"}:
-            return callable(getattr(self.song, "undo" if operation == "song.undo" else "redo", None))
+            return callable(getattr(song, "undo" if operation == "song.undo" else "redo", None))
         if operation == "subscribe":
-            return bool(_supported_event_types(self.song) - {"reset"})
+            return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
-            return callable(getattr(self.song, "stop_playing", None)) or hasattr(self.song, "current_song_time")
+            return callable(getattr(song, "stop_playing", None)) or hasattr(song, "current_song_time")
         if operation == "session.clip-launch":
-            return any(getattr(slot, "clip", None) is not None and callable(getattr(slot, "fire", None)) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("slot", "fire")
         if operation == "session.clip-stop":
-            return any(callable(getattr(track, "stop_all_clips", None)) for track in self._items(getattr(self.song, "tracks", [])))
+            return self._offers("track", "stop_all_clips")
         if operation == "tempo.set":
-            return isinstance(self._read_attr(self.song, "tempo"), (int, float))
+            return isinstance(self._read_attr(song, "tempo"), (int, float))
         if operation == "session.capture-midi":
-            return callable(getattr(self.song, "capture_midi", None)) and not any(getattr(slot, "clip", None) is not None for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
+            return callable(getattr(song, "capture_midi", None))
         if operation == "scene.capture":
-            return callable(getattr(self.song, "capture_and_insert_scene", None))
-        if operation in {"clip.duplicate", "clip.move"}:
-            session = any(getattr(slot, "clip", None) is not None and callable(getattr(slot, "duplicate_clip_to", None)) and (operation != "clip.move" or callable(getattr(slot, "delete_clip", None))) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
-            arrangement = operation == "clip.duplicate" and any(getattr(slot, "clip", None) is not None and callable(getattr(track, "duplicate_clip_to_arrangement", None)) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
-            return session or arrangement
+            return callable(getattr(song, "capture_and_insert_scene", None))
+        if operation == "clip.duplicate":
+            return self._offers("slot", "duplicate_clip_to") or self._offers("track", "duplicate_clip_to_arrangement")
+        if operation == "clip.move":
+            return self._offers("slot", "duplicate_clip_to", "delete_clip")
         if operation == "arrangement.clip.create":
-            return any(callable(getattr(track, "create_midi_clip", None)) for track in self._items(getattr(self.song, "tracks", [])))
+            return self._offers("track", "create_midi_clip")
         if operation == "arrangement.clip.delete":
-            return any(callable(getattr(track, "delete_clip", None)) for track in self._items(getattr(self.song, "tracks", []))) or bool(self._items(getattr(self.song, "arrangement_clips", [])))
+            return self._offers("track", "delete_clip") or bool(self._items(getattr(song, "arrangement_clips", [])))
         if operation == "arrangement.clip.move":
-            return bool(self._arrangement_clip_items())
+            return self._offers("track", "duplicate_clip_to_arrangement", "delete_clip")
         if operation == "audio.clip.set":
-            return any(self._read_attr(getattr(slot, "clip", None), "is_audio_clip") is True and bool(self._audio_fields(getattr(slot, "clip"))["availableAudioFields"]) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
-        if operation in {"audio.capture.inspect", "audio.capture.start", "audio.capture.stop", "audio.capture.status", "audio.capture.emergency-stop", "audio.capture.cleanup"} and self._capture_state is not None and self._capture_state.get("state") != "cleaned":
+            return self._offers_any("audio_clip", "gain", "pitch_coarse", "pitch_fine", "warp_mode", "warping", "fade_in_length", "fade_out_length", "loop_start", "loop_end", method=False)
+        capture = ("audio.capture.inspect", "audio.capture.start", "audio.capture.stop", "audio.capture.status", "audio.capture.emergency-stop", "audio.capture.cleanup")
+        if operation in capture and self._capture_state is not None and self._capture_state.get("state") != "cleaned":
             # Recovery authority and the negotiated provider identity must
             # remain advertised while the one destination is occupied or a
             # stop/cleanup is unresolved. Target checks still refuse new work.
             return True
-        if operation in {"audio.capture.inspect", "audio.capture.start", "audio.capture.stop", "audio.capture.status", "audio.capture.emergency-stop", "audio.capture.cleanup"}:
+        if operation in capture:
             return self._capture_shape_supported()
         if operation == "mixer.set":
-            return any(self._read_attr(track, "mixer_device") is not None for track in self._items(getattr(self.song, "tracks", [])))
+            return self._offers("track", "mixer_device", method=False)
         if operation in {"automation.envelope.read", "automation.envelope.create", "automation.point.insert", "automation.point.delete"}:
-            return any(getattr(slot, "clip", None) is not None and callable(getattr(getattr(slot, "clip", None), "create_automation_envelope", None)) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "create_automation_envelope")
         if operation == "automation.envelope.delete":
-            return any(getattr(slot, "clip", None) is not None and callable(getattr(getattr(slot, "clip", None), "clear_envelope", None)) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "clear_envelope")
         if operation == "device.insert":
-            return any(callable(getattr(track, "insert_device", None)) for track in self._items(getattr(self.song, "tracks", []))) or any(callable(getattr(chain, "insert_device", None)) for track in self._items(getattr(self.song, "tracks", [])) for device in self._items(getattr(track, "devices", [])) for chain in self._items(self._read_attr(device, "chains") or []))
+            return self._offers("track", "insert_device") or self._offers("chain", "insert_device")
         if operation == "device.delete":
-            return any(callable(getattr(track, "delete_device", None)) for track in self._items(getattr(self.song, "tracks", [])))
+            return self._offers("track", "delete_device")
         if operation == "device.enable":
-            return any(self._device_on_parameter(device) is not None for track in self._items(getattr(self.song, "tracks", [])) for device in self._items(getattr(track, "devices", [])))
+            if self._probe_classes("device"): return self._offers("device", "parameters", method=False)
+            return any(self._device_on_parameter(device) is not None for device in self._shape_probe()["device"])
         if operation == "device.move":
-            return callable(getattr(self.song, "move_device", None))
+            return callable(getattr(song, "move_device", None))
         if operation in {"browser.search", "browser.inspect", "browser.load"}:
             try:
                 browser = self._browser()
@@ -961,58 +1056,51 @@ class LiveObjectMapper:
                 return True
             except ValueError:
                 return False
-        if operation == "track.rename": return any(hasattr(track, "name") for track in self._items(getattr(self.song, "tracks", [])))
-        if operation == "scene.rename": return any(hasattr(scene, "name") for scene in self._items(getattr(self.song, "scenes", [])))
-        if operation == "clip.rename": return any(hasattr(getattr(slot, "clip", None), "name") for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", [])) if getattr(slot, "clip", None) is not None)
-        if operation == "device.rename": return any(hasattr(device, "name") for track in self._items(getattr(self.song, "tracks", [])) for device in self._items(getattr(track, "devices", [])))
-        if operation == "locator.rename": return any(hasattr(locator, "name") for locator in self._items(getattr(self.song, "cue_points", [])))
+        if operation in {"track.rename", "scene.rename", "clip.rename", "device.rename", "locator.rename"}:
+            kind = {"track": "track", "scene": "scene", "clip": "clip", "device": "device", "locator": "locator"}[operation.split(".")[0]]
+            return any(hasattr(candidate, "name") for candidate in self._shape_probe()[kind])
         if operation == "routing.set":
-            return any(self._read_attr(track, "available_output_routing_types") is not None or self._read_attr(track, "can_be_armed") is True or isinstance(self._read_attr(track, "current_monitoring_state"), int) for track in self._items(getattr(self.song, "tracks", [])))
+            if self._probe_classes("track"): return self._offers_any("track", "available_output_routing_types", "can_be_armed", "current_monitoring_state", method=False)
+            return any(self._read_attr(track, "available_output_routing_types") is not None or self._read_attr(track, "can_be_armed") is True or isinstance(self._read_attr(track, "current_monitoring_state"), int) for track in self._shape_probe()["track"])
         if operation in {"recording.session", "recording.arrangement"}:
-            tracks = self._items(getattr(self.song, "tracks", []))
-            return isinstance(self._read_attr(self.song, "session_record"), bool) and isinstance(self._read_attr(self.song, "record_mode"), bool) and any(isinstance(self._read_attr(track, "arm"), bool) for track in tracks)
+            track_arm = self._offers("track", "arm", method=False) if self._probe_classes("track") else any(isinstance(self._read_attr(track, "arm"), bool) for track in self._shape_probe()["track"])
+            return isinstance(self._read_attr(song, "session_record"), bool) and isinstance(self._read_attr(song, "record_mode"), bool) and track_arm
         if operation in {"realtime.arm", "realtime.disarm", "realtime.stats"}:
             return getattr(self, "realtime_available", False)
         if operation == "session.audition-launch":
-            return any(callable(getattr(scene, "fire", None)) or callable(getattr(scene, "launch", None)) for scene in self._items(getattr(self.song, "scenes", [])))
+            return self._offers_any("scene", "fire", "launch")
         if operation in {"session.audition-stop", "session.emergency-stop"}:
-            return callable(getattr(self.song, "stop_all_clips", None)) and callable(getattr(self.song, "stop_playing", None))
-        if operation == "locator.add" or operation == "locator.delete":
+            return callable(getattr(song, "stop_all_clips", None)) and callable(getattr(song, "stop_playing", None))
+        if operation in {"locator.add", "locator.delete"}:
             return self._locator_supported()
-        tracks = self._items(getattr(self.song, "tracks", []))
         if operation == "track.create":
-            return callable(getattr(self.song, "create_midi_track", None)) and callable(getattr(self.song, "create_audio_track", None))
+            return callable(getattr(song, "create_midi_track", None)) and callable(getattr(song, "create_audio_track", None))
         if operation == "track.delete":
-            return callable(getattr(self.song, "delete_track", None)) and bool(tracks)
+            return callable(getattr(song, "delete_track", None)) and bool(self._items(getattr(song, "tracks", [])))
         if operation == "scene.create":
-            return callable(getattr(self.song, "create_scene", None))
+            return callable(getattr(song, "create_scene", None))
         if operation == "scene.delete":
-            return callable(getattr(self.song, "delete_scene", None)) and bool(self._items(getattr(self.song, "scenes", [])))
+            return callable(getattr(song, "delete_scene", None)) and bool(self._items(getattr(song, "scenes", [])))
         if operation == "clip.create":
-            return any(bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))) for track in tracks)
+            if self._probe_classes("slot"): return self._offers("slot", "create_clip")
+            return any(bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))[:self._PROBE_SAMPLE]) for track in self._shape_probe()["track"])
         if operation == "clip.delete":
-            return any(callable(getattr(slot, "delete_clip", None)) and (getattr(slot, "clip", None) is not None or (bool(getattr(track, "has_midi_input", False)) and callable(getattr(slot, "create_clip", None)))) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("slot", "delete_clip")
         if operation in {"note.add", "note.add-batch"}:
-            existing_clip_support = any(callable(getattr(getattr(slot, "clip", None), "add_new_notes", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
-            creatable_midi_slot = any(bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))) for track in tracks)
-            return existing_clip_support or creatable_midi_slot
+            return self._offers("clip", "add_new_notes") or self._operation_supported("clip.create")
         if operation == "note.update":
-            return any(callable(getattr(getattr(slot, "clip", None), "apply_note_modifications", None)) and callable(getattr(getattr(slot, "clip", None), "get_notes_extended", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "apply_note_modifications", "get_notes_extended")
         if operation == "note.delete":
-            return any(callable(getattr(getattr(slot, "clip", None), "remove_notes_by_id", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "remove_notes_by_id")
         if operation in {"device.parameter.set", "device.parameters.set"}:
-            return any(
-                any(device.get("parameters") for device in self._device_items(track, track_index))
-                for track_index, track in enumerate(tracks)
-            )
+            if self._probe_classes("parameter"): return self._offers("parameter", "value", method=False)
+            return any(all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))) for parameter in self._shape_probe()["parameter"])
         if operation == "arrangement.audio-clip.create":
-            return any(callable(getattr(track, "create_audio_clip", None)) for track in tracks)
+            return self._offers("track", "create_audio_clip")
         if operation == "clip.set":
-            clips = [getattr(slot, "clip", None) for track in tracks for slot in self._items(getattr(track, "clip_slots", []))]
-            clips += [clip for track in tracks for clip in self._items(self._read_attr(track, "arrangement_clips") or [])]
-            return any(clip is not None and (self._read_attr(clip, "muted") is not None or isinstance(self._read_attr(clip, "color_index"), int) or self._read_attr(clip, "looping") is not None) for clip in clips)
+            return self._offers_any("clip", "muted", "color_index", "looping", method=False) or self._offers_any("arrangement_clip", "muted", "color_index", "looping", method=False)
         if operation == "locator.jump":
-            return callable(getattr(self.song, "jump_to_next_cue", None)) and callable(getattr(self.song, "jump_to_prev_cue", None))
+            return callable(getattr(song, "jump_to_next_cue", None)) and callable(getattr(song, "jump_to_prev_cue", None))
         if operation in {"view.set", "view.control"}:
             try:
                 view = getattr(self._application(), "view", None)
@@ -1020,94 +1108,85 @@ class LiveObjectMapper:
                 return False
             if view is None: return False
             if operation == "view.set": return callable(getattr(view, "show_view", None)) and callable(getattr(view, "is_view_visible", None))
-            song_view = getattr(self.song, "view", None)
+            song_view = getattr(song, "view", None)
             return callable(getattr(view, "zoom_view", None)) and callable(getattr(view, "scroll_view", None)) and song_view is not None and self._read_attr(song_view, "follow_song") is not None
         if operation == "session.audio-clip.create":
-            return any(not bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_audio_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))) for track in tracks)
+            if self._probe_classes("slot"): return self._offers("slot", "create_audio_clip")
+            return any(not bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_audio_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))[:self._PROBE_SAMPLE]) for track in self._shape_probe()["track"])
         if operation == "clip.action":
-            return any(clip is not None and (callable(getattr(clip, "crop", None)) or callable(getattr(clip, "duplicate_loop", None)) or callable(getattr(clip, "start_scrub", None))) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])) for clip in [getattr(slot, "clip", None)])
+            return self._offers_any("clip", "crop", "duplicate_loop", "start_scrub")
         if operation == "automation.envelope.clear":
-            return any(callable(getattr(getattr(slot, "clip", None), "clear_all_envelopes", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "clear_all_envelopes")
         if operation == "note.read-by-id":
-            return any(callable(getattr(getattr(slot, "clip", None), "get_notes_by_id", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "get_notes_by_id")
         if operation == "note.read-selected":
-            return any(callable(getattr(getattr(slot, "clip", None), "get_selected_notes", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "get_selected_notes")
         if operation == "note.duplicate":
-            return any(callable(getattr(getattr(slot, "clip", None), "duplicate_notes_by_id", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "duplicate_notes_by_id")
         if operation == "note.quantize":
-            return any(callable(getattr(getattr(slot, "clip", None), "quantize", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
-        if operation in {"audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete"}:
-            clips = [getattr(slot, "clip", None) for track in tracks for slot in self._items(getattr(track, "clip_slots", []))]
-            clips += [clip for track in tracks for clip in self._items(self._read_attr(track, "arrangement_clips") or [])]
-            audio_clips = [clip for clip in clips if clip is not None and self._read_attr(clip, "is_audio_clip") is True]
-            if operation == "audio.warp-marker.read": return any(self._read_attr(clip, "warp_markers") is not None for clip in audio_clips)
-            method = {"audio.warp-marker.add": "add_warp_marker", "audio.warp-marker.move": "move_warp_marker", "audio.warp-marker.delete": "remove_warp_marker"}[operation]
-            return any(callable(getattr(clip, method, None)) for clip in audio_clips)
+            return self._offers("clip", "quantize")
+        if operation == "audio.warp-marker.read":
+            return self._offers("audio_clip", "warp_markers", method=False)
+        if operation in {"audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete"}:
+            return self._offers("audio_clip", {"audio.warp-marker.add": "add_warp_marker", "audio.warp-marker.move": "move_warp_marker", "audio.warp-marker.delete": "remove_warp_marker"}[operation])
         if operation == "arrangement.automation.read":
-            arrangement_clips = [clip for track in tracks for clip in self._items(self._read_attr(track, "arrangement_clips") or [])]
-            arrangement_clips += self._items(getattr(self.song, "arrangement_clips", []))
-            return any(callable(getattr(clip, "automation_envelope", None)) for clip in arrangement_clips)
+            return self._offers("arrangement_clip", "automation_envelope")
         if operation == "audio.take-lane.read":
-            return any(self._read_attr(track, "take_lanes") is not None for track in tracks)
+            return self._offers("track", "take_lanes", method=False)
         if operation == "take-lane.create":
-            return any(callable(getattr(track, "create_take_lane", None)) for track in tracks)
+            return self._offers("track", "create_take_lane")
         if operation == "take-lane.rename":
-            return any(hasattr(lane, "name") for track in tracks for lane in self._items(self._read_attr(track, "take_lanes") or []))
+            return any(hasattr(lane, "name") for lane in self._shape_probe()["take_lane"])
         if operation == "take-lane.clip.create":
-            return any(callable(getattr(lane, "create_midi_clip", None)) for track in tracks for lane in self._items(self._read_attr(track, "take_lanes") or []))
+            return self._offers("take_lane", "create_midi_clip")
         if operation == "take-lane.audio-clip.create":
-            return any(callable(getattr(lane, "create_audio_clip", None)) for track in tracks for lane in self._items(self._read_attr(track, "take_lanes") or []))
+            return self._offers("take_lane", "create_audio_clip")
         if operation == "tuning.read":
-            return getattr(self.song, "tuning_system", None) is not None or self._read_attr(self.song, "root_note") is not None or self._read_attr(self.song, "scale_name") is not None
+            return getattr(song, "tuning_system", None) is not None or self._read_attr(song, "root_note") is not None or self._read_attr(song, "scale_name") is not None
         if operation == "tuning.set":
-            tuning = getattr(self.song, "tuning_system", None)
-            return tuning is not None and (self._read_attr(tuning, "reference_pitch") is not None or self._read_attr(self.song, "root_note") is not None)
+            tuning = getattr(song, "tuning_system", None)
+            return tuning is not None and (self._read_attr(tuning, "reference_pitch") is not None or self._read_attr(song, "root_note") is not None)
         if operation == "groove.read":
-            return getattr(self.song, "groove_pool", None) is not None or self._read_attr(self.song, "groove_amount") is not None
+            return getattr(song, "groove_pool", None) is not None or self._read_attr(song, "groove_amount") is not None
         if operation == "groove.set":
-            return isinstance(self._read_attr(self.song, "groove_amount"), (int, float)) and not isinstance(self._read_attr(self.song, "groove_amount"), bool)
+            return isinstance(self._read_attr(song, "groove_amount"), (int, float)) and not isinstance(self._read_attr(song, "groove_amount"), bool)
         if operation == "groove.edit":
-            pool = getattr(self.song, "groove_pool", None)
-            return any(self._read_attr(groove, "name") is not None for groove in self._items(self._read_attr(pool, "grooves") or [])) if pool is not None else False
+            return getattr(song, "groove_pool", None) is not None and self._offers("groove", "name", method=False)
         if operation == "scene.set":
-            return any(self._read_attr(scene, "color_index") is not None or self._read_attr(scene, "tempo") is not None for scene in self._items(getattr(self.song, "scenes", [])))
+            return self._offers_any("scene", "color_index", "tempo", method=False)
         if operation == "scene.fire-selected":
-            return any(callable(getattr(scene, "fire_as_selected", None)) for scene in self._items(getattr(self.song, "scenes", [])))
-        if operation == "song.read":
-            return True
+            return self._offers("scene", "fire_as_selected")
         if operation == "transport.action":
-            song = self.song
             return any(callable(getattr(song, name, None)) for name in ("start_playing", "continue_playing", "stop_playing", "play_selection", "tap_tempo", "nudge_up", "nudge_down", "re_enable_automation", "force_link_beat_time"))
         if operation == "locator.jump-to":
-            return self._locator_supported() and any(callable(getattr(locator, "jump", None)) for locator in self._items(getattr(self.song, "cue_points", [])))
+            return self._locator_supported() and self._offers("locator", "jump")
         if operation == "song.time-convert":
-            song = self.song
             return (callable(getattr(song, "get_beats_loop_start", None)) and callable(getattr(song, "get_beats_loop_length", None))) or callable(getattr(song, "get_current_smpte_song_time", None))
         if operation == "track.create-return":
-            return callable(getattr(self.song, "create_return_track", None))
+            return callable(getattr(song, "create_return_track", None))
         if operation == "track.delete-return":
-            return callable(getattr(self.song, "delete_return_track", None)) and bool(self._items(getattr(self.song, "return_tracks", [])))
+            return callable(getattr(song, "delete_return_track", None)) and bool(self._items(getattr(song, "return_tracks", [])))
         if operation == "track.duplicate":
-            return callable(getattr(self.song, "duplicate_track", None)) and bool(self._items(getattr(self.song, "tracks", [])))
+            return callable(getattr(song, "duplicate_track", None)) and bool(self._items(getattr(song, "tracks", [])))
         if operation == "scene.duplicate":
-            return callable(getattr(self.song, "duplicate_scene", None)) and bool(self._items(getattr(self.song, "scenes", [])))
+            return callable(getattr(song, "duplicate_scene", None)) and bool(self._items(getattr(song, "scenes", [])))
         if operation == "track.set":
-            return any(self._read_attr(track, "color_index") is not None for track in tracks)
+            return self._offers("track", "color_index", method=False)
         if operation == "track.view.set":
-            return any(getattr(track, "view", None) is not None and (self._read_attr(getattr(track, "view", None), "is_collapsed") is not None or self._read_attr(getattr(track, "view", None), "device_insert_mode") is not None) for track in tracks)
+            return self._offers_any("track_view", "is_collapsed", "device_insert_mode", method=False)
         if operation == "track.select-instrument":
-            return any(callable(getattr(getattr(track, "view", None), "select_instrument", None)) for track in tracks)
+            return self._offers("track_view", "select_instrument")
         if operation == "selection.set":
-            return getattr(self.song, "view", None) is not None
+            return getattr(song, "view", None) is not None
         if operation == "song.set":
             settings_state = self._song_settings_state()
             return any(settings_state.get(field) is not None for field in self._SONG_SET_FIELDS)
         if operation == "song.view.set":
-            return self._read_attr(getattr(self.song, "view", None), "draw_mode") is not None
+            return self._read_attr(getattr(song, "view", None), "draw_mode") is not None
         if operation == "clip.view.set":
-            return any(getattr(getattr(slot, "clip", None), "view", None) is not None for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
+            return self._offers("clip", "view", method=False)
         if operation == "device.view.set":
-            return any(getattr(device, "view", None) is not None for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers("device", "view", method=False)
         if operation == "application.dialog":
             try:
                 application = self._application()
@@ -1116,56 +1195,52 @@ class LiveObjectMapper:
             if callable(getattr(application, "press_current_dialog_button", None)): return True
             state = self._dialog_state(application)
             return any(value is not None for value in state.values())
-        if operation == "performance.read":
-            return True
         if operation == "mixer.extended.set":
-            return any(self._read_attr(self._read_attr(track, "mixer_device"), "track_activator") is not None or self._read_attr(self._read_attr(track, "mixer_device"), "crossfader") is not None or self._read_attr(self._read_attr(track, "mixer_device"), "panning_left") is not None for track in tracks)
+            return self._offers_any("mixer", "track_activator", "crossfader", "panning_left", method=False)
         if operation == "chain-mixer.set":
-            return any(self._read_attr(self._read_attr(chain, "mixer_device"), "volume") is not None for track in tracks for device in self._items(getattr(track, "devices", [])) for chain in self._items(self._read_attr(device, "chains") or []))
+            return self._offers("chain_mixer", "volume", method=False)
         if operation == "device-io.set":
-            return any(bool(self._items(self._read_attr(device, "audio_inputs") or [])) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            if self._probe_classes("device"): return self._offers("max", "audio_inputs", method=False) or self._offers("device", "audio_inputs", method=False)
+            return any(bool(self._items(self._read_attr(device, "audio_inputs") or [])) for device in self._shape_probe()["device"])
         if operation == "compressor.sidechain.set":
-            return any(self._read_attr(device, "input_routing_type") is not None for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers("compressor", "input_routing_type", method=False) or self._offers("device", "input_routing_type", method=False)
         if operation == "device.bank.set":
-            return any(callable(getattr(device, "parameter_bank_count", None)) and callable(getattr(device, "store_chosen_bank", None)) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers("device", "parameter_bank_count", "store_chosen_bank") or self._offers("max", "parameter_bank_count", "store_chosen_bank")
         if operation == "parameter.re-enable-automation":
-            return any(callable(getattr(parameter, "re_enable_automation", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for parameter in self._items(getattr(device, "parameters", [])))
+            return self._offers("parameter", "re_enable_automation")
         if operation == "device.comparison.save-to-slot":
-            return any(callable(getattr(device, "save_preset_to_compare_ab_slot", None)) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers("device", "save_preset_to_compare_ab_slot")
         if operation == "chain.set":
-            return any(self._read_attr(chain, "color_index") is not None or self._read_attr(chain, "auto_color") is not None for track in tracks for device in self._items(getattr(track, "devices", [])) for chain in self._items(self._read_attr(device, "chains") or []))
+            return self._offers_any("chain", "color_index", "auto_color", method=False)
         if operation == "drum-pad.set":
-            return any(self._read_attr(pad, "note") is not None or self._read_attr(pad, "solo") is not None for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
-        if operation == "drum-pad.delete-all-chains":
-            return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
-        if operation in {"drum-pad.load-sample", "drum-pad.load-samples"}:
-            return any(callable(getattr(pad, "delete_all_chains", None)) for track in tracks for device in self._items(getattr(track, "devices", [])) for pad in self._items(self._read_attr(device, "drum_pads") or []))
+            return self._offers_any("pad", "note", "solo", method=False)
+        if operation in {"drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples"}:
+            return self._offers("pad", "delete_all_chains")
         if operation == "ownership.settle":
             return self._operation_supported("browser.load")
         if operation == "rack.set":
-            return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
+            if self._probe_classes("rack"): return self._offers("rack", "visible_macro_count", method=False)
+            return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for device in self._shape_probe()["rack"])
         if operation == "rack.action":
-            return any(any(callable(getattr(device, name, None)) for name in ("add_macro", "remove_macro", "randomize_macros", "insert_chain", "copy_pad", "store_variation", "recall_variation", "delete_variation")) for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
+            return self._offers_any("rack", "add_macro", "remove_macro", "randomize_macros", "insert_chain", "copy_pad", "store_variation", "recall_variation", "delete_variation")
         if operation == "rack.view.set":
-            return any(getattr(device, "view", None) is not None for track in tracks for device in self._items(getattr(track, "devices", [])) if self._read_attr(device, "can_have_chains") is True)
+            return self._offers("rack", "view", method=False)
         if operation == "drift.set":
-            return any("drift" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower() and (self._read_attr(device, "pitch_bend_range") is not None or self._read_attr(device, "voice_count_index") is not None) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("drift", "pitch_bend_range", "voice_count_index", method=False)
         if operation == "drum-cell.set":
-            return any("drumcell" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower().replace("_", "").replace(" ", "") and self._read_attr(device, "gain") is not None for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers("drum_cell", "gain", method=False)
         if operation == "eq8.set":
-            return any("eq8" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower().replace("_", "").replace(" ", "") and (self._read_attr(device, "edit_mode") is not None or self._read_attr(device, "global_mode") is not None or self._read_attr(device, "oversample") is not None) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("eq8", "edit_mode", "global_mode", "oversample", method=False)
         if operation == "hybrid-reverb.set":
-            return any("hybridreverb" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower().replace("_", "").replace(" ", "") and (self._read_attr(device, "ir_attack_time") is not None or self._read_attr(device, "ir_decay_time") is not None or self._read_attr(device, "ir_size_factor") is not None or self._read_attr(device, "ir_category_index") is not None) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("hybrid_reverb", "ir_attack_time", "ir_decay_time", "ir_size_factor", "ir_category_index", method=False)
         if operation in {"looper.action", "looper.set"}:
-            return any("looper" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower() and (any(callable(getattr(device, name, None)) for name in ("record", "overdub", "play", "stop", "clear")) or self._read_attr(device, "speed") is not None) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("looper", "record", "overdub", "play", "stop", "clear") or self._offers("looper", "speed", method=False)
         if operation == "meld.set":
-            return any("meld" in str(self._read_attr(device, "class_name") or device.__class__.__name__).lower() and (self._read_attr(device, "selected_engine") is not None or self._read_attr(device, "unison_voices") is not None or self._read_attr(device, "poly_voices") is not None) for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("meld", "selected_engine", "unison_voices", "poly_voices", method=False)
         if operation == "plugin.set":
-            return any(self._read_attr(device, "is_editor_open") is not None or self._read_attr(device, "presets") is not None for track in tracks for device in self._items(getattr(track, "devices", [])))
+            return self._offers_any("plugin", "is_editor_open", "presets", method=False) or self._offers_any("device", "is_editor_open", "presets", method=False)
         if operation == "simpler.replace-sample":
-            return any(callable(getattr(device, "replace_sample", None)) for track in tracks for device in self._items(getattr(track, "devices", [])))
-        if operation in {"observe.subscribe", "observe.poll", "observe.unsubscribe"}:
-            return True
+            return self._offers("simpler", "replace_sample") or self._offers("device", "replace_sample")
         return False
 
     def capabilities(self, operations: set[str] | None = None) -> list[str]:
@@ -1185,25 +1260,14 @@ class LiveObjectMapper:
         if supports("subscribe"): capabilities.append("subscriptions")
         if self._locator_supported() or supports("arrangement.clip.delete"): capabilities.append("arrangement.read")
         if self._locator_supported() or supports("arrangement.clip.create") or supports("arrangement.clip.delete"): capabilities.append("arrangement.write")
-        tracks = self._items(getattr(self.song, "tracks", []))
-        device_objects = [device for track in tracks for device in self._items(getattr(track, "devices", []))]
-        # Shallow attribute traversal is enough for status and avoids building
-        # the full recursive device graph on every capability refresh.
-        cursor = 0
-        while cursor < len(device_objects) and len(device_objects) < 512:
-            device = device_objects[cursor]; cursor += 1
-            for chain in self._items(self._read_attr(device, "chains") or []):
-                for nested in self._items(self._read_attr(chain, "devices") or []):
-                    if len(device_objects) >= 512: break
-                    device_objects.append(nested)
-                if len(device_objects) >= 512: break
-        if device_objects:
+        # The same shape probe as operations: a few representatives, never the Set's whole device graph.
+        probe = self._shape_probe()
+        if probe["device"]:
             capabilities.append("devices")
-            if any(self._items(getattr(device, "parameters", [])) for device in device_objects): capabilities.append("parameters")
+            if probe["parameter"] if not self._probe_classes("device") else self._offers("device", "parameters", method=False): capabilities.append("parameters")
             if supports("device.parameter.set"): capabilities.append("device.parameter.write")
-            if any(self._read_attr(item, "can_have_chains") is True for item in device_objects): capabilities.extend(("racks", "chains"))
-            class_names = [str(self._read_attr(item, "class_name") or item.__class__.__name__).lower() for item in device_objects]
-            if any(any(marker in name for marker in ("plugin", "vst", "audio_unit")) for name in class_names): capabilities.append("plugins")
+            if probe["rack"] if not self._probe_classes("rack") else True: capabilities.extend(("racks", "chains"))
+            if probe["plugin"]: capabilities.append("plugins")
         if supports("audio.clip.set"): capabilities.append("audio")
         if supports("audio.warp-marker.read"): capabilities.append("warp")
         if supports("audio.take-lane.read"): capabilities.append("takes")
@@ -8584,20 +8648,15 @@ class LiveObjectMapper:
         return matches[0]
 
     def _capture_shape_supported(self) -> bool:
-        if not callable(getattr(self.song, "stop_playing", None)):
+        """The resampling capture provider, from stable shape probed on representatives (never the
+        Set): Live can stop, a slot can fire, and a track offers exactly one Resampling input. The
+        source clip, the empty destination and the target's arm and monitoring are checked by
+        inspect and again atomically by start, where a refusal can say why."""
+        if not callable(getattr(self.song, "stop_playing", None)) or not self._offers("slot", "fire"):
             return False
-        tracks = self._items(getattr(self.song, "tracks", []))
-        has_source = any(getattr(slot, "clip", None) is not None and callable(getattr(slot, "fire", None)) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])))
-        if not has_source:
-            return False
-        for track in tracks:
-            # Status advertises the provider from stable, non-mutating shape:
-            # one exact Resampling choice and one fireable empty slot. Target-
-            # specific arm/monitor/audio-input requirements are rechecked by
-            # inspect and again atomically by start, where useful refusal detail
-            # can be returned instead of silently hiding the whole provider.
-            if not any(getattr(slot, "clip", None) is None and callable(getattr(slot, "fire", None)) for slot in self._items(getattr(track, "clip_slots", []))):
-                continue
+        if self._probe_classes("track"):
+            return self._offers("track", "available_input_routing_types", method=False)
+        for track in self._shape_probe()["track"]:
             try:
                 self._capture_resampling_choice(track)
                 return True
@@ -9366,17 +9425,23 @@ def _probe_track(song: Any) -> Any:
 
 
 def _supported_event_types(song: Any) -> set[str]:
-    """The event types this Live shape can push, probed on the Song, its view and one track: never
-    by walking the Set."""
+    """The event types this Live shape can push, probed on the Song, its view and, for tracks and
+    parameters, Live's own classes (a test double's first track): never by walking the Set."""
     supported = {"reset"}
     if _listens(song, "is_playing", "record_mode", "session_record"): supported.add("transport")
     if _listens(song, "tracks", "scenes"): supported.add("object")
     if _listens(song, "tracks", "scenes", "cue_points"): supported.add("structure")
     view = getattr(song, "view", None)
     if _listens(view, "selected_track", "selected_scene", "highlighted_clip_slot", "detail_clip", "selected_parameter"): supported.add("selection")
-    track = _probe_track(song)
-    mixer = getattr(track, "mixer_device", None) if track is not None else None
-    volume = getattr(mixer, "volume", None) if mixer is not None else None
+    live = _live_module()
+    track_class = getattr(getattr(live, "Track", None), "Track", None) if live is not None else None
+    parameter_class = getattr(getattr(live, "DeviceParameter", None), "DeviceParameter", None) if live is not None else None
+    if isinstance(track_class, type) or isinstance(parameter_class, type):
+        track, volume = track_class, parameter_class
+    else:
+        track = _probe_track(song)
+        mixer = getattr(track, "mixer_device", None) if track is not None else None
+        volume = getattr(mixer, "volume", None) if mixer is not None else None
     if _listens(view, "selected_track") and _listens(volume, "value"): supported.add("parameter")
     if _listens(track, "name", "color", "color_index"): supported.add("name")
     if _listens(track, "mute", "solo", "arm") or _listens(volume, "value"): supported.add("mixer")

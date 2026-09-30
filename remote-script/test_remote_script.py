@@ -2339,7 +2339,9 @@ class ControlSurfaceTests(unittest.TestCase):
 
     def test_capture_midi_refuses_any_preexisting_session_content(self):
         song = FakeSong(); song.tracks[0].clip_slots[0].clip = FakeClip(4.0); called = []; song.capture_midi = lambda: called.append(True); mapper = LiveObjectMapper(song); expected = mapper._capture_authority_revision()
-        self.assertNotIn("session.capture-midi", mapper.status()["operations"])
+        # Advertised on shape (Live can capture MIDI; the Set isn't walked to see whether its slots are empty):
+        # the capture itself refuses pre-existing content.
+        self.assertIn("session.capture-midi", mapper.status()["operations"])
         with self.assertRaisesRegex(ValueError, "globally empty Session slots"): mapper.invoke("session.capture-midi", {"expectedStateRevision": expected})
         self.assertEqual(called, []); self.assertIsNotNone(song.tracks[0].clip_slots[0].clip)
 
@@ -6961,3 +6963,100 @@ class ListenerEventTests(unittest.TestCase):
         subscription.refresh()
         self.assertTrue(all(track.listening() == 2 for track in song.tracks))
         subscription.close()
+
+
+class ShapeProbeTests(unittest.TestCase):
+    """Review: what a Live shape offers is probed on representatives, never by walking the Set, so a
+    big Set (or one long warped recording) can't slow or break status."""
+
+    def test_status_reads_only_the_sets_first_tracks(self):
+        class Marker:
+            def __init__(self, value): self.beat_time = value; self.sample_time = value * 100.0
+        class Unreadable(FakeClip):
+            @property
+            def warp_markers(self): raise RuntimeError("never read to advertise")
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(200)]
+        long_take = FakeClip(4.0); long_take.is_audio_clip = True; long_take.warp_markers = [Marker(float(index)) for index in range(3000)]; song.tracks[0].clip_slots[0].clip = long_take
+        broken = Unreadable(4.0); broken.is_audio_clip = True; song.tracks[150].clip_slots[0].clip = broken
+        counter = ReadCounter(song.tracks)
+        status = LiveObjectMapper(song).status()
+        self.assertIn("clip.create", status["operations"]); self.assertIn("device.parameter.set", status["operations"])
+        self.assertTrue(set(counter.reads) <= set(range(LiveObjectMapper._PROBE_SAMPLE)), f"only the first tracks are looked at: {sorted(counter.reads)}")
+
+    def test_inside_live_its_classes_answer_and_no_track_is_read(self):
+        def module(**classes): return types.SimpleNamespace(**classes)
+        class Clip:
+            def add_new_notes(self, notes): pass
+            def apply_note_modifications(self, notes): pass
+            def get_notes_extended(self, *args): pass
+            def remove_notes_by_id(self, ids): pass
+            def create_automation_envelope(self, parameter): pass
+            def crop(self): pass
+            name = property(lambda self: ""); muted = property(lambda self: False); view = property(lambda self: None)
+        class ClipSlot:
+            def fire(self): pass
+            def create_clip(self, length): pass
+            def delete_clip(self): pass
+            def duplicate_clip_to(self, slot): pass
+        class Track:
+            def stop_all_clips(self): pass
+            def insert_device(self, name, index): pass
+            def delete_device(self, index): pass
+            mixer_device = property(lambda self: None); color_index = property(lambda self: 0); arm = property(lambda self: False); name = property(lambda self: "")
+        class DeviceParameter:
+            value = property(lambda self: 0.0)
+            def re_enable_automation(self): pass
+        class Device:
+            parameters = property(lambda self: []); name = property(lambda self: ""); view = property(lambda self: None)
+        live = types.ModuleType("Live")
+        live.Clip = module(Clip=Clip); live.ClipSlot = module(ClipSlot=ClipSlot); live.Track = module(Track=Track); live.DeviceParameter = module(DeviceParameter=DeviceParameter); live.Device = module(Device=Device)
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(50)]; counter = ReadCounter(song.tracks)
+        with patch.dict(sys.modules, {"Live": live}):
+            operations = set(LiveObjectMapper(song).status()["operations"])
+        self.assertEqual(counter.reads, {}, "Live's classes answer; the Set isn't read")
+        self.assertTrue({"clip.create", "clip.delete", "clip.move", "note.add-batch", "note.update", "note.delete", "session.clip-launch", "session.clip-stop", "device.insert", "device.delete", "device.parameter.set", "parameter.re-enable-automation", "automation.envelope.create", "clip.action", "clip.set", "mixer.set", "track.set", "clip.rename", "device.rename"} <= operations, operations)
+        self.assertNotIn("note.read-by-id", operations, "a member Live's class doesn't have isn't offered")
+
+
+class OldBoundTests(unittest.TestCase):
+    """Review: every formerly capped argument, one past its old literal bound, passes the registry and
+    reaches the operation's own fences, so the Remote Script and the registry stay in step."""
+
+    def test_playback_targets_and_scene_indices_past_their_old_bounds_reach_the_fences(self):
+        mapper = LiveObjectMapper(FakeSong()); snapshot = mapper.snapshot(); scene = snapshot["scenes"][0]; epoch = mapper.refs.epoch
+        targets = [f"{epoch}:track:0|{epoch}:clip_slot:0:{index}|{scene['ref']}" for index in range(257)]
+        cases = [
+            ("session.emergency-stop", {"expectedTargets": targets, "expectedRecording": "stopped"}, "active playback does not exactly match"),
+            ("session.audition-launch", {"ref": scene["ref"], "setName": "Set", "sceneName": "Scene 1", "sceneIndex": 10001, "playbackRevision": "revision", "eligibleTargets": targets, "outputSafety": {"safe": True, "provenance": "unit-test"}, "expectedSetIdentity": "live:set", "expectedAuthorityRevision": "0" * 64}, "Set identity does not match"),
+            ("session.audition-stop", {"ref": scene["ref"], "setName": "Set", "eligibleTargets": targets, "expectedSetIdentity": "live:set", "expectedAuthorityRevision": "0" * 64}, "Set identity does not match"),
+        ]
+        for operation, args, fence in cases:
+            validate_operation_payload(operation, "request", args)
+            with self.assertRaisesRegex(ValueError, fence): mapper.invoke(operation, args)
+
+    def test_a_note_duplication_of_hundreds_of_notes(self):
+        song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live"); transaction = "old-bound-notes"
+        created = mapper.invoke("clip.create", ControlSurfaceTests.clip_creation_args(mapper, mapper.snapshot()["tracks"][0]["ref"], 0, kind="midi", name="Dense", length=2048), transaction)
+        added = mapper.invoke("note.add-batch", {"ref": created["ref"], "notes": [{"pitch": 60, "start": index * 0.5, "duration": 0.25, "velocity": 100, "channel": 1} for index in range(600)], **ControlSurfaceTests.note_authority(mapper, created["ref"])}, transaction)
+        clip = song.tracks[0].clip_slots[0].clip
+        clip.duplicate_notes_by_id = lambda ids: clip.add_new_notes([{key: value for key, value in note.items() if key != "note_id"} for note in list(clip.notes) if note["note_id"] in set(ids)])
+        request = {"ref": created["ref"], "noteIds": added["noteIds"][:513], **ControlSurfaceTests.note_authority(mapper, created["ref"])}
+        validate_operation_payload("note.duplicate", "request", request)
+        self.assertEqual(mapper.invoke("note.duplicate", request, transaction)["duplicated"], 513)
+
+    def test_an_envelope_clear_over_hundreds_of_parameters(self):
+        song = FakeSong(); device = song.tracks[0].devices[0]; device.parameters = [FakeParameter() for _ in range(600)]
+        clip = FakeClip(4.0); clip.clear_all_envelopes = lambda: None; clip.automation_envelope = lambda parameter: None; song.tracks[0].clip_slots[0].clip = clip
+        mapper = LiveObjectMapper(song); clip_ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        request = {"clipRef": clip_ref, "expectedAuthorityDigest": mapper._clip_authority_digest(clip_ref), "expectedEnvelopesRevision": hashlib.sha256(mapper._bounded_canonical([False] * 600).encode("utf-8")).hexdigest()}
+        validate_operation_payload("automation.envelope.clear", "request", request)
+        self.assertEqual(mapper.invoke("automation.envelope.clear", request)["cleared"], 0)
+
+    def test_a_midi_capture_of_three_hundred_clips(self):
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(300)]
+        def capture():
+            for track in song.tracks: track.clip_slots[0].clip = FakeClip(4.0)
+        song.capture_midi = capture
+        mapper = LiveObjectMapper(song, provenance="real-live")
+        result = mapper.invoke("session.capture-midi", {"expectedStateRevision": mapper._capture_authority_revision()}, "old-bound-capture")
+        self.assertEqual(len(result["clips"]), 300); validate_operation_payload("session.capture-midi", "result", result)
