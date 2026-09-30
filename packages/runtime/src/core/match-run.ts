@@ -97,7 +97,7 @@ export class MatchRun {
       return { next: "[Kumi] Before finishing, audition what you built against the reference (the audition tool; several candidates on their own tracks render together). If the producer gave no reference, listen to what they pointed at, or ask them for one and stop." };
     }
     this.checks.push(this.best.score);
-    const wrapUp = (why: string) => `[Kumi] ${why} Tidy up, then give your final answer. Keep the winner on its track, mute the runner-up for the producer to A/B, and remove the other candidate tracks you made (undo_change on the change that added each). Then say the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which track holds the runner-up. Call it the closest you got.`;
+    const wrapUp = (why: string) => `[Kumi] ${why} Tidy up, then give your final answer. Put the winner where the producer asked for it (the track they named or had selected, or keep it on its own), and mute every other candidate track you made (don't undo them: Live removes a track only from the last one back, and not one changed since). Then say the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which muted tracks hold the others for the producer to A/B or delete. Call it the closest you got.`;
     if (this.best.score >= this.budget.target) return { stop: "reached", ...(this.continuations ? { wrapUp: wrapUp(`That reaches ${this.best.score}%, close enough to stop.`) } : {}) };
     if (left.rounds <= 0 || elapsed >= this.budget.ms) return { stop: "budget", wrapUp: wrapUp("That's the run's budget spent.") };
     // A plateau: the last checks gained less than minGain over the best before them.
