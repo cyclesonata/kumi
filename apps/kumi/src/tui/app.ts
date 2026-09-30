@@ -1049,7 +1049,13 @@ export class TuiApp {
       this.notice("Copied the sign-in link.", "info");
       return;
     }
-    if (panel.kind === "pick") panel.picker.type(event.text);
+    if (panel.kind === "pick") {
+      // A "/" to begin with is a command, not a filter (no item starts with one): the list gives way
+      // to the input box, where the command menu opens. So /update works from the model list Kumi
+      // opens at the start.
+      if (!panel.picker.filter && event.text.startsWith("/")) { this.closePanel(); this.onInput(event); return; }
+      panel.picker.type(event.text);
+    }
     // A key is one word: spaces and line breaks a paste brings along go.
     else if (panel.kind === "key" && !panel.checking) { panel.secret = (panel.secret + event.text.replace(/[\s\x00-\x1f\x7f]/g, "")).slice(0, 4096); delete panel.status; }
   }

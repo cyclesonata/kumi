@@ -740,6 +740,28 @@ test("with no model chosen, Kumi starts with a signed-in provider's first one an
   await fresh.app.close();
 });
 
+test("a command typed while a list is open runs: the list Kumi opens at the start gives way to the input box on \"/\"", async () => {
+  const none = fakeModels({ lists: MODELS });
+  const h = harness(120, 36, none.control);
+  void h.app.run();
+  await delay(10);
+  assert.ok(has(h.screen(), "Choose a model"));
+  await h.type("/");
+  let lines = h.screen();
+  assert.ok(!has(lines, "Choose a model"), "the list closes");
+  assert.ok(has(lines, "Forget this conversation and start fresh") && lines.some((line) => line.trim() === "/help"), "the command menu opens");
+  await h.type("help\r");
+  await delay(5);
+  lines = h.screen();
+  assert.ok(has(lines, "enter sends · ctrl+j or alt+enter starts a new line"), lines.join("\n"));
+  // A filter that's begun keeps its "/": model names have them.
+  await h.type("/model\r");
+  await delay(10);
+  await h.type("gpt-6/");
+  assert.ok(has(h.screen(), "filter: gpt-6/"));
+  await h.app.close();
+});
+
 test("signing in to ChatGPT from Kumi shows the link to open, copies it on c, and can be cancelled", async () => {
   const fake = fakeModels({ lists: MODELS });
   const h = harness(120, 36, fake.control);
