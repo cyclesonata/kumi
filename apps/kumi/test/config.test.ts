@@ -144,5 +144,9 @@ test("Live's Remote Scripts folder is in the User Library Live's own preferences
     assert.equal(remoteScriptsDir(env), join(moved, "User Library", "Remote Scripts"));
     assert.equal(remoteScriptsDir({ ...env, KUMI_REMOTE_SCRIPTS_DIR: "/chosen/Remote Scripts" }), "/chosen/Remote Scripts", "an explicit folder wins");
     assert.equal(liveUserLibrary(process.platform === "win32" ? { APPDATA: join(dir, "none") } : { HOME: join(dir, "none") }), undefined);
+    // Unescaped once: a folder whose name holds the text "&quot;" keeps it.
+    const literal = join(dir, "Takes &quot;live&quot;");
+    writeFileSync(join(preferences, "Library.cfg"), `<?xml version="1.0"?><Ableton><ContentLibrary><UserLibrary><LibraryProject Id="0"><ProjectLocation /><ProjectName Value="User Library" /><ProjectPath Value="${literal.replace(/&/g, "&amp;")}" /></LibraryProject></UserLibrary></ContentLibrary></Ableton>`);
+    assert.equal(liveUserLibrary(env), join(literal, "User Library"));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

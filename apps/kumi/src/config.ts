@@ -109,7 +109,8 @@ export function liveUserLibrary(env: Env = process.env): string | undefined {
       .filter((file) => existsSync(file)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
     for (const file of configs) {
       const block = /<UserLibrary>([\s\S]*?)<\/UserLibrary>/.exec(readFileSync(file, "utf8"))?.[1] ?? "";
-      const value = (field: string) => new RegExp(`<${field} Value="([^"]*)"`).exec(block)?.[1]?.replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      // &amp; last, so "&amp;quot;" (a literal &quot; in the path) stays "&quot;".
+      const value = (field: string) => new RegExp(`<${field} Value="([^"]*)"`).exec(block)?.[1]?.replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
       const folder = value("ProjectPath"); const name = value("ProjectName") || "User Library";
       if (folder && isAbsolute(folder)) return join(folder, name);
     }
