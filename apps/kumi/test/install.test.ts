@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { KUMI_VERSION } from "@kumi/runtime";
-import { fetchManifest, newerVersion, rollbackInstalled, uninstallInstalled, updateInstalled } from "../src/install.js";
+import { checkRelease, fetchManifest, newerVersion, rollbackInstalled, uninstallInstalled, updateInstalled } from "../src/install.js";
 
 const out = () => { const stream = new PassThrough(); let text = ""; stream.on("data", (chunk) => { text += String(chunk); }); return { stream, text: () => text }; };
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
@@ -34,6 +34,13 @@ test("versions compare by number, and a release's description is checked before 
   }
   assert.equal(await fetchManifest({}, (async () => { throw new Error("offline"); }) as typeof fetch), undefined, "no network is no answer, not a crash");
   assert.equal(await fetchManifest({}, (async () => new Response("", { status: 404 })) as typeof fetch), undefined);
+});
+
+test("asked now (/update, update --check), a release says whether it's newer; not being able to ask isn't taken for up to date", async () => {
+  const release = (kumi: string) => (async () => json({ kumi, bundle: "kumi.tar.gz", sha256: "a".repeat(64), node })) as typeof fetch;
+  assert.equal(await checkRelease({ KUMI_RELEASES: "https://example.test/r" }, release("99.0.0")), "99.0.0");
+  assert.equal(await checkRelease({ KUMI_RELEASES: "https://example.test/r" }, release(KUMI_VERSION)), undefined);
+  await assert.rejects(checkRelease({ KUMI_RELEASES: "https://example.test/r" }, (async () => { throw new Error("offline"); }) as typeof fetch), /couldn't reach GitHub/);
 });
 
 test("update puts the new Kumi in place only after checking it, keeps the one before, and rollback goes back", async () => {

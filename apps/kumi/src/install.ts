@@ -221,6 +221,13 @@ export async function uninstallInstalled(io: InstalledIo, options: { all: boolea
   return 0;
 }
 
+/** A newer release's version, asked now (for /update and `kumi update --check`); undefined when this is the newest. Throws when GitHub can't be asked. */
+export async function checkRelease(env: Env = process.env, fetcher: typeof fetch = fetch): Promise<string | undefined> {
+  const manifest = await fetchManifest(env, fetcher);
+  if (!manifest) throw new Error("Kumi couldn't reach GitHub to ask; check your internet connection");
+  return newerVersion(manifest.kumi, KUMI_VERSION) ? manifest.kumi : undefined;
+}
+
 /** A newer release's version, asked of GitHub at most once a day. */
 export async function newerRelease(cacheFile: string, env: Env = process.env, now = Date.now()): Promise<string | undefined> {
   try {

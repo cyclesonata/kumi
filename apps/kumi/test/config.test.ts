@@ -47,6 +47,11 @@ test("sign-in commands: login (browser, device, Pi import, a key asked for), log
   assert.throws(() => loadConfig(["login", "anthropic", secret], {}), (error: unknown) => error instanceof Error && /asks for the API key/.test(error.message) && !error.message.includes(secret));
   // `login` alone asks which way to sign in.
   assert.equal(loadConfig(["login"], isolated).mode, "login-choose");
+  // update, update --check (just asks), update --rollback.
+  assert.deepEqual(loadConfig(["update"], isolated), { mode: "update", rollback: false, check: false });
+  assert.deepEqual(loadConfig(["update", "--check"], isolated), { mode: "update", rollback: false, check: true });
+  assert.deepEqual(loadConfig(["update", "--rollback"], isolated), { mode: "update", rollback: true, check: false });
+  assert.throws(() => loadConfig(["update", "--now"], isolated), /Use: update \[--check \| --rollback\]\./);
   for (const args of [["login", secret], ["logout", secret], ["login", "anthropic", "--device"], ["login", "openai-codex", "--token", secret], ["login", "openai-codex", "--device", "--from-pi"], ["logout", "openai-codex", "--all"], ["auth", secret]]) {
     assert.throws(() => loadConfig(args, {}), (error: unknown) => error instanceof Error && !error.message.includes(secret));
   }
@@ -93,6 +98,11 @@ test("the chosen model persists in an owner-only settings file; KUMI_MODEL overr
     assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5", effort: "low" });
     writeFileSync(settingsFile, JSON.stringify({ model: "anthropic/claude-sonnet-5", effort: "ludicrous" }));
     assert.deepEqual(readSettings(settingsFile), { model: "anthropic/claude-sonnet-5" });
+    // The producer's "updateCheck": false outlasts Kumi saving a model.
+    writeFileSync(settingsFile, JSON.stringify({ model: "anthropic/claude-sonnet-5", updateCheck: false }));
+    writeSettings(settingsFile, { model: "openai/gpt-6-luna" });
+    assert.deepEqual(readSettings(settingsFile), { model: "openai/gpt-6-luna", updateCheck: false });
+    writeSettings(settingsFile, { model: "anthropic/claude-sonnet-5" });
     assert.equal(loadInferenceConfig(local).model, "anthropic/claude-sonnet-5");
     assert.equal(loadInferenceConfig({ ...local, KUMI_MODEL: "openai/gpt-6-luna" }).model, "openai/gpt-6-luna");
   } finally { rmSync(dir, { recursive: true, force: true }); }

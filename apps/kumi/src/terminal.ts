@@ -7,6 +7,7 @@ import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
 import { sanitizeText, StreamingText } from "./text.js";
+import type { UpdateControl } from "./update.js";
 import { KUMI } from "@kumi/runtime";
 
 interface Options {
@@ -21,14 +22,18 @@ interface Options {
   closeTimeoutMs?: number;
   /** What the producer typed before, for the up arrow; kept across /new, reconnects and restarts. */
   history?: InputHistory;
+  /** Kumi's updates, for /update and word of a newer Kumi. */
+  updates?: UpdateControl;
 }
 export interface Terminal {
   run(): Promise<number>;
   handleEvent(event: SessionEvent): void;
+  /** A newer Kumi, found as Kumi started. */
+  offerUpdate(latest: string): void;
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = `/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: ${KUMI} login <provider>.`;
+const HELP = `/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /update (get the newest Kumi) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: ${KUMI} login <provider>.`;
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -119,6 +124,8 @@ export function createTerminal(options: Options): Terminal {
   let started = false;
   let closing = false;
   let cancelling = false;
+  /** A newer Kumi's version, once the startup check or /update found one. */
+  let newer: string | undefined;
   let suppressOutput = false;
   let displayedBytes = 0;
   let startedAt = performance.now();
@@ -170,6 +177,19 @@ export function createTerminal(options: Options): Terminal {
     options.history?.add(inputLine);
     if (command === "/quit") { await finish(); return; }
     if (command === "/help") { notice(HELP); return; }
+    // Typing /update is the go-ahead: Kumi closes, updates and opens again with this conversation.
+    if (command === "/update" && options.updates) {
+      if (busy()) { notice("[update] Kumi is working; /update once it's done (Ctrl-C stops it)."); return; }
+      let latest = newer;
+      if (!latest) {
+        try { latest = await options.updates.check(); } catch (error) { notice(`[update] ${safeError(error, secrets)}. Try /update again later.`); return; }
+      }
+      if (!latest) { notice(`[update] Kumi is up to date (${options.updates.current}).`); return; }
+      notice(`[update] Updating to Kumi ${latest}: Kumi closes, updates and opens again.`);
+      options.updates.request();
+      await finish();
+      return;
+    }
     if (command === "/stop") {
       if (!controller.stopLive) { notice("[stop] Kumi can't stop Live here."); return; }
       // An answer in progress stops too, so its later steps can't start Live again.
@@ -372,6 +392,11 @@ export function createTerminal(options: Options): Terminal {
       return done;
     },
     handleEvent, interrupt,
+    offerUpdate(latest: string) {
+      if (closing || newer === latest) return;
+      newer = latest;
+      notice(`[update] Kumi ${latest} is out (this is ${options.updates?.current ?? "an older one"}). /update gets it.`);
+    },
     close: () => finish(),
   };
 }

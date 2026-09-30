@@ -30,6 +30,16 @@ export function newer(left: string, right: string): boolean {
   return false;
 }
 
+/** Kumi's updates, as the terminals offer them: /update, and word of a newer Kumi when it starts. */
+export interface UpdateControl {
+  /** This Kumi's version. */
+  current: string;
+  /** A newer version, asked now; undefined when this is the newest. Throws, saying why, when it can't be asked. */
+  check(): Promise<string | undefined>;
+  /** Kumi updates once the terminal has closed, then opens again; the terminal finishes right after. */
+  request(): void;
+}
+
 export interface CheckIo {
   /** Where the last check's answer is kept, so it runs at most once a day. */
   cacheFile: string;
@@ -53,6 +63,16 @@ async function upstreamVersion(run: Run, repo: string, branch: string): Promise<
   if ((await run("git", ["fetch", "--quiet", remote!, rest.join("/")], repo)).code !== 0) return undefined;
   const shown = await run("git", ["show", `${branch}:package.json`], repo);
   try { const version = (JSON.parse(shown.stdout) as { version?: unknown }).version; return shown.code === 0 && typeof version === "string" ? version : undefined; } catch { return undefined; }
+}
+
+/** The upstream branch's version when it's newer than this Kumi, asked now (for /update and `update --check`). Throws when git can't say. */
+export async function checkCheckout(io: Omit<CheckIo, "cacheFile" | "now"> = {}): Promise<string | undefined> {
+  const run = io.run ?? runProgram; const repo = io.repoDir ?? REPO;
+  const branch = await upstream(run, repo).catch(() => undefined);
+  if (!branch) throw new Error("this Kumi isn't a git checkout that follows a branch");
+  const latest = await upstreamVersion(run, repo, branch).catch(() => undefined);
+  if (!latest) throw new Error("Kumi couldn't reach the repository to ask; check your internet connection");
+  return newer(latest, io.version ?? KUMI_VERSION) ? latest : undefined;
 }
 
 /** A newer Kumi's version, if there is one: asked of git at most once a day, else from the last answer. */

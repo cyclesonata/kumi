@@ -3,6 +3,7 @@ import {
   createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createGoalStore, createPlaybookStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join } from "node:path";
@@ -11,8 +12,8 @@ import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { writeReport } from "./report.js";
-import { newerKumi, olderBridge, runUpdate } from "./update.js";
-import { newerRelease, rollbackInstalled, uninstallInstalled, updateInstalled } from "./install.js";
+import { checkCheckout, newerKumi, olderBridge, runUpdate, type UpdateControl } from "./update.js";
+import { checkRelease, newerRelease, rollbackInstalled, uninstallInstalled, updateInstalled } from "./install.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
@@ -45,6 +46,7 @@ ${helpRows([
   [sub("auth"), "Show which providers are usable (no secrets)"],
   [sub("doctor"), "Check sign-in, the bridge, Live and the terminal"],
   [sub("update"), "Bring Kumi up to date, and the bridge in Live when it's older"],
+  [sub("update --check"), "Say whether there's a newer Kumi, without installing it"],
   ...(INSTALLED ? [[sub("update --rollback"), "Go back to the Kumi you had before the last update"] as const, [sub("uninstall"), "Remove Kumi (your conversations and notes stay unless you say)"] as const] : []),
   [sub("report"), "Write a file to send when something goes wrong (no keys in it)"],
   [sub("--version"), "Show Kumi's version"],
@@ -57,7 +59,7 @@ Kumi reads the open Live Set and makes the changes you ask for; each change can 
 and bounces when you ask, listens to audio (a reference, a sample, a recording) and compares it, keeps short notes
 of what you tell it that Live can't show, and saves your ways of working as recipes to replay, including ones it
 learns by watching you.
-In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /undo /refresh /reconnect /new /quit. Ctrl-C cancels work, or exits if idle.
+In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /undo /refresh /reconnect /new /update /quit. Ctrl-C cancels work, or exits if idle.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = `The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: ${KUMI} bridge`;
@@ -87,6 +89,31 @@ async function probeLive(bridgeConfig: string): Promise<LiveProbe> {
   } catch { return { started: true, connected: false }; }
   finally { await integration.close().catch(() => {}); }
 }
+/** `kumi update --check`: whether there's a newer Kumi, without installing it. */
+async function updateCheck(): Promise<number> {
+  try {
+    const latest = INSTALLED ? await checkRelease(process.env) : await checkCheckout();
+    process.stdout.write(latest ? `Kumi ${latest} is out (this is ${KUMI_VERSION}). Update with: ${sub("update")}\n` : `Kumi is up to date (${KUMI_VERSION}).\n`);
+    return 0;
+  } catch (error) { process.stdout.write(`${safeError(error, secrets)}.\n`); return 1; }
+}
+
+/**
+ * After /update: Kumi updated the way it was installed, then opened again as it was started, so the
+ * Set's conversation continues. Node can't replace its own process, so the new Kumi runs as a child
+ * with the terminal, and this one waits and passes its exit on.
+ */
+async function updateAndReopen(): Promise<number> {
+  process.stdout.write("\n");
+  const updated = INSTALLED ? await updateInstalled({ out: process.stdout, env: process.env, input: process.stdin }) : await runUpdate({ out: process.stdout, env: process.env });
+  if (updated !== 0) { process.stdout.write(`\nKumi wasn't updated; this one still works: ${KUMI_START}\n`); return updated; }
+  process.stdout.write("\nOpening Kumi again…\n");
+  // Ctrl-C belongs to the new Kumi (it reads keys itself); a stray one mustn't end this process under it.
+  process.on("SIGINT", () => {});
+  const reopened = spawnSync(process.execPath, [...process.execArgv, process.argv[1]!, ...process.argv.slice(2)], { stdio: "inherit", env: process.env });
+  return reopened.status ?? 1;
+}
+
 const bundledBridgeVersion = (() => {
   try { return (JSON.parse(readFileSync(new URL("../../../mcp-server/package.json", import.meta.url), "utf8")) as { version?: string }).version; } catch { return undefined; }
 })();
@@ -99,7 +126,7 @@ try {
   }
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
-  else if (config.mode === "update") process.exitCode = !INSTALLED ? await runUpdate({ out: process.stdout, env: process.env })
+  else if (config.mode === "update") process.exitCode = config.check ? await updateCheck() : !INSTALLED ? await runUpdate({ out: process.stdout, env: process.env })
     : config.rollback ? await rollbackInstalled({ out: process.stdout, env: process.env, input: process.stdin }) : await updateInstalled({ out: process.stdout, env: process.env, input: process.stdin });
   else if (config.mode === "uninstall") {
     if (INSTALLED) process.exitCode = await uninstallInstalled({ out: process.stdout, env: process.env, input: process.stdin }, config);
@@ -195,27 +222,36 @@ try {
     // Programs Kumi fetches when first needed (ffmpeg, off a Mac) go in its tools folder, and it says so.
     configurePrograms({ toolsDir: loadToolsDir(), onFetch: (message) => terminal?.handleEvent({ type: "notice", message }) });
     const stale = config.mode === "live" ? olderBridge(process.env, bundledBridgeVersion) : undefined;
+    // /update: Kumi closes, then updates and opens again (below, once the terminal is done).
+    let updateAfter = false;
+    const updates: UpdateControl = { current: KUMI_VERSION, check: () => INSTALLED ? checkRelease(process.env) : checkCheckout(), request: () => { updateAfter = true; } };
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
-      history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser,
+      history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser, updates,
       panelTab: { load: () => readSettings(loadSettingsFile()).panelTab, save: (id) => { try { writeSettings(loadSettingsFile(), { ...readSettings(loadSettingsFile()), panelTab: id }); } catch { /* next time, then */ } } },
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: ${KUMI} update` } : {}) });
     const interrupt = () => terminal?.interrupt();
     const terminate = () => { void terminal?.close(); };
     process.on("SIGINT", interrupt); process.on("SIGTERM", terminate);
     const running = terminal.run();
-    // A newer Kumi, asked of git at most once a day while Kumi starts; nothing is said without one.
-    void (INSTALLED ? newerRelease(join(dirname(loadSettingsFile()), "update-check.json")) : newerKumi({ cacheFile: join(dirname(loadSettingsFile()), "update-check.json") }))
-      .then((latest) => { if (latest) terminal?.handleEvent({ type: "notice", message: `Kumi ${latest} is out (this is ${KUMI_VERSION}). Quit Kumi, then run: ${KUMI} update` }); }, () => {});
+    // A newer Kumi, asked at most once a day while Kumi starts (in the background: nothing waits for it, and
+    // nothing is said without one). "updateCheck": false in settings.json, or KUMI_NO_UPDATE_CHECK, turns it off.
+    if (readSettings(loadSettingsFile()).updateCheck !== false && !process.env.KUMI_NO_UPDATE_CHECK) {
+      const cacheFile = join(dirname(loadSettingsFile()), "update-check.json");
+      void (INSTALLED ? newerRelease(cacheFile) : newerKumi({ cacheFile })).then((latest) => { if (latest) terminal?.offerUpdate(latest); }, () => {});
+    }
     try { process.exitCode = await running; }
     finally {
       process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", terminate);
       // Normally exit naturally. A leaked dependency handle must not hang the TUI
       // indefinitely after bounded cleanup. Only this Kumi process is terminated.
-      const watchdog = setTimeout(() => {
-        process.stderr.write("Kumi shutdown left a live handle; terminating this Kumi process.\n"); process.exit(1);
-      }, 2_000);
-      watchdog.unref();
+      if (!updateAfter) {
+        const watchdog = setTimeout(() => {
+          process.stderr.write("Kumi shutdown left a live handle; terminating this Kumi process.\n"); process.exit(1);
+        }, 2_000);
+        watchdog.unref();
+      }
     }
+    if (updateAfter) process.exit(await updateAndReopen());
   }
 } catch (error) {
   process.stderr.write(`Kumi: ${safeError(error, secrets)}\n`);

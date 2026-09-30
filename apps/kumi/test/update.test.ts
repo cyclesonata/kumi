@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import type { Ran } from "../src/bridge-setup.js";
-import { newer, newerKumi, runUpdate } from "../src/update.js";
+import { checkCheckout, newer, newerKumi, runUpdate } from "../src/update.js";
 
 /** A checkout following origin/main, with Kumi and its bridge at the given versions, and a bridge in Live. */
 function checkout(kumi: string, bundled: string, installed?: string) {
@@ -71,6 +71,17 @@ test("a newer Kumi on the checkout's branch is found with git, at most once a da
     assert.equal(await newerKumi({ cacheFile: join(c.root, "other.json"), run: offline.run, repoDir: c.repo, version: "1.0.0" }), undefined);
     rmSync(join(c.repo, ".git"), { recursive: true });
     assert.equal(await newerKumi({ cacheFile: join(c.root, "third.json"), run: p.run, repoDir: c.repo, version: "1.0.0" }), undefined);
+  } finally { c.cleanup(); }
+});
+
+test("asked now (/update, update --check), a checkout says whether its branch is newer, and says why when git can't", async () => {
+  const c = checkout("1.0.0", "1.0.0");
+  try {
+    assert.equal(await checkCheckout({ run: programs({ upstream: "1.1.0" }).run, repoDir: c.repo, version: "1.0.0" }), "1.1.0");
+    assert.equal(await checkCheckout({ run: programs({ upstream: "1.0.0" }).run, repoDir: c.repo, version: "1.0.0" }), undefined);
+    await assert.rejects(checkCheckout({ run: programs({ offline: true }).run, repoDir: c.repo, version: "1.0.0" }), /couldn't reach the repository/);
+    rmSync(join(c.repo, ".git"), { recursive: true });
+    await assert.rejects(checkCheckout({ run: programs({}).run, repoDir: c.repo, version: "1.0.0" }), /isn't a git checkout/);
   } finally { c.cleanup(); }
 });
 

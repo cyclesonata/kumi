@@ -515,6 +515,59 @@ test("the welcome screen catches you up on the Set; later it's a note in the con
   await h.app.close();
 });
 
+test("a newer Kumi shows on the welcome screen, later as a note; /update asks, then closes Kumi so it updates", async () => {
+  let requested = 0; let latest: string | undefined; let unreachable = false;
+  const updates = { current: "1.0.0", request: () => { requested++; },
+    check: async () => { if (unreachable) throw new Error("Kumi couldn't reach GitHub to ask; check your internet connection"); return latest; } };
+  // Nothing newer, or no way to ask: /update says which.
+  const h = harness(120, 36, undefined, {}, undefined, { updates });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/update\r");
+  await delay(10);
+  assert.ok(has(h.screen(), "Kumi is up to date (1.0.0)."));
+  unreachable = true;
+  await h.type("/update\r");
+  await delay(10);
+  const lines_ = h.screen();
+  assert.ok(has(lines_, "Kumi couldn't reach GitHub to ask") && has(lines_, "/update again later."), "why it couldn't ask, and what to do");
+  // Found once the conversation has begun: a note.
+  h.app.offerUpdate("1.1.0");
+  assert.ok(has(h.screen(), "Kumi 1.1.0 is out: /update gets it."));
+  await h.app.close();
+  assert.equal(requested, 0);
+  // Found as Kumi starts: the welcome screen says so, and /update offers it.
+  unreachable = false;
+  const w = harness(120, 36, undefined, {}, undefined, { updates });
+  const closed = w.app.run();
+  await delay(5);
+  connect(w);
+  w.app.offerUpdate("1.1.0");
+  let lines = w.screen();
+  assert.ok(has(lines, "Kumi 1.1.0 is out · /update gets it") && has(lines, "Kumi can see Night Drive."), "on the welcome screen");
+  await w.type("/update\r");
+  await delay(10);
+  lines = w.screen();
+  assert.ok(has(lines, "Update to Kumi 1.1.0?") && has(lines, "Kumi closes, updates and opens again"));
+  await w.type("\u001b[B\r");
+  await delay(5);
+  assert.ok(!has(w.screen(), "Update to Kumi 1.1.0?"), "not now closes the question");
+  assert.equal(requested, 0);
+  await w.type("/update\r");
+  await delay(10);
+  await w.type("\r");
+  assert.equal(await closed, 0, "Kumi closes");
+  assert.equal(requested, 1, "and updates once it has");
+  // Without updates to offer (a test, or a Kumi that can't), there's no /update.
+  const none = harness();
+  void none.app.run();
+  await delay(5);
+  await none.type("/upd");
+  assert.ok(!has(none.screen(), "Get the newest Kumi"));
+  await none.app.close();
+});
+
 test("focus paths follow Live's detail view, shorten from the middle, and keep dark colours visible", () => {
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Clip", clip: "", view: "Arrangement", selectedNotes: 2 }), { crumbs: ["Keys", "Untitled clip"], context: "Arrangement · Clip view · 2 notes selected" });
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Device", device: "Reverb", parameter: { name: "Pan", owner: "Mixer" } }).crumbs, ["Keys", "Reverb"], "a parameter from elsewhere is not shown as the device's");
