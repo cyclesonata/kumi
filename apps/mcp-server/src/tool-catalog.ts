@@ -1680,7 +1680,8 @@ export function parseToolPolicySpec(value: unknown): ToolPolicySpec {
   const deny = candidate.deny ?? [];
   if (!Array.isArray(allow) || allow.length > 256 || !allow.every(validToolPattern)) throw new Error("tool policy allow list is invalid");
   if (!Array.isArray(deny) || deny.length > 256 || !deny.every(validToolPattern)) throw new Error("tool policy deny list is invalid");
-  if ([...allow, ...deny].some((pattern) => !TOOL_CATALOG.some((entry) => toolPolicyMatches(pattern, entry.name)))) throw new Error("tool policy pattern matches no known tool");
+  // A name no tool here has (one from another version of the bridge, or of Kumi) is kept and matches
+  // nothing: it neither fails the policy nor widens it (an allow list of only such names allows nothing).
   return Object.freeze({ profile: profile as ToolPolicyProfile, allow: Object.freeze([...allow]), deny: Object.freeze([...deny]) });
 }
 
