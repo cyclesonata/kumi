@@ -7900,3 +7900,70 @@ class LightDeviceDiscoveryTests(unittest.TestCase):
         song.tracks[0].devices[0].name = "FM"
         self.assertNotEqual(mapper.discover("device", 2)["revision"], revision)
         with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("device", 2, first["nextCursor"])
+
+
+class CountingNoteClip(FakeNoteClip):
+    """A note clip that counts how often its notes are read."""
+
+    def __init__(self, length=4.0, notes=()):
+        super().__init__(length, notes); self.note_reads = 0
+
+    def get_all_notes_extended(self):
+        self.note_reads += 1
+        return super().get_all_notes_extended()
+
+
+class TargetedDiscoveryTests(unittest.TestCase):
+    """B: slots and clips read their track's slots alone, parameters their device alone, notes their
+    clip alone (Arrangement clips too); Arrangement clip rows hold their notes only when asked."""
+
+    def song(self):
+        song = FakeSong(); song.tracks = [lean_track("Keys"), lean_track("Bass")]
+        session = CountingNoteClip(4.0, [FakeMidiNote(index + 1, 60 + index, index * 0.5, 0.25) for index in range(6)]); song.tracks[0].clip_slots[1].clip = session
+        long_clip = CountingNoteClip(64.0, [FakeMidiNote(index + 1, 36 + index % 24, index * 0.25, 0.25) for index in range(50)]); long_clip.start_time = 8.0
+        song.tracks[1].arrangement_clips = [long_clip]
+        return song, session, long_clip
+
+    def test_slots_clips_and_parameters_read_only_their_parent(self):
+        song, session, _ = self.song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()["tracks"]
+        track_ref, slot_ref = whole[0]["ref"], whole[0]["clipSlots"][1]["ref"]
+        counter = ReadCounter(song.tracks); LeanDevice.parameter_reads = 0; session.note_reads = 0
+        self.assertEqual(mapper.discover("clip_slot", 100, None, track_ref)["items"], whole[0]["clipSlots"])
+        self.assertEqual(counter.reads, {0: {"clip_slots"}}); self.assertEqual(LeanDevice.parameter_reads, 0)
+        # A clip's notes are read when its fields want them, not otherwise.
+        light = mapper.discover("session_clip", 1, None, slot_ref, None, ["name", "length", "isAudio"])["items"]
+        self.assertEqual((light, session.note_reads), ([{"ref": whole[0]["clips"][0]["ref"], "parentRef": slot_ref, "name": "", "length": 4.0, "isAudio": False}], 0))
+        self.assertEqual(mapper.discover("session_clip", 1, None, slot_ref)["items"], whole[0]["clips"]); self.assertEqual(session.note_reads, 1)
+        self.assertEqual(mapper.discover("clip", 5, None, track_ref)["items"], [])  # a clip's parent is its slot
+        # A device's parameters, reading that device's alone.
+        operator = whole[0]["devices"][0]; LeanDevice.parameter_reads = 0
+        self.assertEqual(mapper.discover("parameter", 1000, None, operator["ref"])["items"], operator["parameters"])
+        self.assertEqual(LeanDevice.parameter_reads, 1)
+        nested = whole[0]["devices"][4]["chains"][1]["devices"][0]["chains"][0]["devices"][0]
+        self.assertEqual(mapper.discover("parameter", 1000, None, nested["ref"])["items"], nested["parameters"])
+
+    def test_notes_list_from_their_clip_session_or_arrangement(self):
+        song, session, long_clip = self.song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        clip_row = whole["tracks"][0]["clips"][0]
+        self.assertEqual(mapper.discover("note", 100, None, clip_row["ref"])["items"], [note | {"ref": f"{clip_row['ref']}:note:{index}", "parentRef": clip_row["ref"]} for index, note in enumerate(clip_row["notes"])])
+        arrangement_ref = f"{mapper.refs.epoch}:arrangement_clip:1:0"; notes = mapper._read_notes(long_clip)
+        listed, cursor = [], None
+        while True:
+            page = mapper.discover("note", 20, cursor, arrangement_ref); listed += page["items"]; cursor = page.get("nextCursor")
+            validate_operation_payload("discover", "result", page)
+            if not cursor: break
+        self.assertEqual(listed, [note | {"ref": f"{arrangement_ref}:note:{index}", "parentRef": arrangement_ref} for index, note in enumerate(notes)])
+        self.assertEqual(len(listed), 50)
+        song.arrangement_clips = [long_clip]; song_level = f"{mapper.refs.epoch}:arrangement_clip:0"
+        self.assertEqual(len(mapper.discover("note", 100, None, song_level)["items"]), 50)
+        self.assertEqual(mapper.discover("note", 100, None, f"{mapper.refs.epoch}:arrangement_clip:1:7")["items"], [])
+
+    def test_arrangement_clip_rows_hold_their_notes_only_when_asked(self):
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); long_clip.note_reads = 0
+        row = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]
+        self.assertNotIn("notes", row); self.assertNotIn("notesRevision", row); self.assertEqual(row["noteCount"], 50)
+        self.assertEqual(mapper.get(row["ref"])["noteCount"], 50); self.assertNotIn("notes", mapper.get(row["ref"]))
+        listed = mapper.discover("arrangement_clip", 10, None, row["parentRef"], None, ["name", "noteCount"])["items"]
+        self.assertEqual(listed, [{"ref": row["ref"], "parentRef": row["parentRef"], "name": row["name"], "noteCount": 50}])
+        asked = mapper.discover("arrangement_clip", 10, None, row["parentRef"], None, ["notes", "notesRevision"])["items"][0]
+        self.assertEqual(len(asked["notes"]), 50); self.assertEqual(asked["notesRevision"], hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(long_clip)).encode()).hexdigest())

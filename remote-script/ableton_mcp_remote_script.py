@@ -1592,14 +1592,31 @@ class LiveObjectMapper:
             rows.extend(summary(clip, self.refs.put("arrangement_clip", clip, f"{track_index}:{clip_index}"), track_ref) for clip_index, clip in enumerate(self._items(self._read_attr(track, "arrangement_clips") or [])))
         return rows
 
-    def _arrangement_clip_row(self, track: Any, clip: Any, track_index: int, clip_index: int) -> dict[str, Any]:
-        track_ref = self.refs.put("track", track, str(track_index)); reference = self.refs.put("arrangement_clip", clip, f"{track_index}:{clip_index}"); notes = self._read_notes(clip)
-        row = {"ref": reference, "objectIdentity": self._capture_object_identity(clip), "parentRef": track_ref, "trackRef": track_ref, "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": float(getattr(clip, "start_time", getattr(clip, "start", 0.0)) or 0.0), "length": float(getattr(clip, "length", 0.0) or 0.0), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
+    def _note_count(self, clip: Any) -> int | None:
+        """How many notes a MIDI clip holds (Live counts its note vector; no note is read); None for audio."""
+        if self._read_attr(clip, "is_audio_clip") is True: return None
+        reader = getattr(clip, "get_all_notes_extended", None)
+        if callable(reader):
+            try: return len(reader())
+            except Exception: return None
+        try: return len(self._read_notes(clip))
+        except ValueError: return None
+
+    def _arrangement_notes(self, clip: Any, notes: bool) -> dict[str, Any]:
+        """An Arrangement clip row's notes: always how many; the notes and their revision only when asked
+        (an Arrangement clip can hold tens of thousands; discover note pages them)."""
+        if not notes: return {"noteCount": self._note_count(clip)}
+        rows = self._read_notes(clip)
+        return {"notes": rows, "notesRevision": hashlib.sha256(self._bounded_canonical(rows).encode("utf-8")).hexdigest(), "noteCount": len(rows) if self._read_attr(clip, "is_audio_clip") is not True else None}
+
+    def _arrangement_clip_row(self, track: Any, clip: Any, track_index: int, clip_index: int, notes: bool = False) -> dict[str, Any]:
+        track_ref = self.refs.put("track", track, str(track_index)); reference = self.refs.put("arrangement_clip", clip, f"{track_index}:{clip_index}")
+        row = {"ref": reference, "objectIdentity": self._capture_object_identity(clip), "parentRef": track_ref, "trackRef": track_ref, "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": float(getattr(clip, "start_time", getattr(clip, "start", 0.0)) or 0.0), "length": float(getattr(clip, "length", 0.0) or 0.0), **self._arrangement_notes(clip, notes), **self._audio_fields(clip)}
         for key, value in self._clip_state_fields(clip).items():
             if value is not None or key not in row: row[key] = value
         return row
 
-    def _arrangement_clip_items(self, track_indices: Any = None) -> list[dict[str, Any]]:
+    def _arrangement_clip_items(self, track_indices: Any = None, notes: bool = False) -> list[dict[str, Any]]:
         """The Arrangement's clips as rows: every track's, or only those of the tracks at the given
         snapshot indices (a focused snapshot, a targeted read)."""
         rows: list[dict[str, Any]] = []
@@ -1611,11 +1628,11 @@ class LiveObjectMapper:
             for track_index in sorted({index for index in track_indices if isinstance(index, int) and 0 <= index < len(tracks)}):
                 track = tracks[track_index]; self.refs.put("track", track, str(track_index))
                 for clip_index, clip in enumerate(self._items(self._read_attr(track, "arrangement_clips") or [])):
-                    rows.append(self._arrangement_clip_row(track, clip, track_index, clip_index))
+                    rows.append(self._arrangement_clip_row(track, clip, track_index, clip_index, notes))
             return rows
         if song_level:
             for index, clip in enumerate(song_level):
-                reference = self.refs.put("arrangement_clip", clip, str(index)); notes = self._read_notes(clip)
+                reference = self.refs.put("arrangement_clip", clip, str(index))
                 rows.append({
                     "ref": reference,
                     "objectIdentity": self._capture_object_identity(clip),
@@ -1625,15 +1642,14 @@ class LiveObjectMapper:
                     "kind": "midi" if hasattr(clip, "add_new_notes") else "audio",
                     "start": float(getattr(clip, "start_time", getattr(clip, "start", 0.0)) or 0.0),
                     "length": float(getattr(clip, "length", 0.0) or 0.0),
-                    "notes": notes,
-                    "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(),
+                    **self._arrangement_notes(clip, notes),
                     **self._audio_fields(clip),
                 })
             return rows
         for track_index, track in enumerate(self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", []))):
             track_ref = self.refs.put("track", track, str(track_index))
             for clip_index, clip in enumerate(self._items(self._read_attr(track, "arrangement_clips") or [])):
-                rows.append(self._arrangement_clip_row(track, clip, track_index, clip_index))
+                rows.append(self._arrangement_clip_row(track, clip, track_index, clip_index, notes))
         return rows
 
     def _device_items(self, track: Any, track_index: int) -> list[dict[str, Any]]:
@@ -1674,14 +1690,11 @@ class LiveObjectMapper:
         for row in rows: visit(row)
         return flattened
 
-    def _device_row(self, device: Any, device_ref: str, track_ref: str, track_index: int, path: str, index: int, traversal: dict[str, Any], depth: int) -> dict[str, Any]:
-        identity = self._capture_object_identity(device); seen = traversal["seen"]
-        if depth > 32 or identity in seen: raise ValueError("device hierarchy is cyclic or identity-ambiguous")
-        seen.add(identity); traversal["count"] += 1
-        if traversal["count"] > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device hierarchy exceeds its traversal bound")
+    def _parameter_rows(self, device: Any, device_ref: str, start: int = 0, stop: int | None = None) -> list[dict[str, Any]]:
+        """A device's parameters as its whole row lists them (those from start to stop, by Live's index)."""
         parameters: list[dict[str, Any]] = []; native_parameters = self._items(getattr(device, "parameters", []))
         if len(native_parameters) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device parameter collection exceeds its complete-state bound")
-        for parameter_index, parameter in enumerate(native_parameters):
+        for parameter_index, parameter in enumerate(native_parameters[start:stop], start):
             minimum = self._read_attr(parameter, "min", "min_value")
             maximum = self._read_attr(parameter, "max", "max_value")
             value = self._read_attr(parameter, "value")
@@ -1716,6 +1729,14 @@ class LiveObjectMapper:
                 "state": int(self._read_attr(parameter, "state")) if isinstance(self._read_attr(parameter, "state"), int) and not isinstance(self._read_attr(parameter, "state"), bool) else None,
                 "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])] if self._read_attr(parameter, "value_items") is not None else None,
             })
+        return parameters
+
+    def _device_row(self, device: Any, device_ref: str, track_ref: str, track_index: int, path: str, index: int, traversal: dict[str, Any], depth: int) -> dict[str, Any]:
+        identity = self._capture_object_identity(device); seen = traversal["seen"]
+        if depth > 32 or identity in seen: raise ValueError("device hierarchy is cyclic or identity-ambiguous")
+        seen.add(identity); traversal["count"] += 1
+        if traversal["count"] > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device hierarchy exceeds its traversal bound")
+        parameters = self._parameter_rows(device, device_ref)
         enabled = self._read_attr(device, "is_active", "is_enabled", "enabled")
         bank_count_method = getattr(device, "parameter_bank_count", None)
         try: parameter_bank = bank_count_method() if callable(bank_count_method) else None
@@ -2139,16 +2160,28 @@ class LiveObjectMapper:
 
     def _slot_rows(self, track_ref: str, index: int, slot: Any, slot_index: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """A Session slot's row and its clip's row (None when empty), as a track's whole row has them."""
+        slot_row = self._slot_row(track_ref, index, slot, slot_index); clip = getattr(slot, "clip", None)
+        return slot_row, (self._session_clip_row(slot_row["ref"], index, slot_index, clip) if clip is not None else None)
+
+    def _slot_row(self, track_ref: str, index: int, slot: Any, slot_index: int) -> dict[str, Any]:
+        """A Session slot's row: its state and its clip's ref, not the clip's row."""
         clip = getattr(slot, "clip", None)
         slot_ref = self.refs.put("clip_slot", slot, f"{index}:{slot_index}")
         if clip is None:
-            return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)}, None
+            return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "empty": True, **self._slot_state_fields(slot)}
         clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
-        notes = self._read_notes(clip)
-        clip_row = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0)), "notes": notes, "notesRevision": hashlib.sha256(self._bounded_canonical(notes).encode("utf-8")).hexdigest(), **self._audio_fields(clip)}
+        return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)}
+
+    def _session_clip_row(self, slot_ref: str, index: int, slot_index: int, clip: Any, notes: bool = True) -> dict[str, Any]:
+        """A Session clip's row; without notes, it leaves out notes and notesRevision (reading them is its cost)."""
+        clip_ref = self.refs.put("clip", clip, f"{index}:{slot_index}")
+        clip_row: dict[str, Any] = {"ref": clip_ref, "parentRef": slot_ref, "objectIdentity": self._capture_object_identity(clip), "name": str(getattr(clip, "name", "")), "kind": "midi" if hasattr(clip, "add_new_notes") else "audio", "start": slot_index * 4, "length": float(getattr(clip, "length", 0.0))}
+        if notes:
+            rows = self._read_notes(clip); clip_row["notes"] = rows; clip_row["notesRevision"] = hashlib.sha256(self._bounded_canonical(rows).encode("utf-8")).hexdigest()
+        clip_row.update(self._audio_fields(clip))
         for key, value in self._clip_state_fields(clip).items():
             if value is not None or key not in clip_row: clip_row[key] = value
-        return {"ref": slot_ref, "parentRef": track_ref, "trackRef": track_ref, "objectIdentity": self._capture_object_identity(slot), "sceneIndex": slot_index, "clipRef": clip_ref, "empty": False, **self._slot_state_fields(slot)}, clip_row
+        return clip_row
 
     def _ref_track_index(self, reference: Any) -> int | None:
         """The snapshot index of the track a ref sits on, read from its path (refs are positional:
@@ -2497,18 +2530,22 @@ class LiveObjectMapper:
                 items = [self._whole_device_row(device, path, depth, row) for device, path, depth, row in walked]
             else:
                 items = [row for _, _, _, row in walked]; light_devices = {row["ref"]: (device, path, depth, row) for device, path, depth, row in walked}
-        elif kind in {"clip_slot", "clip", "session_clip", "note", "parameter"}:
-            # What lives under a track is read from the parent's track alone.
-            track_index = self._ref_track_index(parent)
-            if track_index is not None: track_rows = [row for row in [self._whole_track_row(track_index)] if row is not None]
-            else: track_rows = self.snapshot()["tracks"]
-            if kind == "clip_slot": items = [slot for track in track_rows for slot in track["clipSlots"]]
-            elif kind in {"clip", "session_clip"}: items = [clip for track in track_rows for clip in track["clips"]]
-            elif kind == "note": items = [note | {"ref": f"{clip['ref']}:note:{index}", "parentRef": clip["ref"]} for track in track_rows for clip in track["clips"] if parent is None or clip["ref"] == parent for index, note in enumerate(clip["notes"])]
-            else: items = [parameter for track in track_rows for device in self._flatten_device_rows(track["devices"]) for parameter in device["parameters"]]
+        elif kind in {"clip_slot", "clip", "session_clip"}:
+            # A track's slots, or a slot's clip, read from that track's slots alone (nothing else it
+            # holds); a clip's notes only when the requested fields or filters name them.
+            wanted = set(requested_fields or []) | set(filters or {})
+            items = self._slot_discovery(kind, parent, requested_fields is None or bool({"notes", "notesRevision"} & wanted))
+        elif kind == "parameter":
+            # A device's parameters, read from that device alone (found on its track's light walk).
+            items = self._parameter_discovery(parent)
+        elif kind == "note":
+            # A clip's notes, Session or Arrangement, read from that clip alone.
+            clip = self._note_parent(parent)
+            items = [note | {"ref": f"{parent}:note:{index}", "parentRef": parent} for index, note in enumerate(self._read_notes(clip))] if clip is not None else []
         elif kind == "arrangement_clip":
             track_index = self._ref_track_index(parent)
-            items = self._arrangement_clip_items([track_index]) if track_index is not None else self._arrangement_clip_items()
+            with_notes = bool({"notes", "notesRevision"} & (set(requested_fields or []) | set(filters or {})))
+            items = self._arrangement_clip_items([track_index], with_notes) if track_index is not None else self._arrangement_clip_items(None, with_notes)
         elif kind == "locator": items = self._locator_items()
         elif kind == "session_playback": items = [self._playback()]
         elif kind == "selection": items = [self._selection_item()]
@@ -2566,6 +2603,46 @@ class LiveObjectMapper:
             allowed = set(requested_fields) | {"ref", "parentRef"}
             page = [{key: value for key, value in item.items() if key in allowed} for item in page]
         return {"epoch": self.refs.epoch, "items": page, "truncated": next_cursor is not None, "revision": revision, "kind": kind, **({"nextCursor": next_cursor} if next_cursor else {})}
+
+    def _slot_discovery(self, kind: str, parent: Any, notes: bool) -> list[dict[str, Any]]:
+        """The rows a slot or clip list can hold: a track's slots (their parent is the track), or a
+        slot's clip (its parent is the slot). Other parents hold none."""
+        parts = parent.split(":") if isinstance(parent, str) else []
+        track_index = self._ref_track_index(parent); entry = self._track_entry(track_index) if track_index is not None else None
+        if entry is None: return []
+        track = entry[0]; track_ref = self.refs.put("track", track, str(track_index)); slots = self._items(getattr(track, "clip_slots", []))
+        if kind == "clip_slot":
+            return [self._slot_row(track_ref, track_index, slot, slot_index) for slot_index, slot in enumerate(slots)] if parts[1:2] == ["track"] else []
+        if parts[1:2] != ["clip_slot"] or len(parts) != 4 or not parts[3].isdigit() or int(parts[3]) >= len(slots): return []
+        slot_index = int(parts[3]); slot = slots[slot_index]; clip = getattr(slot, "clip", None)
+        return [self._session_clip_row(self.refs.put("clip_slot", slot, f"{track_index}:{slot_index}"), track_index, slot_index, clip, notes)] if clip is not None else []
+
+    def _parameter_discovery(self, parent: Any) -> list[dict[str, Any]]:
+        """A device's parameters as its whole row lists them, reading that device alone."""
+        track_index = self._ref_track_index(parent); entry = self._track_entry(track_index) if track_index is not None else None
+        if entry is None or not isinstance(parent, str) or parent.split(":")[1:2] != ["device"]: return []
+        for device, _, _, row in self._light_device_walk(entry[0], self.refs.put("track", entry[0], str(track_index)), str(track_index)):
+            if row["ref"] == parent: return self._parameter_rows(device, parent)
+        return []
+
+    def _note_parent(self, parent: Any) -> Any:
+        """The clip a note list names, at its place now: a Session clip (clip:t:s), an Arrangement
+        clip on a track (arrangement_clip:t:c) or on the Song (arrangement_clip:c). None otherwise."""
+        parts = parent.split(":") if isinstance(parent, str) else []
+        if len(parts) < 3 or parts[0] != str(self.refs.epoch) or not all(part.isdigit() for part in parts[2:]): return None
+        kind, path = parts[1], [int(part) for part in parts[2:]]
+        if kind == "clip" and len(path) == 2:
+            entry = self._track_entry(path[0]); slots = self._items(getattr(entry[0], "clip_slots", [])) if entry is not None else []
+            clip = getattr(slots[path[1]], "clip", None) if path[1] < len(slots) else None
+        elif kind == "arrangement_clip" and len(path) == 2:
+            entry = self._track_entry(path[0]); clips = self._items(self._read_attr(entry[0], "arrangement_clips") or []) if entry is not None else []
+            clip = clips[path[1]] if path[1] < len(clips) else None
+        elif kind == "arrangement_clip" and len(path) == 1:
+            clips = self._items(getattr(self.song, "arrangement_clips", []))
+            clip = clips[path[0]] if path[0] < len(clips) else None
+        else: return None
+        if clip is not None: self.refs.put(kind, clip, ":".join(parts[2:]))
+        return clip
 
     def _selection_item(self) -> dict[str, Any]:
         """The selection as discovery lists it: the selected track, scene and highlighted slot by
