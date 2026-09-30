@@ -83,7 +83,7 @@ interface Operation {
 const UNSAVED = "unsaved";
 const newConversationId = () => `${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
 /** HISTORY kept with a conversation: what it shows, without a clip's notes or where devices sit. */
-const MAX_CHANGES = 100;
+const MAX_CHANGES = 2000;
 const emptyUsage = () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 const lean = ({ clip: _clip, devices: _devices, ...change }: ChangeRecord): ChangeRecord => change;
 const STILL_MISSING = "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?";
@@ -916,7 +916,7 @@ export function createSession(options: Options): SessionController {
       learned?.drafts.change(event.change);
       const record = lean(event.change);
       seen.set(record.id, record);
-      if (seen.size > 500) seen.delete(seen.keys().next().value!);
+      if (seen.size > 20_000) seen.delete(seen.keys().next().value!);
       const index = conversationChanges.findIndex((change) => change.id === record.id);
       if (index >= 0) conversationChanges[index] = record;
       else { conversationChanges.push(record); if (conversationChanges.length > MAX_CHANGES) conversationChanges.shift(); }

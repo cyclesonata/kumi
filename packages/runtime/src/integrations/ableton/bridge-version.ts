@@ -23,3 +23,7 @@ export const RENDER_BRIDGE = "1.0.49";
 
 /** The bridge release a goal needs: it releases the undo of its render steps (live_transaction_release), without which its hundreds of steps fill the host. */
 export const GOAL_BRIDGE = "1.0.50";
+
+/** The bridge release without caps on a Set's size: its Remote Script pages whole collections (a discovery
+ * of up to 100000 rows) and verifies a change without walking the Set. Older ones refuse pages over 100. */
+export const SCALE_BRIDGE = "1.0.57";

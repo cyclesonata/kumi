@@ -204,7 +204,7 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     assert.deepEqual(pads.map((args) => [args.deviceRef, args.note]), [["7:device:2:0", 36], ["7:device:2:0", 37], ["7:device:2:0", 38]]);
     assert.equal(new Set(pads.map((args) => args.filePath)).size, 3, "three different samples");
     assert.deepEqual(b.records.slice(-3).map((record) => record.title.replace(/“.*”/, "“…”")), ["Loaded “…” onto Drum Rack pad C1", "Loaded “…” onto Drum Rack pad C#1", "Loaded “…” onto Drum Rack pad D1"]);
-    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
+    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 501 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
@@ -528,10 +528,10 @@ test("new tracks go after the last one; references after a new track are retired
   } finally { await b.integration.close(); }
 });
 
-test("one answer can make at most 40 changes", async () => {
+test("one answer can make up to 500 changes, then checks with the producer", async () => {
   const b = await opened();
   try {
-    for (let count = 0; count < 40; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + count }, signal())).isError, false);
+    for (let count = 0; count < 500; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + count }, signal())).isError, false);
     const over = await tool(b.tools, "set_tempo").execute({ tempo: 150 }, signal());
     assert.equal(over.isError, true); assert.match(over.text, /check with the producer/);
     const next = await b.integration.observe(signal());

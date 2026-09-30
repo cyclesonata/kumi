@@ -48,9 +48,9 @@ export function statusPayload(result: CallToolResult) {
 export function discoveryPayload(result: CallToolResult, kind: string, epoch: number) {
   const value = payload(result);
   if (value.epoch !== epoch) throw new ObservationError("Live epoch changed; result discarded, refresh before continuing");
-  if (value.kind !== kind || !Array.isArray(value.items) || value.items.length > 100 || typeof value.truncated !== "boolean"
+  if (value.kind !== kind || !Array.isArray(value.items) || typeof value.truncated !== "boolean"
     || typeof value.revision !== "string" || (value.nextCursor !== undefined && (typeof value.nextCursor !== "string" || !value.nextCursor || value.nextCursor.length > 1024))) {
-    throw new ObservationError("Malformed bounded discovery result");
+    throw new ObservationError("Malformed discovery result");
   }
   return { ...value, items: value.items.map(object), truncated: value.truncated, nextCursor: value.nextCursor as string | undefined };
 }

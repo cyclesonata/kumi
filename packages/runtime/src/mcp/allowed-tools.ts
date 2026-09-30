@@ -6,7 +6,9 @@ import type { McpEndpoint } from "./client.js";
 export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read",
   "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect"]);
 const MAX_RESULT_BYTES = 64 * 1024;
-const MAX_HOST_RESULT_BYTES = 4 * 1024 * 1024;
+// Kumi's own reads of a big Set (every track, every parameter of a plug-in) come whole; what the model
+// sees stays within MAX_RESULT_BYTES, because tokens cost the producer money.
+const MAX_HOST_RESULT_BYTES = 256 * 1024 * 1024;
 const MAX_CATALOG_BYTES = 1024 * 1024;
 
 /** Host-owned authorization boundary; model instructions and annotations confer no authority. */
