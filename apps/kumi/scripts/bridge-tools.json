@@ -907,7 +907,7 @@
  },
  {
   "name": "live_automation_preview",
-  "description": "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing.",
+  "description": "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing. insert-step: one value held from start for length (beats), as drawing a step does; it makes the envelope when there's none, and undo takes the step (or that envelope) away.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -917,8 +917,20 @@
       "create-envelope",
       "delete-envelope",
       "insert",
+      "insert-step",
       "delete-range"
      ]
+    },
+    "start": {
+     "type": "number",
+     "minimum": 0
+    },
+    "length": {
+     "type": "number",
+     "minimum": 0.001
+    },
+    "value": {
+     "type": "number"
     },
     "clipRef": {
      "type": "string",
@@ -2474,7 +2486,7 @@
  },
  {
   "name": "live_note_edit_preview",
-  "description": "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs.",
+  "description": "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs. select: select notes in the clip as a click in its editor would (exactly one of noteIds, all: true, none: true; nothing to undo). delete-range: delete the notes starting inside a region of pitch (fromPitch, pitchSpan) and time (fromTime, timeSpan, in beats); the preview counts them, and undo puts them back.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -2488,7 +2500,9 @@
      "enum": [
       "quantize",
       "quantize-pitch",
-      "duplicate"
+      "duplicate",
+      "select",
+      "delete-range"
      ]
     },
     "noteIds": {
@@ -2511,6 +2525,32 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 127
+    },
+    "all": {
+     "type": "boolean",
+     "const": true
+    },
+    "none": {
+     "type": "boolean",
+     "const": true
+    },
+    "fromPitch": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 127
+    },
+    "pitchSpan": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 128
+    },
+    "fromTime": {
+     "type": "number",
+     "minimum": 0
+    },
+    "timeSpan": {
+     "type": "number",
+     "minimum": 0.001
     }
    },
    "required": [
@@ -2974,7 +3014,7 @@
  },
  {
   "name": "live_song_settings_preview",
-  "description": "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
+  "description": "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization, and whether launching a clip or scene selects it) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3002,6 +3042,9 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 8
+    },
+    "selectOnLaunch": {
+     "type": "boolean"
     }
    },
    "additionalProperties": false
@@ -3040,7 +3083,7 @@
  },
  {
   "name": "live_transport_action_preview",
-  "description": "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). Audible actions are fenced but not undoable; emergency stop stays separate.",
+  "description": "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). jump-by moves the song position by beats (negative jumps back); jump-in-running-clip (trackRef, beats) jumps in the Session clip playing on a track. Audible actions are fenced but not undoable; emergency stop stays separate.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3059,11 +3102,23 @@
       "trigger-session-record",
       "force-link-beat-time",
       "stop-all-clips",
-      "back-to-arrangement"
+      "back-to-arrangement",
+      "jump-by",
+      "jump-in-running-clip"
      ]
     },
     "beatTime": {
      "type": "number"
+    },
+    "beats": {
+     "type": "number",
+     "minimum": -1000000,
+     "maximum": 1000000
+    },
+    "trackRef": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
     }
    },
    "required": [
@@ -3758,7 +3813,7 @@
  },
  {
   "name": "live_drum_pad_preview",
-  "description": "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad). load-samples does that for up to 128 pads of one rack (a whole Drum Rack) as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
+  "description": "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad; sample-chain does the same without Live's Browser, through Kumi's Live extension). load-samples does that for up to 128 pads of one rack (a whole Drum Rack) as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3768,6 +3823,7 @@
       "set",
       "delete-all-chains",
       "load-sample",
+      "sample-chain",
       "load-samples"
      ]
     },
@@ -3968,7 +4024,7 @@
  },
  {
   "name": "live_device_specialized_preview",
-  "description": "Read-only preflight for specialized device families: Drift, Drum Cell, Eq8, Hybrid Reverb, Meld, and plug-ins (presets and editor state).",
+  "description": "Read-only preflight for specialized device families: Drift (including its modulation matrix: each slot's source or target index, from the device row's drift mod*List names), Drum Cell, Eq8, Hybrid Reverb, Meld, plug-ins (presets and editor state), a Simpler's sample (sample: its Beats, Complex Pro, Texture and Tones warp settings and its slicing settings, as the device row's sample shows them), and Wavetable (wavetable: each oscillator's wavetable category and index, from the row's categories and oscillator*Wavetables, and effect mode, the filter routing and unison).",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3980,8 +4036,115 @@
       "eq8",
       "hybrid-reverb",
       "meld",
-      "plugin"
+      "plugin",
+      "sample",
+      "wavetable"
      ]
+    },
+    "beatsGranulationResolution": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "beatsTransientEnvelope": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "beatsTransientLoopMode": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "complexProEnvelope": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "complexProFormants": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "textureFlux": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "textureGrainSize": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "tonesGrainSize": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingStyle": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingBeatDivision": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingRegionCount": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingSensitivity": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "oscillator1WavetableCategory": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator1WavetableIndex": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2WavetableCategory": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2WavetableIndex": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator1EffectMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2EffectMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "filterRouting": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "unisonMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "unisonVoiceCount": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
     },
     "deviceRef": {
      "type": "string",
@@ -4002,6 +4165,66 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 8
+    },
+    "modFilterSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modFilterSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modLfoSource": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modPitchSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modPitchSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modShapeSource": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource3": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget3": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
     },
     "gain": {
      "type": "number",
