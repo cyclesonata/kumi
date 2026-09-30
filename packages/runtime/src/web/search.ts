@@ -2,7 +2,7 @@
  * Searching the web without a key: Exa first (it finds pages by what they're about, with the
  * passages that matter), DuckDuckGo when Exa can't answer, and GitHub's own search for code.
  */
-import { decodeEntities } from "./html.js";
+import { decodeEntities, htmlToText } from "./html.js";
 import { exaSearch, type Found } from "./exa.js";
 import { searchGithub } from "./github.js";
 import { decodeText, WebError, type WebClient } from "./net.js";
@@ -33,7 +33,8 @@ export function parseDuckDuckGo(html: string): Found[] {
       try { url = new URL(url.startsWith("//") ? `https:${url}` : url).searchParams.get("uddg") ?? url; } catch { continue; }
     }
     if (!/^https?:\/\//.test(url)) continue;
-    const words = (value: string | undefined) => (value ? decodeEntities(value.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim() : "");
+    // Read as HTML, so an entity decoded into "<" stays text rather than becoming markup.
+    const words = (value: string | undefined) => (value ? htmlToText(value, DUCKDUCKGO_URL).replace(/\s+/g, " ").trim() : "");
     const title = words(link[2]);
     const snippet = words(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(block)?.[1]);
     found.push({ title: title || url, url, ...(snippet ? { text: snippet } : {}) });
