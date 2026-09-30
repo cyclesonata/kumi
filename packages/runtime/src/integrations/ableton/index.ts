@@ -1680,7 +1680,7 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   async function openGoal(given: AuditionRequest, originalSignal: AbortSignal): Promise<GoalRig | string> {
     // A goal turns one track's own knobs (and closes its chain with a safety limiter): not Main's.
-    if (given.candidates.some((candidate) => candidate.mix)) return "A goal searches a track's own devices. For the whole mix, audition it against the reference (candidates [{\"mix\": true}]) and change EQ, compression and levels between rounds.";
+    if (given.candidates.some((candidate) => candidate.mix || candidate.track === MIX_CANDIDATE)) return "A goal searches a track's own devices. For the whole mix, audition it against the reference (candidates [{\"mix\": true}]) and change EQ, compression and levels between rounds.";
     if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
     if (!supported({ since: GOAL_BRIDGE })) return tooOld({ since: GOAL_BRIDGE });
     if (!given.reference) return "A goal needs a reference to reach.";

@@ -5,7 +5,7 @@
  * trying something genuinely different, or the budget spent) or sends the model back in with the
  * score, what's left of the budget and the biggest gaps. A first draft can't end a run.
  */
-import type { AuditionCandidate, AuditionEvent, AuditionRequest } from "./contracts.js";
+import { MIX_CANDIDATE, type AuditionCandidate, type AuditionEvent, type AuditionRequest } from "./contracts.js";
 import { MATCHING } from "./techniques.js";
 
 export interface MatchBudget {
@@ -84,7 +84,7 @@ export class MatchRun {
       this.best = event.best;
       // Its track and clip, by names that last beyond this turn (references don't).
       const where = event.takes.find((take) => take.label === event.best!.label)?.where;
-      if (where) this.bestCandidate = { track: where.track, label: event.best.label, ...(where.clip ? { clip: where.clip } : {}) }; else delete this.bestCandidate;
+      if (where) this.bestCandidate = { track: where.track, label: event.best.label, ...(where.clip ? { clip: where.clip } : {}), ...(where.track === MIX_CANDIDATE ? { mix: true } : {}) }; else delete this.bestCandidate;
     }
   }
   /** Kumi's knob search tuned the best: its score, heard at full length, is the run's new best. */
@@ -93,8 +93,8 @@ export class MatchRun {
     this.history.push({ label, score });
     if (!this.best || score > this.best.score) this.best = { label, score };
   }
-  /** Whether a stop should first let Kumi's knob search tune the best. */
-  get polishes(): boolean { return !this.polished && Boolean(this.budget.polishMs && this.bestCandidate && this.last?.request?.reference); }
+  /** Whether a stop should first let Kumi's knob search tune the best (a track's knobs: never the whole mix). */
+  get polishes(): boolean { return !this.polished && Boolean(this.budget.polishMs && this.bestCandidate && !this.bestCandidate.mix && this.last?.request?.reference); }
   get polishMs(): number { return this.budget.polishMs ?? 0; }
   /** Kumi changed the Set: the last audition no longer says how it sounds. */
   changed(): void { this.changedSince = true; }

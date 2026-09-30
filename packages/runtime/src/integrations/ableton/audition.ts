@@ -18,7 +18,7 @@ export const AUDITION_DESCRIPTION = [
   "Hear what you built, quietly, and how close it is to a reference, in one call: Kumi renders each candidate track (its Post FX, so its devices are in it) onto a scratch track with Main silenced,",
   "listens, compares with the reference, then removes the scratch tracks and puts everything back. Up to 8 candidates render together in one real-time pass, so try several ideas at once (different instruments, chains, settings on separate tracks).",
   "Say where the part is: from_beat and beats in the Arrangement, or a Session clip per candidate (clip), which Kumi plays from the Arrangement for the render and removes after.",
-  "A candidate can be the whole mix ({\"mix\": true}): what Main plays at from_beat, recorded as quietly as a track (through Resampling); audition it against a reference to match a mix, changing EQ, compression and levels between rounds.",
+  "A candidate can be the whole mix ({\"mix\": true}, on its own): what Main plays at from_beat, recorded as quietly as a track (through Resampling); audition it against a reference to match a mix, changing EQ, compression and levels between rounds.",
   "Returns each candidate's closeness to the reference (0–100) with the biggest gaps in words, and what it heard. A silent render is reported, not compared. Without a reference it only listens.",
 ].join(" ");
 
@@ -53,8 +53,8 @@ export function auditionRequest(input: JsonObject): AuditionRequest | string {
   }
   if (!candidates.length || candidates.length > 8) return "Give 1 to 8 candidates.";
   const mix = candidates.some((candidate) => candidate.mix);
-  // The mix is what the Arrangement plays: Session clips copied there for the others would be in it too.
-  if (mix && candidates.some((candidate) => candidate.clip)) return "The whole mix renders from the Arrangement: give from_beat, and no Session clips for the other candidates.";
+  // The mix is everything Main plays: other candidates rendered in the same pass would play into it.
+  if (mix && candidates.length > 1) return "The whole mix renders on its own: every other candidate would play into it. Audition the mix alone (and tracks in another call).";
   if (new Set(candidates.map((candidate) => candidate.track)).size !== candidates.length) return "Each candidate is a track of its own; put ideas on separate tracks to hear them side by side.";
   const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
   const fromBeat = number(input.from_beat); const beats = number(input.beats);

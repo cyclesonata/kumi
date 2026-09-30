@@ -198,7 +198,7 @@ test("a rig that fails partway through setting up undoes what it made before say
 test("the whole mix is a candidate: recorded quietly through Resampling, heard as a mix, and a goal points to audition rounds instead", async () => {
   assert.deepEqual(auditionRequest({ candidates: [{ mix: true }], from_beat: 16, beats: 8, reference: "~/ref.wav" }), { candidates: [{ track: MIX_CANDIDATE, mix: true }], fromBeat: 16, beats: 8, reference: "~/ref.wav", focus: "section" });
   assert.match(String(auditionRequest({ candidates: [{ mix: true, track: "track:1" }], from_beat: 0 })), /no track or clip/);
-  assert.match(String(auditionRequest({ candidates: [{ mix: true }, { track: "track:1", clip: "clip:1" }], from_beat: 0 })), /renders from the Arrangement/);
+  assert.match(String(auditionRequest({ candidates: [{ mix: true }, { track: "track:1" }], from_beat: 0 })), /renders on its own: every other candidate would play into it/);
   const b = await rig();
   try {
     const result = await tool(b.tools, "audition").execute({ candidates: [{ mix: true, label: "My mix" }], from_beat: 8, beats: 2, reference }, signal());

@@ -235,8 +235,8 @@ test("the extension Live runs itself (installed in Live) is used first, and none
 });
 
 test("Live keeps Kumi's extension in its Extensions folder, and its data beside it", () => {
-  assert.deepEqual(kumiExtensionFolders({}, "darwin", "/Users/p"), { code: "/Users/p/Library/Application Support/Ableton/Extensions/kumi.kumi", data: "/Users/p/Library/Application Support/Ableton/Extensions Data/kumi.kumi" });
-  assert.deepEqual(kumiExtensionFolders({ ABLETON_MCP_LIVE_EXTENSIONS_DIR: "/x/Extensions" }, "darwin", "/Users/p"), { code: "/x/Extensions/kumi.kumi", data: "/x/Extensions Data/kumi.kumi" });
+  assert.deepEqual(kumiExtensionFolders({}, "darwin", "/Users/p"), { code: join("/Users/p", "Library", "Application Support", "Ableton", "Extensions", "kumi.kumi"), data: join("/Users/p", "Library", "Application Support", "Ableton", "Extensions Data", "kumi.kumi") });
+  assert.deepEqual(kumiExtensionFolders({ ABLETON_MCP_LIVE_EXTENSIONS_DIR: "/x/Extensions" }, "darwin", "/Users/p"), { code: join("/x/Extensions", "kumi.kumi"), data: join("/x", "Extensions Data", "kumi.kumi") });
   assert.equal(kumiExtensionFolders({}, "linux", "/home/p"), undefined);
   assert.match(kumiExtensionFolders({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32", "C:/Users/p")!.data, /AppData[\\/]Roaming[\\/]Ableton[\\/]Extensions Data[\\/]kumi\.kumi$/);
 });
