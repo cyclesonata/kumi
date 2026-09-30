@@ -850,6 +850,11 @@ class LiveObjectMapper:
         # The Live undo step a client opened ({stepId, expiresAt, owner, label}): closed by the client,
         # or by a guard (its deadline, its connection closing, a reconnect, the bridge shutting down).
         self._undo_step: dict[str, Any] | None = None
+        # Fire buttons a client holds pressed, by ref ({target, owner, expiresAt}): released by the
+        # client, or by a guard (its deadline, its connection closing, a reconnect, the bridge shutting down).
+        self._held_fire_buttons: dict[str, dict[str, Any]] = {}
+        # The connection a change came through, while it runs (see AbletonMcpBridge._apply_mutation).
+        self._request_owner: Any = None
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -1004,6 +1009,10 @@ class LiveObjectMapper:
             return self._offers("clip", "select_all_notes", "deselect_all_notes", "select_notes_by_id")
         if operation == "note.delete-range":
             return self._offers("clip", "remove_notes_extended")
+        if operation == "fire-button.set":
+            return self._offers("clip", "set_fire_button_state") or self._offers("slot", "set_fire_button_state") or self._offers("scene", "set_fire_button_state")
+        if operation == "track.action":
+            return self._offers("track", "jump_in_running_session_clip")
         if operation == "subscribe":
             return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
@@ -1166,7 +1175,7 @@ class LiveObjectMapper:
         if operation == "scene.fire-selected":
             return self._offers("scene", "fire_as_selected")
         if operation == "transport.action":
-            return any(callable(getattr(song, name, None)) for name in ("start_playing", "continue_playing", "stop_playing", "play_selection", "tap_tempo", "nudge_up", "nudge_down", "re_enable_automation", "force_link_beat_time"))
+            return any(callable(getattr(song, name, None)) for name in ("start_playing", "continue_playing", "stop_playing", "play_selection", "tap_tempo", "nudge_up", "nudge_down", "re_enable_automation", "force_link_beat_time", "jump_by"))
         if operation == "locator.jump-to":
             return self._locator_supported() and self._offers("locator", "jump")
         if operation == "song.time-convert":
@@ -3137,7 +3146,7 @@ class LiveObjectMapper:
         return result
 
     def _invoke_operation(self, operation: str, args: dict[str, Any]) -> Any:
-        if operation in {"session.audition-launch", "session.clip-launch", "audio.capture.start"}: _require_output_safety(args)
+        if operation in {"session.audition-launch", "session.clip-launch", "audio.capture.start", "fire-button.set"}: _require_output_safety(args)
         if operation == "session.audition-launch":
             return self._guarded_audition_launch(args)
         if operation == "session.audition-stop":
@@ -3371,8 +3380,8 @@ class LiveObjectMapper:
         if operation == "session.status":
             return self.status()
         if operation == "session.reconnect":
-            # A step the previous session opened can't be closed by its references any more.
-            self._end_undo_step()
+            # A step (or a pressed fire button) the previous session held can't be let go by its references any more.
+            self._end_undo_step(); self._release_fire_buttons()
             self.refs.reset()
             self._playback_state_digest = None
             self._playback_revision_counter = 0
@@ -3411,6 +3420,10 @@ class LiveObjectMapper:
             return self._note_select(args)
         if operation == "note.delete-range":
             return self._note_delete_range(args)
+        if operation == "fire-button.set":
+            return self._fire_button_set(args, getattr(self, "_request_owner", None))
+        if operation == "track.action":
+            return self._track_action(args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
@@ -3465,9 +3478,90 @@ class LiveObjectMapper:
         if step is not None and int(time.time() * 1000) >= step["expiresAt"]: self._end_undo_step()
 
     def release_connection(self, owner: Any) -> None:
-        """A connection went: what it held open in Live (an undo step) is closed."""
+        """A connection went: what it held open in Live (an undo step, pressed fire buttons) is let go."""
         step = self._undo_step
         if step is not None and owner is not None and step.get("owner") is owner: self._end_undo_step()
+        if owner is not None: self._release_fire_buttons(owner)
+
+    # How long a fire button stays pressed unless its connection presses it again.
+    FIRE_BUTTON_HOLD_MS = 30000
+
+    def _fire_button_target(self, reference: Any) -> Any:
+        """The clip, slot or scene a fire-button ref names at its place now, reading only that."""
+        parts = reference.split(":") if isinstance(reference, str) else []
+        if len(parts) < 3 or parts[0] != str(self.refs.epoch) or not all(part.isdigit() for part in parts[2:]): raise ValueError("fire button reference is stale or invalid")
+        kind, path = parts[1], parts[2:]
+        if kind == "scene" and len(path) == 1:
+            scenes = self._items(getattr(self.song, "scenes", []))
+            if int(path[0]) >= len(scenes): raise ValueError("fire button reference is stale or invalid")
+            self.refs.put("scene", scenes[int(path[0])], path[0])
+            return scenes[int(path[0])]
+        if kind in {"clip", "clip_slot"} and len(path) == 2:
+            entry = self._track_entry(int(path[0]))
+            slots = self._items(getattr(entry[0], "clip_slots", [])) if entry is not None else []
+            if int(path[1]) >= len(slots): raise ValueError("fire button reference is stale or invalid")
+            slot = slots[int(path[1])]
+            if kind == "clip_slot":
+                self.refs.put("clip_slot", slot, ":".join(path))
+                return slot
+            clip = getattr(slot, "clip", None)
+            if clip is None: raise ValueError("that slot holds no clip")
+            self.refs.put("clip", clip, ":".join(path))
+            return clip
+        raise ValueError("a fire button belongs to a clip, a clip slot or a scene")
+
+    def _fire_button_set(self, args: dict[str, Any], owner: Any = None) -> dict[str, Any]:
+        """Press or release a clip's, slot's or scene's launch button as a player would: a press
+        launches (a Gate clip plays while it's held), a release lets go (a Gate clip stops). A press
+        is held for the connection that made it: released when that connection goes, on reconnect
+        and shutdown, or FIRE_BUTTON_HOLD_MS after it was last pressed."""
+        if set(args) - {"ref", "pressed", "expectedObjectIdentity", "outputSafety"}: raise ValueError("fire button arguments are invalid")
+        reference, pressed = args.get("ref"), args.get("pressed")
+        if not isinstance(pressed, bool): raise ValueError("pressed must be true or false")
+        target = self._fire_button_target(reference)
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(target), args["expectedObjectIdentity"]): raise ValueError("fire button target changed since preview")
+        setter = getattr(target, "set_fire_button_state", None)
+        if not callable(setter): raise ValueError("this has no fire button on this Live shape")
+        held = getattr(self, "_held_fire_buttons", None)
+        if held is None: held = self._held_fire_buttons = {}
+        setter(pressed)
+        if pressed: held[str(reference)] = {"target": target, "owner": owner, "expiresAt": int(time.time() * 1000) + self.FIRE_BUTTON_HOLD_MS}
+        else: held.pop(str(reference), None)
+        return {"ref": reference, "pressed": pressed}
+
+    def _release_fire_buttons(self, owner: Any = None, expired_only: bool = False) -> int:
+        """Let go of held fire buttons: every one, one connection's, or those past their deadline.
+        How many. A guard: it never raises."""
+        held = getattr(self, "_held_fire_buttons", None)
+        if not held: return 0
+        now = int(time.time() * 1000); released = 0
+        for reference, hold in list(held.items()):
+            if owner is not None and hold.get("owner") is not owner: continue
+            if expired_only and now < hold["expiresAt"]: continue
+            held.pop(reference, None); released += 1
+            setter = getattr(hold["target"], "set_fire_button_state", None)
+            if callable(setter):
+                try: setter(False)
+                except BaseException: pass
+        return released
+
+    def fire_button_tick(self) -> None:
+        """Let go of fire buttons held past their deadline (checked on every display tick)."""
+        self._release_fire_buttons(expired_only=True)
+
+    def _track_action(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Jump within the Session clip playing on a track by a number of beats (Live's
+        jump_in_running_session_clip): only while one plays there."""
+        if set(args) - {"ref", "action", "beats", "expectedObjectIdentity"} or args.get("action") != "jump-in-running-clip": raise ValueError("track action is invalid")
+        track, _ = self._positional_track(args.get("ref"))
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(track), args["expectedObjectIdentity"]): raise ValueError("track identity changed since preview")
+        beats = args.get("beats")
+        if not isinstance(beats, (int, float)) or isinstance(beats, bool) or not math.isfinite(float(beats)): raise ValueError("beats is required to jump in the running clip")
+        jump = getattr(track, "jump_in_running_session_clip", None)
+        if not callable(jump): raise ValueError("jumping in a running clip is unavailable on this Live shape")
+        if self._slot_index(self._read_attr(track, "playing_slot_index")) is None: raise ValueError("no Session clip is playing on this track")
+        jump(float(beats))
+        return {"done": True}
 
     def _song_undo(self, operation: str, args: dict[str, Any]) -> dict[str, Any]:
         """Live's own undo or redo, once, when Live says there's something to undo (redo); otherwise
@@ -5708,11 +5802,11 @@ class LiveObjectMapper:
         state = self._song_state()
         return {**state, "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
 
-    _TRANSPORT_ACTIONS = {"start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"}
+    _TRANSPORT_ACTIONS = {"start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement", "jump-by"}
 
     def _transport_action(self, args: dict[str, Any]) -> dict[str, Any]:
         set_ref = args.get("setRef"); action = args.get("action")
-        if not isinstance(set_ref, str) or set_ref != self.refs.put("set", self.song, "song") or action not in self._TRANSPORT_ACTIONS or set(args) - {"setRef", "action", "beatTime", "expectedObjectIdentity", "expectedRevision"}:
+        if not isinstance(set_ref, str) or set_ref != self.refs.put("set", self.song, "song") or action not in self._TRANSPORT_ACTIONS or set(args) - {"setRef", "action", "beatTime", "beats", "expectedObjectIdentity", "expectedRevision"}:
             raise ValueError("transport action is invalid")
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(self.song), args["expectedObjectIdentity"]): raise ValueError("Set identity changed since preview")
         playback = self._playback()
@@ -5742,6 +5836,11 @@ class LiveObjectMapper:
             try: setattr(song, "back_to_arranger", False)
             except BaseException as error: raise ValueError("transport action back-to-arrangement is unavailable on this Live shape") from error
             return {"done": True, "revision": str(self._playback()["revision"])}
+        elif action == "jump-by":
+            # The playhead moves by beats (negative: back), as Live's own jump buttons do.
+            beats = args.get("beats")
+            if not isinstance(beats, (int, float)) or isinstance(beats, bool) or not math.isfinite(float(beats)): raise ValueError("beats is required for jump-by")
+            method, call_args = getattr(song, "jump_by", None), (float(beats),)
         elif action == "re-enable-automation": method, call_args = getattr(song, "re_enable_automation", None), ()
         elif action == "trigger-session-record": method, call_args = getattr(song, "trigger_session_record", None), ()
         else:
@@ -10555,7 +10654,7 @@ def _state_hash(value: Any) -> str:
 
 
 # Operations whose outcome depends on what plays and is queued: their authority binds playback.
-_PLAYBACK_BOUND_OPERATIONS = frozenset({"transport.set", "transport.action", "tempo.set", "session.clip-launch", "session.clip-stop", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.capture-midi", "scene.capture", "scene.fire-selected", "recording.session", "recording.arrangement", "realtime.arm", "realtime.disarm", "locator.jump", "locator.jump-to", "fire-button.set"})
+_PLAYBACK_BOUND_OPERATIONS = frozenset({"transport.set", "transport.action", "tempo.set", "session.clip-launch", "session.clip-stop", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.capture-midi", "scene.capture", "scene.fire-selected", "recording.session", "recording.arrangement", "realtime.arm", "realtime.disarm", "locator.jump", "locator.jump-to", "fire-button.set", "track.action"})
 # Operations on the locators: their authority binds every locator's identity, name and place.
 _LOCATOR_BOUND_OPERATIONS = frozenset({"locator.add", "locator.delete", "locator.rename", "locator.jump", "locator.jump-to", "arrangement.locator.create", "arrangement.locator.delete"})
 # Besides every arrangement.* operation, those that add, move or remove Arrangement clips (or the
@@ -10680,6 +10779,7 @@ class AbletonMcpBridge:
         self.queue.drain()
         self.mapper.capture_tick()
         self.mapper.undo_step_tick()
+        self.mapper.fire_button_tick()
 
     def _pump(self) -> None:
         """Serve every connection with non-blocking I/O on Live's main thread.
@@ -10858,8 +10958,11 @@ class AbletonMcpBridge:
         """Run a mutation on Live's thread: the realtime plane's arm and disarm, an undo step held for
         the connection that opened it, or the mapper's operation."""
         if operation in {"realtime.arm", "realtime.disarm"}: return self._realtime_op(operation, args)
-        if operation in _AUTHORITY_FREE_INVOKES: return self.mapper._undo_step_operation(operation, args, holder)
-        return self.mapper.invoke(operation, args, transaction_id, ownership_token)
+        if operation in {"undo.step.begin", "undo.step.end"}: return self.mapper._undo_step_operation(operation, args, holder)
+        # What the change leaves held in Live (a pressed fire button) belongs to the connection it came through.
+        self.mapper._request_owner = holder
+        try: return self.mapper.invoke(operation, args, transaction_id, ownership_token)
+        finally: self.mapper._request_owner = None
 
     def _mutate(self, request: dict[str, Any], holder: dict[str, Any]) -> Any:
         """One request, one Live-thread callback: the cleanup ownership an owned deletion needs, the
@@ -11006,6 +11109,7 @@ class AbletonMcpBridge:
         try: self.mapper.capture_shutdown()
         except BaseException: pass
         self.mapper._end_undo_step()
+        self.mapper._release_fire_buttons()
         self.queue.close()
         with self._executed_lock: self._executed_mutations.clear()
         self.mapper.refs.reset()

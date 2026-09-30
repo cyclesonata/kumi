@@ -7232,3 +7232,90 @@ class NoteSelectionAndRegionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clip notes changed since preview"): bridge.mapper.invoke("note.delete-range", request(expectedNotesRevision="0" * 64))
         with self.assertRaisesRegex(ValueError, "the time range is invalid"): bridge.mapper.invoke("note.delete-range", request(timeSpan=0))
         self.assertTrue(bridge.mapper._operation_supported("note.delete-range"))
+
+
+class FakeFireSlot(FakeSlot):
+    def __init__(self):
+        super().__init__(); self.presses = []
+    def set_fire_button_state(self, pressed): self.presses.append(pressed)
+
+
+class FakeFireScene(FakeScene):
+    def __init__(self, name="Scene 1"):
+        super().__init__(name); self.presses = []
+    def set_fire_button_state(self, pressed): self.presses.append(pressed)
+
+
+class FakeFireClip(FakeClip):
+    def __init__(self, length=4.0):
+        super().__init__(length); self.presses = []
+    def set_fire_button_state(self, pressed): self.presses.append(pressed)
+
+
+def fire_song():
+    song = FakeSong(); slot = FakeFireSlot(); slot.clip = FakeFireClip(); song.tracks[0].clip_slots = [slot, FakeFireSlot()]; song.scenes = [FakeFireScene(), FakeFireScene("Scene 2")]
+    return song
+
+
+class Closable:
+    def close(self): pass
+
+
+class PlayingControlTests(unittest.TestCase):
+    """fire-button.set held per connection, track.action and transport.action jump-by."""
+
+    SAFE = {"safe": True, "provenance": "test-harness"}
+
+    def press(self, row, pressed):
+        return {"ref": row["ref"], "pressed": pressed, "expectedObjectIdentity": row["objectIdentity"], "outputSafety": self.SAFE}
+
+    def test_a_press_is_held_for_its_connection_and_every_guard_lets_it_go(self):
+        song = fire_song(); bridge = immediate_bridge(song); bridge._connections = []; bridge._clients = set(); snapshot = bridge.mapper.snapshot(); holder = {}
+        clip_row, slot_row, scene_row = snapshot["tracks"][0]["clips"][0], snapshot["tracks"][0]["clipSlots"][1], snapshot["scenes"][1]
+        clip, slot, scene = song.tracks[0].clip_slots[0].clip, song.tracks[0].clip_slots[1], song.scenes[1]
+        self.assertEqual(mutate_through(bridge, "fire-button.set", self.press(clip_row, True), "fire-key-0001", holder=holder), {"ref": clip_row["ref"], "pressed": True})
+        self.assertEqual((clip.presses, list(bridge.mapper._held_fire_buttons)), ([True], [clip_row["ref"]]))
+        # The connection lets go itself.
+        mutate_through(bridge, "fire-button.set", self.press(clip_row, False), "fire-key-0002", holder=holder)
+        self.assertEqual((clip.presses, bridge.mapper._held_fire_buttons), ([True, False], {}))
+        # Its connection closing lets go of what it holds; another connection closing doesn't.
+        mutate_through(bridge, "fire-button.set", self.press(scene_row, True), "fire-key-0003", holder=holder)
+        bridge._close(types.SimpleNamespace(holder={}, socket=Closable())); self.assertEqual(scene.presses, [True])
+        bridge._close(types.SimpleNamespace(holder=holder, socket=Closable())); self.assertEqual(scene.presses, [True, False])
+        # Held past its deadline, the display tick lets go.
+        mutate_through(bridge, "fire-button.set", self.press(slot_row, True), "fire-key-0004", holder=holder)
+        expires = bridge.mapper._held_fire_buttons[slot_row["ref"]]["expiresAt"]; self.assertAlmostEqual(expires - time.time() * 1000, 30000, delta=2000)
+        with patch("ableton_mcp_remote_script.time.time", return_value=(expires - 1) / 1000): bridge.mapper.fire_button_tick()
+        self.assertEqual(slot.presses, [True])
+        with patch("ableton_mcp_remote_script.time.time", return_value=expires / 1000): bridge.mapper.fire_button_tick()
+        self.assertEqual(slot.presses, [True, False])
+        # A press needs the output-safety evidence launches need, and the target it previewed.
+        with self.assertRaisesRegex(ValueError, "output-safety"): bridge.mapper.invoke("fire-button.set", {**self.press(clip_row, True), "outputSafety": {"safe": True, "provenance": "unknown"}})
+        with self.assertRaisesRegex(ValueError, "target changed since preview"): bridge.mapper.invoke("fire-button.set", {**self.press(clip_row, True), "expectedObjectIdentity": scene_row["objectIdentity"]})
+        with self.assertRaisesRegex(ValueError, "holds no clip"): bridge.mapper.invoke("fire-button.set", self.press({**clip_row, "ref": clip_row["ref"].rsplit(":", 1)[0] + ":1"}, True))
+        # A reconnect lets go of everything held.
+        mutate_through(bridge, "fire-button.set", self.press(clip_row, True), "fire-key-0005", holder=holder)
+        bridge.mapper.invoke("session.reconnect", {}); self.assertEqual((clip.presses[-1], bridge.mapper._held_fire_buttons), (False, {}))
+        self.assertTrue(bridge.mapper._operation_supported("fire-button.set")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("fire-button.set"))
+
+    def test_shutting_the_bridge_down_lets_go_of_pressed_fire_buttons(self):
+        import socket as _socket
+        probe = _socket.socket(); probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]; probe.close()
+        instance = FakeInstance(); instance.song = fire_song(); live = AbletonMcpBridge(instance, {"host": "127.0.0.1", "port": port, "secret": "x" * 40})
+        row = live.mapper.snapshot()["scenes"][0]
+        live.mapper.invoke("fire-button.set", self.press(row, True)); live.update_display(); self.assertEqual(instance.song.scenes[0].presses, [True])
+        live.disconnect(); self.assertEqual(instance.song.scenes[0].presses, [True, False])
+
+    def test_a_running_clip_is_jumped_in_and_the_playhead_jumps_by_beats(self):
+        song = FakeSong(); track = song.tracks[0]; track.jumps = []; track.jump_in_running_session_clip = lambda beats: track.jumps.append(beats)
+        song.jumps = []; song.jump_by = lambda beats: song.jumps.append(beats)
+        bridge = immediate_bridge(song); snapshot = bridge.mapper.snapshot(); row = snapshot["tracks"][0]
+        args = {"ref": row["ref"], "action": "jump-in-running-clip", "beats": 4, "expectedObjectIdentity": row["objectIdentity"]}
+        with self.assertRaisesRegex(ValueError, "no Session clip is playing"): bridge.mapper.invoke("track.action", args)
+        track.playing_slot_index = 0
+        self.assertEqual(mutate_through(bridge, "track.action", args, "track-action-0001"), {"done": True}); self.assertEqual(track.jumps, [4.0])
+        with self.assertRaisesRegex(ValueError, "beats is required"): bridge.mapper.invoke("track.action", {key: value for key, value in args.items() if key != "beats"})
+        self.assertTrue(bridge.mapper._operation_supported("track.action")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("track.action"))
+        transport = {"setRef": snapshot["set"]["ref"], "action": "jump-by", "beats": -8, "expectedObjectIdentity": snapshot["set"]["objectIdentity"], "expectedRevision": bridge.mapper._playback()["revision"]}
+        self.assertTrue(mutate_through(bridge, "transport.action", transport, "jump-key-0001")["done"]); self.assertEqual(song.jumps, [-8.0])
+        with self.assertRaisesRegex(ValueError, "beats is required for jump-by"): bridge.mapper.invoke("transport.action", {key: value for key, value in transport.items() if key != "beats"})
