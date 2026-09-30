@@ -472,6 +472,27 @@ const planParts = (whole: boolean): LanguageModelV4StreamPart[] => [
 ];
 const overloaded = () => new APICallError({ message: "down", url: "u", requestBodyValues: {}, statusCode: 503, isRetryable: true, responseHeaders: { "retry-after-ms": "1" } });
 
+test("a plan whose first step waits for the next begins when it's finished, and says it started once", async () => {
+  // Like parameter steps waiting to batch: nothing starts while it's written; finishing starts it.
+  let begin: (() => void) | undefined;
+  const planTool: KernelTool = { name: "plan", description: "plan", inputSchema: { type: "object" }, execute: async () => ({ text: "whole" }),
+    stream(_signal, onStart) {
+      begin = onStart;
+      return { started: false, push() {}, async finish() { onStart(); return { text: "planned", reply: "Done." }; }, async abandon() {} };
+    } };
+  const h = harness(() => new ReadableStream({ start(controller) {
+    for (const part of planParts(true)) controller.enqueue(part);
+    controller.enqueue({ type: "tool-input-end", id: "c1" });
+    controller.enqueue(call("plan", "{\"steps\":[{\"tool\":\"set_tempo\"}]}"));
+    controller.enqueue(finish("tool-calls")); controller.close();
+  } }), { tools: [planTool] });
+  const { events, emit } = collect();
+  await h.kernel.run("go", new AbortController().signal, emit);
+  assert.ok(begin);
+  assert.equal(events.filter((event) => event.type === "tool-start").length, 1, `one start, so its end closes it: ${JSON.stringify(events)}`);
+  await h.kernel.close();
+});
+
 test("a plan starts while the model is still writing it, and finishes with the whole of it", async () => {
   const fixture = streamingTool();
   let release!: () => void;

@@ -222,6 +222,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       const streamed = early.get(call.toolCallId);
       const started = streamed?.begun || performance.now();
       if (!streamed?.begun) deliver({ type: "tool-start", id: call.toolCallId, name: call.toolName });
+      // A streamed call that hadn't begun (its first step waiting for the next, to batch them) begins in
+      // finish: it's started now, so beginning there doesn't say so a second time.
+      if (streamed && !streamed.begun) streamed.begun = started;
       const tool = tools.get(call.toolName);
       let outcome: { text: string; isError: boolean; images?: readonly ToolImage[] };
       if (!tool) outcome = { text: `Unknown tool ${JSON.stringify(call.toolName.slice(0, 64))}; use only the supplied tools.`, isError: true };
