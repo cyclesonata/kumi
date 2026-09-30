@@ -487,6 +487,14 @@ export class TuiApp {
         this.transcript.insertBefore({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
           ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) }, this.current);
         break;
+      case "auditioned": {
+        const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
+        // Gaps are the analysis's words; kept short so the round reads in a line.
+        const gaps = event.gaps.slice(0, 3).map((gap) => clean(gap.replace(/ \(.*\)$/, "").replace(/ against the reference$/, ""), 48));
+        this.transcript.insertBefore({ kind: "auditioned", round: event.round, ...(event.best ? { best: { label: clean(event.best.label, 60), score: event.best.score } } : {}),
+          ...(event.previous !== undefined ? { previous: event.previous } : {}), takes: event.takes.slice(0, 8).map((take) => ({ ...take, label: clean(take.label, 40) })), gaps }, this.current);
+        break;
+      }
       case "watched": {
         // What Kumi saw came first too: above the answer that says what it means.
         const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
@@ -1798,11 +1806,13 @@ export class TuiApp {
     if (kept.length && this.changes.length) rows.push({ spans: [] });
     // Ids restart with each Kumi process (a resumed conversation's may repeat), so rows are keyed by place.
     for (const [place, change] of [...this.changes].reverse().entries()) {
-      const action = change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : change.state === "expired" ? "no undo" : "check Live";
-      const actionStyle = change.state === "applied" ? st.accent : change.state === "undone" || change.state === "expired" ? st.faint : st.warn;
-      const titleStyle = change.state === "undone" || change.state === "expired" ? st.faint : st.text;
+      // An audition changed nothing: a quiet line, its score where an undo would be.
+      const heard = change.state === "heard";
+      const action = heard ? (change.score !== undefined ? `${change.score}%` : "heard") : change.state === "applied" ? "undo" : change.state === "undone" ? "undone" : change.state === "kept" ? "kept" : change.state === "expired" ? "no undo" : "check Live";
+      const actionStyle = heard ? st.dim : change.state === "applied" ? st.accent : change.state === "undone" || change.state === "expired" ? st.faint : st.warn;
+      const titleStyle = heard ? st.dim : change.state === "undone" || change.state === "expired" ? st.faint : st.text;
       const lines = wrap([{ text: change.title, style: titleStyle }], Math.max(1, width - textWidth(action) - 3)).map((spans) => spans.map((span) => span.text).join(""));
-      const marker = change.state === "undone" || change.state === "expired" ? { text: "○ ", style: st.faint }
+      const marker = heard ? { text: "♪ ", style: st.faint } : change.state === "undone" || change.state === "expired" ? { text: "○ ", style: st.faint }
         : change.state === "unsure" ? { text: "● ", style: st.warn }
         : change.track ? { text: "■ ", style: { fg: chipColor(change.track.color) } as Style } : { text: "✓ ", style: st.accent };
       const undo = change.state === "applied" ? { action: () => { void this.undo(change.id); } } : {};

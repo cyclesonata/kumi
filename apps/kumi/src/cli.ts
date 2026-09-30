@@ -127,6 +127,7 @@ try {
           onChange: (change) => { controller.watch?.({ type: "change", change }); terminal?.handleEvent({ type: "change", change }); },
           onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },
           onWatch: (on) => terminal?.handleEvent({ type: "watching", on }),
+          onAudition: (event) => terminal?.handleEvent(event),
           projectStore: createProjectStore(loadProjectsDir()),
           ...(liveUserLibrary() ? { userLibrary: liveUserLibrary()! } : {}),
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),

@@ -83,6 +83,19 @@ The first release for producers to use day to day. Ships with bridge 1.0.49.
 
 ### Listening
 
+- `audition` hears what Kumi built, quietly: it renders up to eight candidate
+  tracks in one real-time pass (each track's Post FX onto a scratch track, with
+  Main silenced), scores each against a reference from 0 to 100 on balance,
+  brightness, movement, envelope, pitch, density and width, and names the
+  biggest gaps. Then it removes the scratch tracks and puts everything back.
+  Main is restored exactly after an error, a cancel or a crash (on the next
+  start, with a word to the producer). A silent render is said as such, never
+  compared. HISTORY shows one quiet line with the score, and the conversation
+  one line per round ("Round 2 · 58% → 71% · …"). Needs bridge 1.0.49.
+- Matching a sound is a search: Kumi builds several different candidates,
+  auditions them together, refines the best on its biggest gaps, and says the
+  score before and after. A technique drafted while matching is kept only once
+  it's been heard.
 - `listen` hears audio files and the Set's audio clips. It measures loudness
   (LUFS, true peak, range), balance in ten bands with stereo width, dynamics,
   tempo and key. For a single sound it also finds pitch, harmonics, envelope

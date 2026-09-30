@@ -298,6 +298,7 @@ export function createTerminal(options: Options): Terminal {
         else if (state === "unsure") notice(`[change] Check Live: ${title}. ${note ?? "Live didn't confirm it."}`);
         else if (state === "kept") notice(`[change] Kept: ${title}. ${note ?? ""}`.trim());
         else if (state === "expired") notice(`[change] No undo anymore: ${title}. ${note ?? ""}`.trim());
+        else if (state === "heard") notice(`[heard] ${title}`);
         break;
       }
       case "notice": notice(event.message); break;
@@ -322,6 +323,7 @@ export function createTerminal(options: Options): Terminal {
       case "watching": notice(event.on ? "[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done." : "[live] Kumi stopped watching."); break;
       case "recipe": notice(`[recipe] ${event.action === "running" ? "Running" : event.action === "forgotten" ? "Forgot" : event.action === "updated" ? "Updated" : "Saved"} “${event.name}” (${event.steps} steps)`); break;
       case "technique": notice(`[technique] ${{ kept: "Kept", updated: "Updated", used: "Using", forgot: "Forgot" }[event.action]} “${event.technique.name}”${event.action === "kept" || event.action === "updated" ? ` (for ${event.technique.fits}; /forget ${event.technique.id} drops it)` : ""}`); break;
+      case "auditioned": notice(`[round ${event.round}] ${event.best ? `${event.previous !== undefined ? `${event.previous}% → ` : ""}${event.best.score}%${event.gaps.length ? ` · ${event.gaps.join(", ")}` : ""}` : "listened"}`); break;
       case "heard": notice(event.compared ? `[heard] ${event.file} against ${event.compared.reference}: ${event.compared.headlines.join("; ") || "close"}` : `[heard] ${event.file} · ${event.summary}`); break;
       case "watched": {
         const at = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;

@@ -1045,3 +1045,14 @@ Kumi full screen in a PTY (gpt-6-astra, "Kumi Focus Demo", bridge 1.0.41). In Li
   Rack Lab 901 and Random 8's Drum Rack pads, three times in random order, waiting for Live's focus
   feed to name each. 17 of 78 at best; selections lagged or landed elsewhere. Left out (1.0.45):
   pointing at something stays inside Kumi.
+
+## Audition on real Live (bridge 1.0.49, 2026-09-29)
+
+Two candidates in "Kumi Focus Demo" (Drift and Operator playing the same C chord at bar 5)
+against an earlier render of the Drift one: one silent pass, both recorded at full level with
+Main at -inf (−15.8 and −9.4 LUFS). Drift 76%, Operator 32% (an octave up, slow attack, darker).
+Afterwards: Main 0.85 as before, 55 tracks as before, one HISTORY line ("Auditioned 2
+candidates · 76% (Drift chord)"). A round took about 40 s for a 2 s part, mostly the bridge's
+per-step round trips. Found on the way: the registry didn't list the recording's new fields
+(1.0.48), and Live itself refused deleting a recorded-onto scratch track (1.0.49); a window
+opening right on an attack read as a flurry of onsets (now 0.1 s of lead-in).

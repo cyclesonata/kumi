@@ -1,3 +1,4 @@
+import type { Closeness } from "../audio/match.js";
 import type { FailureKind } from "./errors.js";
 export type JsonObject = Record<string, unknown>;
 
@@ -162,6 +163,51 @@ export interface Integration {
   sessionStrip?(trackRef: string, scene: number, signal: AbortSignal): Promise<SessionStrip | undefined>;
   /** The Arrangement at a glance (length, playhead, loop, locators), for FOCUS. */
   arrangementStrip?(signal: AbortSignal): Promise<ArrangementStrip | undefined>;
+  /** Render candidates quietly, hear them and set them against a reference (the audition tool's work). */
+  audition?(request: AuditionRequest, signal: AbortSignal): Promise<AuditionResult | string>;
+}
+
+/** An audition: the candidate tracks, where the part is, and what to match. */
+export interface AuditionCandidate { track: string; clip?: string; label?: string }
+export interface AuditionRequest {
+  candidates: AuditionCandidate[];
+  fromBeat?: number;
+  beats?: number;
+  reference?: string;
+  referenceFrom?: number;
+  referenceSeconds?: number;
+  focus?: "sound" | "section";
+}
+
+/** One candidate's render, heard. */
+export interface AuditionTake {
+  label: string;
+  track: string;
+  /** The render was (nearly) silent: nothing to compare. */
+  silent?: boolean;
+  closeness?: Closeness;
+  heard?: { lufs: number | null; summary: string };
+}
+export interface AuditionResult {
+  takes: AuditionTake[];
+  /** The best take's label, when anything was compared. */
+  best?: string;
+  reference?: { file: string; summary: string };
+  /** How long the render and listening took. */
+  seconds: number;
+  /** Anything the producer should know (Main couldn't be put back, a scratch track stayed). */
+  notes: string[];
+}
+
+/** One audition, for the conversation: the round, the best score and the one before, and what differs most. */
+export interface AuditionEvent {
+  type: "auditioned";
+  round: number;
+  best?: { label: string; score: number };
+  previous?: number;
+  /** Each candidate's score, best first; silent ones say so. */
+  takes: { label: string; score?: number; silent?: boolean }[];
+  gaps: string[];
 }
 
 /** A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data. */
@@ -277,9 +323,11 @@ export interface ChangeRecord {
    * "applied": in the Set, can be undone. "undone": put back. "kept": still in the Set, and
    * Kumi can't undo it (see `note`). "unsure": Live didn't confirm it; check Live. "expired":
    * Live restarted since, so Kumi can't undo it; whether it's still in the Set depends on
-   * whether the Set was saved.
+   * whether the Set was saved. "heard": Kumi listened to it (an audition); nothing in the Set changed.
    */
-  state: "applied" | "undone" | "kept" | "unsure" | "expired";
+  state: "applied" | "undone" | "kept" | "unsure" | "expired" | "heard";
+  /** An audition's best closeness to its reference, 0–100. */
+  score?: number;
   /** Why an undo didn't happen, in plain words. */
   note?: string;
   at: number;
@@ -331,6 +379,7 @@ export type SessionEvent = KernelEvent
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
   | MemoryEvent
   | HeardEvent
+  | AuditionEvent
   | WatchedEvent
   | RecipeEvent
   | TechniqueEvent

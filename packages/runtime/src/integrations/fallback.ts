@@ -32,5 +32,6 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
     clipView: async (slotRef, signal) => current.clipView?.(slotRef, signal),
     sessionStrip: async (trackRef, scene, signal) => current.sessionStrip?.(trackRef, scene, signal),
     arrangementStrip: async (signal) => current.arrangementStrip?.(signal),
+    audition: async (request, signal) => current.audition ? current.audition(request, signal) : "Kumi isn't connected to Live, so it can't render anything to hear.",
   };
 }

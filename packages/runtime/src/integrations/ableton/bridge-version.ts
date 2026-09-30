@@ -17,3 +17,6 @@ export function atLeast(version: string | undefined, minimum: string): boolean {
   }
   return true;
 }
+
+/** The bridge release that renders several tracks in one recording, and deletes its own scratch tracks on undo (audition). */
+export const RENDER_BRIDGE = "1.0.49";

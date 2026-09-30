@@ -6,7 +6,7 @@ import { basename, dirname } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
+import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
@@ -16,7 +16,10 @@ import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { setMeter } from "./more-changes.js";
-import { atLeast } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, atLeast, RENDER_BRIDGE } from "./bridge-version.js";
+import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, renderSpan, restoreStore, silentRender } from "./audition.js";
+import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
+import { summary as heardSummary } from "../../audio/tools.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
@@ -52,6 +55,8 @@ const MAX_CHANGES_PER_TURN = 40;
 /** What a tool says when Live went away (or the Set changed) during the answer. */
 const NO_CURRENT_LIVE = "Kumi has no current view of Live: it disconnected, or the Set changed. Kumi reconnects on its own when Live is back; tell the producer, and don't describe earlier readings as current.";
 const MAX_CHANGE_RECORDS = 500;
+/** Seconds of a render heard before the part starts. */
+const LEAD_IN = 0.1;
 
 function noAccess(key: string, now: Date, project?: Observation["project"]): Observation {
   return { key, label: "Inference-only — No Live access", instructions: INSTRUCTIONS, tools: [], revision: "no-live", ...(project ? { project } : {}),
@@ -94,6 +99,10 @@ interface Options {
   reconnectIntervalMs?: number;
   /** Live's User Library, where the devices Kumi makes go (make_device); Live's default place when left out. */
   userLibrary?: string;
+  /** Where Main's level is kept while an audition renders, to put it back after a crash. */
+  restoreFile?: string;
+  /** Each audition, for the conversation's round lines. */
+  onAudition?: (event: AuditionEvent) => void;
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
@@ -124,6 +133,16 @@ export function createAbletonIntegration(options: Options): Integration {
   let currentSet: string | undefined;
   /** The Set's tempo, for waits measured in beats. */
   let currentTempo: number | undefined;
+  /** Beats in a bar, from the time signature (4 in 4/4, 3 in 6/8). */
+  let beatsPerBar = 4;
+  /** While an audition runs: the ids of its own steps, kept out of HISTORY and undone after. */
+  let quiet: string[] | undefined;
+  /** This answer's auditions: how many, and the best score so far, for "Round 2 · 58% → 71%". */
+  let rounds = { count: 0, best: undefined as number | undefined };
+  /** References heard this session, by file and span: a matching run hears the same one each round. */
+  const referenceCache = new Map<string, Analysis>();
+  const restore = restoreStore(options.restoreFile ?? `${homedir()}/.kumi/audition-restore.json`);
+  let toldQuietly = false;
   let closing: Promise<void> | undefined;
   let focusFeed: FocusFeed | undefined;
   /** Tracks from this turn's discovery (names and colours), for HISTORY's chips. */
@@ -449,10 +468,13 @@ export function createAbletonIntegration(options: Options): Integration {
     if (depth < 2) for (const value of Object.values(args)) if (Array.isArray(value)) for (const item of value) if (item && typeof item === "object" && !Array.isArray(item)) requireFreshReferences(item as JsonObject, depth + 1);
   }
   function emitChange(record: ChangeRecord) {
+    // An audition's own steps aren't the producer's changes: HISTORY gets one line for the whole of it.
+    if (quiet) return;
     try { options.onChange?.(structuredClone(record)); } catch { /* a listener failure must not affect Live */ }
   }
   function remember(record: ChangeRecord, transactionId: string, restore?: Applied["restore"]) {
     changes.set(record.id, { record, transactionId, ...(restore ? { restore } : {}) });
+    if (quiet) { quiet.push(record.id); return; }
     if (changes.size > MAX_CHANGE_RECORDS) changes.delete(changes.keys().next().value!);
     emitChange(record);
     scheduleSave(20_000);
@@ -1069,7 +1091,7 @@ export function createAbletonIntegration(options: Options): Integration {
     // armed) refuses the recording. It's disarmed first, each a change with its undo, and said.
     let disarmed: string[] = [];
     if (kind.tool === "record" && named.action === "start" && typeof named.destinationTrackRef === "string" && !cleanup) {
-      const cleared = await disarmOthers(named.destinationTrackRef, originalSignal);
+      const cleared = await disarmOthers([named.destinationTrackRef, ...(Array.isArray(named.alsoTrackRefs) ? named.alsoTrackRefs.filter((ref): ref is string => typeof ref === "string") : [])], originalSignal);
       if (typeof cleared === "string") return { text: cleared, isError: true };
       disarmed = cleared;
     }
@@ -1085,8 +1107,9 @@ export function createAbletonIntegration(options: Options): Integration {
     try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
     return { text: JSON.stringify({ done: done.title, note: "Live's ordinary stop was refused, so Kumi stopped clips, the transport and recording together." }), isError: false, done };
   }
-  /** Disarms every armed track but `destination`, each a change; their names, or why one couldn't be. */
-  async function disarmOthers(destination: string, signal: AbortSignal): Promise<string[] | string> {
+  /** Disarms every armed track but those recorded (`keep`), each a change; their names, or why one couldn't be. */
+  async function disarmOthers(keep: readonly string[], signal: AbortSignal): Promise<string[] | string> {
+    const kept = new Set(keep.flatMap((ref) => [ref, lengthen(ref) as string]));
     const read = await invoke("live_discover", { kind: "track", fields: ["ref", "name", "armed"], limit: 100 }, signal);
     // Unread, the recording's own check decides.
     if (read.isError) return [];
@@ -1094,7 +1117,7 @@ export function createAbletonIntegration(options: Options): Integration {
     try { items = ((JSON.parse(read.text) as { live?: { items?: typeof items } }).live?.items ?? []); } catch { return []; }
     const routing = CHANGES.find((candidate) => candidate.tool === "set_routing");
     const disarmed: string[] = [];
-    for (const track of items.filter((item) => item.armed === true && typeof item.ref === "string" && item.ref !== destination && item.ref !== lengthen(destination))) {
+    for (const track of items.filter((item) => item.armed === true && typeof item.ref === "string" && !kept.has(item.ref))) {
       const name = typeof track.name === "string" ? track.name.slice(0, 80) : "a track";
       const outcome = routing ? await change(routing, { trackRef: track.ref as string, arm: false }, signal) : { text: "Live doesn't offer disarming here", isError: true };
       if (outcome.isError) return `${name} is armed too, and Live records onto one armed track only; Kumi couldn't disarm it: ${outcome.text.slice(0, 200)}`;
@@ -1134,7 +1157,7 @@ export function createAbletonIntegration(options: Options): Integration {
       catch { return unsure; }
       if (applied.isError) return uncertain(applied) ? unsure : { text: JSON.stringify(applied), isError: true };
       const done = kind.summarize(preview, prepared, knownTrack);
-      try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
+      if (!quiet) try { options.onAction?.(done); } catch { /* a listener failure must not affect Live */ }
       return { text: JSON.stringify({ done: done.title, live: shorten(payload(applied)) }), isError: false, done };
     } catch (error) {
       return { text: error instanceof ObservationError ? error.message : "That didn't happen in Live; discover again, then retry.", isError: true };
@@ -1228,7 +1251,7 @@ export function createAbletonIntegration(options: Options): Integration {
   }
 
   /** Undo one change through the bridge's guarded undo. Refusals keep the change and say why. */
-  async function undoChange(target: string, signal: AbortSignal): Promise<{ record?: ChangeRecord; text: string; isError: boolean }> {
+  async function undoChange(target: string, signal: AbortSignal, discard = false): Promise<{ record?: ChangeRecord; text: string; isError: boolean }> {
     const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied") : changes.get(target);
     if (!entry) return { text: target === "last" ? "There's no change of Kumi's left to undo." : `There's no change ${target.slice(0, 32)} in this session.`, isError: true };
     if (entry.record.state === "undone") return { record: entry.record, text: JSON.stringify({ undone: entry.record.title, change: entry.record.id, already: true }), isError: false };
@@ -1246,7 +1269,7 @@ export function createAbletonIntegration(options: Options): Integration {
     };
     let result: CallToolResult;
     try {
-      result = await tools.call("live_undo", { transactionId: entry.transactionId, confirmation: "undo", idempotencyKey: entry.undoKey }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
+      result = await tools.call("live_undo", { transactionId: entry.transactionId, confirmation: "undo", idempotencyKey: entry.undoKey, ...(discard ? { discard: true } : {}) }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
     } catch {
       return { record: update({ state: "unsure", note: "Live didn't answer the undo; try again." }), text: "Live didn't answer the undo; it can be retried.", isError: true };
     }
@@ -1267,6 +1290,252 @@ export function createAbletonIntegration(options: Options): Integration {
       else { const { color: _color, ...rest } = current; known.set(restore.ref, restore.value ? { ...rest, color: restore.value } : rest); }
     }
     return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
+  }
+  /** A discovery for the audition's own use, through the model's path (so its references are current); its rows. */
+  async function rows(kind: string, extra: JsonObject, signal: AbortSignal): Promise<JsonObject[]> {
+    const read = await invoke("live_discover", { kind, limit: 100, ...extra }, signal);
+    if (read.isError) throw new ObservationError(read.text);
+    const items = (JSON.parse(read.text) as { live?: { items?: unknown } }).live?.items;
+    return Array.isArray(items) ? items.map((item) => object(item)) : [];
+  }
+  /** One of the audition's steps, as its own tool would run it (quietly, while an audition runs); its reply. */
+  async function step(tool: string, input: JsonObject, signal: AbortSignal): Promise<JsonObject> {
+    const kind = CHANGES.find((candidate) => candidate.tool === tool);
+    const action = kind ? undefined : ACTIONS.find((candidate) => candidate.tool === tool);
+    const outcome = kind ? await change(kind, input, signal, true) : await act(action!, input, signal);
+    if (outcome.isError) throw new ObservationError(`${tool}: ${outcome.text.slice(0, 400)}`);
+    try { return JSON.parse(outcome.text) as JsonObject; } catch { return {}; }
+  }
+  /** Main's fader now, read fresh. */
+  async function mainVolume(signal: AbortSignal): Promise<{ ref: string; volume?: number }> {
+    const main = (await rows("main-track", { fields: ["name", "mixer"] }, signal))[0];
+    if (!main || typeof main.ref !== "string") throw new ObservationError("Live didn't say where Main is.");
+    const volume = object(main.mixer ?? {}).volume;
+    return { ref: main.ref, ...(typeof volume === "number" ? { volume } : {}) };
+  }
+  /** Main back where it was, set directly and read back (its undo can be refused once Live moves it). True when it is. */
+  async function putMainBack(volume: number, signal: AbortSignal): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const main = await mainVolume(signal);
+        if (main.volume !== undefined && Math.abs(main.volume - volume) < 1e-4) return true;
+        await step("set_mixer", { trackRef: main.ref, volume }, signal);
+        const after = await mainVolume(signal);
+        if (after.volume !== undefined && Math.abs(after.volume - volume) < 1e-4) return true;
+      } catch { /* once more, then say so */ }
+    }
+    return false;
+  }
+  /** Where a fader position is in dB, as Live shows it (0.85 is 0 dB). */
+  const faderDb = (volume: number) => (volume <= 0 ? "-inf dB" : `${(20 * Math.log10(volume / 0.85) * (volume > 0.85 ? 0.3 : 1)).toFixed(1)} dB`);
+
+  /**
+   * Render each candidate's Post FX onto a scratch track, with Main silenced, in one pass; hear each
+   * against the reference; then undo every step (the scratch tracks go, though they recorded) and
+   * put Main back exactly, whatever happened: an error, a cancelled turn, a dropped connection.
+   */
+  async function audition(request: AuditionRequest, originalSignal: AbortSignal): Promise<AuditionResult | string> {
+    const began = Date.now();
+    if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
+    if (!supported({ since: RENDER_BRIDGE })) return tooOld({ since: RENDER_BRIDGE });
+    if (quiet) return "An audition is already running; wait for it.";
+    const tempo = currentTempo;
+    if (!tempo) return "Kumi doesn't know the Set's tempo yet; try again.";
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    // Cleanup runs even after a cancel: bounded, on its own signal.
+    const settle = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+    const focus = request.focus;
+    const notes: string[] = [];
+    const counted = changesThisTurn;
+    rounds.count++;
+    const round = rounds.count;
+    const tell = (title: string, playing?: boolean) => { try { options.onAction?.({ title, ...(playing !== undefined ? { playing } : {}) }); } catch { /* a listener failure must not affect Live */ } };
+    let prior: number | undefined;
+    let started = false;
+    const files: { take: AuditionTake; file: string; start: number }[] = [];
+    const takes: AuditionTake[] = request.candidates.map((candidate, index) => ({ label: candidate.label ?? `Candidate ${index + 1}`, track: candidate.track }));
+    let from = request.fromBeat ?? 0; let beats = request.beats;
+    // Scratch tracks, one per candidate, named so they can be found (and aren't mistaken for the producer's).
+    const tag = randomUUID().slice(0, 4);
+    const scratch = request.candidates.map((_, index) => `Kumi · render ${index + 1} ${tag}`);
+    quiet = [];
+    try {
+      const main = await mainVolume(signal);
+      if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
+      prior = main.volume;
+      const tracks = await rows("track", { fields: ["name"] }, signal);
+      const names = request.candidates.map((candidate) => {
+        const found = tracks.find((track) => track.ref === candidate.track);
+        if (!found || typeof found.name !== "string") throw new ObservationError(`${candidate.track} isn't a track in this turn's discovery; discover again.`);
+        // Live routes by name: two tracks of one name can't be told apart.
+        if (tracks.filter((track) => track.name === found.name).length > 1) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
+        return found.name;
+      });
+      const seconds = (beats ?? 8) * 60 / tempo;
+      tell(!toldQuietly ? `Listening to my version quietly (about ${Math.round(seconds + 6)} s a round)` : `Round ${round}: listening quietly`, true);
+      toldQuietly = true;
+      // Written before Main goes quiet: a crash from here puts it back on the next start.
+      restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior, at: now().getTime() });
+      await step("set_mixer", { trackRef: main.ref, volume: 0 }, signal);
+      // Session clips play from a free stretch of the Arrangement, after everything in it.
+      if (request.candidates.some((candidate) => candidate.clip)) {
+        const song = tools.has("live_song_state") ? payload(await tools.call("live_song_state", {}, signal, { host: true })) : {};
+        const end = typeof song.songLength === "number" ? song.songLength : 0;
+        from = (Math.ceil(end / beatsPerBar) + 2) * beatsPerBar;
+        let longest = 0;
+        for (const candidate of request.candidates) {
+          if (!candidate.clip) continue;
+          const slots = await rows("clip-slot", { parent: candidate.track, fields: ["clipRef"] }, signal);
+          const slot = slots.find((row) => row.clipRef === candidate.clip);
+          if (!slot) throw new ObservationError(`${candidate.clip} isn't a Session clip on that track; discover its clip slots again.`);
+          const clip = (await rows("session-clip", { parent: slot.ref, fields: ["length"] }, signal))[0];
+          if (typeof clip?.length === "number") longest = Math.max(longest, clip.length);
+          await step("duplicate_clip", { clipRef: candidate.clip, arrangementPosition: from }, signal);
+        }
+        beats ??= Math.min(32, longest || 8);
+      }
+      beats ??= 8;
+      const span = renderSpan(from, beats, beatsPerBar);
+      restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior, at: now().getTime(), scratch });
+      await step("add_tracks_and_scenes", { tracks: scratch.map((name) => ({ name, kind: "audio" })), scenes: [] }, signal);
+      const now_ = await rows("track", { fields: ["name"] }, signal);
+      const refsOf = scratch.map((name) => { const found = now_.find((track) => track.name === name); if (typeof found?.ref !== "string") throw new ObservationError("Kumi's scratch track didn't appear."); return found.ref; });
+      for (const [index, ref] of refsOf.entries()) await step("set_routing", { trackRef: ref, inputType: names[index]!, inputSubRouting: "Post FX", arm: true, monitoring: "off" }, signal);
+      await step("set_transport", { position: span.position, loopEnabled: false }, signal);
+      if (supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
+      started = true;
+      await step("record", { action: "start", lane: "arrangement", destinationTrackRef: refsOf[0]!, ...(refsOf.length > 1 ? { alsoTrackRefs: refsOf.slice(1) } : {}) }, signal);
+      await step("play", { action: "continue" }, signal);
+      await delay(span.wait * 60 / tempo * 1000, undefined, { signal });
+      await step("play", { action: "stop" }, signal);
+      await step("record", { action: "stop", lane: "arrangement" }, signal);
+      started = false;
+      // Each render's file, and where the part starts in it.
+      for (const [index, ref] of refsOf.entries()) {
+        const clip = (await rows("arrangement-clip", { parent: ref, fields: ["start", "length", "isAudio"] }, signal)).find((row) => row.isAudio === true);
+        if (!clip || typeof clip.ref !== "string") { takes[index]!.silent = true; continue; }
+        const file = await (async () => { try { return await clipFile(clip.ref as string, signal); } catch { return undefined; } })();
+        if (!file) { takes[index]!.silent = true; continue; }
+        // A tenth of a second before the part: a window that opens right on the attack hears it as a flurry of onsets.
+        const start = Math.max(0, (from - (typeof clip.start === "number" ? clip.start : span.position)) * 60 / tempo - LEAD_IN);
+        files.push({ take: takes[index]!, file, start });
+      }
+    } catch (error) {
+      if (originalSignal.aborted) notes.push("Stopped before it finished.");
+      else notes.push(error instanceof Error ? error.message.slice(0, 400) : "The render failed.");
+    } finally {
+      const cleanup = settle();
+      if (started) await stopEverything(cleanup);
+      // Every step undone, newest first (the scratch tracks with discard: they recorded since); Main is set back, not undone.
+      const steps = quiet ?? [];
+      const mainSet = steps.find((id) => /^Main /.test(changes.get(id)?.record.title ?? ""));
+      for (const id of [...steps].reverse()) {
+        if (id === mainSet) continue;
+        const entry = changes.get(id);
+        // What was set on a scratch track goes with it.
+        if (!entry || entry.record.state !== "applied" || (entry.record.track && scratch.includes(entry.record.track.name))) continue;
+        const undone = await undoChange(id, cleanup, entry.record.family === "structure").catch(() => undefined);
+        // Scratch tracks that stay mustn't stay armed (the next recording would take them too).
+        if ((!undone || undone.isError) && entry.record.family === "structure") {
+          for (const name of scratch) {
+            const ref = (await rows("track", { fields: ["name"] }, cleanup).catch(() => [] as JsonObject[])).find((track) => track.name === name)?.ref;
+            if (typeof ref === "string") await step("set_routing", { trackRef: ref, arm: false }, cleanup).catch(() => undefined);
+          }
+        }
+        if (!undone || undone.isError) notes.push(`Couldn't take back “${entry.record.title}” (${(undone?.text ?? "no answer").slice(0, 200)}); ${entry.record.family === "structure" ? "delete Kumi's render track by hand" : "check it in Live"}.`);
+      }
+      if (prior !== undefined) {
+        const back = await putMainBack(prior, cleanup);
+        if (back) restore.clear();
+        else notes.push(`Main may still be silent: set it back to ${faderDb(prior)} in Live.`);
+      }
+      for (const id of steps) changes.delete(id);
+      quiet = undefined;
+      changesThisTurn = counted;
+    }
+    // Listening happens with Live back as it was.
+    try {
+      const reference = request.reference ? await heardReference(request.reference, request, signal) : undefined;
+      for (const { take, file, start } of files) {
+        const heard = await hear(file, { start, seconds: (beats ?? 8) * 60 / tempo + LEAD_IN, ...(focus ? { focus: focus === "section" ? "mix" : "sound" } : {}), signal });
+        take.heard = { lufs: heard.loudness.integratedLufs, summary: heardSummary(heard) };
+        if (silentRender(heard)) { take.silent = true; continue; }
+        if (reference) take.closeness = closeness(heard, reference, focus);
+      }
+      const scored = takes.filter((take) => take.closeness).sort((a, b) => b.closeness!.score - a.closeness!.score);
+      const best = scored[0];
+      if (takes.every((take) => take.silent) && files.length) notes.push("The render was silent: is the source playing in the Arrangement at that spot (its clips there, the track not muted)?");
+      const previous = rounds.best;
+      if (best && (previous === undefined || best.closeness!.score > previous)) rounds.best = best.closeness!.score;
+      const result: AuditionResult = { takes, ...(best ? { best: best.label } : {}), ...(reference ? { reference: { file: reference.file, summary: heardSummary(reference) } } : {}), seconds: Math.round((Date.now() - began) / 100) / 10, notes };
+      // HISTORY: one quiet line for the whole of it.
+      const title = best ? `Auditioned ${takes.length === 1 ? "" : `${takes.length} candidates · `}${best.closeness!.score}%${takes.length > 1 ? ` (${best.label})` : ""}`
+        : takes.every((take) => take.silent) && files.length ? "Auditioned: the render was silent" : `Auditioned ${takes.length === 1 ? takes[0]!.label : `${takes.length} candidates`}`;
+      emitChange({ id: `a${randomUUID().slice(0, 8)}`, family: "clip", title, state: "heard", ...(best ? { score: best.closeness!.score } : {}), at: now().getTime() });
+      try {
+        options.onAudition?.({ type: "auditioned", round, ...(best ? { best: { label: best.label, score: best.closeness!.score } } : {}), ...(previous !== undefined ? { previous } : {}),
+          takes: [...scored.map((take) => ({ label: take.label, score: take.closeness!.score })), ...takes.filter((take) => !take.closeness).map((take) => ({ label: take.label, ...(take.silent ? { silent: true } : {}) }))],
+          gaps: best?.closeness!.gaps.slice(0, 3) ?? [] });
+      } catch { /* a listener failure must not affect Live */ }
+      tell(best ? `Auditioned · ${best.closeness!.score}%` : "Auditioned", false);
+      return result;
+    } catch (error) {
+      tell("Auditioned", false);
+      signal.throwIfAborted();
+      return `${notes.length ? `${notes.join(" ")} ` : ""}Kumi couldn't listen to the render: ${error instanceof Error ? error.message.slice(0, 300) : "it failed"}`;
+    }
+  }
+  /**
+   * An audition cut off by a crash left Main silent: with that Set open again, Main goes back to where
+   * it was, and the producer is told (with any scratch tracks to delete). What was said, or nothing.
+   */
+  async function restoreAfterCrash(identity: string, path: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+    const pending = restore.load();
+    if (!pending || quiet) return undefined;
+    // The same Set: its file, or (unsaved) its identity in this Live.
+    if (pending.path ? pending.path !== path : pending.set !== identity) return undefined;
+    // Quietly: putting Main back isn't one of Kumi's changes for HISTORY.
+    quiet = []; const counted = changesThisTurn;
+    let back = false;
+    try { back = await putMainBack(pending.volume, signal).catch(() => false); }
+    finally { for (const id of quiet ?? []) changes.delete(id); quiet = undefined; changesThisTurn = counted; }
+    if (!back) return undefined;
+    restore.clear();
+    const said = `Kumi's last render was cut off, so it put Main back to ${faderDb(pending.volume)}.${pending.scratch?.length ? ` Delete its render tracks if they're still there: ${pending.scratch.join(", ")}.` : ""}`;
+    try { options.onAction?.({ title: said }); } catch { /* a listener failure must not affect Live */ }
+    return said;
+  }
+  /** The reference, heard once per file and span this session. */
+  async function heardReference(named: string, request: AuditionRequest, signal: AbortSignal): Promise<Analysis> {
+    const file = (await clipFile(named, signal).catch(() => undefined)) ?? audioPath(named);
+    const key = JSON.stringify([file, request.referenceFrom ?? 0, request.referenceSeconds ?? null, request.focus ?? null]);
+    const known = referenceCache.get(key);
+    if (known) return known;
+    const heard = await hear(file, { ...(request.referenceFrom !== undefined ? { start: request.referenceFrom } : {}), ...(request.referenceSeconds !== undefined ? { seconds: request.referenceSeconds } : {}),
+      ...(request.focus ? { focus: request.focus === "section" ? "mix" : "sound" } : {}), signal });
+    referenceCache.set(key, heard);
+    if (referenceCache.size > 32) referenceCache.delete(referenceCache.keys().next().value!);
+    return heard;
+  }
+  /** An audio clip in the Set, named by its clipRef from discovery, as the file it plays; undefined for anything that isn't a clip. */
+async function clipFile(named: string, originalSignal: AbortSignal): Promise<string | undefined> {
+    const given = named.trim(); const ref = longRefs.get(given) ?? given;
+    const arrangement = /^(\d+):arrangement_clip:(\d+):\d+$/.exec(ref); const session = /^(\d+):clip:(\d+):(\d+)$/.exec(ref);
+    if (!arrangement && !session) {
+      if (/^(arrangement_clip|clip):[\w:]+$/.test(given)) throw new ObservationError("That clip isn't one from this turn's discovery; discover it again.");
+      return undefined;
+    }
+    if (!available || lost || !tools) throw new ObservationError("Live isn't connected, so Kumi can't find that clip's file.");
+    const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(15_000)]);
+    // A Session clip's parent is its slot; an Arrangement clip's, its track.
+    const query = arrangement ? { kind: "arrangement-clip", parent: `${arrangement[1]}:track:${arrangement[2]}` } : { kind: "session-clip", parent: `${session![1]}:clip_slot:${session![2]}:${session![3]}` };
+    const read = await tools.call("live_discover", { ...query, fields: ["ref", "name", "isAudio", "filePath"], limit: 100 }, signal, { host: true });
+    const items = read.isError ? [] : payload(read).items;
+    const clip = (Array.isArray(items) ? items : []).map((item) => object(item)).find((item) => item.ref === ref);
+    if (!clip) throw new ObservationError("That clip isn't in the Set any more; discover it again.");
+    if (clip.isAudio === false) throw new ObservationError("That's a MIDI clip, which has no sound of its own: record its track to audio first (resampling), then listen to the recording.");
+    if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
+    return clip.filePath;
   }
   function definitions(): KernelTool[] {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
@@ -1311,7 +1580,19 @@ export function createAbletonIntegration(options: Options): Integration {
     const watcher: KernelTool[] = PROJECT_TOOLS.slice(1).every((name) => tools!.has(name)) ? [{ name: WATCH_TOOL, description: WATCH_DESCRIPTION,
       inputSchema: { type: "object", additionalProperties: false, required: ["action"], properties: { action: { type: "string", enum: ["start", "stop"] } } },
       execute: (input, signal) => watch(input, signal) }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher];
+    const auditions: KernelTool[] = supported({ since: RENDER_BRIDGE }) && tools!.has("live_undo") && tools!.has("live_recording_preview") ? [{ name: AUDITION_TOOL, description: AUDITION_DESCRIPTION, inputSchema: AUDITION_SCHEMA,
+      execute: async (input, signal) => {
+        const request = auditionRequest(input);
+        if (typeof request === "string") return { text: request, isError: true };
+        const result = await audition(request, signal);
+        if (typeof result === "string") return { text: result, isError: true };
+        const round = rounds.count;
+        return { text: JSON.stringify({ round, ...(result.best ? { best: result.best } : {}),
+          takes: result.takes.map((take) => ({ label: take.label, track: shortRef(take.track), ...(take.silent ? { silent: true } : {}), ...(take.heard ? { heard: take.heard.summary } : {}),
+            ...(take.closeness ? { score: take.closeness.score, gaps: take.closeness.gaps, features: Object.fromEntries(take.closeness.features.map((feature) => [feature.name, feature.similarity])) } : {}) })),
+          ...(result.reference ? { reference: result.reference.summary } : {}), seconds: result.seconds, ...(result.notes.length ? { notes: result.notes } : {}) }), isError: result.takes.every((take) => take.silent) };
+      } }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions];
   }
   return {
     async start(signal) {
@@ -1406,31 +1687,13 @@ export function createAbletonIntegration(options: Options): Integration {
           }) };
       } catch { signal.throwIfAborted(); return undefined; }
     },
-    /** An audio clip in the Set, named by its clipRef from discovery, as the file it plays; undefined for anything that isn't a clip. */
-    async audioFile(named, originalSignal) {
-      const given = named.trim(); const ref = longRefs.get(given) ?? given;
-      const arrangement = /^(\d+):arrangement_clip:(\d+):\d+$/.exec(ref); const session = /^(\d+):clip:(\d+):(\d+)$/.exec(ref);
-      if (!arrangement && !session) {
-        if (/^(arrangement_clip|clip):[\w:]+$/.test(given)) throw new ObservationError("That clip isn't one from this turn's discovery; discover it again.");
-        return undefined;
-      }
-      if (!available || lost || !tools) throw new ObservationError("Live isn't connected, so Kumi can't find that clip's file.");
-      const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(15_000)]);
-      // A Session clip's parent is its slot; an Arrangement clip's, its track.
-      const query = arrangement ? { kind: "arrangement-clip", parent: `${arrangement[1]}:track:${arrangement[2]}` } : { kind: "session-clip", parent: `${session![1]}:clip_slot:${session![2]}:${session![3]}` };
-      const read = await tools.call("live_discover", { ...query, fields: ["ref", "name", "isAudio", "filePath"], limit: 100 }, signal, { host: true });
-      const items = read.isError ? [] : payload(read).items;
-      const clip = (Array.isArray(items) ? items : []).map((item) => object(item)).find((item) => item.ref === ref);
-      if (!clip) throw new ObservationError("That clip isn't in the Set any more; discover it again.");
-      if (clip.isAudio === false) throw new ObservationError("That's a MIDI clip, which has no sound of its own: record its track to audio first (resampling), then listen to the recording.");
-      if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
-      return clip.filePath;
-    },
+    audioFile: (named, signal) => clipFile(named, signal),
+    audition: (request, signal) => audition(request, signal),
     async observe(originalSignal, hints) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       signal.throwIfAborted();
       if (!started || closed) throw new ObservationError("Integration is not open");
-      invalidate(); const lease = observationGeneration; changesThisTurn = 0; picked.clear();
+      invalidate(); const lease = observationGeneration; changesThisTurn = 0; picked.clear(); rounds = { count: 0, best: undefined };
       // While Live is away the conversation stays with its Set (and keeps being saved there).
       const away = () => noAccess(previous?.key ?? `${generation}:no-live`, now(), previous?.path && previous.project ? previous.project : undefined);
       if (!available || lost) return away();
@@ -1470,7 +1733,7 @@ export function createAbletonIntegration(options: Options): Integration {
         const songState = songRead && "value" in songRead ? songRead.value : undefined;
         const numerator = typeof songState?.signatureNumerator === "number" ? songState.signatureNumerator : 4;
         const denominator = typeof songState?.signatureDenominator === "number" ? songState.signatureDenominator : 4;
-        setMeter(numerator, denominator);
+        setMeter(numerator, denominator); beatsPerBar = numerator * 4 / denominator;
         registerRows("set", page.items, setArgs, page.nextCursor);
         // The Set's tracks, with references usable in this turn: most requests then need no discovery first.
         let trackList: JsonObject[] | undefined; let moreTracks = false; let moreDevices = false;
@@ -1511,6 +1774,7 @@ export function createAbletonIntegration(options: Options): Integration {
           }
         } catch (error) { if (lease !== observationGeneration) throw error; trackList = undefined; }
         options.onConnection("connected");
+        const restored = await restoreAfterCrash(identity, typeof row.filePath === "string" ? row.filePath : undefined, signal); assertLease(lease, signal);
         const name = typeof row.name === "string" && row.name.trim() ? row.name.slice(0, 256) : "(unnamed/unsaved)";
         // Its file says which saved Set this is (for its conversation and catching up). It's read for a
         // newly seen Set, and again when the name changes: Save As, or an unsaved Set's first save.
@@ -1552,6 +1816,7 @@ export function createAbletonIntegration(options: Options): Integration {
             ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             ...(pinned ? { pinned } : {}),
+            ...(restored ? { restoredAfterCrash: restored } : {}),
             // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
             ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.

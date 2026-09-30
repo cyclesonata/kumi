@@ -67,10 +67,12 @@ export const ACTIONS: readonly ActionKind[] = [
     tool: "record", since: FIXED_BRIDGE, preview: "live_recording_preview", apply: "live_recording_apply",
     description: "Start or stop recording: action start or stop, lane session or arrangement, and destinationTrackRef, the armed track (arm it with set_routing first). Live records onto one armed track only, so Kumi disarms any other first and says which. Recording keeps what it records in the Set; stop it with action stop.",
     inputSchema: { type: "object", additionalProperties: false, required: ["action", "lane"], properties: {
-      action: { type: "string", enum: ["start", "stop"] }, lane: { type: "string", enum: ["session", "arrangement"] }, destinationTrackRef: REF } },
+      action: { type: "string", enum: ["start", "stop"] }, lane: { type: "string", enum: ["session", "arrangement"] }, destinationTrackRef: REF,
+      alsoTrackRefs: { type: "array", maxItems: 7, items: REF, description: "More armed tracks recorded at the same time (bridge 1.0.47): several sources rendered in one pass" } } },
     prepare(input) {
       return { action: input.action, lane: input.lane, intent: input.action === "start" ? "The producer asked Kumi to record." : "The producer asked Kumi to stop recording.",
-        ...(input.destinationTrackRef ? { destinationTrackRef: input.destinationTrackRef } : {}), outputSafety: SAFETY };
+        ...(input.destinationTrackRef ? { destinationTrackRef: input.destinationTrackRef } : {}),
+        ...(input.action === "start" && Array.isArray(input.alsoTrackRefs) && input.alsoTrackRefs.length ? { alsoTrackRefs: input.alsoTrackRefs } : {}), outputSafety: SAFETY };
     },
     summarize(_preview, input, track) {
       const known = track(input.destinationTrackRef);

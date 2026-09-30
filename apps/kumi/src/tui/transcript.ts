@@ -32,6 +32,8 @@ export type Entry =
   | { kind: "memory"; what: MemoryKind; text: string }
   /** Audio Kumi listened to: its tonal balance, or its differences from a reference. */
   | { kind: "heard"; file: string; summary: string; bands: number[]; compared?: { reference: string; summary: string; differences: number[] } }
+  /** An audition: its round, the best score and the one before, what differs most, and each candidate's score. */
+  | { kind: "auditioned"; round: number; best?: { label: string; score: number }; previous?: number; takes: { label: string; score?: number; silent?: boolean }[]; gaps: string[] }
   /** A video Kumi watched: what it is, where its words came from, and the frames it looked at (pictured when `pictures`). */
   | { kind: "watched"; title: string; channel?: string; duration?: number; from: number; to: number; chapters: string[]; words: string;
     frames: { at: number; zoom?: string; thumb: Picture }[]; sound?: { from: number; to: number }; notes: string[]; pictures: boolean };
@@ -190,6 +192,7 @@ function entryRows(entry: Entry, width: number): Row[] {
     return wrap([{ text: "── ", style: S.rule }, { text: entry.text, style: S.dim }, { text: ` ${"─".repeat(rest)}`, style: S.rule }], inner).map((spans) => ({ spans }));
   }
   if (entry.kind === "heard") return heardRows(entry, inner);
+  if (entry.kind === "auditioned") return auditionedRows(entry, inner);
   if (entry.kind === "watched") return watchedRows(entry, inner);
   const rows: Row[] = [];
   if (entry.text) {
@@ -245,6 +248,25 @@ function heardRows(entry: Extract<Entry, { kind: "heard" }>, width: number): Row
     }) });
   }
   rows.push({ spans: BAND_LABELS.slice(0, fits).map((label) => ({ text: pad(label), style: S.faint })) });
+  return rows;
+}
+
+/**
+ * An audition, in a line or two: "Round 2 · 58% → 71% · brighter top, faster attack", and with
+ * several candidates, each one's score, quietly.
+ */
+function auditionedRows(entry: Extract<Entry, { kind: "auditioned" }>, width: number): Row[] {
+  const spans: Span[] = [{ text: `Round ${entry.round} · `, style: S.dim }];
+  if (entry.best) {
+    if (entry.previous !== undefined) spans.push({ text: `${entry.previous}% → `, style: S.dim });
+    spans.push({ text: `${entry.best.score}%`, style: entry.previous !== undefined && entry.best.score < entry.previous ? S.warn : S.accent });
+    if (entry.gaps.length) spans.push({ text: ` · ${entry.gaps.join(", ")}`, style: S.dim });
+  } else spans.push({ text: entry.takes.every((take) => take.silent) ? "the render was silent" : "listened", style: S.dim });
+  const rows: Row[] = wrap(spans, width).map((line) => ({ spans: line }));
+  if (entry.takes.length > 1) {
+    const each = entry.takes.map((take) => `${take.label} ${take.silent ? "silent" : take.score !== undefined ? `${take.score}` : "–"}`).join(" · ");
+    rows.push(...wrap([{ text: each, style: S.faint }], width).map((line) => ({ spans: line })));
+  }
   return rows;
 }
 
