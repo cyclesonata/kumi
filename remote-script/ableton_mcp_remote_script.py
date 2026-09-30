@@ -861,6 +861,12 @@ class LiveObjectMapper:
         # How long one read the host asks for (a snapshot with arguments, a discovery page) may hold
         # Live's thread before it stops and says where to go on. Encoding the answer comes after.
         self.read_budget_seconds = READ_BUDGET_SECONDS
+        # The structure revision kept across requests ((revision, tick, track identities)) while Live's
+        # listeners watch what it hashes (see _watch_structure); display ticks age it.
+        self._structure_held: tuple[str, int, list[str]] | None = None
+        self._structure_watch: list[tuple[Any, str, Callable[[], None]]] | None = None
+        self._structure_rewatch = False
+        self._display_ticks = 0
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -2391,7 +2397,11 @@ class LiveObjectMapper:
         result = None
         if kind == "set":
             result = self._set_row()
-        elif kind in {"clip", "take_lane", "take_lane_clip", "device", "parameter"}:
+        elif kind in {"device", "parameter"}:
+            result = self._device_scoped_row(reference, kind)
+        elif kind == "clip":
+            result = self._clip_row_at(reference, notes=True)
+        elif kind in {"take_lane", "take_lane_clip"}:
             result = self._track_scoped_rows(self._ref_track_index(reference), kind).get(reference)
         elif kind == "arrangement_clip":
             track_index = self._ref_track_index(reference)
@@ -2406,13 +2416,135 @@ class LiveObjectMapper:
                 row = self._scene_row(scenes[int(path)], int(path))
                 result = row if row["ref"] == reference else None
         elif kind == "track":
-            identity = self._capture_object_identity(obj); tracks = self._all_track_objects(); matches = [candidate for candidate in tracks if self._capture_same_object(candidate, obj, identity)]
-            track_index = self._ref_track_index(reference)
-            row = self._whole_track_row(track_index) if len(matches) == 1 and track_index is not None else None
+            # A ref names a place: the track there, if it's still the one the ref was given for.
+            identity = self._capture_object_identity(obj); track_index = self._ref_track_index(reference)
+            row = self._whole_track_row(track_index) if track_index is not None else None
             if row is not None and row["ref"] == reference and row.get("objectIdentity") == identity: result = row
         if result is None:
             raise ValueError("unknown live ref")
         return result
+
+    def _light_walk(self, index: int) -> list[tuple[Any, str, int, dict[str, Any]]]:
+        """A track's light device walk (see _light_device_walk), once per shared read."""
+        cache = self._read_cache; key = f"light-walk:{index}"
+        if cache is not None and key in cache: return cache[key]
+        entry = self._track_entry(index)
+        walked = list(self._light_device_walk(entry[0], self.refs.put("track", entry[0], str(index)), str(index))) if entry is not None else []
+        if cache is not None: cache[key] = walked
+        return walked
+
+    def _walked_device(self, device_ref: str) -> tuple[Any, str, int, dict[str, Any]] | None:
+        """The device at a device ref's place now, from its track's light walk."""
+        index = self._ref_track_index(device_ref)
+        return next((item for item in self._light_walk(index) if item[3]["ref"] == device_ref), None) if index is not None else None
+
+    def _device_scoped_row(self, reference: str, kind: str) -> dict[str, Any] | None:
+        """A device's whole row, or a device parameter's row, exactly as the track's whole row holds
+        them, building that device alone (found on its track's light walk)."""
+        if kind == "device":
+            found = self._walked_device(reference)
+            if found is None: return None
+            device, path, depth, light_row = found
+            return self._device_row(device, reference, light_row["parentRef"], int(path.split(":", 1)[0]), path, light_row["chainPosition"], {"count": 0, "seen": set()}, depth)
+        device_ref, _, position = reference.partition(":parameter:")[2].rpartition(":")
+        if not position.isdigit(): return None
+        found = self._walked_device(device_ref)
+        parameters = self._items(getattr(found[0], "parameters", [])) if found is not None else []
+        return self._parameter_row(parameters[int(position)], int(position), device_ref) if int(position) < len(parameters) else None
+
+    def _clip_row_at(self, reference: str, notes: bool) -> dict[str, Any] | None:
+        """A Session clip's row, from its slot alone (clip:t:s)."""
+        parts = reference.split(":")
+        if len(parts) != 4 or not parts[2].isdigit() or not parts[3].isdigit(): return None
+        entry = self._track_entry(int(parts[2])); slots = self._items(getattr(entry[0], "clip_slots", [])) if entry is not None else []
+        slot = slots[int(parts[3])] if int(parts[3]) < len(slots) else None; clip = getattr(slot, "clip", None) if slot is not None else None
+        if clip is None: return None
+        return self._session_clip_row(self.refs.put("clip_slot", slot, f"{parts[2]}:{parts[3]}"), int(parts[2]), int(parts[3]), clip, notes)
+
+    def _positional_identity(self, reference: str) -> str | None:
+        """The identity of what's at a ref's place now, reading that one object (and the light walk
+        of its track, for what lives in a device tree). None when nothing is there."""
+        parts = reference.split(":") if isinstance(reference, str) else []
+        if len(parts) < 3 or parts[0] != str(self.refs.epoch): return None
+        kind, path = parts[1], parts[2:]
+        found: Any = None
+        if kind == "track" and len(path) == 1 and path[0].isdigit():
+            entry = self._track_entry(int(path[0])); found = entry[0] if entry is not None else None
+        elif kind in {"clip", "clip_slot"} and len(path) == 2 and all(part.isdigit() for part in path):
+            entry = self._track_entry(int(path[0])); slots = self._items(getattr(entry[0], "clip_slots", [])) if entry is not None else []
+            slot = slots[int(path[1])] if int(path[1]) < len(slots) else None
+            found = slot if kind == "clip_slot" else getattr(slot, "clip", None) if slot is not None else None
+        elif kind == "scene" and len(path) == 1 and path[0].isdigit():
+            scenes = self._items(getattr(self.song, "scenes", [])); found = scenes[int(path[0])] if int(path[0]) < len(scenes) else None
+        elif kind == "arrangement_clip":
+            found = self._note_parent(reference)
+        elif kind in {"device", "chain"} and path[0].isdigit():
+            self._light_walk(int(path[0]))
+            if kind == "device":
+                walked = self._walked_device(reference); return walked[3]["objectIdentity"] if walked is not None else None
+            try: found = self.refs.get(reference)
+            except KeyError: found = None
+        elif kind == "parameter":
+            found = self._parameter_at(reference)
+        else:
+            try: found = self.refs.get(reference)
+            except KeyError: found = None
+        return self._capture_object_identity(found) if found is not None else None
+
+    def _parameter_at(self, reference: str) -> Any:
+        """The parameter at a parameter ref's place now: a device's (by index), a rack's macro or chain
+        selector, or a track's mixer control."""
+        key = reference.partition(":parameter:")[2]
+        parts = key.split(":")
+        if parts[:1] == ["mixer"] and len(parts) >= 3 and parts[1].isdigit():
+            entry = self._track_entry(int(parts[1])); mixer = self._read_attr(entry[0], "mixer_device") if entry is not None else None
+            if mixer is None: return None
+            if parts[2] == "sends" and len(parts) == 4 and parts[3].isdigit():
+                sends = self._items(self._read_attr(mixer, "sends") or []); return sends[int(parts[3])] if int(parts[3]) < len(sends) else None
+            return self._read_attr(mixer, parts[2]) if len(parts) == 3 else None
+        device_ref, _, position = key.rpartition(":")
+        if device_ref.endswith(":macro"): device_ref, selector = device_ref[:-6], "macro"
+        elif position == "chain-selector": selector = "chain-selector"
+        else: selector = "parameter"
+        found = self._walked_device(device_ref)
+        if found is None: return None
+        if selector == "chain-selector": return self._read_attr(found[0], "chain_selector")
+        items = self._items(self._read_attr(found[0], "macros") or []) if selector == "macro" else self._items(getattr(found[0], "parameters", []))
+        return items[int(position)] if position.isdigit() and int(position) < len(items) else None
+
+    def _track_authority_row(self, reference: str) -> dict[str, Any] | None:
+        """A track as a change's authority binds it: its own state (identity, name, arm, monitoring,
+        what plays, its mixer, where it routes, its view), not what it holds (slots, clips, devices,
+        take lanes) nor the choices of what it could route from (they list the other tracks)."""
+        parts = reference.split(":")
+        entry = self._track_entry(int(parts[2])) if len(parts) == 3 and parts[2].isdigit() else None
+        if entry is None: return None
+        track, track_kind = entry; index = int(parts[2]); armed_value = self._armed(track)
+        return {
+            "ref": self.refs.put("track", track, str(index)), "objectIdentity": self._capture_object_identity(track),
+            "name": str(getattr(track, "name", f"Track {index + 1}")), "kind": track_kind,
+            "armed": armed_value if isinstance(armed_value, bool) else None,
+            "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
+            "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
+            "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
+            "mixer": self._mixer_row(track, index),
+            "routing": {key: value for key, value in self._routing_row(track).items() if key not in _VOLATILE_ROUTING_FIELDS},
+            **self._track_state_fields(track, index),
+        }
+
+    def _authority_view(self, reference: str, identity_only: bool) -> Any:
+        """What a change's authority binds of one ref it names. A ref named as something the change
+        expects (a sibling, an owner, a clip's track; the change fences those identities itself):
+        the identity of what's at its place. Otherwise the object's own state: a track without what
+        it holds, a Session clip without its notes, a device's light row, any other row as get has it."""
+        if identity_only: return {"objectIdentity": self._positional_identity(reference)}
+        kind = reference.split(":", 2)[1] if isinstance(reference, str) and reference.count(":") >= 2 else ""
+        if kind == "track": return self._track_authority_row(reference)
+        if kind == "clip": return self._clip_row_at(reference, notes=False)
+        if kind == "device":
+            walked = self._walked_device(reference)
+            return walked[3] if walked is not None else None
+        return self.get(reference)
 
     def _track_scoped_rows(self, index: int | None, kind: str) -> dict[str, Any]:
         """The rows of one kind under a track, by ref (the first of each in reading order): its
@@ -3753,7 +3885,7 @@ class LiveObjectMapper:
             return self.status()
         if operation == "session.reconnect":
             # A step (or a pressed fire button) the previous session held can't be let go by its references any more.
-            self._end_undo_step(); self._release_fire_buttons(); self._browser_preview = None
+            self._end_undo_step(); self._release_fire_buttons(); self._browser_preview = None; self._unwatch_structure()
             self.refs.reset()
             self._playback_state_digest = None
             self._playback_revision_counter = 0
@@ -4086,26 +4218,16 @@ class LiveObjectMapper:
             authority = self._session_clip_authority(reference) if reference.startswith(f"{self.refs.epoch}:clip:") else {"expectedObjectIdentity": self.get(reference).get("objectIdentity"), "expectedAuthorityRevision": self._arrangement_clip_authority_revision(reference)}
             return hashlib.sha256(self._bounded_canonical(authority).encode("utf-8")).hexdigest()
         if kind == "device":
-            track_index = self._ref_track_index(reference)
-            track_rows = [row for row in [self._whole_track_row(track_index) if track_index is not None else None] if row is not None]
-            def visit(values: Any, owner_ref: str, owner_identity: str, track: dict[str, Any]) -> dict[str, Any] | None:
-                if not isinstance(values, list): return None
-                siblings = [{"ref": item.get("ref"), "objectIdentity": item.get("objectIdentity")} for item in values if isinstance(item, dict)]
-                for item in values:
-                    if not isinstance(item, dict): continue
-                    if item.get("ref") == reference: return {"ref": item.get("ref"), "objectIdentity": item.get("objectIdentity"), "trackRef": track.get("ref"), "trackIdentity": track.get("objectIdentity"), "ownerRef": owner_ref, "ownerIdentity": owner_identity, "siblings": siblings}
-                    for chain in item.get("chains", []):
-                        found = visit(chain.get("devices", []), chain.get("ref"), chain.get("objectIdentity"), track)
-                        if found is not None: return found
-                    for pad in item.get("drumPads", []):
-                        for chain in pad.get("chains", []):
-                            found = visit(chain.get("devices", []), chain.get("ref"), chain.get("objectIdentity"), track)
-                            if found is not None: return found
-                return None
-            for track in track_rows:
-                found = visit(track.get("devices", []), track.get("ref"), track.get("objectIdentity"), track)
-                if found is not None: return hashlib.sha256(self._bounded_canonical(found).encode("utf-8")).hexdigest()
-            raise ValueError("device rename hierarchy is unavailable")
+            # From the track's light walk: the device, its owner (the track or a chain), its siblings there, its track.
+            track_index = self._ref_track_index(reference); entry = self._track_entry(track_index) if track_index is not None else None
+            walked = self._light_walk(track_index) if entry is not None else []
+            named = next((row for _, _, _, row in walked if row["ref"] == reference), None)
+            if entry is None or named is None: raise ValueError("device rename hierarchy is unavailable")
+            owner_ref = named["parentRef"]; track_ref = self.refs.put("track", entry[0], str(track_index))
+            owner_identity = self._capture_object_identity(entry[0]) if owner_ref == track_ref else self._capture_object_identity(self.refs.get(owner_ref))
+            siblings = [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for _, _, _, row in walked if row["parentRef"] == owner_ref]
+            found = {"ref": named["ref"], "objectIdentity": named["objectIdentity"], "trackRef": track_ref, "trackIdentity": self._capture_object_identity(entry[0]), "ownerRef": owner_ref, "ownerIdentity": owner_identity, "siblings": siblings}
+            return hashlib.sha256(self._bounded_canonical(found).encode("utf-8")).hexdigest()
         raise ValueError("rename authority kind is unsupported")
 
     def _rename(self, operation: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -4113,8 +4235,8 @@ class LiveObjectMapper:
         kind = operation.split(".", 1)[0]
         if not isinstance(reference, str) or f":{kind}:" not in reference or not isinstance(name, str) or not 1 <= len(name) <= 256 or not isinstance(expected_name, str) or not isinstance(expected_identity, str):
             raise ValueError("rename authority is invalid")
-        authoritative = self.get(reference)
-        if not isinstance(authoritative, dict) or authoritative.get("ref") != reference or not hmac.compare_digest(str(authoritative.get("objectIdentity", "")), expected_identity):
+        current_identity = self._positional_identity(reference)
+        if current_identity is None or not hmac.compare_digest(current_identity, expected_identity):
             raise ValueError("rename target identity changed since preview")
         expected_authority = args.get("expectedAuthorityRevision")
         if not isinstance(expected_authority, str) or not hmac.compare_digest(self._rename_authority_revision(kind, reference), expected_authority): raise ValueError("rename hierarchy changed since preview")
@@ -4122,17 +4244,22 @@ class LiveObjectMapper:
         if not hasattr(target, "name") or str(getattr(target, "name", "")) != expected_name:
             raise ValueError("rename target changed since preview")
         if kind == "track":
-            tracks = self._all_track_objects()
-            if sum(1 for candidate in tracks if self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename track is stale or ambiguous")
+            # The watched structure knows every track's identity; without it, every track is looked at.
+            held = self._structure_held
+            identities = held[2] if held is not None and self._display_ticks - held[1] < self.STRUCTURE_HOLD_TICKS else [self._capture_object_identity(candidate) for candidate in self._all_track_objects()]
+            if identities.count(expected_identity) != 1 or not self._capture_same_object(target, target, expected_identity): raise ValueError("rename track is stale or ambiguous")
         if kind == "scene" and sum(1 for candidate in self._items(getattr(self.song, "scenes", [])) if self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename scene is stale or ambiguous")
         if kind == "locator" and sum(1 for candidate in self._items(getattr(self.song, "cue_points", [])) if self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename locator is stale or ambiguous")
         if kind == "clip":
-            arrangement_rows = self._arrangement_clip_items(); current_clips = [getattr(slot, "clip", None) for track in self._items(getattr(self.song, "tracks", [])) for slot in self._items(getattr(track, "clip_slots", []))] + [self.refs.get(row["ref"]) for row in arrangement_rows]
-            if sum(1 for candidate in current_clips if self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename clip is stale or ambiguous")
+            # A clip lives on one track: its Session slots and Arrangement clips are where it can be.
+            track_index = self._ref_track_index(reference); entry = self._track_entry(track_index) if track_index is not None else None
+            owner = entry[0] if entry is not None else None
+            current_clips = [getattr(slot, "clip", None) for slot in self._items(getattr(owner, "clip_slots", []))] + self._items(self._read_attr(owner, "arrangement_clips") or []) if owner is not None else self._items(getattr(self.song, "arrangement_clips", []))
+            if sum(1 for candidate in current_clips if candidate is not None and self._capture_same_object(candidate, target, expected_identity)) != 1: raise ValueError("rename clip is stale or ambiguous")
         if kind == "device":
-            track_index = self._ref_track_index(reference); track_row = self._whole_track_row(track_index) if track_index is not None else None
-            named = next((device for device in self._flatten_device_rows((track_row or {}).get("devices", [])) if device.get("ref") == reference), None)
-            if named is None or named.get("objectIdentity") != expected_identity or self._device_identity_count(expected_identity) != 1: raise ValueError("rename device is stale or ambiguous")
+            # A device lives in one track's device tree: that's where it must be, exactly once.
+            track_index = self._ref_track_index(reference); walked = self._light_walk(track_index) if track_index is not None else []
+            if sum(1 for _, _, _, row in walked if row["objectIdentity"] == expected_identity) != 1 or next((row["objectIdentity"] for _, _, _, row in walked if row["ref"] == reference), None) != expected_identity: raise ValueError("rename device is stale or ambiguous")
         prefix = self._return_name_prefix(target, expected_identity) if kind == "track" else ""
         requested = name[len(prefix):] if prefix and name.startswith(prefix) else name
         if not requested: raise ValueError("rename name is invalid")
@@ -4183,16 +4310,63 @@ class LiveObjectMapper:
             except BaseException: continue
             if str(getattr(target, "name", "")) == display_name: return
 
+    # How many display ticks (about 100 ms each) a watched structure revision is trusted without a
+    # listener saying it changed: a safety net, should Live ever change it without telling.
+    STRUCTURE_HOLD_TICKS = 20
+
     def _structure_revision(self) -> str:
         """The Set's structure (each track's and scene's ref, identity, name, kind and place), hashed
-        exactly as the host hashes a snapshot's rows, from light reads: nothing below a track."""
+        exactly as the host hashes a snapshot's rows, from light reads: nothing below a track. Kept
+        across requests while Live's listeners watch the track, return-track and scene lists and
+        every track's and scene's name (what it hashes can't change unseen), for up to
+        STRUCTURE_HOLD_TICKS display ticks; on a Live that can't be watched, read every time."""
         cache = self._read_cache
         if cache is not None and "structure" in cache: return cache["structure"]
-        tracks = [[self.refs.put("track", track, str(index)), self._capture_object_identity(track), str(getattr(track, "name", f"Track {index + 1}")), track_kind, index] for index, (track, track_kind) in enumerate(self._track_entries())]
+        held = getattr(self, "_structure_held", None)
+        if held is not None and getattr(self, "_display_ticks", 0) - held[1] < self.STRUCTURE_HOLD_TICKS:
+            if cache is not None: cache["structure"] = held[0]
+            return held[0]
+        entries = self._track_entries()
+        tracks = [[self.refs.put("track", track, str(index)), self._capture_object_identity(track), str(getattr(track, "name", f"Track {index + 1}")), track_kind, index] for index, (track, track_kind) in enumerate(entries)]
         scenes = [[self.refs.put("scene", scene, str(index)), self._capture_object_identity(scene), str(getattr(scene, "name", f"Scene {index + 1}")), index] for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
         revision = hashlib.sha256(json.dumps({"tracks": tracks, "scenes": scenes}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
         if cache is not None: cache["structure"] = revision
+        self._structure_held = (revision, getattr(self, "_display_ticks", 0), [row[1] for row in tracks]) if self._watch_structure([track for track, _ in entries]) else None
         return revision
+
+    def _watch_structure(self, tracks: list[Any]) -> bool:
+        """Listen for what the structure revision hashes changing: the track, return-track and scene
+        lists (a change there also means new names to watch) and each track's and scene's name.
+        Whether everything is watched; a Live that can't be leaves nothing attached."""
+        if self._structure_watch is not None and not self._structure_rewatch: return True
+        self._unwatch_structure()
+        def names_changed() -> None: self._structure_held = None
+        def lists_changed() -> None: self._structure_held = None; self._structure_rewatch = True
+        watch: list[tuple[Any, str, Callable[[], None]]] = []; complete = True
+        wanted = [(self.song, name, lists_changed) for name in ("tracks", "return_tracks", "scenes")] + [(owner, "name", names_changed) for owner in tracks + self._items(getattr(self.song, "scenes", []))]
+        for owner, name, callback in wanted:
+            register = getattr(owner, f"add_{name}_listener", None)
+            try:
+                if not callable(register): raise TypeError(name)
+                register(callback); watch.append((owner, name, callback))
+            except Exception:
+                complete = False; break
+        self._structure_watch = watch; self._structure_rewatch = False
+        if not complete: self._unwatch_structure()
+        return complete
+
+    def _unwatch_structure(self) -> None:
+        """Take the structure listeners off (reconnect, shutdown, or before watching anew); forget what they kept."""
+        for owner, name, callback in getattr(self, "_structure_watch", None) or []:
+            remover = getattr(owner, f"remove_{name}_listener", None)
+            try:
+                if callable(remover): remover(callback)
+            except Exception: pass
+        self._structure_watch = None; self._structure_held = None
+
+    def structure_tick(self) -> None:
+        """A display tick passed: a kept structure revision ages (see STRUCTURE_HOLD_TICKS)."""
+        self._display_ticks = getattr(self, "_display_ticks", 0) + 1
 
     def _owned_row_exists(self, row: dict[str, Any]) -> bool:
         """Whether a transaction-owned object is still in the Set, wherever it is now. One that's
@@ -11641,21 +11815,19 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
     name, place and length; no notes or markers) only for Arrangement operations, and then only on
     the tracks the arguments name. No collection's size refuses it. Without an operation, all of
     those parts are bound (a caller that doesn't say what it will do gets the widest fence)."""
-    references = _named_references(args)
+    named = _named_references(args, roles=True)
+    references = [reference for reference, _ in named]
     observed = []
     # Playing tempo automation moves the tempo every tick, as playing mixer automation moves its values.
     tempo_automated = _tempo_automation_playing(mapper)
     attributes = ("name", "value", "min", "max", "is_enabled", "is_automatable", "arm", "mute", "solo", "current_monitoring_state", "input_routing_type", "input_routing_channel", "output_routing_type", "output_routing_channel", "gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode", "fade_in_length", "fade_out_length", "loop_start", "loop_end", "start_time", "length", "is_playing", "is_triggered", "is_recording")
-    for reference in sorted(set(references)):
+    for reference, identity_only in sorted(set(named)):
         try:
-            revision = mapper.refs.revision(reference); row = mapper.get(reference)
-            if row is None:
-                obj = mapper.refs.get(reference)
-                if isinstance(obj, dict): row = {key: value for key, value in obj.items() if isinstance(value, (str, int, float, bool, type(None)))}
-                else: row = {attribute: mapper._read_attr(obj, attribute) for attribute in attributes if isinstance(mapper._read_attr(obj, attribute), (str, int, float, bool, type(None)))}
+            revision = mapper.refs.revision(reference); row = mapper._authority_view(reference, identity_only)
+            if row is None: raise ValueError("nothing is at that ref's place")
             if tempo_automated and isinstance(row, dict) and mapper.refs.get(reference) is mapper.song: row = {key: value for key, value in row.items() if key != "tempo"}
-            observed.append([reference, revision, _authority_row(row, mapper)])
-        except (KeyError, ValueError, StopIteration): observed.append([reference, None, None])
+            observed.append([reference, identity_only, revision, _authority_row(row, mapper)])
+        except (KeyError, ValueError, StopIteration): observed.append([reference, identity_only, None, None])
     song_state = {key: mapper._read_attr(mapper.song, key) for key in ("tempo", "loop", "loop_start", "loop_length", "is_playing", "record_mode", "session_record") if not (key == "tempo" and tempo_automated)}
     identity: dict[str, Any] = {"epoch": mapper.refs.epoch, "structure": mapper._structure_revision(), "song": song_state, "references": observed}
     if operation is None or operation in _PLAYBACK_BOUND_OPERATIONS:
@@ -11669,16 +11841,18 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
     return _state_hash(identity)
 
 
-def _named_references(args: Any) -> list[str]:
-    """Every ref a request's arguments name: values under `ref`, `…Ref` and `…Refs`, at any depth."""
-    references: list[str] = []
-    def collect(value: Any, key: str = "") -> None:
+def _named_references(args: Any, roles: bool = False) -> list[Any]:
+    """Every ref a request's arguments name: values under `ref`, `…Ref` and `…Refs`, at any depth.
+    With roles, (ref, expected) pairs: expected when a key on its way starts with `expected` (an
+    identity the change fences itself: a sibling, an owner, a clip's track)."""
+    references: list[Any] = []
+    def collect(value: Any, key: str = "", expected: bool = False) -> None:
         if isinstance(value, dict):
-            for child_key, child in value.items(): collect(child, child_key)
+            for child_key, child in value.items(): collect(child, child_key, expected or child_key.startswith("expected"))
         elif isinstance(value, list):
-            for child in value: collect(child, key)
+            for child in value: collect(child, key, expected)
         elif isinstance(value, str) and (key == "ref" or key.endswith("Ref") or key.endswith("Refs")):
-            references.append(value)
+            references.append((value, expected) if roles else value)
     collect(args)
     return references
 
@@ -11843,6 +12017,7 @@ class AbletonMcpBridge:
         self.mapper.capture_tick()
         self.mapper.undo_step_tick()
         self.mapper.fire_button_tick()
+        self.mapper.structure_tick()
 
     def _pump(self) -> None:
         """Serve every connection with non-blocking I/O on Live's main thread.
@@ -12173,6 +12348,7 @@ class AbletonMcpBridge:
         except BaseException: pass
         self.mapper._end_undo_step()
         self.mapper._release_fire_buttons()
+        self.mapper._unwatch_structure()
         self.queue.close()
         with self._executed_lock: self._executed_mutations.clear()
         self.mapper.refs.reset()

@@ -4999,12 +4999,18 @@ class RackMacroDrumPadTests(unittest.TestCase):
         with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(1) or build(self, args)), patch.object(LiveObjectMapper, "_track_row", lambda self, *row_args: rows.append(row_args[2]) or track_row(self, *row_args)):
             shared = _authority_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(builds, [], "no whole-Set snapshot for 42 references")
-        self.assertEqual(rows, [0], "only their track's row, once")
+        self.assertEqual(rows, [], "no track's whole row: the parameter's own row, and its siblings' identities")
         self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
         alone = remote_module._reference_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(shared, alone, "the same digest as reading each reference on its own")
+        # Siblings are identities the change fences itself: a sibling's value isn't what it depends on,
+        # the parameter's own value is, and so is a sibling replaced.
         device.parameters[3].value = 0.75
-        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "and a later change still shows")
+        self.assertEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "a sibling's value isn't bound")
+        device.parameters[0].value = 0.25
+        moved = _authority_state_digest(mapper, args, "device.parameter.set"); self.assertNotEqual(moved, shared, "its own value is")
+        device.parameters[3] = FakeParameter()
+        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), moved, "and a sibling replaced is")
 
     def test_a_drum_rack_with_sounds_on_its_pads_reads_and_edits_like_any_rack(self):
         """Live lists a Drum Rack's chains both on the rack and on their pads; that isn't a cycle."""
@@ -6374,9 +6380,10 @@ class TargetedReadTests(unittest.TestCase):
         mapper = LiveObjectMapper(rich_song(tracks=12)); whole = mapper.snapshot()
         device = whole["tracks"][4]["devices"][0]; nested = device["chains"][0]["devices"][0]
         cases = [
-            (whole["tracks"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["clips"][0]),
-            (nested["ref"], [4], nested),
-            (nested["parameters"][0]["ref"], [4], nested["parameters"][0]),
+            # A clip from its slot, a device (and a parameter) from its track's light walk: no whole track row.
+            (whole["tracks"][0]["clips"][0]["ref"], [], whole["tracks"][0]["clips"][0]),
+            (nested["ref"], [], nested),
+            (nested["parameters"][0]["ref"], [], nested["parameters"][0]),
             (whole["tracks"][0]["takeLanes"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]),
             (whole["tracks"][0]["takeLanes"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]["clips"][0]),
             (whole["tracks"][7]["ref"], [7], whole["tracks"][7]),
@@ -8103,3 +8110,56 @@ class CreationScopeTests(unittest.TestCase):
         self.assertEqual(scoped["tracks"][2], whole["tracks"][2]); self.assertEqual([row["identity"] for row in bare["tracks"]], [row["identity"] for row in whole["tracks"]])
         self.assertEqual(mapper._creation_scope("clip.duplicate", {"ref": f"{mapper.refs.epoch}:clip:1:0", "targetTrackRef": f"{mapper.refs.epoch}:track:3"}), [1, 3])
         self.assertIsNone(mapper._creation_scope("scene.capture", {}))
+
+
+class WatchedSong(ListenSong):
+    LISTENABLE = ListenSong.LISTENABLE | {"return_tracks"}
+
+
+class FlatChangeTests(unittest.TestCase):
+    """D: an ordinary change binds what it depends on, and the structure revision is kept between
+    requests while Live's listeners watch it."""
+
+    def watched_song(self, tracks=6):
+        song = WatchedSong(); song.return_tracks = []; song.scenes = [ListenScene(f"Scene {index + 1}") for index in range(3)]
+        song.tracks = [ListenTrack() for _ in range(tracks)]
+        for index, track in enumerate(song.tracks): track.name = f"Track {index + 1}"
+        return song
+
+    def test_the_structure_revision_is_kept_until_a_listener_or_the_ticks_drop_it(self):
+        song = self.watched_song(); mapper = LiveObjectMapper(song); reads = []
+        entries = LiveObjectMapper._track_entries
+        with patch.object(LiveObjectMapper, "_track_entries", lambda self, kinds=True: reads.append(kinds) or entries(self, kinds)):
+            first = mapper._structure_revision(); self.assertEqual(len(reads), 1)
+            self.assertEqual(mapper._structure_revision(), first); self.assertEqual(len(reads), 1, "kept: nothing read")
+            song.tracks[2].name = "Bass"
+            renamed = mapper._structure_revision(); self.assertNotEqual(renamed, first); self.assertEqual(len(reads), 2)
+            song.tracks = song.tracks + [ListenTrack()]
+            added = mapper._structure_revision(); self.assertNotEqual(added, renamed)
+            song.tracks[6].name = "New"
+            self.assertNotEqual(mapper._structure_revision(), added, "a new track's name is watched too")
+            count = len(reads)
+            for _ in range(LiveObjectMapper.STRUCTURE_HOLD_TICKS): mapper.structure_tick()
+            mapper._structure_revision(); self.assertEqual(len(reads), count + 1, "and the ticks age it")
+        self.assertGreater(song.listening(), 0)
+        mapper.invoke("session.reconnect", {})
+        self.assertEqual((song.listening(), sum(track.listening() for track in song.tracks)), (0, 0)); self.assertIsNone(mapper._structure_held)
+        # A Live that can't be watched is read every time.
+        plain = LiveObjectMapper(FakeSong()); plain._structure_revision(); self.assertIsNone(plain._structure_held)
+
+    def test_a_rename_binds_the_track_not_what_it_holds(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Bass")]; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][1]
+        args = {"ref": row["ref"], "name": "Sub", "expectedName": "Bass", "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", row["ref"])}
+        digest = _authority_state_digest(mapper, args, "track.rename")
+        LeanDevice.parameter_reads = 0
+        song.tracks[1].devices.append(LeanDevice("Utility", "StereoGain", 20)); song.tracks[1].devices[0]._parameters[0].value = 0.9
+        self.assertEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "what the track holds isn't what a rename depends on")
+        self.assertEqual(LeanDevice.parameter_reads, 0)
+        song.tracks[1].arm = True
+        self.assertNotEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "the track's own state is")
+        self.assertEqual(mapper.invoke("track.rename", args), {"renamed": row["ref"], "name": "Sub"})
+        # A device rename's authority, from the light walk, is the one whole rows gave.
+        device = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]["devices"][0]
+        owner = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]
+        expected = {"ref": device["ref"], "objectIdentity": device["objectIdentity"], "trackRef": mapper.snapshot()["tracks"][0]["ref"], "trackIdentity": mapper.snapshot()["tracks"][0]["objectIdentity"], "ownerRef": owner["ref"], "ownerIdentity": owner["objectIdentity"], "siblings": [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in owner["devices"]]}
+        self.assertEqual(mapper._rename_authority_revision("device", device["ref"]), hashlib.sha256(mapper._bounded_canonical(expected).encode()).hexdigest())
