@@ -9,7 +9,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { midiDeviceCode } from "./midi.js";
-import type { DeviceSpec, MidiEvent, MidiTest } from "./spec.js";
+import type { MidiEvent, MidiSpec, MidiTest } from "./spec.js";
 
 interface Timed extends MidiEvent { at: number }
 
@@ -54,7 +54,7 @@ function eventsOf(bytes: { at: number; byte: number }[]): Timed[] {
 }
 
 /** Runs the device on `input` (control values `set` first), then `settle` ms more for its timers. */
-function run(spec: Pick<DeviceSpec, "controls" | "code">, input: MidiEvent[], set: MidiTest["set"] = {}, settle = 2_000): Run {
+function run(spec: Pick<MidiSpec, "controls" | "code">, input: MidiEvent[], set: MidiTest["set"] = {}, settle = 2_000): Run {
   let clock = 0; const sent: { at: number; byte: number }[] = []; const errors: string[] = [];
   const queue = new Set<{ due: number; order: number; fn: () => void }>(); let order = 0;
   class Task {
@@ -131,7 +131,7 @@ const PROBE: MidiEvent[] = [
 export interface Checked { passed: number; of: number; problems: string[] }
 
 /** The device's tests and Kumi's checks; problems say what went wrong, for the model to fix. */
-export function checkMidiDevice(spec: Pick<DeviceSpec, "controls" | "code" | "tests">): Checked {
+export function checkMidiDevice(spec: Pick<MidiSpec, "controls" | "code" | "tests">): Checked {
   const problems: string[] = [];
   const probe = run(spec, PROBE);
   if (probe.errors.length) problems.push(`Kumi's check: it threw: ${[...new Set(probe.errors)].slice(0, 3).join("; ")}`);
@@ -158,7 +158,7 @@ export const CHECK_TIMEOUT_MS = 10_000;
  * environment (no keys), code can't be made from strings (an escape from the device's frame can't
  * compile anything), and it's stopped at the deadline. Only plain data goes in and comes out.
  */
-export function checkMidiDeviceIsolated(spec: Pick<DeviceSpec, "controls" | "code" | "tests">, options: { timeoutMs?: number } = {}): Promise<Checked> {
+export function checkMidiDeviceIsolated(spec: Pick<MidiSpec, "controls" | "code" | "tests">, options: { timeoutMs?: number } = {}): Promise<Checked> {
   const child = fileURLToPath(new URL("./harness-child.js", import.meta.url));
   const permission = process.allowedNodeEnvironmentFlags.has("--permission") ? "--permission" : "--experimental-permission";
   const args = [permission, `--allow-fs-read=${dirname(dirname(child))}`, "--disallow-code-generation-from-strings", "--max-old-space-size=128", child];

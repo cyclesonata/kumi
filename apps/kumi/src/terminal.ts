@@ -6,7 +6,9 @@ import { safeError } from "./config.js";
 import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
-import { sanitizeText, StreamingText } from "./text.js";
+import { sanitizeText, StreamingText, webWords } from "./text.js";
+import type { UpdateControl } from "./update.js";
+import { KUMI } from "@kumi/runtime";
 
 interface Options {
   controller: SessionController;
@@ -20,14 +22,18 @@ interface Options {
   closeTimeoutMs?: number;
   /** What the producer typed before, for the up arrow; kept across /new, reconnects and restarts. */
   history?: InputHistory;
+  /** Kumi's updates, for /update and word of a newer Kumi. */
+  updates?: UpdateControl;
 }
 export interface Terminal {
   run(): Promise<number>;
   handleEvent(event: SessionEvent): void;
+  /** A newer Kumi, found as Kumi started. */
+  offerUpdate(latest: string): void;
   interrupt(): void;
   close(): Promise<number>;
 }
-const HELP = "/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: npm run kumi -- login <provider>.";
+const HELP = `/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /recipes · /update (get the newest Kumi) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: ${KUMI} login <provider>.`;
 
 /** One synchronous render transaction at a time; Writable preserves byte ordering/backpressure. */
 class Presentation {
@@ -118,6 +124,8 @@ export function createTerminal(options: Options): Terminal {
   let started = false;
   let closing = false;
   let cancelling = false;
+  /** A newer Kumi's version, once the startup check or /update found one. */
+  let newer: string | undefined;
   let suppressOutput = false;
   let displayedBytes = 0;
   let startedAt = performance.now();
@@ -169,6 +177,19 @@ export function createTerminal(options: Options): Terminal {
     options.history?.add(inputLine);
     if (command === "/quit") { await finish(); return; }
     if (command === "/help") { notice(HELP); return; }
+    // Typing /update is the go-ahead: Kumi closes, updates and opens again with this conversation.
+    if (command === "/update" && options.updates) {
+      if (busy()) { notice("[update] Kumi is working; /update once it's done (Ctrl-C stops it)."); return; }
+      let latest = newer;
+      if (!latest) {
+        try { latest = await options.updates.check(); } catch (error) { notice(`[update] ${safeError(error, secrets)}. Try /update again later.`); return; }
+      }
+      if (!latest) { notice(`[update] Kumi is up to date (${options.updates.current}).`); return; }
+      notice(`[update] Updating to Kumi ${latest}: Kumi closes, updates and opens again.`);
+      options.updates.request();
+      await finish();
+      return;
+    }
     if (command === "/stop") {
       if (!controller.stopLive) { notice("[stop] Kumi can't stop Live here."); return; }
       // An answer in progress stops too, so its later steps can't start Live again.
@@ -234,7 +255,7 @@ export function createTerminal(options: Options): Terminal {
         if (!note) notice("[memory] Use: /forget <id>, with an id from /memory.");
         return;
       }
-      if (verb === "/login") { notice("[login] Sign in from a shell: npm run kumi -- login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here."); return; }
+      if (verb === "/login") { notice(`[login] Sign in from a shell: ${KUMI} login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here.`); return; }
       if (verb === "/logout") {
         if (!argument || !(PROVIDERS as readonly string[]).includes(argument)) { notice(`[logout] Use: /logout <provider> (${PROVIDERS.join(", ")}).`); return; }
         notice(await options.models.signOut(argument as ProviderId) ? `[logout] Signed out of ${argument}.` : `[logout] There was no sign-in for ${argument} to remove.`); return;
@@ -305,7 +326,7 @@ export function createTerminal(options: Options): Terminal {
       case "error":
         reportError(new Error(event.message)); text.discard();
         // Plain lines can't show the key box: say which command signs in there.
-        if (event.kind === "auth" && event.provider && (PROVIDERS as readonly string[]).includes(event.provider)) notice(`[login] Sign in from a shell: npm run kumi -- login ${event.provider}`);
+        if (event.kind === "auth" && event.provider && (PROVIDERS as readonly string[]).includes(event.provider)) notice(`[login] Sign in from a shell: ${KUMI} login ${event.provider}`);
         break;
       case "text": {
         if (suppressOutput) return;
@@ -332,6 +353,11 @@ export function createTerminal(options: Options): Terminal {
         const words = { captions: "its captions", automatic: "its automatic captions", transcribed: "its speech, transcribed", none: "no words" }[event.words];
         notice(`[watched] “${event.title.slice(0, 120)}”${event.duration ? ` (${at(event.duration)})` : ""}: ${at(event.from)}–${at(event.to)}, ${words}${event.frames.length ? `, frames at ${event.frames.map((frame) => at(frame.at)).join(", ")}` : ""}${event.sound ? `, the sound at ${at(event.sound.from)}–${at(event.sound.to)}` : ""}`);
         for (const note of event.notes.slice(0, 3)) notice(`[watched] ${note}`);
+        break;
+      }
+      case "web": {
+        const words = webWords(event, (value, max) => sanitizeText(value, secrets).replace(/\s+/g, " ").trim().slice(0, max));
+        notice(`[web] ${words.lead} ${words.title}${words.detail ? ` · ${words.detail}` : ""}`);
         break;
       }
       case "turn-complete": {
@@ -362,7 +388,7 @@ export function createTerminal(options: Options): Terminal {
       // No model yet: the first one a signed-in provider lists.
       if (!options.models.current().model) {
         void options.models.chooseDefault().then((chosen) => {
-          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : "[model] Not signed in to a provider yet. Sign in with: npm run kumi -- login <provider>, then /model.");
+          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model.`);
         }, () => undefined);
       }
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {
@@ -371,6 +397,11 @@ export function createTerminal(options: Options): Terminal {
       return done;
     },
     handleEvent, interrupt,
+    offerUpdate(latest: string) {
+      if (closing || newer === latest) return;
+      newer = latest;
+      notice(`[update] Kumi ${latest} is out (this is ${options.updates?.current ?? "an older one"}). /update gets it.`);
+    },
     close: () => finish(),
   };
 }

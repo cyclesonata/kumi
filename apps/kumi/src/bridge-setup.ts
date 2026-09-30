@@ -6,14 +6,15 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { findBridgeConfig, remoteScriptsDir } from "./config.js";
+import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
+import { KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 export interface Ran { code: number; stdout: string; stderr: string }
@@ -37,9 +38,24 @@ export interface BridgeSetupIo {
   bridgeDir?: string;
   /** Where Kumi keeps the bridge packages it installs. */
   home?: string;
+  /** An installed Kumi's bridge, packed and installed when its release was built (bridge/prepared.json). */
+  prepared?: string;
 }
 
 const BRIDGE_DIR = fileURLToPath(new URL("../../../mcp-server/", import.meta.url));
+/** An installed Kumi carries its bridge ready to install: packed, with its package installed, when the release was built. */
+const PREPARED = fileURLToPath(new URL("../../../../bridge/", import.meta.url));
+
+interface Prepared { artifact: string; sha256: string; root: string }
+/** The release's prepared bridge, when this Kumi was installed from one: no npm needed to install it. */
+function preparedBridge(dir: string): Prepared | undefined {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "prepared.json"), "utf8")) as { artifact?: unknown; sha256?: unknown };
+    if (typeof manifest.artifact !== "string" || typeof manifest.sha256 !== "string" || basename(manifest.artifact) !== manifest.artifact) return undefined;
+    const root = join(dir, "package", "node_modules", "@ableton-mcp", "mcp-server");
+    return existsSync(join(dir, manifest.artifact)) && existsSync(join(root, "dist", "src", "lifecycle-cli.js")) ? { artifact: manifest.artifact, sha256: manifest.sha256, root } : undefined;
+  } catch { return undefined; }
+}
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 
 export function runProgram(command: string, args: readonly string[], cwd?: string): Promise<Ran> {
@@ -90,11 +106,11 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   const scripts = remoteScriptsDir(io.env);
   let bundled: string;
   try { bundled = (JSON.parse(readFileSync(join(bridgeDir, "package.json"), "utf8")) as { version: string }).version; }
-  catch { say("Kumi's copy of the bridge is missing. From the repository, run: npm run setup"); return 1; }
-  if (!existsSync(join(bridgeDir, "dist", "src", "lifecycle-cli.js"))) { say("The bridge isn't built yet. Run: npm run setup"); return 1; }
+  catch { say(`Kumi's copy of the bridge is missing. Run ${KUMI_REPAIR}.`); return 1; }
+  if (!existsSync(join(bridgeDir, "dist", "src", "lifecycle-cli.js"))) { say(`The bridge isn't built yet. Run ${KUMI_REPAIR}.`); return 1; }
 
   const config = findBridgeConfig(io.env);
-  const state = config ? dirname(config) : join(io.home ?? join(homedir(), ".kumi"), "bridge", "state");
+  const state = config ? dirname(config) : join(io.home ?? kumiDir(io.env), "bridge", "state");
   let installed: string | undefined;
   try { installed = config ? readBridgeServer(config).version : undefined; } catch { installed = undefined; }
   const lifecycle = (root: string, action: string, extra: readonly string[] = []) => run(process.execPath, [join(root, "dist", "src", "lifecycle-cli.js"), action,
@@ -107,10 +123,10 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   }
   say(config ? `Kumi's bridge is ${bundled}; the one Live uses is ${installed ?? "older"}. Updating it takes a minute.` : `Kumi will install the Ableton bridge ${bundled}: the Remote Script Live loads, and the local server Kumi talks to.`);
   if (await (io.liveRunning ?? (() => isLiveRunning(run)))()) {
-    say("Live is open. Save your work, quit Live, then run this again: npm run kumi -- bridge");
+    say(`Live is open. Save your work, quit Live, then run this again: ${KUMI} bridge`);
     return 1;
   }
-  if (!io.yes && !await ask(io, "Is Live closed, with your work saved?")) { say("Nothing was changed. Quit Live, then run: npm run kumi -- bridge"); return 1; }
+  if (!io.yes && !await ask(io, "Is Live closed, with your work saved?")) { say(`Nothing was changed. Quit Live, then run: ${KUMI} bridge`); return 1; }
   // The Remote Script goes in the User Library's Remote Scripts folder, which Live doesn't always make.
   if (!existsSync(scripts)) {
     if (basename(scripts) !== "Remote Scripts" || !existsSync(dirname(scripts))) {
@@ -120,18 +136,30 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
     mkdirSync(scripts);
   }
 
-  // The bridge's own package, as a tarball the lifecycle verifies byte for byte.
-  const folder = join(io.home ?? join(homedir(), ".kumi"), "bridge", `${bundled}-${Date.now()}`);
+  // The bridge's own package, as a tarball the lifecycle verifies byte for byte. It goes in a folder of
+  // its own under ~/.kumi/bridge, so updating or removing Kumi later doesn't pull it out from under Live.
+  const folder = join(io.home ?? kumiDir(io.env), "bridge", `${bundled}-${Date.now()}`);
   mkdirSync(folder, { recursive: true, mode: 0o700 });
-  say("Packing the bridge…");
-  const packed = await run("npm", ["pack", "--pack-destination", folder, "--silent"], bridgeDir);
-  const name = packed.stdout.trim().split("\n").filter(Boolean).at(-1);
-  if (packed.code !== 0 || !name) { say(`Packing the bridge failed: ${(packed.stderr || packed.stdout).trim().split("\n").at(-1) ?? "npm pack failed"}`); return 1; }
-  const artifact = join(folder, name);
-  const sha = createHash("sha256").update(readFileSync(artifact)).digest("hex");
-  say("Installing its package…");
-  const installedPackage = await run("npm", ["install", "--prefix", folder, "--ignore-scripts", "--no-audit", "--no-fund", artifact], folder);
-  if (installedPackage.code !== 0) { say(`Installing the bridge's package failed: ${(installedPackage.stderr || installedPackage.stdout).trim().split("\n").at(-1) ?? "npm install failed"}`); return 1; }
+  const ready = preparedBridge(io.prepared ?? PREPARED);
+  let artifact: string; let sha: string;
+  if (ready) {
+    say("Copying the bridge…");
+    artifact = join(folder, ready.artifact);
+    copyFileSync(join(io.prepared ?? PREPARED, ready.artifact), artifact);
+    sha = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+    if (sha !== ready.sha256) { say(`Kumi's copy of the bridge is damaged. Run ${KUMI_REPAIR}.`); return 1; }
+    cpSync(join(io.prepared ?? PREPARED, "package", "node_modules"), join(folder, "node_modules"), { recursive: true });
+  } else {
+    say("Packing the bridge…");
+    const packed = await run("npm", ["pack", "--pack-destination", folder, "--silent"], bridgeDir);
+    const name = packed.stdout.trim().split("\n").filter(Boolean).at(-1);
+    if (packed.code !== 0 || !name) { say(`Packing the bridge failed: ${(packed.stderr || packed.stdout).trim().split("\n").at(-1) ?? "npm pack failed"}`); return 1; }
+    artifact = join(folder, name);
+    sha = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+    say("Installing its package…");
+    const installedPackage = await run("npm", ["install", "--prefix", folder, "--ignore-scripts", "--no-audit", "--no-fund", artifact], folder);
+    if (installedPackage.code !== 0) { say(`Installing the bridge's package failed: ${(installedPackage.stderr || installedPackage.stdout).trim().split("\n").at(-1) ?? "npm install failed"}`); return 1; }
+  }
   const root = join(folder, "node_modules", "@ableton-mcp", "mcp-server");
 
   // The lifecycle plans first (it changes nothing), then applies; either refusal is said as it is.
@@ -158,9 +186,9 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   const attempts = Math.max(1, Math.ceil(waitMs / 3_000));
   for (let attempt = 0; attempt < attempts; attempt++) {
     const check = lifecycleAnswer(await lifecycle(root, "activate"));
-    if (check.ok && activated(check.value)) { say("Live is connected through the new bridge. Run: npm run kumi"); return 0; }
+    if (check.ok && activated(check.value)) { say(`Live is connected through the new bridge. Run: ${KUMI_START}`); return 0; }
     if (attempt < attempts - 1) await sleep(3_000);
   }
-  say("Live didn't connect yet; Kumi will connect when it does. If it doesn't, run: npm run kumi -- doctor");
+  say(`Live didn't connect yet; Kumi will connect when it does. If it doesn't, run: ${KUMI} doctor`);
   return 0;
 }

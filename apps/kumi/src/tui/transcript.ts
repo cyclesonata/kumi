@@ -36,7 +36,12 @@ export type Entry =
   | { kind: "auditioned"; round: number; best?: { label: string; score: number }; previous?: number; takes: { label: string; score?: number; silent?: boolean }[]; gaps: string[] }
   /** A video Kumi watched: what it is, where its words came from, and the frames it looked at (pictured when `pictures`). */
   | { kind: "watched"; title: string; channel?: string; duration?: number; from: number; to: number; chapters: string[]; words: string;
-    frames: { at: number; zoom?: string; thumb: Picture }[]; sound?: { from: number; to: number }; notes: string[]; pictures: boolean };
+    frames: { at: number; zoom?: string; thumb: Picture }[]; sound?: { from: number; to: number }; notes: string[]; pictures: boolean }
+  /** What Kumi looked up for an answer, a line each: a search (its words) or a page read (its title, where it is, what it is). */
+  | { kind: "web"; lines: WebLine[] };
+
+/** A search or a page read, as the web entry shows it: "Searched the web for", “the words”, "8 results". */
+export interface WebLine { lead: string; title: string; detail: string }
 
 /** Ten bands, low to high, as the listening analysis names them. */
 const BAND_LABELS = ["sub", "bass", "u.bas", "l.mid", "mids", "u.mid", "pres", "bite", "brill", "air"];
@@ -139,6 +144,8 @@ const STEP_LABELS: Record<string, string> = {
   save_recipe: "saved a recipe",
   watch_video: "watched a video",
   make_device: "made a device",
+  search_web: "searched the web",
+  read_web: "read a page",
 };
 
 /** What NOW says while a step runs: what Kumi is doing, not what it did. */
@@ -161,6 +168,8 @@ const DOING: Record<string, string> = {
   live_key_estimate: "estimating the key",
   watch_video: "watching the video",
   make_device: "making a device",
+  search_web: "searching the web",
+  read_web: "reading a page",
 };
 
 export function doingLabel(tool: string | undefined, fallback: string): string {
@@ -196,6 +205,8 @@ function entryRows(entry: Entry, width: number): Row[] {
   if (entry.kind === "heard") return heardRows(entry, inner);
   if (entry.kind === "auditioned") return auditionedRows(entry, inner);
   if (entry.kind === "watched") return watchedRows(entry, inner);
+  if (entry.kind === "web") return entry.lines.flatMap((line) => wrap([{ text: `${line.lead} `, style: S.dim },
+    { text: line.title, style: S.text }, ...(line.detail ? [{ text: ` · ${line.detail}`, style: S.faint }] : [])], inner).slice(0, 2).map((spans) => ({ spans })));
   const rows: Row[] = [];
   if (entry.text) {
     for (const row of renderMarkdown(entry.text.replace(/\n+$/, ""), inner, S.text)) {

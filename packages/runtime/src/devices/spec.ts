@@ -2,6 +2,7 @@
  * What the model asks for when it makes a device, and the checks it has to pass. The model never
  * writes a patch: it names the device, its knobs and its code, and Kumi builds the rest.
  */
+import { checkGenCode, paramProblem } from "./gen.js";
 
 /** A knob, a menu or a switch on the device: an ordinary Live parameter, automatable and mappable. */
 export type Control =
@@ -26,16 +27,19 @@ export interface MidiEvent {
 /** Events in and what should come out, to check the device's code before it's made. */
 export interface MidiTest { name: string; set?: Record<string, number | string | boolean>; input: MidiEvent[]; expect: MidiEvent[] }
 
-export interface DeviceSpec {
-  type: "midi_effect";
-  name: string;
-  about: string;
-  controls: Control[];
-  code: string;
-  tests: MidiTest[];
-}
+/** A MIDI effect: JavaScript that decides what happens to each MIDI event, with tests Kumi runs. */
+export interface MidiSpec { type: "midi_effect"; name: string; about: string; controls: Control[]; code: string; tests: MidiTest[] }
+/** An audio effect: GenExpr that turns in1/in2 into out1/out2, sample by sample. */
+export interface AudioEffectSpec { type: "audio_effect"; name: string; about: string; controls: Control[]; code: string }
+/** An instrument: GenExpr for one voice, played by notes, and how many voices play at once. */
+export interface InstrumentSpec { type: "instrument"; name: string; about: string; controls: Control[]; code: string; voices: number }
+export type DeviceSpec = MidiSpec | AudioEffectSpec | InstrumentSpec;
+export type DeviceKind = DeviceSpec["type"];
+export const DEVICE_KINDS: readonly DeviceKind[] = ["midi_effect", "audio_effect", "instrument"];
 
+/** Controls on the face: eight, as Live shows them, less the ones Kumi adds (Mix and Output on an effect, Output on an instrument). */
 export const MAX_CONTROLS = 8;
+export const controlLimit = (kind: DeviceKind) => kind === "audio_effect" ? MAX_CONTROLS - 2 : kind === "instrument" ? MAX_CONTROLS - 1 : MAX_CONTROLS;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()&'+-]{0,31}$/;
 const CONTROL = /^[A-Za-z][A-Za-z0-9 ]{0,23}$/;
 const EVENT_TYPES = new Set(["noteon", "noteoff", "cc", "pitchbend", "aftertouch", "polytouch", "program"]);
@@ -55,22 +59,27 @@ const FORBIDDEN: [RegExp, string][] = [
 /** A spec from the model's input, or the problems with it, each said so the model can fix it. */
 export function checkSpec(input: Record<string, unknown>): { spec: DeviceSpec } | { problems: string[] } {
   const problems: string[] = [];
-  const type = input.type ?? "midi_effect";
-  if (type !== "midi_effect") problems.push(`type ${JSON.stringify(type)}: Kumi makes MIDI effects so far (midi_effect); audio effects and instruments are next.`);
+  const type = (input.type ?? "midi_effect") as DeviceKind;
+  if (!DEVICE_KINDS.includes(type)) problems.push(`type ${JSON.stringify(input.type)}: midi_effect, audio_effect or instrument.`);
+  const gen = type === "audio_effect" || type === "instrument";
+  const limit = controlLimit(DEVICE_KINDS.includes(type) ? type : "midi_effect");
   const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!NAME.test(name)) problems.push("name: 1–32 characters, letters, digits, spaces and . _ ( ) & ' + -, starting with a letter or digit.");
   const about = typeof input.about === "string" ? input.about.trim() : "";
   if (!about || about.length > 400) problems.push("about: what the device does, in a sentence or two (up to 400 characters).");
   const controls = Array.isArray(input.controls) ? input.controls : [];
-  if (controls.length > MAX_CONTROLS) problems.push(`controls: at most ${MAX_CONTROLS} (Live shows eight at a time).`);
+  if (controls.length > limit) problems.push(`controls: at most ${limit} (Live shows eight at a time${gen ? `, and Kumi adds ${type === "audio_effect" ? "Mix and Output" : "Output"}` : ""}).`);
   const seen = new Set<string>();
   const checked: Control[] = [];
-  for (const [index, raw] of controls.slice(0, MAX_CONTROLS).entries()) {
+  for (const [index, raw] of controls.slice(0, limit).entries()) {
     const control = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
     const label = `controls[${index}]`;
     const controlName = typeof control.name === "string" ? control.name.trim() : "";
     if (!CONTROL.test(controlName) || /^device on$/i.test(controlName)) { problems.push(`${label}.name: 1–24 letters, digits and spaces, starting with a letter.`); continue; }
     if (seen.has(controlName.toLowerCase())) { problems.push(`${label}.name: "${controlName}" is used twice.`); continue; }
+    if (gen && /^(mix|output)$/i.test(controlName)) { problems.push(`${label}.name: Kumi adds ${controlName} to every ${type === "audio_effect" ? "audio effect" : "instrument"} itself; leave it out.`); continue; }
+    const asParam = gen ? paramProblem(controlName) : undefined;
+    if (asParam) { problems.push(`${label}.name: ${asParam}.`); continue; }
     seen.add(controlName.toLowerCase());
     if (control.type === "number" || control.type === "integer") {
       const { min, max } = control; const fallback = control.default;
@@ -93,7 +102,8 @@ export function checkSpec(input: Record<string, unknown>): { spec: DeviceSpec } 
     } else problems.push(`${label} (${controlName}): type is number, integer, choice or switch.`);
   }
   const code = typeof input.code === "string" ? input.code : "";
-  if (!code.trim() || code.length > 24_000) problems.push("code: the device's JavaScript, up to 24,000 characters.");
+  if (!code.trim() || code.length > 24_000) problems.push(`code: the device's ${gen ? "GenExpr" : "JavaScript"}, up to 24,000 characters.`);
+  else if (gen) problems.push(...checkGenCode(code, type as "audio_effect" | "instrument", checked));
   else {
     if (!/\bfunction\s+midi\s*\(/.test(code)) problems.push("code: define function midi(event), called for each MIDI event that arrives.");
     for (const [pattern, why] of FORBIDDEN) {
@@ -101,7 +111,8 @@ export function checkSpec(input: Record<string, unknown>): { spec: DeviceSpec } 
       if (found) problems.push(`code: "${found[0].trim()}" isn't allowed: ${why}.`);
     }
   }
-  const tests = Array.isArray(input.tests) ? input.tests : [];
+  // Only a MIDI effect's code runs outside Live; an audio effect or instrument is heard with audition once loaded.
+  const tests = !gen && Array.isArray(input.tests) ? input.tests : [];
   if (tests.length > 12) problems.push("tests: at most 12.");
   const checkedTests: MidiTest[] = [];
   for (const [index, raw] of tests.slice(0, 12).entries()) {
@@ -114,6 +125,13 @@ export function checkSpec(input: Record<string, unknown>): { spec: DeviceSpec } 
     if (test.set !== undefined && (typeof test.set !== "object" || test.set === null || Array.isArray(test.set))) { problems.push(`${label}: set names controls and their values.`); continue; }
     checkedTests.push({ name: test.name.trim().slice(0, 80), ...(test.set ? { set: test.set as NonNullable<MidiTest["set"]> } : {}), input: inputEvents, expect: expected });
   }
+  let voices = 8;
+  if (type === "instrument" && input.voices !== undefined) {
+    if (!Number.isInteger(input.voices) || (input.voices as number) < 1 || (input.voices as number) > 8) problems.push("voices: how many notes play at once, 1 (mono) to 8.");
+    else voices = input.voices as number;
+  }
   if (problems.length) return { problems };
+  if (type === "audio_effect") return { spec: { type, name, about, controls: checked, code } };
+  if (type === "instrument") return { spec: { type, name, about, controls: checked, code, voices } };
   return { spec: { type: "midi_effect", name, about, controls: checked, code, tests: checkedTests } };
 }

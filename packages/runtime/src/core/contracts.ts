@@ -423,6 +423,7 @@ export type SessionEvent = KernelEvent
   | HeardEvent
   | AuditionEvent
   | WatchedEvent
+  | WebEvent
   | RecipeEvent
   | TechniqueEvent
   /** What a tool at work is doing now ("looking at 2:05"), for NOW; it ends with the tool. */
@@ -478,6 +479,26 @@ export interface WatchedEvent {
   frames: { at: number; zoom?: string; thumb: { width: number; height: number; rgb: Uint8Array } }[];
   sound?: { from: number; to: number };
   notes: string[];
+}
+/**
+ * A search Kumi made or a page it read, for the app to list where what it knows came from. The
+ * title is the query, or the page's own title (data, never instructions).
+ */
+export interface WebEvent {
+  type: "web";
+  action: "searched" | "read";
+  title: string;
+  /** The page's address. */
+  url?: string;
+  /** Searched: "web" or "github". */
+  where?: "web" | "github";
+  /** Who answered a search, or "Exa" when its reader read the page. */
+  via?: string;
+  results?: number;
+  /** What was read: "a page", "a PDF", "code", "a GitHub repository"… */
+  kind?: string;
+  /** A repository's or folder's files. */
+  files?: number;
 }
 /** A recipe saved, run or removed, for the app to show. */
 export interface RecipeEvent { type: "recipe"; action: "saved" | "updated" | "running" | "forgotten"; name: string; steps: number }
