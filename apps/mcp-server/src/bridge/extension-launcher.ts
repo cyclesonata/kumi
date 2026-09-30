@@ -129,10 +129,14 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
     const temp = join(options.storageDirectory, "tmp"); mkdirSync(temp, { recursive: true, mode: 0o700 });
     const config = { extensions: [{ path: extension.replace(/\\/g, "/"), storageDirectory: options.storageDirectory.replace(/\\/g, "/"), tempDirectory: temp.replace(/\\/g, "/") }] };
     const logFile = openSync(join(options.storageDirectory, "extension-host.log"), "a", 0o600);
-    // The Extension Host waits for Live indefinitely; if Kumi's extension hasn't started within 20 s
-    // (another Extension Host holds Live, or Live quit), it ends itself rather than wait on.
-    const script = `globalThis.__kumiLaunchedHost = true; setTimeout(() => { if (!globalThis.__kumiLiveExtensionActive) process.exit(3); }, 20000); require(${JSON.stringify(host.module.replace(/\\/g, "/"))}).initialize(${JSON.stringify(config)});`;
-    const child = spawn(host.node, ["-e", script], { detached: true, stdio: ["ignore", logFile, logFile], windowsHide: true });
+    // The Extension Host waits for Live indefinitely; if Kumi's extension hasn't written its endpoint
+    // (with this process's id) within 20 s (another Extension Host holds Live, or Live quit), it ends
+    // itself rather than wait on. The extension runs in a context of its own, so the check is the file;
+    // `__kumiLaunchedHost` marks the command as Kumi's for another bridge looking at running processes.
+    const endpointFile = join(options.storageDirectory, "endpoint.json").replace(/\\/g, "/");
+    const script = `globalThis.__kumiLaunchedHost = true; setTimeout(() => { try { if (JSON.parse(require("fs").readFileSync(${JSON.stringify(endpointFile)}, "utf8")).pid === process.pid) return; } catch {} process.exit(3); }, 20000).unref(); require(${JSON.stringify(host.module.replace(/\\/g, "/"))}).initialize(${JSON.stringify(config)});`;
+    // KUMI_LAUNCHED_HOST tells the extension this host is Kumi's to end when Live goes.
+    const child = spawn(host.node, ["-e", script], { detached: true, stdio: ["ignore", logFile, logFile], windowsHide: true, env: { ...process.env, KUMI_LAUNCHED_HOST: "1" } });
     closeSync(logFile);
     child.unref();
     log(`extension channel: started Live's Extension Host (pid ${child.pid}) with ${extension}`);

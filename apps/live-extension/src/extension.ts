@@ -46,8 +46,6 @@ export async function deactivate(): Promise<void> {
 }
 
 export function activate(activation: ActivationContext): void {
-  // Tells the bridge's launch script this extension started (it ends the host otherwise).
-  (globalThis as { __kumiLiveExtensionActive?: boolean }).__kumiLiveExtensionActive = true;
   const context = initialize(activation, "1.0.0");
   const storage = context.environment.storageDirectory ?? join(tmpdir(), "kumi-live-extension");
   const temp = context.environment.tempDirectory ?? join(storage, "tmp");
@@ -86,7 +84,9 @@ export function activate(activation: ActivationContext): void {
       if (misses < 3) return;
       clearInterval(watchdog); log("Live is gone; stopping");
       try { rmSync(join(storage, "endpoint.json"), { force: true }); } catch { /* already gone */ }
-      const ownHost = (globalThis as { __kumiLaunchedHost?: boolean }).__kumiLaunchedHost === true;
+      // Kumi's bridge started this Extension Host (it says so in the environment): end it. In Live's own
+      // host (kumi.ablx), only stop serving; that host isn't Kumi's to end.
+      const ownHost = process.env.KUMI_LAUNCHED_HOST === "1";
       void server.close().finally(() => { if (ownHost) process.exit(0); });
     }
   }, 5_000);

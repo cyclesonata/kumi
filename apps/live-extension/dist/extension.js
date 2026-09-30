@@ -17255,7 +17255,6 @@ async function deactivate() {
   await current.server.close();
 }
 function activate(activation) {
-  globalThis.__kumiLiveExtensionActive = true;
   const context = (0, import_sdk4.initialize)(activation, "1.0.0");
   const storage = context.environment.storageDirectory ?? (0, import_node_path2.join)((0, import_node_os.tmpdir)(), "kumi-live-extension");
   const temp = context.environment.tempDirectory ?? (0, import_node_path2.join)(storage, "tmp");
@@ -17303,7 +17302,7 @@ function activate(activation) {
         (0, import_node_fs3.rmSync)((0, import_node_path2.join)(storage, "endpoint.json"), { force: true });
       } catch {
       }
-      const ownHost = globalThis.__kumiLaunchedHost === true;
+      const ownHost = process.env.KUMI_LAUNCHED_HOST === "1";
       void server.close().finally(() => {
         if (ownHost) process.exit(0);
       });
