@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { expandPadChains, AUTHORITY_FREE_INVOKES, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
+import { expandPadChains, AUTHORITY_FREE_INVOKES, EXPLICIT_DELETIONS, READ_ONLY_INVOKES, RemoteScriptLiveAdapter, TRANSACTION_CREATIONS, TRANSACTION_DELETIONS } from "../src/bridge/remote-adapter.js";
 import { LIVE_REGISTRY_HASH, LiveMutationNotDispatchedError } from "../src/live.js";
 
 const secret = "0123456789abcdef0123456789abcdef";
@@ -379,9 +379,12 @@ test("read-only invoke classification is identical across the TS adapter and the
   assert.ok(match, "python read-only invoke set not found");
   const pythonSet = new Set([...match[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]));
   assert.deepEqual([...pythonSet].sort(), [...READ_ONLY_INVOKES].sort());
-  const free = python.match(/_AUTHORITY_FREE_INVOKES = \{([^}]*)\}/);
-  assert.ok(free, "python authority-free invoke set not found");
-  assert.deepEqual([...free[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]).sort(), [...AUTHORITY_FREE_INVOKES].sort());
+  // And the sets that decide what a mutation carries: its creations' ownership, its deletions' fences.
+  for (const [name, mirror] of [["_AUTHORITY_FREE_INVOKES", AUTHORITY_FREE_INVOKES], ["_TRANSACTION_CREATIONS", TRANSACTION_CREATIONS], ["_TRANSACTION_DELETIONS", TRANSACTION_DELETIONS], ["_EXPLICIT_DELETIONS", EXPLICIT_DELETIONS]] as const) {
+    const set = python.match(new RegExp(`${name} = \\{([^}]*)\\}`));
+    assert.ok(set, `python ${name} not found`);
+    assert.deepEqual([...set[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]).sort(), [...mirror].sort(), `${name} is mirrored exactly`);
+  }
 });
 
 function authorityServer(operations: string[], seen: Record<string, unknown>[], answer: (request: Record<string, unknown>) => unknown) {
@@ -396,7 +399,7 @@ function authorityServer(operations: string[], seen: Record<string, unknown>[], 
 }
 const notDispatched = (pattern?: RegExp) => (error: unknown) => error instanceof LiveMutationNotDispatchedError && (!pattern || pattern.test(error.message));
 
-test("an explicit deletion of an existing device or return goes out with its identity fences and no ownership token; without it, the deletion is refused unsent", async () => {
+test("an explicit deletion of an existing device, return or track goes out with its identity fences and no ownership token; without it, the deletion is refused unsent", async () => {
   const seen: Record<string, unknown>[] = [];
   const server = authorityServer(["device.delete", "track.delete-return", "track.delete"], seen, (request) => ({ deleted: (request.args as { ref: string }).ref }));
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
@@ -414,8 +417,12 @@ test("an explicit deletion of an existing device or return goes out with its ide
     const sent = seen.slice(before);
     assert.deepEqual(sent.map((row) => `${String(row.method)} ${String(row.operation)}`), ["preflight device.delete", "prepare device.delete", "invoke device.delete", "preflight track.delete-return", "prepare track.delete-return", "invoke track.delete-return"]);
     assert.equal(sent.every((row) => row.ownershipToken === undefined && (row.args as Record<string, unknown>).explicitDeletion === true), true);
+    // A track (like a clip, a scene or a locator) is deleted explicitly the same way: fences, no token.
+    const beforeTrack = seen.length;
+    assert.deepEqual(await adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0", explicitDeletion: true } }, context("explicit-track-delete")), { deleted: "1:track:0" });
+    assert.equal(seen.slice(beforeTrack).every((row) => row.ownershipToken === undefined), true);
     const beforeOthers = seen.length;
-    await assert.rejects(adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0", explicitDeletion: true } }, context("explicit-track-delete")), notDispatched(), "other deletions have no explicit form");
+    await assert.rejects(adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0" } }, context("unowned-track-delete")), notDispatched(/lacks transaction-owned authority/));
     await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: { ...device, explicitDeletion: false } }, context("half-explicit-delete")), notDispatched(), "only explicitDeletion: true is the authority");
     assert.equal(seen.length, beforeOthers);
   } finally { await adapter?.close(); await close(server); }

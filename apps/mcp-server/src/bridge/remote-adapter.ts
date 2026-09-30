@@ -30,12 +30,12 @@ export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into
 // results) and later cleanup deletes can present them.
-const TRANSACTION_CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"]);
-const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"]);
+export const TRANSACTION_CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "device.duplicate", "session.capture-midi", "scene.capture", "locator.add"]);
+export const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"]);
 // Deletions of an existing object the producer previewed and confirmed (never an undo or a cleanup):
 // they carry explicitDeletion instead of a creating transaction's ownership token, and the Remote
 // Script checks the exact identity fences in their arguments. Mirrors _EXPLICIT_DELETIONS there.
-const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return"]);
+export const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return", "clip.delete", "arrangement.clip.delete", "scene.delete", "track.delete", "locator.delete"]);
 function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation) && !AUTHORITY_FREE_INVOKES.has(operation); }
 const KIND_TO_WIRE: Readonly<Record<LiveDiscoveryKind, string>> = {
   set: "set", track: "track", "return-track": "return_track", "main-track": "main_track", scene: "scene",
