@@ -10,6 +10,7 @@ import { AudioError, prepareAudio } from "./decode.js";
 
 export { ANALYSIS_VERSION, BANDS, analyzeFile, type Analysis, type AnalyzeOptions, type SoundAnalysis } from "./analyze.js";
 export { AUDIO_EXTENSIONS, AudioError, openAudio } from "./decode.js";
+export { closeness, type Closeness, type Feature } from "./match.js";
 
 /** Analyze a file in a worker thread; `signal` stops it, and anything it started. */
 export async function hear(path: string, options: AnalyzeOptions = {}): Promise<Analysis> {

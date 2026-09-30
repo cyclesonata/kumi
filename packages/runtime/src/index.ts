@@ -2,7 +2,7 @@ export type { CatchUp, ChainNode, ChangeFamily, ChangeRecord, ClipNote, DeviceNo
 export { createMemoryStore, FORGET_TOOL, MAX_NOTE, MAX_NOTES, memoryInstructions, REMEMBER_TOOL } from "./core/memory.js";
 export { checkTechnique, createTechniqueStore, MAX_TECHNIQUES, TECHNIQUE_GUIDANCE, TECHNIQUE_TOOL, techniqueInstructions, TechniqueDrafts, techniqueTools, type Technique, type TechniqueStore } from "./core/techniques.js";
 export { GAP_GUIDANCE, GAP_TOOL, gapTools } from "./core/gaps.js";
-export { analyzeFile, compare, hear, type Analysis, type Comparison } from "./audio/index.js";
+export { analyzeFile, closeness, compare, hear, type Analysis, type Closeness, type Comparison } from "./audio/index.js";
 export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
 export { videoTools, WATCH_VIDEO_TOOL } from "./video/tool.js";
 export { findFfmpeg, findWhisper, findYtDlp, watchVideo, youtubeId, type Watched, type WatchRequest } from "./video/index.js";
