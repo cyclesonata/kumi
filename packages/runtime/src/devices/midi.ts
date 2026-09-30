@@ -5,7 +5,7 @@
  * device holds (so all-notes-off silences them), and runs timers; the device's code only decides.
  */
 import { devicePatcher, type Box, type Line } from "./amxd.js";
-import type { Control, DeviceSpec } from "./spec.js";
+import type { Control, MidiSpec } from "./spec.js";
 
 /** The frame, with __CONTROLS__ and __DEFAULTS__ for the device's controls and __CODE__ for its code. */
 const FRAME = String.raw`// Made by Kumi. The frame (fixed) runs the device's own code, below it.
@@ -99,7 +99,7 @@ function anything() {
 `;
 
 /** The code the device's v8.codebox runs: the frame around the model's code. */
-export function midiDeviceCode(spec: Pick<DeviceSpec, "controls" | "code">): string {
+export function midiDeviceCode(spec: Pick<MidiSpec, "controls" | "code">): string {
   const controls = spec.controls.map((control, index) => ({ id: `c${index + 1}`, name: control.name,
     ...(control.type === "choice" ? { options: control.options } : {}), ...(control.type === "switch" ? { toggle: true } : {}) }));
   const defaults = Object.fromEntries(spec.controls.map((control) => [control.name, control.default]));
@@ -108,10 +108,14 @@ export function midiDeviceCode(spec: Pick<DeviceSpec, "controls" | "code">): str
     .replace("__CODE__", () => spec.code.split(/\r?\n/).map((line) => `    ${line}`).join("\n"));
 }
 
-/** Live's display style for a unit (live.dial's parameter_unitstyle), and the text for a custom one. */
-function unitStyle(control: Extract<Control, { type: "number" | "integer" }>): { style: number; units?: string } {
+/**
+ * Live's display style for a unit (live.dial's parameter_unitstyle), and the text for a custom one.
+ * Live's time style reads the value as milliseconds, so seconds get their own label.
+ */
+export function unitStyle(control: Extract<Control, { type: "number" | "integer" }>): { style: number; units?: string } {
   switch (control.unit) {
-    case "ms": case "s": return { style: 2 };
+    case "ms": return { style: 2 };
+    case "s": return { style: 9, units: "s" };
     case "Hz": return { style: 3 };
     case "dB": return { style: 4 };
     case "%": return { style: 5 };
@@ -124,7 +128,7 @@ function unitStyle(control: Extract<Control, { type: "number" | "integer" }>): {
 }
 
 /** The patcher of a MIDI effect for `spec`: its face shows the controls in a row. */
-export function midiDevicePatcher(spec: DeviceSpec): object {
+export function midiDevicePatcher(spec: MidiSpec): object {
   const boxes: Box[] = []; const lines: Line[] = [];
   const text = (id: string, content: string, rect: number[], extra: Record<string, unknown> = {}) =>
     boxes.push({ box: { id, maxclass: "newobj", text: content, fontname: "Arial Bold", fontsize: 10.0, patching_rect: rect, ...extra } });

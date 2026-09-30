@@ -26,7 +26,8 @@
 - **Listens:** loudness, tonal balance, width, tempo and key of a mix, a sample or its own bounce, and how your mix compares with a reference.
 - **Watches tutorials** from YouTube or a file, then builds what they show on a new track.
 - **Plays, records and resamples** when you ask.
-- **Makes Max for Live devices** you describe in plain words, and puts them on your tracks.
+- **Makes Max for Live devices** you describe in plain words (MIDI effects, audio effects and instruments) and puts them on your tracks.
+- **Looks things up:** searches the web and reads pages, PDFs, manuals and code on GitHub, so it can build an effect like one it has read about.
 - **Shows where you are:** FOCUS follows what you touch in Live, as a device tree, a piano roll or a Session or Arrangement strip. Click a device to point at it: "this Saturator's too harsh".
 - **Remembers:** notes about you and each Set, techniques it learns from what you keep, and recipes you can replay. Every save is shown, and one click forgets it.
 - **Keeps your conversations** for each Set, and says what changed while it was closed.
@@ -34,18 +35,33 @@
 
 ## Get started
 
-You need **Node.js 22 or 24** ([nodejs.org](https://nodejs.org)) and Ableton Live 12 Beta.
+You need Ableton Live 12 Beta, on macOS 13 or later or on Windows 10 or 11. Kumi brings everything else it needs, Node included.
+
+**macOS:** open Terminal and paste:
 
 ```sh
-npm run setup                        # install and build, about a minute
-npm run kumi -- login openai-codex   # sign in with ChatGPT (or set an API key)
-npm run kumi -- bridge               # with Live closed: connect Kumi to Live
-npm run kumi                         # open Kumi next to your Set
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
 
-The first time, pick **AbletonMcpBridge** as a Control Surface in Live's **Settings → Link, Tempo & MIDI**. After that, Kumi finds Live by itself.
+**Windows:** open PowerShell and paste:
 
-Something off? `npm run kumi -- doctor` checks everything and says what to run. `npm run kumi -- report` puts what went wrong in one file to send us, and `npm run kumi -- update` keeps Kumi and its bridge current.
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+Then, in a new terminal window:
+
+```sh
+kumi login      # sign in with ChatGPT, or an Anthropic, OpenAI or OpenCode key
+kumi bridge     # with Live closed: connect Kumi to Live (once)
+kumi            # open Kumi next to your Set
+```
+
+The first time you open Live afterwards, pick **AbletonMcpBridge** as a Control Surface in Live's **Settings → Link, Tempo & MIDI**. After that, Kumi finds Live by itself.
+
+Something off? `kumi doctor` checks everything and says what to run. `kumi report` puts what went wrong in one file to send us. `kumi uninstall` removes Kumi.
+
+Kumi tells you when there's a newer version as it starts. `/update` inside Kumi, or `kumi update` in a terminal, gets it and brings the bridge along; `kumi update --check` only asks, and `kumi update --rollback` goes back. To stop the check, put `"updateCheck": false` in `~/.kumi/settings.json`.
 
 Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live.
 
@@ -53,13 +69,18 @@ Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` st
 
 ## Status
 
-Kumi 1.0 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
+Kumi 1.1 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
 
 ## Development
 
+From a copy of this repository, with Node.js 22 or 24:
+
 ```sh
+npm run setup     # install and build
+npm run kumi      # run it (npm run kumi -- bridge, -- doctor, and so on)
 npm run typecheck
 npm test          # no Live or sign-in needed
+node scripts/build-release.mjs   # the bundle the installer downloads (Node 24)
 ```
 
 `apps/kumi` is the terminal app; `packages/runtime` holds Kumi's agent core, providers, memory, audio analysis and the Live integration. Kumi talks to Live through a local bridge, `apps/mcp-server` plus its Remote Script, which also works on its own with other MCP clients ([bridge guide](apps/mcp-server/README.md)).

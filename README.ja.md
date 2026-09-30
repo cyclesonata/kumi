@@ -26,7 +26,8 @@
 - **聴く：** ミックス、サンプル、自分でバウンスした音のラウドネス、トーンバランス、ステレオ幅、テンポとキー。ミックスとリファレンスの違いも聴き分けます。
 - **チュートリアルを見る：** YouTube やファイルのビデオを見て、その内容を新しいトラックに組み立てます。
 - **再生・録音・リサンプリング**を、頼まれたときに行います。
-- **Max for Live デバイスを作る：** 言葉で説明したデバイスを作り、トラックに載せます。
+- **Max for Live デバイスを作る：** 言葉で説明した MIDI エフェクト、オーディオエフェクト、インストゥルメントを作り、トラックに載せます。
+- **調べる：** ウェブを検索し、ページ、PDF、マニュアル、GitHub のコードを読むので、読んだものに似たエフェクトも作れます。
 - **いまいる場所を表示：** FOCUS は Live で触れたものを追い、デバイスツリー、ピアノロール、セッションやアレンジメントの帯として表示します。デバイスをクリックして指し示せます。「このサチュレーター、きつすぎる」のように。
 - **覚える：** あなたと各 Set についてのメモ、残した音から学んだテクニック、再実行できるレシピ。保存したものはすべて表示され、クリック一つで忘れさせられます。
 - **会話を保存：** Set ごとに会話を保存し、閉じていた間に変わったことも伝えます。
@@ -34,18 +35,33 @@
 
 ## はじめかた
 
-**Node.js 22 または 24**（[nodejs.org](https://nodejs.org)）と Ableton Live 12 が必要です。
+必要なのは Ableton Live 12 Beta（macOS 13 以降、または Windows 10・11）だけです。Node を含め、ほかに必要なものは Kumi が用意します。
+
+**macOS：** ターミナルを開いて貼り付けます。
 
 ```sh
-npm run setup                        # インストールとビルド（約 1 分）
-npm run kumi -- login openai-codex   # ChatGPT でサインイン（または API キーを設定）
-npm run kumi -- bridge               # Live を閉じた状態で：Kumi を Live につなぐ
-npm run kumi                         # Set の横で Kumi を開く
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
 
-初回は、Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** をコントロールサーフェスとして選びます。その後は Kumi が自分で Live を見つけます。
+**Windows：** PowerShell を開いて貼り付けます。
 
-うまくいかないときは、`npm run kumi -- doctor` がすべてを確認し、実行すべきことを教えます。`npm run kumi -- report` は起きたことを送れるファイル一つにまとめ、`npm run kumi -- update` は Kumi とブリッジを最新に保ちます。
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+続けて、新しいターミナルウィンドウで：
+
+```sh
+kumi login      # ChatGPT でサインイン、または Anthropic・OpenAI・OpenCode のキーを使う
+kumi bridge     # Live を閉じた状態で：Kumi を Live につなぐ（最初の一回だけ）
+kumi            # Set の横で Kumi を開く
+```
+
+そのあと初めて Live を開いたら、Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** をコントロールサーフェスとして選びます。その後は Kumi が自分で Live を見つけます。
+
+うまくいかないときは、`kumi doctor` がすべてを確認し、実行すべきことを教えます。`kumi report` は起きたことを送れるファイル一つにまとめます。`kumi uninstall` で Kumi を削除します。
+
+新しいバージョンが出ると、Kumi は起動時に知らせます。Kumi の中で `/update`、またはターミナルで `kumi update` を実行すると更新され、ブリッジも一緒に更新されます。`kumi update --check` は確認だけ、`kumi update --rollback` は一つ前に戻します。確認を止めるには、`~/.kumi/settings.json` に `"updateCheck": false` を加えます。
 
 Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。
 
@@ -53,13 +69,18 @@ Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業
 
 ## 現状
 
-Kumi 1.0 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows 対応は確認中です。次は Renoise と Reaper への対応を予定しています。
+Kumi 1.1 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows 対応は確認中です。次は Renoise と Reaper への対応を予定しています。
 
 ## 開発
 
+このリポジトリのコピーで、Node.js 22 または 24 を使います。
+
 ```sh
+npm run setup     # インストールとビルド
+npm run kumi      # 実行（npm run kumi -- bridge、-- doctor など）
 npm run typecheck
 npm test          # Live もサインインも不要
+node scripts/build-release.mjs   # インストーラーがダウンロードするバンドル（Node 24）
 ```
 
 `apps/kumi` はターミナルアプリ、`packages/runtime` は Kumi のエージェントコア、プロバイダー、メモリー、音声解析、Live との連携を持ちます。Kumi はローカルのブリッジ（`apps/mcp-server` とその Remote Script）を通じて Live と通信します。このブリッジは他の MCP クライアントからも単独で使えます（[ブリッジのガイド（英語）](apps/mcp-server/README.md)）。

@@ -209,6 +209,19 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 
+test("a plan that loads a rack can add chains to it at once, before the bridge's catalog notice arrives", async () => {
+  const b = await opened({ lateRacks: true });
+  try {
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "load_device", input: { trackRef: "track:1", itemId: "audio_effects/Audio Effect Rack" }, as: "rack" },
+      { tool: "edit_rack", input: { rackRef: "@rack", action: "add-chain" }, as: "left" },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.doesNotMatch(result.text, /no rack in the Set yet/);
+    assert.equal(b.requests.filter((request) => request.name === "live_rack_preview").length, 1, "the chain was asked of Live");
+  } finally { await b.integration.close(); }
+});
+
 test("racks: the observation shows chains with their devices; a plan adds a chain, loads into it and balances the chains", async () => {
   const b = await opened({ racks: true });
   try {

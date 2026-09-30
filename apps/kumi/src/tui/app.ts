@@ -9,7 +9,8 @@ import {
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
 import type { ModelControl } from "../models.js";
-import { sanitizeText, StreamingText } from "../text.js";
+import { sanitizeText, StreamingText, webWords } from "../text.js";
+import type { UpdateControl } from "../update.js";
 import { Editor, type EditorLayout } from "./editor.js";
 import { Picker, type PickerItem } from "./picker.js";
 import type { InputEvent } from "./keys.js";
@@ -49,6 +50,8 @@ export interface TuiOptions {
   tabs?: readonly Tab[];
   /** Which tab showed last, kept across restarts. */
   panelTab?: { load(): string | undefined; save(id: string): void };
+  /** Kumi's updates: /update, and a newer Kumi on the welcome screen. Without it, neither shows. */
+  updates?: UpdateControl;
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -94,6 +97,7 @@ const COMMANDS = [
   { name: "/recipes", about: "Your saved ways of working" },
   { name: "/logout", about: "Sign out of a provider" },
   { name: "/status", about: "What Kumi is connected to" },
+  { name: "/update", about: "Get the newest Kumi" },
   { name: "/help", about: "Keys and commands" },
   { name: "/quit", about: "Close Kumi" },
 ] as const;
@@ -107,7 +111,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -253,6 +257,8 @@ export class TuiApp {
   private focus: LiveFocus | null = null;
   /** What changed in the Set while Kumi wasn't running. */
   private catchUp: CatchUp | undefined;
+  /** A newer Kumi's version, once the startup check or /update found one. */
+  private newer: string | undefined;
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
@@ -336,6 +342,14 @@ export class TuiApp {
   }
 
   /** Stop Kumi's work, or close when there is none (Ctrl-C from outside the window). */
+  /** A newer Kumi, found as Kumi started: the welcome screen says so, or, once the conversation has begun, a note. */
+  offerUpdate(latest: string): void {
+    if (this.closing || this.newer === latest) return;
+    this.newer = latest;
+    if (!this.transcript.isEmpty) this.notice(`Kumi ${latest} is out: /update gets it.`, "info");
+    this.scheduler.request();
+  }
+
   interrupt(): void {
     if (this.closing) return;
     if (this.busy) this.cancel();
@@ -540,6 +554,16 @@ export class TuiApp {
           notes: event.notes.map((note) => clean(note, 300)), pictures: this.depth === "truecolor" || this.depth === "256" }, this.current);
         break;
       }
+      case "web": {
+        // What Kumi looked up goes above the answer that uses it, a line each, together.
+        const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replace(/\s+/g, " ").trim().slice(0, max);
+        const line = webWords(event, clean);
+        const at = this.current ? this.transcript.entries.indexOf(this.current) : -1;
+        const above = at > 0 ? this.transcript.entries[at - 1] : at === -1 ? this.transcript.entries.at(-1) : undefined;
+        if (above?.kind === "web" && above.lines.length < 24) { above.lines.push(line); this.transcript.touch(above); }
+        else this.transcript.insertBefore({ kind: "web", lines: [line] }, this.current);
+        break;
+      }
       case "doing": {
         const running = this.current?.steps.filter((step) => step.state === "running").at(-1);
         if (running) running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80);
@@ -742,7 +766,7 @@ export class TuiApp {
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
       && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
       && (command.name !== "/conversations" || this.options.controller.conversations !== undefined) && (command.name !== "/reconnect" || this.options.controller.reconnect !== undefined)
-      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined));
+      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -786,6 +810,11 @@ export class TuiApp {
       if (this.connection !== "connected") { this.notice("Live isn't connected, so there's nothing for Kumi to stop.", "info"); return; }
       if (this.busy) await controller.cancel().catch(() => {});
       if (!await controller.stopLive()) this.notice("Kumi couldn't stop Live just now; press space in Live to stop it.", "warn");
+      return;
+    }
+    if (command === "/update" && this.options.updates) {
+      this.editor.clear();
+      await this.openUpdate().catch((error: unknown) => this.panelFailed(error));
       return;
     }
     if (command === "/status") {
@@ -1020,7 +1049,13 @@ export class TuiApp {
       this.notice("Copied the sign-in link.", "info");
       return;
     }
-    if (panel.kind === "pick") panel.picker.type(event.text);
+    if (panel.kind === "pick") {
+      // A "/" to begin with is a command, not a filter (no item starts with one): the list gives way
+      // to the input box, where the command menu opens. So /update works from the model list Kumi
+      // opens at the start.
+      if (!panel.picker.filter && event.text.startsWith("/")) { this.closePanel(); this.onInput(event); return; }
+      panel.picker.type(event.text);
+    }
     // A key is one word: spaces and line breaks a paste brings along go.
     else if (panel.kind === "key" && !panel.checking) { panel.secret = (panel.secret + event.text.replace(/[\s\x00-\x1f\x7f]/g, "")).slice(0, 4096); delete panel.status; }
   }
@@ -1139,6 +1174,30 @@ export class TuiApp {
         this.notice(`${removed ? `Signed out of ${name}.` : `Kumi had no sign-in for ${name} to remove.`}${still}`, "info");
       } };
       this.scheduler.request();
+    } };
+    this.scheduler.request();
+  }
+
+  /** /update: the newest Kumi, once it's confirmed. Kumi then closes, updates, and opens again with this conversation. */
+  private async openUpdate(): Promise<void> {
+    const updates = this.options.updates!;
+    if (this.busy) { this.notice("Kumi is working: /update once it's done, or press esc to stop it first.", "info"); return; }
+    let latest = this.newer;
+    if (!latest) {
+      this.notice("Looking for a newer Kumi…", "info");
+      try { latest = await updates.check(); } catch (error) { this.notice(`${safeError(error, this.secrets)}. Try /update again later.`, "warn"); return; }
+      if (!latest) { this.notice(`Kumi is up to date (${updates.current}).`, "info"); return; }
+      this.newer = latest;
+    }
+    const picker = new Picker(`Update to Kumi ${latest}?`, [
+      { label: "Update now", detail: "Kumi closes, updates and opens again", value: "yes" },
+      { label: "Not now", value: "no" },
+    ]);
+    this.panel = { kind: "pick", picker, choose: async (answer) => {
+      this.closePanel();
+      if (answer.value !== "yes") return;
+      updates.request();
+      await this.finish(0);
     } };
     this.scheduler.request();
   }
@@ -1557,6 +1616,7 @@ export class TuiApp {
     }
     add();
     add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
+    if (this.newer) { add(); add(`Kumi ${this.newer} is out · /update gets it`, st.accent); }
     // The wordmark goes above, when the window has room for it and everything under it.
     if (width >= LOGO_WIDTH && height >= rows.length + LOGO_HEIGHT + 1) {
       rows.unshift(...LOGO_LETTERS.map((text) => ({ text, style: st.bright, center: true })), { text: "", style: st.text }, { text: LOGO_RULE, style: st.faint, center: true }, { text: "", style: st.text });

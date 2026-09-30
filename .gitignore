@@ -29,3 +29,5 @@ __pycache__/
 /apps/kumi/dist/
 /packages/runtime/node_modules/
 /packages/runtime/dist/
+# scripts/build-release.mjs output
+/release/

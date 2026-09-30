@@ -7,7 +7,8 @@ import vm from "node:vm";
 import { decodeAmxd, encodeAmxd } from "../src/devices/amxd.js";
 import { checkMidiDevice, checkMidiDeviceIsolated } from "../src/devices/harness.js";
 import { midiDeviceCode, midiDevicePatcher } from "../src/devices/midi.js";
-import { checkSpec, type DeviceSpec } from "../src/devices/spec.js";
+import { checkSpec, type MidiSpec } from "../src/devices/spec.js";
+import { afterFunctions, audioEffectPatcher, effectCode, inputsRead, instrumentPatcher, paramName, voiceCode } from "../src/devices/gen.js";
 import { deviceTool } from "../src/devices/tool.js";
 
 const folder = mkdtempSync(join(tmpdir(), "kumi-devices-test-"));
@@ -51,10 +52,10 @@ function reset() { pending = []; timer = null; sounding.clear(); }`,
       expect: [{ type: "noteon", pitch: 55, at: 30 }, { type: "noteoff", pitch: 55, at: 200 }] },
   ],
 };
-const spec = (overrides: Record<string, unknown> = {}): DeviceSpec => {
+const spec = (overrides: Record<string, unknown> = {}): MidiSpec => {
   const checked = checkSpec({ ...LOWEST, ...overrides });
-  assert.ok("spec" in checked, JSON.stringify(checked));
-  return checked.spec;
+  assert.ok("spec" in checked && checked.spec.type === "midi_effect", JSON.stringify(checked));
+  return checked.spec as MidiSpec;
 };
 
 test("a device file is Live's container: ampf, the type's letters, meta, and the patcher as JSON", () => {
@@ -103,12 +104,13 @@ test("the device's code can't reach files, the network or Max and Live: the fram
 });
 
 test("a spec says what's wrong with it, each so it can be fixed", () => {
-  const checked = checkSpec({ type: "audio_effect", name: "", about: "", controls: [
+  assert.match((checkSpec({ ...LOWEST, type: "reverb" }) as { problems: string[] }).problems.join(" "), /midi_effect, audio_effect or instrument/);
+  const checked = checkSpec({ type: "midi_effect", name: "", about: "", controls: [
     { name: "Window", type: "number", min: 5, max: 1, default: 3 }, { name: "Window", type: "switch", default: true }, { name: "Mode", type: "choice", options: ["A"], default: "A" },
     { name: "Level", type: "integer", min: 0, max: 10, default: 2.5 }, { name: "Rate", type: "number", min: 0, max: 1, default: 0.5, unit: "furlongs" }], code: "send(1)", tests: [{ name: "x", input: "no" }] });
   assert.ok("problems" in checked);
   const text = checked.problems.join("\n");
-  for (const expected of [/MIDI effects so far/, /^name:/m, /^about:/m, /min is below max/, /used twice/, /2–16 options/, /whole-number/, /unit is one of/, /define function midi/, /^tests\[0\]/m]) assert.match(text, expected);
+  for (const expected of [/^name:/m, /^about:/m, /min is below max/, /used twice/, /2–16 options/, /whole-number/, /unit is one of/, /define function midi/, /^tests\[0\]/m]) assert.match(text, expected);
 });
 
 test("Kumi runs the device's tests and its own checks: a working device passes, a broken one is told what went wrong", () => {
@@ -141,7 +143,7 @@ test("make_device reads its guide on demand, makes a device where Live's Browser
   const result = JSON.parse(made.text) as Record<string, unknown>;
   assert.equal(result.itemId, "user_library/Kumi/Lowest Note");
   assert.deepEqual(result.controls, ["Window (1–50 ms; 15)"]);
-  assert.match(String(result.tests), /4 of 4/);
+  assert.match(String(result.checks), /4 of 4/);
   assert.equal(result.note, undefined, "the Browser listed it");
   assert.deepEqual(seen, ["user_library/Kumi/Lowest Note", "user_library/Kumi/Lowest Note"]);
   const decoded = decodeAmxd(readFileSync(join(folder, "Kumi", "Lowest Note.amxd")));
@@ -168,4 +170,132 @@ test("a device's code is checked in a process of its own: it can't reach Kumi, c
   const endless = await checkMidiDeviceIsolated(spec({ code: "function midi(event) { while (true) {} }", tests: [] }), { timeoutMs: 1_500 });
   assert.match(endless.problems.join(" "), /didn't finish within 2 s; something loops forever/);
   assert.ok(Date.now() - started < 5_000);
+});
+
+/** An audio effect a producer might ask for: a saturator with a tone control, its own function first. */
+const GRIT = {
+  type: "audio_effect", name: "Grit", about: "Warm saturation with a tone control.",
+  controls: [{ name: "Drive", type: "number", min: 0, max: 24, default: 6, unit: "dB" }, { name: "Tone", type: "number", min: 0, max: 1, default: 0.5 }, { name: "Hard", type: "switch", default: false }],
+  code: `// Soft or hard clipping.
+shaper(x, hard_clip) {
+  return hard_clip > 0.5 ? clamp(x, -1, 1) : tanh(x);
+}
+History lp_l(0), lp_r(0);
+g = dbtoa(drive);
+lp_l = mix(lp_l, shaper(in1 * g, hard), 0.05 + tone * 0.9);
+lp_r = mix(lp_r, shaper(in2 * g, hard), 0.05 + tone * 0.9);
+out1 = lp_l / g;
+out2 = lp_r / g;`,
+};
+
+/** A plucked voice for an instrument. */
+const PLUCK = {
+  type: "instrument", name: "Pluck", about: "A plucked saw.", voices: 6,
+  controls: [{ name: "Decay", type: "number", min: 0.05, max: 4, default: 0.6, unit: "s" }],
+  code: `History env(0);
+env = change(strike) != 0 ? velocity / 127 : env * exp(-1 / (decay * samplerate));
+osc = phasor(mtof(note + bend)) * 2 - 1;
+out1 = osc * env * 0.2;
+out2 = out1;`,
+};
+
+const inner = (patcher: object, id: string) => {
+  const box = (patcher as { patcher: { boxes: { box: Record<string, unknown> }[] } }).patcher.boxes.find((item) => item.box.id === id)!.box;
+  return box as { text: string; numinlets: number; patcher: { classnamespace: string; boxes: { box: Record<string, unknown> }[]; lines: { patchline: { source: [string, number]; destination: [string, number] } }[] } };
+};
+const codeOf = (patcher: object, id: string) => String(inner(patcher, id).patcher.boxes.find((item) => item.box.maxclass === "codebox")!.box.code);
+const wires = (patcher: object) => (patcher as { patcher: { lines: { patchline: { source: [string, number]; destination: [string, number] } }[] } }).patcher.lines.map((line) => `${line.patchline.source.join(":")}>${line.patchline.destination.join(":")}`);
+
+test("GenExpr's order holds: the model's functions first, then Kumi's Params for the controls, then the rest; inputs as the code reads them", () => {
+  assert.equal(paramName("Decay Time"), "decay_time"); assert.equal(paramName(" Hi-Cut 2 "), "hi_cut_2");
+  const code = effectCode({ ...GRIT, controls: GRIT.controls as never });
+  const shaper = code.indexOf("shaper(x, hard_clip)"); const params = code.indexOf("Param drive(6, min=0, max=24);"); const history = code.indexOf("History lp_l");
+  assert.ok(shaper >= 0 && params > shaper && history > params, code);
+  assert.match(code, /Param tone\(0\.5, min=0, max=1\);\nParam hard\(0, min=0, max=1\);/);
+  assert.equal(afterFunctions("out1 = in1; out2 = in2;"), 0, "no functions: Params go first");
+  assert.equal(afterFunctions("foo(1);\nout1 = in1;"), 0, "a call isn't a definition");
+  assert.equal(inputsRead(GRIT.code), 2); assert.equal(inputsRead("out1 = in1; out2 = in1; // in2 in a comment"), 1); assert.equal(inputsRead(PLUCK.code), 0);
+  const voice = voiceCode({ ...PLUCK, controls: PLUCK.controls as never });
+  assert.match(voice, /Param note\(60, min=0, max=127\);[\s\S]*Param strike\(0\);[\s\S]*Param decay\(0\.6, min=0\.05, max=4\);\n\nHistory env\(0\);/);
+});
+
+test("an audio effect: plugin~ into the model's gen~, Kumi's fixed output stage with Mix and Output, plugout~; each control a Live parameter", () => {
+  const checked = checkSpec(GRIT);
+  assert.ok("spec" in checked && checked.spec.type === "audio_effect", JSON.stringify(checked));
+  const patcher = audioEffectPatcher(checked.spec as never);
+  const effect = inner(patcher, "obj-effect");
+  assert.equal(effect.text, "gen~"); assert.equal(effect.patcher.classnamespace, "dsp.gen"); assert.equal(effect.numinlets, 2);
+  assert.match(codeOf(patcher, "obj-effect"), /\r\n/, "Max's line endings");
+  const stage = codeOf(patcher, "obj-output");
+  for (const line of ["Param kumi_mix(100", "Param kumi_output(0", "clamp(dcblock(fixnan(fixdenorm(in1))), -2, 2)"]) assert.ok(stage.includes(line), line);
+  // The dry signal passes untouched: a hot track isn't clipped by a Kumi effect at Mix 0.
+  assert.match(stage, /out1 = mix\(in3, clamp\(dcblock\(fixnan\(fixdenorm\(in1\)\)\), -2, 2\), wet\) \* gain;/);
+  const lines = wires(patcher);
+  for (const expected of ["obj-plugin:0>obj-effect:0", "obj-plugin:1>obj-effect:1", "obj-effect:0>obj-output:0", "obj-plugin:0>obj-output:2", "obj-plugin:1>obj-output:3", "obj-output:1>obj-plugout:1"]) assert.ok(lines.includes(expected), expected);
+  const faces = (patcher as { patcher: { boxes: { box: Record<string, unknown> }[] } }).patcher.boxes.filter((item) => item.box.parameter_enable === 1).map((item) => item.box);
+  assert.deepEqual(faces.map((box) => (box.saved_attribute_attributes as { valueof: { parameter_longname: string } }).valueof.parameter_longname), ["Drive", "Tone", "Hard", "Mix", "Output"]);
+  assert.ok(lines.includes("obj-control-1:0>obj-prepend-1:0"));
+  assert.equal(inner(patcher, "obj-prepend-1").text, "prepend drive");
+  assert.equal(inner(patcher, "obj-prepend-4").text, "prepend kumi_mix");
+  const mono = audioEffectPatcher({ ...(checked.spec as never as { name: string; about: string; controls: [] }), controls: [], code: "out1 = tanh(in1); out2 = out1;" });
+  assert.equal(inner(mono, "obj-effect").numinlets, 1);
+  assert.ok(!wires(mono).includes("obj-plugin:1>obj-effect:1"), "a code that reads only in1 gets only in1");
+  assert.equal(decodeAmxd(encodeAmxd("audio_effect", patcher))?.type, "audio_effect");
+});
+
+test("an instrument: notes shared out by poly to one gen~ per voice (bend exactly 0 at rest, a strike per note), every voice into Kumi's output stage", () => {
+  const checked = checkSpec(PLUCK);
+  assert.ok("spec" in checked && checked.spec.type === "instrument" && checked.spec.voices === 6, JSON.stringify(checked));
+  const patcher = instrumentPatcher(checked.spec as never);
+  assert.equal(inner(patcher, "obj-poly").text, "poly 6 1");
+  assert.equal(inner(patcher, "obj-route").text, "route 1 2 3 4 5 6");
+  assert.equal(inner(patcher, "obj-bendcentre").text, "- 64"); assert.equal(inner(patcher, "obj-bendscale").text, "/ 32.");
+  const voices = (patcher as { patcher: { boxes: { box: Record<string, unknown> }[] } }).patcher.boxes.filter((item) => String(item.box.id).startsWith("obj-voice-"));
+  assert.equal(voices.length, 6);
+  assert.equal(inner(patcher, "obj-voice-1").numinlets, 1, "no audio input, one inlet for its Params");
+  const lines = wires(patcher);
+  for (let voice = 1; voice <= 6; voice++) {
+    for (const expected of [`obj-route:${voice - 1}>obj-order-${voice}:0`, `obj-order-${voice}:1>obj-unpack-${voice}:0`, `obj-order-${voice}:0>obj-heard-${voice}:0`, `obj-note-${voice}:0>obj-voice-${voice}:0`, `obj-strike-${voice}:0>obj-voice-${voice}:0`, `obj-voice-${voice}:0>obj-output:0`, `obj-voice-${voice}:1>obj-output:1`, `obj-prepend-1:0>obj-voice-${voice}:0`]) {
+      assert.ok(lines.includes(expected), expected);
+    }
+  }
+  assert.ok(lines.includes("obj-heard-1:1>obj-played-1:0") && lines.includes("obj-played-1:1>obj-bang-1:0"), "a strike counts only notes played (velocity above 0)");
+  // On real Live, a bare counter (first count 0) left strike at 0, so no voice played its first note.
+  assert.equal(inner(patcher, "obj-count-1").text, "counter 1 1000000", "a voice's first note changes strike too");
+  assert.match(codeOf(patcher, "obj-output"), /Param kumi_output/);
+  assert.doesNotMatch(codeOf(patcher, "obj-output"), /kumi_mix/, "an instrument has no dry signal to mix");
+  assert.equal(decodeAmxd(encodeAmxd("instrument", patcher))?.type, "instrument");
+});
+
+test("Kumi's checks for an audio effect or an instrument say what's wrong, each so it can be fixed", () => {
+  const problems = (input: Record<string, unknown>) => { const checked = checkSpec(input); return "problems" in checked ? checked.problems.join("\n") : ""; };
+  assert.match(problems({ ...GRIT, controls: [{ name: "Mix", type: "number", min: 0, max: 1, default: 1 }] }), /Kumi adds Mix/);
+  assert.match(problems({ ...GRIT, controls: [{ name: "Delay", type: "number", min: 0, max: 1, default: 1 }] }), /Param delay, a name gen~ or Kumi already uses; call it something else/);
+  assert.match(problems({ ...GRIT, controls: Array.from({ length: 7 }, (_, index) => ({ name: `Knob ${index + 1}`, type: "number", min: 0, max: 1, default: 0 })) }), /at most 6.*Kumi adds Mix and Output/);
+  assert.match(problems({ ...GRIT, code: "out1 = in1;" }), /assign out1 \(left\) and out2 \(right\)/);
+  assert.match(problems({ ...GRIT, code: "out1 = in3; out2 = in1;" }), /two inputs/);
+  assert.match(problems({ ...GRIT, code: "out1 = cycle(440); out2 = out1;" }), /reads its input/);
+  assert.match(problems({ ...GRIT, code: "out1 = in1 * (velocity / 127); out2 = in2;" }), /gets no notes/);
+  assert.match(problems({ ...GRIT, code: "out1 = tanh(in1; out2 = in2;" }), /don't pair up/);
+  assert.match(problems({ ...PLUCK, code: "out1 = in1; out2 = in2;" }), /no audio input/);
+  assert.match(problems({ ...PLUCK, code: "out1 = cycle(440); out2 = out1;" }), /plays the note it's given/);
+  assert.match(problems({ ...PLUCK, voices: 9 }), /1 \(mono\) to 8/);
+  assert.match(problems({ ...PLUCK, code: "Param note(60);\nout1 = cycle(mtof(note)); out2 = out1;" }), /Kumi's; use them without declaring/);
+  // A control's Param declared by the model too (as gen~ code usually is) would be declared twice.
+  assert.match(problems({ ...GRIT, code: "Param drive(1, min=1, max=20);\nout1 = tanh(in1 * drive); out2 = tanh(in2 * drive);" }), /drive is the Drive control's Param, which Kumi declares/);
+  assert.equal(problems({ ...GRIT, tests: [{ name: "ignored", input: [], expect: [] }] }), "", "an audio effect isn't tested with MIDI; its tests are left out");
+});
+
+test("make_device makes an audio effect and an instrument, with Kumi's own knobs, and says to hear them", async () => {
+  const tool = deviceTool({ userLibrary: folder, waitMs: 1_000, browserSees: async () => true });
+  assert.match((await tool.execute({ guide: true, type: "audio_effect" }, new AbortController().signal)).text, /^Making an audio effect[\s\S]*Max compiles the code when Live loads/);
+  assert.match((await tool.execute({ guide: true, type: "instrument" }, new AbortController().signal)).text, /^Making an instrument[\s\S]*change\(strike\) != 0/);
+  const effect = JSON.parse((await tool.execute(GRIT, new AbortController().signal)).text) as Record<string, unknown>;
+  assert.equal(effect.type, "audio effect"); assert.equal(effect.itemId, "user_library/Kumi/Grit");
+  assert.deepEqual(effect.controls, ["Drive (0–24 dB; 6)", "Tone (0–1; 0.5)", "Hard (on/off; off)", "Mix (0–100 %; 100)", "Output (-36–12 dB; 0)"]);
+  assert.match(String(effect.next), /audition/);
+  assert.equal(decodeAmxd(readFileSync(join(folder, "Kumi", "Grit.amxd")))?.type, "audio_effect");
+  const instrument = JSON.parse((await tool.execute(PLUCK, new AbortController().signal)).text) as Record<string, unknown>;
+  assert.equal(instrument.type, "instrument"); assert.equal(instrument.voices, 6);
+  assert.equal(decodeAmxd(readFileSync(join(folder, "Kumi", "Pluck.amxd")))?.type, "instrument");
 });

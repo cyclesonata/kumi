@@ -13,13 +13,15 @@ import { join } from "node:path";
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
 /** A device on a fixture track: its knobs by name. */
 export interface FixtureDevice { name: string; className: string; params: { name: string; value: number; min: number; max: number }[] }
-type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
+type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters, a page of 100 at a time, "Feedback" the last. */ manyParameters?: boolean; racks?: boolean; /** Rack tools only once a rack is loaded, with the bridge's catalog notice arriving late (as on real Live). */ lateRacks?: boolean; /** The bridge's version; "1" (older than any gate) by default. */ version?: string;
   /** Playing, recording and the emergency stop, as bridge 1.0.34 offers them. */ transport?: boolean;
   /** An audio clip (playing this file) in the first track's first slot, and a MIDI clip in the second track's Arrangement. */ audioClip?: string;
   /** The Set's saved file, which the bridge can back up (live_project_backup_*). */ savedSet?: string;
   /** Free space on the disk Live records to, in bytes (plenty when left out). */ freeDisk?: number;
   /** Renders: what recording each source track's Post FX makes (a file), for auditions; with it, Main, the playhead and the song's length are Live's. */ renders?: (source: string, devices: readonly FixtureDevice[]) => string | undefined;
   /** The Set's tempo (120 when left out). */ tempo?: number;
+  /** Recording starts this many beats after it's asked for, once (a bridge whose steps outlast a render's lead-in). */ lateRecord?: number;
+  /** Live's Start Playback with Record turned off: recording on while stopped doesn't start playing. */ noPlayOnRecord?: boolean;
   /** Tracks beyond the two fixtures, with their devices (goal candidates). */ extraTracks?: { name: string; devices: FixtureDevice[] }[];
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
   /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
@@ -30,8 +32,16 @@ export function bridge(options: Options = {}) {
   let live = true; let epoch = 7;
   let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
     ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) }))];
-  // Main's fader and the playhead, as auditions use them.
-  const main = { volume: 0.85 }; let position = 0; let recordingFrom: number | undefined;
+  // Main's fader and the playhead, as auditions use them, moving as Live's does: "continue" plays on from where
+  // playback last stopped and "start" from the start marker, wherever the playhead was moved while stopped; a
+  // jump while playing is honoured, and one while recording ends the take there; stopping while stopped goes
+  // back to the start; and recording on while stopped plays from the start marker (Start Playback with Record).
+  const main = { volume: 0.85 }; let recordingFrom: number | undefined;
+  const playhead = { at: 0, since: 0, stoppedAt: 0, marker: 0 };
+  let lateRecord = options.lateRecord;
+  /** Where the playhead is: while playing, on from where it started. */
+  const now = () => transport.playing ? playhead.at + (Date.now() - playhead.since) * tempo / 60_000 : playhead.at;
+  const play = (from: number) => { transport.playing = true; playhead.at = from; playhead.since = Date.now(); if (transport.arrangementRecord) recordingFrom = from; };
   let failStep: string | undefined;
   /** A take on each armed track (what its source's Post FX made), from where recording started. */
   const takes = () => {
@@ -48,7 +58,7 @@ export function bridge(options: Options = {}) {
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
     "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
-    ...(options.racks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
+    ...(options.racks || options.lateRacks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
     ...(options.savedSet ? ["live_project_backup_preview", "live_project_backup_apply"] : []),
     ...(options.renders ? ["live_transport_preview", "live_song_state", "live_track_structure_preview", "live_track_structure_apply", ...(options.parameters ? [] : ["live_device_parameter_preview", "live_device_parameter_apply"])] : []),
     ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop", "live_routing_preview", "live_routing_apply"] : [])];
@@ -65,12 +75,13 @@ export function bridge(options: Options = {}) {
   const refusal = (text: string, extra: JsonObject = {}): CallToolResult => ({ isError: true, content: [{ type: "text", text }], structuredContent: { message: text, ...extra } });
   const pending = new Map<string, { name: string; args: JsonObject }>();
   const catalogListeners = new Set<() => void>();
+  let rackLoaded = false;
   let transactions = 0;
   /** Transactions the client gave up the undo of. */
   const released: string[] = [];
   const endpoint: McpEndpoint = {
     pid: null, serverInfo: { name: "kumi-synthetic-bridge", version: options.version ?? "1" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
-    async list() { return { tools: catalog.filter((tool) => drumRack || !tool.name.startsWith("live_drum_pad_")) }; },
+    async list() { return { tools: catalog.filter((tool) => (drumRack || !tool.name.startsWith("live_drum_pad_")) && (!options.lateRacks || rackLoaded || !/^live_(rack|chain_mixer)_/.test(tool.name))) }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
       if (failStep && (name === failStep || (name === "live_transport_action_preview" && args.action === failStep))) { failStep = undefined; return refusal("adapter request failed"); }
@@ -95,7 +106,7 @@ export function bridge(options: Options = {}) {
         return wrap({ epoch: 7, kind: args.kind, items: rows.slice(from, from + limit), revision: "r1", truncated: Boolean(next), ...(next ? { nextCursor: next } : {}) });
       }
       if (name === "live_discover") {
-        const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo, ...(options.savedSet ? { filePath: options.savedSet } : {}) };
+        const set = { ref: "7:set:song", objectIdentity: "song", name: "Fixture Set", tempo, position: now(), playing: transport.playing, ...(options.savedSet ? { filePath: options.savedSet } : {}) };
         const items = args.kind === "set" ? [set] : args.kind === "track"
           ? tracks.map((track, index) => ({ ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true }))
           : args.kind === "selection" ? [{ ref: "7:selection:0", selectedTrackRef: "7:track:0" }]
@@ -124,7 +135,7 @@ export function bridge(options: Options = {}) {
         const base = { transactionId: id, epoch: 7, confirmation: name === "live_mixer_preview" ? "secret-confirmation-token-0123456789" : "apply" };
         if (name === "live_project_backup_preview") return wrap({ ...base, path: options.savedSet, allowedRoot: args.allowedRoot, impact: "creates-verified-backup" });
         if (name === "live_tempo_preview") return wrap({ ...base, priorTempo: tempo, proposedTempo: args.tempo });
-        if (name === "live_transport_preview") return wrap({ ...base, prior: { position, loop: { enabled: false } }, proposed: { position: args.position, loopEnabled: args.loopEnabled } });
+        if (name === "live_transport_preview") return wrap({ ...base, prior: { position: now(), loop: { enabled: false } }, proposed: { position: args.position, loopEnabled: args.loopEnabled } });
         if (name === "live_mixer_preview") return wrap({ ...base, trackRef: args.trackRef, prior: { volume: args.trackRef === "7:main_track:0" ? main.volume : 0.85, pan: 0 }, ...(args.volume === 0.4 ? { priorDisplay: { volume: "0.0 dB", pan: "C" } } : {}), proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_object_rename_preview") return wrap({ ...base, target: { kind: args.kind, ref: args.ref, currentName: tracks[Number(String(args.ref).split(":").at(-1))]?.name }, proposedName: args.name });
         if (name === "live_track_properties_preview") return wrap({ ...base, ref: args.ref, prior: { colorIndex: 4 }, proposed: { colorIndex: args.colorIndex } });
@@ -158,12 +169,18 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_transport_action_preview") {
           if (transaction.args.action === "stop" && transport.refuseStop && transport.playing) return refusal("request failed: missing, expired, stale, or mismatched mutation preflight");
           // Like Live: playing with recording on records from where it starts; stopping writes the takes.
-          if (transaction.args.action === "start" || transaction.args.action === "continue") { transport.playing = true; if (transport.arrangementRecord) recordingFrom = position; }
+          if (transaction.args.action === "start" && !transport.playing) play(playhead.marker);
+          if (transaction.args.action === "continue" && !transport.playing) play(playhead.stoppedAt);
           // And, as on real Live, stopping ends the recording: the next pass records only once it's started again.
-          if (transaction.args.action === "stop") { transport.playing = false; takes(); transport.arrangementRecord = false; }
+          if (transaction.args.action === "stop" && transport.playing) { playhead.at = now(); playhead.stoppedAt = playhead.at; transport.playing = false; takes(); transport.arrangementRecord = false; }
+          else if (transaction.args.action === "stop") { playhead.at = 0; playhead.stoppedAt = 0; playhead.marker = 0; }
           return wrap({ transactionId: args.transactionId, state: "applied", done: transaction.args.action });
         }
-        if (transaction.name === "live_transport_preview" && typeof transaction.args.position === "number") position = transaction.args.position;
+        if (transaction.name === "live_transport_preview" && typeof transaction.args.position === "number") {
+          // A jump while recording ends the take where the playhead was, and Live records nothing after it.
+          if (transport.playing && recordingFrom !== undefined) { takes(); transport.arrangementRecord = false; }
+          playhead.at = transaction.args.position; playhead.since = Date.now();
+        }
         if (transaction.name === "live_mixer_preview" && transaction.args.trackRef === "7:main_track:0" && typeof transaction.args.volume === "number") main.volume = transaction.args.volume;
         if (transaction.name === "live_routing_preview" && (typeof transaction.args.arm === "boolean" || typeof transaction.args.inputType === "string")) {
           const index = Number(String(transaction.args.trackRef).split(":").at(-1));
@@ -175,7 +192,12 @@ export function bridge(options: Options = {}) {
           const recorded = [transaction.args.destinationTrackRef, ...(Array.isArray(transaction.args.alsoTrackRefs) ? transaction.args.alsoTrackRefs : [])];
           if (transaction.args.action === "start" && tracks.some((track, index) => track.armed && !recorded.includes(`7:track:${index}`))) return refusal("adapter request failed");
           const on = transaction.args.action === "start";
-          if (transaction.args.lane === "arrangement" && on) recordingFrom = position;
+          if (transaction.args.lane === "arrangement" && on) {
+            transport.arrangementRecord = true;
+            if (!transport.playing && !options.noPlayOnRecord) play(playhead.marker);
+            // On the beat it started on: the fixture's renders don't move with the take, so its start stays put.
+            else if (transport.playing) { recordingFrom = Math.floor(now() + (lateRecord ?? 0)); lateRecord = undefined; }
+          }
           if (transaction.args.lane === "arrangement" && !on) takes();
           if (transaction.args.lane === "arrangement") transport.arrangementRecord = on; else transport.sessionRecord = on;
           // Like the bridge when Live doesn't confirm in time: it happened, but the answer can't say so.
@@ -229,6 +251,8 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_browser_load_preview") {
           // Like the bridge, a Drum Rack in the Set brings the pad tools.
           if (String(transaction.args.itemId).endsWith("Drum Rack")) { drumRack = true; for (const listener of catalogListeners) listener(); }
+          // A rack brings the rack tools, but (like real Live) the catalog notice comes later: no listener is told.
+          if (/Rack$/.test(String(transaction.args.itemId))) rackLoaded = true;
           if (transaction.args.chainRef) return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: "7:device:0:0:2:0",
             placement: { owner: "chain", rack: "Instrument Rack", chain: 2, index: 0, chains: [{ name: "Keys", devices: ["Operator"] }, { name: "Pad", devices: [] }, { name: "Bells", devices: ["Collision"] }] } });
           return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: `7:device:${String(transaction.args.trackRef).split(":").at(-1)}:0` });
@@ -287,7 +311,7 @@ export function bridge(options: Options = {}) {
     lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
   return {
     integration, requests, records, states, actions, auditions, released, get tempo() { return tempo; },
-    main, get position() { return position; }, trackNames: () => tracks.map((track) => track.name),
+    main, get position() { return now(); }, trackNames: () => tracks.map((track) => track.name),
     /** A track's devices as they are now (knobs moved by the search included). */
     devicesOf: (name: string) => tracks.find((track) => track.name === name)?.devices,
     /** The next request of this name (or play action) is refused, as Live refuses one. */

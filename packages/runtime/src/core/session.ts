@@ -7,6 +7,8 @@ import { memoryInstructions, memoryTools } from "./memory.js";
 import { recipeInstructions, recipeTools, RUN_RECIPE_TOOL, type RecipeStore } from "./recipes.js";
 import { listeningTools } from "../audio/tools.js";
 import { videoTools } from "../video/tool.js";
+import type { WebClient } from "../web/net.js";
+import { webTools } from "../web/tool.js";
 import { asksForTechnique, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE, TECHNIQUE_NUDGE, techniqueInstructions, techniqueTools, type TechniqueStore } from "./techniques.js";
 import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
@@ -42,6 +44,8 @@ interface Options {
   recipes?: RecipeStore;
   /** Let the model watch videos (tutorials): where videos are kept, and the programs Kumi fetches. */
   watch?: { videosDir: string; toolsDir: string };
+  /** Let the model search the web and read pages, PDFs and code (true), or with a client of its own (tests). */
+  web?: boolean | { client: WebClient };
   /** What Kumi learned building things the producer liked; without it none are kept. */
   techniques?: TechniqueStore;
   /** How long a drafted technique waits for a sign before it's kept anyway. */
@@ -200,6 +204,7 @@ export function createSession(options: Options): SessionController {
   const listening = options.listen ? listeningTools({ onEvent: (event) => emit(event),
     resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
   const watching = options.watch ? videoTools({ ...options.watch, onEvent: (event) => emit(event) }) : [];
+  const browsing = options.web ? webTools({ onEvent: (event) => emit(event), ...(typeof options.web === "object" ? { client: options.web.client } : {}) }) : [];
   // Techniques are drafted by the model and kept by what the producer does next.
   const learned = options.techniques ? techniqueTools({ store: options.techniques, onEvent: (event) => emit(event), ...(options.techniqueSettleMs !== undefined ? { settleMs: options.techniqueSettleMs } : {}) }) : undefined;
   const gaps = options.gaps ? gapTools({ file: options.gaps }) : [];
@@ -358,7 +363,7 @@ export function createSession(options: Options): SessionController {
           const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved),
             learned ? TECHNIQUE_GUIDANCE : "", techniqueInstructions(known), gaps.length ? GAP_GUIDANCE : ""].filter(Boolean).join("\n\n");
           const value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-            tools: [...observation.tools.map(withTechnique), ...(notes?.tools ?? []), ...listening, ...watching, ...recipes, ...(learned?.tools ?? []), ...gaps], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+            tools: [...observation.tools.map(withTechnique), ...(notes?.tools ?? []), ...listening, ...watching, ...browsing, ...recipes, ...(learned?.tools ?? []), ...gaps], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
           if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
           return { value, lifetime };
         } catch (error) { lifetime.abort(); throw error; }
@@ -597,7 +602,11 @@ export function createSession(options: Options): SessionController {
       if (setup.stopReason !== "completed" || op.controller.signal.aborted) return { ...setup, usage };
       const heard = heardLast as AuditionEvent | undefined;
       if (!heard?.request?.reference) {
-        emit({ type: "notice", message: "The goal needs something to reach: give a reference (a file, or an audio clip in the Set) and try /goal again." });
+        // Nothing to compare with: the model did it as an ordinary request. The GOAL tab says so and
+        // stops rather than waiting on a search that won't start.
+        goalStatusNow = { ...goalStatusNow!, state: "done", why: "no reference to reach, so it was done as a regular request" };
+        emit(goalStatusNow);
+        emit({ type: "notice", message: "A goal searches toward something: with no reference, Kumi did this as a regular request. To search, give /goal a reference too (an audio file, a clip in the Set, or a video)." });
         return { stopReason: "completed", usage };
       }
       request = heard.request;

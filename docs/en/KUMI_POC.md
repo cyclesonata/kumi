@@ -1,6 +1,6 @@
 # Kumi
 
-Kumi 1.0 is a producer assistant for the **current open Ableton Live Set**, in
+Kumi 1.1 is a producer assistant for the **current open Ableton Live Set**, in
 your terminal. It reads the Set and makes the changes you ask for, each with its
 own undo ([how changes work](KUMI_CHANGES.md)). When you ask, it plays, records
 and bounces audio. It listens to audio, such as a reference track, a sample or
@@ -8,19 +8,35 @@ its own recording, and compares one with another. It saves your ways of
 working as [recipes](#recipes-and-watching-you-work) to replay, including ones
 it learns by watching you. For a saved Set it picks up the conversation next
 time and says what changed meanwhile. It keeps short notes of what you tell it
-that Live can't show ([what Kumi remembers](#what-kumi-remembers)). It runs its
-own agent core and the independent Ableton MCP Beyond bridge for Live access.
+that Live can't show ([what Kumi remembers](#what-kumi-remembers)), makes Max for
+Live devices you describe, and looks things up on the web
+([looking things up](#looking-things-up)). It runs its own agent core and the
+independent Ableton MCP Beyond bridge for Live access.
 
 ## Install and sign in
 
-You need **Node.js 22 or 24** (Node 25 has reached end of life); the Node 24 LTS installer from
-[nodejs.org](https://nodejs.org) is fine. On any other version Kumi says so and
-stops before doing anything. From the repository root:
+On macOS, open Terminal and paste:
 
 ```sh
-npm run setup                                 # install and build Kumi and the bridge
-npm run kumi                                  # start; sign in and choose a model inside
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
+
+On Windows, open PowerShell and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+The installer puts Kumi and its own Node 24 in `~/.kumi` (`KUMI_HOME` moves it),
+checks each download against its published checksum, and adds `kumi` to your
+PATH. It needs no admin rights, git, npm or Node of your own, and never touches
+the files Kumi keeps for you there. Running it again repairs or updates Kumi.
+Then, in a new terminal window, `kumi` starts Kumi.
+
+From a copy of this repository instead, with **Node.js 22 or 24**:
+`npm run setup`, then `npm run kumi` (and `npm run kumi -- <command>` wherever
+this guide says `kumi <command>`). On any other Node, Kumi says so and stops
+before doing anything.
 
 Inside Kumi, `/login` signs in: to ChatGPT with your plan (the browser opens and
 the sign-in comes back on `localhost:1455`), or to Anthropic, OpenAI or OpenCode
@@ -37,25 +53,39 @@ your message again; a model the provider doesn't offer opens the list.
 The same from a shell:
 
 ```sh
-npm run kumi -- login openai-codex            # ChatGPT; add --device on a machine without a browser
-npm run kumi -- login anthropic               # asks for the key without showing it; also openai, opencode
-npm run kumi -- logout <provider>             # remove Kumi's sign-in there
-npm run kumi -- model                         # show the model
-npm run kumi -- model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
-npm run kumi -- auth                          # which providers are usable; never prints secrets
-npm run kumi -- doctor                        # check Node, sign-in, the bridge, Live and the terminal
-npm run kumi -- update                        # bring Kumi up to date, and the bridge in Live when it's older
-npm run kumi -- report                        # a file to send when something goes wrong
-npm run kumi -- --inference-only              # chat without Live
+kumi login openai-codex            # ChatGPT; add --device on a machine without a browser
+kumi login anthropic               # asks for the key without showing it; also openai, opencode
+kumi logout <provider>             # remove Kumi's sign-in there
+kumi model                         # show the model
+kumi model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
+kumi auth                          # which providers are usable; never prints secrets
+kumi doctor                        # check Node, sign-in, the bridge, Live and the terminal
+kumi update                        # bring Kumi up to date, and the bridge in Live when it's older
+kumi update --check                # only say whether there's a newer Kumi
+kumi update --rollback             # go back to the Kumi before the last update
+kumi report                        # a file to send when something goes wrong
+kumi uninstall                     # remove Kumi (your files stay unless you add --all)
+kumi --inference-only              # chat without Live
 ```
 
-`update` moves this checkout forward on its branch (`git merge --ff-only`; it
-leaves a checkout with changes of its own alone), runs `npm run setup`, and then
-updates the bridge in Live if it's older than Kumi's, asking you to quit Live
-first. Kumi says when there's a newer version: once a day at most it asks git
-for the version on the checkout's branch, and says nothing when there's none, no
-network, or no checkout. When the bridge in Live is older than Kumi's, Kumi says
-so as it starts.
+`update` fetches the newest release, checks it against its checksum and starts
+it once to be sure it runs, then puts it in place and keeps the one before for
+`--rollback`. Then it updates the bridge in Live if it's older than Kumi's,
+asking you to quit Live first. In a copy of the repository, `update` moves the
+checkout forward on its branch instead (`git merge --ff-only`; it leaves a
+checkout with changes of its own alone) and runs `npm run setup`. Inside Kumi,
+`/update` asks first, then closes Kumi, updates it the same way and opens it
+again, and the Set's conversation carries on.
+
+Kumi says when there's a newer version as it starts: at most once a day it asks
+in the background (GitHub's latest release, or git for a checkout) and says
+nothing when there's none or no network. `"updateCheck": false` in
+`~/.kumi/settings.json`, or `KUMI_NO_UPDATE_CHECK=1`, turns that off. When the
+bridge in Live is older than Kumi's, Kumi says so as it starts.
+
+`uninstall` removes Kumi, its Node, its launcher and the lines it added to your
+shell's startup files, and offers to take the bridge out of Live (the bridge
+stays, with what Live needs, while Live is open or when you say no).
 
 `report` writes `~/kumi-report-<date>.txt`: Kumi's and the bridge's versions,
 the doctor's checks, what Kumi did in your last conversation (your requests, its
@@ -130,7 +160,7 @@ Live plus a local MCP server that Kumi starts. `npm run setup` builds it, and on
 command puts it into Live:
 
 1. Quit Live, saving your work.
-2. Run `npm run kumi -- bridge`.
+2. Run `kumi bridge`.
 3. Open Live. The first time, open **Settings → Link, Tempo & MIDI** and choose
    `AbletonMcpBridge` as a Control Surface.
 4. Run `npm run kumi`.
@@ -155,7 +185,7 @@ configuration instead, pass it explicitly:
 
 ```sh
 npm run diagnostics --prefix apps/mcp-server -- --config /absolute/path/bridge-config.json
-npm run kumi -- --bridge-config /absolute/path/bridge-config.json
+kumi --bridge-config /absolute/path/bridge-config.json
 ```
 
 Keep the secret in the bridge's separate private file, never in the command.
@@ -357,7 +387,7 @@ What it needs:
   speech model the first time (about 190 MB, checked against its published
   checksum).
 
-`npm run kumi -- doctor` says which of these you have. Nothing is downloaded
+`kumi doctor` says which of these you have. Nothing is downloaded
 whole: frames and sound come from the video's streams at the moments Kumi looks
 at. Each video's words, frames and sound are kept in `~/.kumi/videos` (the last
 24 videos), so watching one again is quick.
@@ -369,27 +399,56 @@ around them stay in the conversation.
 
 ## Making Max for Live devices
 
-Ask Kumi for a MIDI effect Live doesn't have, in your own words, and it makes
-one and puts it on your track:
+Ask Kumi for a device Live doesn't have, in your own words (a MIDI effect, an
+audio effect or an instrument), and it makes one and puts it on your track:
 
 > make a MIDI effect that keeps only the lowest note of each chord, and put it on the Keys track
 
+> make me an audio effect that sounds like the Erbe-Verb
+
 Kumi decides the details you wouldn't spell out (a chord is notes within about
-15 ms, say) and tells you what it chose. It writes the device's code and tests,
-and makes it: a Max for Live device in your User Library's Kumi folder, which
-Live's Browser lists like any other. Its knobs are ordinary Live parameters, so
-you can automate and map them, and Kumi can turn them. Loading it is a change
-in HISTORY with its undo. A second device of the same name gets a number
-rather than replacing the first, which a Set may use.
+15 ms, say) and tells you what it chose. When the device should sound or work
+like one that exists, it first [looks up](#looking-things-up) how the original
+works: its manual, a paper on its design, or open source code of it. It writes
+the device's code and makes it: a Max for Live device in your User Library's
+Kumi folder, which Live's Browser lists like any other. Its knobs are ordinary
+Live parameters, so you can automate and map them, and Kumi can turn them.
+Loading it is a change in HISTORY with its undo. A second device of the same
+name gets a number rather than replacing the first, which a Set may use.
 
-Before a device is made, Kumi runs its code on your computer: the tests Kumi
-wrote for it, and Kumi's own checks. Those are no errors, every note it plays is
-released, and nothing keeps running once you let go. A device that fails isn't
-made; Kumi fixes it first. The code can't reach your files, the network, or the
-rest of Max and Live.
+A MIDI effect is JavaScript. Before it's made, Kumi runs its code on your
+computer: the tests Kumi wrote for it, and Kumi's own checks. Those are no
+errors, every note it plays is released, and nothing keeps running once you let
+go. A device that fails isn't made; Kumi fixes it first. The code can't reach
+your files, the network, or the rest of Max and Live.
 
-It needs Max for Live (Live Suite, or Standard with the add-on). Audio effects
-and instruments are next.
+An audio effect or an instrument is written in GenExpr, the language of Max's
+gen~, and Kumi checks the code before building the device around it. An effect
+gets Mix and Output knobs; an instrument plays up to 8 notes at once. Every
+device ends in Kumi's output stage, which keeps the device's own output safe (no
+NaN, denormals or DC, held under +6 dBFS); on an effect the dry signal passes
+untouched, so at Mix 0 your track sounds exactly as it did without it. Kumi
+listens to what it made with `audition` and fixes what it hears.
+
+It needs Max for Live (Live Suite, or Standard with the add-on).
+
+## Looking things up
+
+Kumi can search the web and read what it finds, to build or explain what you
+name and it doesn't know well enough: a hardware unit, a plugin, a synth, an
+effect's algorithm, an artist's technique.
+
+- `search_web` searches the web through Exa's free search, or DuckDuckGo when
+  Exa can't answer, and GitHub's repositories when it's looking for code.
+- `read_web` reads a page, a PDF, a text or code file, a GitHub repository (its
+  files and README) or a file in one, a Max patch or Max for Live device (its
+  controls and its gen~ code first), or a picture, which the model sees. A long
+  page comes a stretch at a time, and pages are kept for 20 minutes.
+
+What Kumi looked up shows above its answer, a quiet line each ("Read “Building
+the Erbe-Verb” · a PDF"). Kumi reads only public addresses, never this computer
+or your network, checked again as each connection is made, redirects included.
+It treats what a page says as information, never as instructions.
 
 ## What Kumi remembers
 
@@ -563,7 +622,10 @@ Your prompts, in-memory conversation and returned Live metadata are sent to the
 selected inference provider. Track/device names and tool results are untrusted
 data, not instructions or permission grants. Reading Live is not local-only.
 Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only by
-you; terminal scrollback and the provider's retention policies are separate. The
+you; terminal scrollback and the provider's retention policies are separate.
+When Kumi looks something up, its searches go to Exa (or DuckDuckGo), and it reads
+pages itself; a PDF, a page built by scripts, or a site that turns Kumi away is
+read through Exa's reader, which then sees that address. The
 credential store intentionally persists.
 
 Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25

@@ -24,6 +24,7 @@ import type { Knob } from "../../core/evolve.js";
 import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
+import { KUMI } from "../../command.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -993,6 +994,10 @@ export function createAbletonIntegration(options: Options): Integration {
       signal.throwIfAborted();
       if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
       await ensureCatalog(signal); assertLease(lease, signal);
+      // The bridge offers some tools only once the Set has what they work on (edit_rack once there's a
+      // rack): a plan that just loaded one may be ahead of the bridge's catalog-changed notice, so the
+      // catalog is read again before saying the change isn't available.
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) { await tools.refresh(signal); assertLease(lease, signal); }
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
@@ -1496,7 +1501,6 @@ export function createAbletonIntegration(options: Options): Integration {
     lap("main read");
     let started = false;
     const window = rig.window ?? { from: rig.from, beats: rig.beats };
-    const span = renderSpan(window.from, window.beats, beatsPerBar);
     /** The producer's own armed tracks: disarmed for the pass (Live records exactly the armed ones), armed again after. */
     const rearm: string[] = held?.rearm ?? [];
     let failed = true;
@@ -1512,56 +1516,82 @@ export function createAbletonIntegration(options: Options): Integration {
         const tracks = await rows("track", { fields: ["name", "armed"] }, signal);
         lap("tracks read");
         const refs = rig.sources.map((source) => { const found = tracks.find((track) => track.name === source.scratch); if (typeof found?.ref !== "string") throw new ObservationError(`Kumi's render track “${source.scratch}” is gone.`); return found; });
-        let rearmed = false;
-        for (const track of refs) if (track.armed !== true) { await step("set_routing", { trackRef: track.ref, arm: true }, signal); rearmed = true; }
+        for (const track of refs) if (track.armed !== true) await step("set_routing", { trackRef: track.ref, arm: true }, signal);
         for (const track of tracks) {
           if (track.armed !== true || typeof track.ref !== "string" || refs.includes(track)) continue;
-          await step("set_routing", { trackRef: track.ref, arm: false }, signal); rearm.push(track.ref); rearmed = true;
+          await step("set_routing", { trackRef: track.ref, arm: false }, signal); rearm.push(track.ref);
         }
-        const primeKey = `${span.position}`;
-        if (!held || held.primed !== primeKey) {
-          await step("set_transport", { position: span.position, loopEnabled: false }, signal);
-          lap("transport");
-          if (supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
-          lap("back to arrangement");
-          if (held) held.primed = primeKey;
-        } else {
-          // Every held pass plays from the same spot: Live's "start" plays from its start marker, not where
-          // the pass is primed (on real Live the part came 0.8 s late and a chord was heard cut short).
-          await step("set_transport", { position: span.position }, signal);
-          lap("transport");
-        }
-        started = true;
-        // Recording stays on in a held rig; arming anew (something disarmed a track) starts it afresh.
-        if (!held?.recording || rearmed) {
+        const record = { action: "start", lane: "arrangement", destinationTrackRef: refs[0]!.ref as string, ...(refs.length > 1 ? { alsoTrackRefs: refs.slice(1).map((track) => track.ref as string) } : {}) };
+        const beatMs = 60 / tempo * 1000;
+        // A pass whose takes started after the part (its steps outlasted the lead-in) goes again once, with twice the lead-in.
+        for (const longer of [false, true]) {
+          const span = renderSpan(window.from, window.beats, beatsPerBar, tempo, longer);
+          const primeKey = `${span.position}`;
+          const priming = !held || held.primed !== primeKey;
+          if (priming && supported({ since: ARRANGEMENT_BRIDGE })) { await step("play", { action: "back-to-arrangement" }, signal); lap("back to arrangement"); }
           if (held?.recording) { await step("record", { action: "stop", lane: "arrangement" }, signal); held.recording = false; }
-          await step("record", { action: "start", lane: "arrangement", destinationTrackRef: refs[0]!.ref as string, ...(refs.length > 1 ? { alsoTrackRefs: refs.slice(1).map((track) => track.ref as string) } : {}) }, signal);
-          if (held) held.recording = true;
-          lap("record start");
+          started = true;
+          // On real Live, "continue" plays from where playback last stopped and "start" from the start marker,
+          // wherever the playhead was moved while stopped (moved to beat 40, it played on from 251); a jump
+          // while playing is honoured; and a jump while recording ends the take there, recording nothing after.
+          if (span.position > 0) {
+            // So a pass plays, jumps to its lead-in, then records: the take starts there, before the part.
+            await step("play", { action: "continue" }, signal);
+            lap("play");
+            await step("set_transport", { position: span.position, ...(priming ? { loopEnabled: false } : {}) }, signal);
+            const jumpedAt = Date.now();
+            lap("jump");
+            await step("record", record, signal);
+            if (held) held.recording = true;
+            lap("record start");
+            await delay(Math.max(0, span.wait * beatMs - (Date.now() - jumpedAt)), undefined, { signal });
+          } else {
+            // Too near the Set's start for a lead-in: stopped twice, Live is at its start, and recording on plays
+            // from there (Live's Start Playback with Record; with that turned off, start does).
+            await step("play", { action: "stop" }, signal);
+            await step("play", { action: "stop" }, signal);
+            if (priming && rig.transport?.loop !== false) await step("set_transport", { loopEnabled: false }, signal);
+            lap("to the start");
+            await step("record", record, signal);
+            if (held) held.recording = true;
+            lap("record start");
+            const now_ = (await rows("set", { fields: ["position", "playing"] }, signal))[0];
+            if (now_?.playing !== true) { await step("play", { action: "start" }, signal); lap("play"); }
+            // Until the playhead is past the part: a count-in holds it at the start for a bar or more first.
+            let at = now_?.playing === true && typeof now_.position === "number" ? now_.position : 0;
+            for (let check = 0; check < 4 && at < span.wait - 0.25; check++) {
+              await delay((span.wait - at) * beatMs, undefined, { signal });
+              const read = (await rows("set", { fields: ["position"] }, signal))[0]?.position;
+              if (typeof read !== "number") break;
+              at = read;
+            }
+          }
+          if (held) held.primed = primeKey;
+          lap("wait");
+          await step("play", { action: "stop" }, signal);
+          lap("stop");
+          if (!held) { await step("record", { action: "stop", lane: "arrangement" }, signal); lap("record stop"); }
+          // Stopping ends Live's recording too, held or not: the next pass starts it again (without that, a
+          // held rig's later passes recorded nothing, and each was scored on the first pass's take).
+          else held.recording = false;
+          started = false;
+          // Each source's take covering the part (the newest: a pass records over the last), read together.
+          let late = false;
+          await Promise.all(rig.sources.map(async (source, index) => {
+            const clips = (await rows("arrangement-clip", { parent: refs[index]!.ref, fields: ["start", "length", "isAudio"] }, signal)).filter((row) => row.isAudio === true && typeof row.ref === "string");
+            const clip = clips.map((row, order) => ({ row, order })).filter(({ row }) => typeof row.start === "number" && row.start <= window.from)
+              .sort((a, b) => (b.row.start as number) - (a.row.start as number) || b.order - a.order)[0]?.row ?? clips.at(-1);
+            if (!clip) return;
+            if (typeof clip.start === "number" && clip.start > window.from + 1e-3) late = true;
+            const file = await clipFile(clip.ref as string, signal).catch(() => undefined);
+            // A tenth of a second before the part: a window that opens right on the attack hears it as a flurry of onsets.
+            if (file) files.set(source.name, { file, start: Math.max(0, (window.from - (typeof clip.start === "number" ? clip.start : span.position)) * 60 / tempo - LEAD_IN) });
+          }));
+          lap("clips and files");
+          if (!late) break;
+          if (longer) rig.notes.push("Live started recording after the part had begun, so a take may miss its start; render it again.");
+          else lap("late: again with a longer lead-in");
         }
-        // From where the pass is primed.
-        await step("play", { action: "continue" }, signal);
-        lap("play");
-        await delay(span.wait * 60 / tempo * 1000, undefined, { signal });
-        lap("wait");
-        await step("play", { action: "stop" }, signal);
-        lap("stop");
-        if (!held) { await step("record", { action: "stop", lane: "arrangement" }, signal); lap("record stop"); }
-        // Stopping ends Live's recording too, held or not: the next pass starts it again (without that, a
-        // held rig's later passes recorded nothing, and each was scored on the first pass's take).
-        else held.recording = false;
-        started = false;
-        // Each source's take covering the part (the newest: a pass records over the last), read together.
-        await Promise.all(rig.sources.map(async (source, index) => {
-          const clips = (await rows("arrangement-clip", { parent: refs[index]!.ref, fields: ["start", "length", "isAudio"] }, signal)).filter((row) => row.isAudio === true && typeof row.ref === "string");
-          const clip = clips.map((row, order) => ({ row, order })).filter(({ row }) => typeof row.start === "number" && row.start <= window.from)
-            .sort((a, b) => (b.row.start as number) - (a.row.start as number) || b.order - a.order)[0]?.row ?? clips.at(-1);
-          if (!clip) return;
-          const file = await clipFile(clip.ref as string, signal).catch(() => undefined);
-          // A tenth of a second before the part: a window that opens right on the attack hears it as a flurry of onsets.
-          if (file) files.set(source.name, { file, start: Math.max(0, (window.from - (typeof clip.start === "number" ? clip.start : span.position)) * 60 / tempo - LEAD_IN) });
-        }));
-        lap("clips and files");
       });
       failed = false;
     } finally {
@@ -2082,7 +2112,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       } catch {
         options.onConnection("error");
         // The usual cause after updating Kumi: Live's Remote Script is from an older bridge than Kumi's.
-        throw new KumiError("live", "Kumi couldn't start its bridge to Live. After updating Kumi, Live's part needs updating too: quit Live, then run npm run kumi -- bridge. Otherwise: npm run kumi -- doctor");
+        throw new KumiError("live", `Kumi couldn't start its bridge to Live. After updating Kumi, Live's part needs updating too: quit Live, then run ${KUMI} bridge. Otherwise: ${KUMI} doctor`);
       }
     },
     stopLive: (signal) => stopEverything(AbortSignal.any([signal, lifetime.signal])),

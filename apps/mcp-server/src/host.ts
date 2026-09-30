@@ -1413,8 +1413,8 @@ export class McpHost {
     const kinds = ["track", "scene", "clip", "device", "locator", "takeLane"] as const;
     if (!isObject(params) || !hasOnly(params, ["kind", "ref", "name"]) || !kinds.includes(params.kind as typeof kinds[number]) || !isNonEmptyString(params.ref, 256) || !isNonEmptyString(params.name, 256)) return error(id, -32602, "kind, ref, and a non-empty name are required");
     try {
-      const status = this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
-      if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
+      this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
+      const status = await this.requireOperation(operation);
       const adapter = this.asyncAdapter(); const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
       const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
@@ -9247,6 +9247,18 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       transaction.state = "undone";
       return this.successText(id, { transactionId: transaction.id, state: "undone", tempo: restored.tempo, epoch: transaction.epoch, idempotent: false });
     } catch (cause) { return this.adapterToolError(id, cause, "Tempo undo failed; inspect Live state before retrying."); }
+  }
+
+  /**
+   * An operation Live offers depends on what's in the Set (device.rename once there's a device): the
+   * status read at connection can be older than a device a client just added, so a missing operation is
+   * asked for again before it's refused.
+   */
+  private async requireOperation(operation: LiveInvocation["operation"]): Promise<LiveStatus> {
+    let status = this.requireConnected();
+    if (!status.operations?.includes(operation)) status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+    if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
+    return status;
   }
 
   private requireConnected(capability?: LiveCapability): LiveStatus {

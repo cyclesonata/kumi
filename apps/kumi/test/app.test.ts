@@ -515,6 +515,59 @@ test("the welcome screen catches you up on the Set; later it's a note in the con
   await h.app.close();
 });
 
+test("a newer Kumi shows on the welcome screen, later as a note; /update asks, then closes Kumi so it updates", async () => {
+  let requested = 0; let latest: string | undefined; let unreachable = false;
+  const updates = { current: "1.0.0", request: () => { requested++; },
+    check: async () => { if (unreachable) throw new Error("Kumi couldn't reach GitHub to ask; check your internet connection"); return latest; } };
+  // Nothing newer, or no way to ask: /update says which.
+  const h = harness(120, 36, undefined, {}, undefined, { updates });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/update\r");
+  await delay(10);
+  assert.ok(has(h.screen(), "Kumi is up to date (1.0.0)."));
+  unreachable = true;
+  await h.type("/update\r");
+  await delay(10);
+  const lines_ = h.screen();
+  assert.ok(has(lines_, "Kumi couldn't reach GitHub to ask") && has(lines_, "/update again later."), "why it couldn't ask, and what to do");
+  // Found once the conversation has begun: a note.
+  h.app.offerUpdate("1.1.0");
+  assert.ok(has(h.screen(), "Kumi 1.1.0 is out: /update gets it."));
+  await h.app.close();
+  assert.equal(requested, 0);
+  // Found as Kumi starts: the welcome screen says so, and /update offers it.
+  unreachable = false;
+  const w = harness(120, 36, undefined, {}, undefined, { updates });
+  const closed = w.app.run();
+  await delay(5);
+  connect(w);
+  w.app.offerUpdate("1.1.0");
+  let lines = w.screen();
+  assert.ok(has(lines, "Kumi 1.1.0 is out · /update gets it") && has(lines, "Kumi can see Night Drive."), "on the welcome screen");
+  await w.type("/update\r");
+  await delay(10);
+  lines = w.screen();
+  assert.ok(has(lines, "Update to Kumi 1.1.0?") && has(lines, "Kumi closes, updates and opens again"));
+  await w.type("\u001b[B\r");
+  await delay(5);
+  assert.ok(!has(w.screen(), "Update to Kumi 1.1.0?"), "not now closes the question");
+  assert.equal(requested, 0);
+  await w.type("/update\r");
+  await delay(10);
+  await w.type("\r");
+  assert.equal(await closed, 0, "Kumi closes");
+  assert.equal(requested, 1, "and updates once it has");
+  // Without updates to offer (a test, or a Kumi that can't), there's no /update.
+  const none = harness();
+  void none.app.run();
+  await delay(5);
+  await none.type("/upd");
+  assert.ok(!has(none.screen(), "Get the newest Kumi"));
+  await none.app.close();
+});
+
 test("focus paths follow Live's detail view, shorten from the middle, and keep dark colours visible", () => {
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Clip", clip: "", view: "Arrangement", selectedNotes: 2 }), { crumbs: ["Keys", "Untitled clip"], context: "Arrangement · Clip view · 2 notes selected" });
   assert.deepEqual(focusPath({ track: { name: "Keys" }, detail: "Device", device: "Reverb", parameter: { name: "Pan", owner: "Mixer" } }).crumbs, ["Keys", "Reverb"], "a parameter from elsewhere is not shown as the device's");
@@ -685,6 +738,28 @@ test("with no model chosen, Kumi starts with a signed-in provider's first one an
   assert.ok(has(lines, "Choose a model") && has(lines, "Sign in to ChatGPT") && has(lines, "with your ChatGPT plan"));
   assert.match(lines[0]!, /no model chosen/);
   await fresh.app.close();
+});
+
+test("a command typed while a list is open runs: the list Kumi opens at the start gives way to the input box on \"/\"", async () => {
+  const none = fakeModels({ lists: MODELS });
+  const h = harness(120, 36, none.control);
+  void h.app.run();
+  await delay(10);
+  assert.ok(has(h.screen(), "Choose a model"));
+  await h.type("/");
+  let lines = h.screen();
+  assert.ok(!has(lines, "Choose a model"), "the list closes");
+  assert.ok(has(lines, "Forget this conversation and start fresh") && lines.some((line) => line.trim() === "/help"), "the command menu opens");
+  await h.type("help\r");
+  await delay(5);
+  lines = h.screen();
+  assert.ok(has(lines, "enter sends · ctrl+j or alt+enter starts a new line"), lines.join("\n"));
+  // A filter that's begun keeps its "/": model names have them.
+  await h.type("/model\r");
+  await delay(10);
+  await h.type("gpt-6/");
+  assert.ok(has(h.screen(), "filter: gpt-6/"));
+  await h.app.close();
 });
 
 test("signing in to ChatGPT from Kumi shows the link to open, copies it on c, and can be cancelled", async () => {
@@ -1022,6 +1097,32 @@ test("a video Kumi watched goes above the answer: its title, where its words cam
   assert.ok(lines.some((line) => line.includes("0:05") && line.includes("0:15")), "their times");
   assert.ok(!lines.some((line) => line.includes("private-token")), "names and notes are shown safely");
   assert.ok(!has(lines, "transcribing what's said · 40%"), "NOW moves on once the tool ends");
+  await h.app.close();
+});
+
+test("what Kumi looked up goes above the answer, a quiet line for each search and page, grouped; a page's title is shown safely", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("make me a reverb like the erbe-verb\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "s1", name: "search_web" });
+  h.emit({ type: "doing", text: "searching the web for “erbe-verb design”" });
+  assert.ok(has(h.screen(), "searching the web for “erbe-verb"), "NOW says what it's looking for (as much as fits)");
+  h.emit({ type: "web", action: "searched", title: "erbe-verb design", where: "web", via: "Exa", results: 8 });
+  h.emit({ type: "tool-end", id: "s1", name: "search_web", isError: false, elapsedMs: 900 });
+  h.emit({ type: "web", action: "read", title: "Building the Erbe-Verb private-token", url: "https://forum.audulus.com/uploads/erbe.pdf", kind: "a PDF", via: "Exa" });
+  h.emit({ type: "web", action: "read", title: "Afturmath/dm-Erbeverb", url: "https://github.com/Afturmath/dm-Erbeverb", kind: "a GitHub repository", files: 29 });
+  h.emit({ type: "text", text: "It's a four-delay FDN reverb." });
+  await delay(5);
+  const lines = h.screen();
+  const searched = lines.findIndex((line) => line.includes("Searched the web for “erbe-verb design” · 8 results"));
+  const pdf = lines.findIndex((line) => line.includes("Read “Building the Erbe-Verb") && line.includes("· forum.audulus.com · a PDF"));
+  const repo = lines.findIndex((line) => line.includes("Read “Afturmath/dm-Erbeverb” · github.com · a GitHub repository · 29 files"));
+  const answer = lines.findIndex((line) => line.includes("It's a four-delay FDN reverb."));
+  assert.ok(searched >= 0 && pdf === searched + 1 && repo === pdf + 1 && answer > repo, lines.join("\n"));
+  assert.ok(!lines.some((line) => line.includes("private-token")), "a page's words are shown safely");
   await h.app.close();
 });
 

@@ -8,8 +8,9 @@ import { createTerminal } from "../src/terminal.js";
 import { KeyInput } from "../src/input.js";
 import { StreamingText, sanitizeText } from "../src/text.js";
 import { fakeModels, MODELS } from "./fake-models.js";
+import type { UpdateControl } from "../src/update.js";
 
-function fixture(tty = false, hold = false, startupNotice?: string) {
+function fixture(tty = false, hold = false, startupNotice?: string, updates?: UpdateControl) {
   const input = new PassThrough() as PassThrough & { isTTY: boolean; isRaw: boolean; setRawMode(value: boolean): void };
   input.isTTY = tty; input.isRaw = false; input.setRawMode = (value) => { input.isRaw = value; };
   let output = "";
@@ -30,7 +31,7 @@ function fixture(tty = false, hold = false, startupNotice?: string) {
     async undo() { calls.push("undo"); return { id: "c1", family: "tempo", title: "Tempo 120 → 124 BPM", state: "undone", at: 1 }; },
   };
   const terminal = createTerminal({ controller, input, output: sink, models: fakeModels({ model: "openai-codex/fixture", signedIn: ["openai-codex"] }).control, mode: "inference-only", secrets: ["private-token"], closeTimeoutMs: 25,
-    ...(startupNotice ? { startupNotice } : {}) });
+    ...(startupNotice ? { startupNotice } : {}), ...(updates ? { updates } : {}) });
   const done = terminal.run();
   return { input, sink, terminal, controller, done, calls, emit: (event: SessionEvent) => terminal.handleEvent(event), get output() { return output; } };
 }
@@ -208,6 +209,32 @@ test("a watched video is one line: what it is, where its words came from, the fr
   assert.match(f.output, /\[watched\] “1 Minute Reese With Operator” \(1:21\): 0:00–1:21, its automatic captions, frames at 0:05, 1:05, the sound at 0:20–0:30/);
   assert.match(f.output, /\[watched\] Kumi couldn't take the frame at 1:10/);
   assert.ok(!f.output.includes("private-token"));
+});
+
+test("a search or a page Kumi read is one line: what it looked for or read, and where", async () => {
+  const f = fixture(); await delay(0);
+  f.emit({ type: "web", action: "searched", title: "erbe verb", where: "github", via: "GitHub", results: 1 });
+  f.emit({ type: "web", action: "read", title: "https://example.com/manual", url: "https://example.com/manual", kind: "a page" });
+  f.emit({ type: "web", action: "searched", title: "nothing like this private-token", where: "web", via: "Exa", results: 0 });
+  f.input.write("/quit\n"); assert.equal(await f.done, 0);
+  assert.match(f.output, /\[web\] Searched GitHub for “erbe verb” · 1 repository/);
+  assert.match(f.output, /\[web\] Read example\.com\/manual\n/);
+  assert.match(f.output, /\[web\] Searched the web for “nothing like this .*” · nothing found/);
+  assert.ok(!f.output.includes("private-token"));
+});
+
+test("plain lines say when a newer Kumi is out, and /update closes Kumi so it updates (or says it's up to date)", async () => {
+  let requested = 0; let latest: string | undefined;
+  const f = fixture(false, false, undefined, { current: "1.0.0", check: async () => latest, request: () => { requested++; } }); await delay(0);
+  f.input.write("/update\n"); await delay(5);
+  assert.match(f.output, /\[update\] Kumi is up to date \(1\.0\.0\)\./);
+  latest = "1.1.0";
+  f.terminal.offerUpdate("1.1.0");
+  assert.match(f.output, /\[update\] Kumi 1\.1\.0 is out \(this is 1\.0\.0\)\. \/update gets it\./);
+  f.input.write("/update\n");
+  assert.equal(await f.done, 0);
+  assert.match(f.output, /Updating to Kumi 1\.1\.0: Kumi closes, updates and opens again\./);
+  assert.equal(requested, 1);
 });
 
 test("plain lines list a Set's conversations and go back to one; /reconnect and /new say what they do", async () => {

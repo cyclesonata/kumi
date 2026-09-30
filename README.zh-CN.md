@@ -26,7 +26,8 @@
 - **聆听：** 混音、采样或它自己弹出的音频的响度、音色平衡、声像宽度、速度与调性，以及你的混音与参考曲的差别。
 - **观看教程：** 观看 YouTube 或本地文件中的视频，并在新轨道上搭建出教程里做的内容。
 - **播放、录音与重采样**，在你要求时进行。
-- **制作 Max for Live 设备：** 按你的描述制作设备，并放到你的轨道上。
+- **制作 Max for Live 设备：** 按你的描述制作 MIDI 效果器、音频效果器和乐器，并放到你的轨道上。
+- **查找资料：** 搜索网络，阅读网页、PDF、说明书和 GitHub 上的代码，从而能照着读到的资料做出类似的效果器。
 - **显示你在哪里：** FOCUS 跟随你在 Live 中触碰的对象，显示为设备树、钢琴卷帘，或 Session、Arrangement 视图的条带。点击某个设备即可指向它：“这个 Saturator 太刺耳了”。
 - **记住：** 关于你和每个工程的笔记、从你保留的声音中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
 - **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。
@@ -34,18 +35,33 @@
 
 ## 开始使用
 
-需要 **Node.js 22 或 24**（[nodejs.org](https://nodejs.org)）和 Ableton Live 12。
+需要 Ableton Live 12 Beta，运行在 macOS 13 或更高版本，或 Windows 10、11 上。其余所需的一切（包括 Node）都由 Kumi 自带。
+
+**macOS：** 打开“终端”，粘贴：
 
 ```sh
-npm run setup                        # 安装并构建，约一分钟
-npm run kumi -- login openai-codex   # 使用 ChatGPT 登录（或设置 API 密钥）
-npm run kumi -- bridge               # 在 Live 关闭时：把 Kumi 连接到 Live
-npm run kumi                         # 在你的工程旁打开 Kumi
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
 
-首次使用时，请在 Live 的 **Settings → Link, Tempo & MIDI** 中将 **AbletonMcpBridge** 选为控制界面（Control Surface）。之后 Kumi 会自己找到 Live。
+**Windows：** 打开 PowerShell，粘贴：
 
-遇到问题？`npm run kumi -- doctor` 会检查所有环节并告诉你该运行什么。`npm run kumi -- report` 把出错的情况整理成一个可以发给我们的文件，`npm run kumi -- update` 让 Kumi 和桥接保持最新。
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+然后在新的终端窗口中：
+
+```sh
+kumi login      # 使用 ChatGPT 登录，或使用 Anthropic、OpenAI、OpenCode 的密钥
+kumi bridge     # 在 Live 关闭时：把 Kumi 连接到 Live（只需一次）
+kumi            # 在你的工程旁打开 Kumi
+```
+
+之后首次打开 Live 时，请在 Live 的 **Settings → Link, Tempo & MIDI** 中将 **AbletonMcpBridge** 选为控制界面（Control Surface）。之后 Kumi 会自己找到 Live。
+
+遇到问题？`kumi doctor` 会检查所有环节并告诉你该运行什么。`kumi report` 把出错的情况整理成一个可以发给我们的文件。`kumi uninstall` 会卸载 Kumi。
+
+有新版本时，Kumi 会在启动时告诉你。在 Kumi 中输入 `/update`，或在终端运行 `kumi update`，即可更新，桥接也会一并更新；`kumi update --check` 只检查、不安装，`kumi update --rollback` 回到上一个版本。如果不想让它检查，在 `~/.kumi/settings.json` 中加入 `"updateCheck": false`。
 
 在 Kumi 中输入 `/` 查看命令。Esc 停止 Kumi 正在做的事，`/stop` 停止 Live。
 
@@ -53,13 +69,18 @@ npm run kumi                         # 在你的工程旁打开 Kumi
 
 ## 当前状态
 
-Kumi 1.0 已在 macOS 上的 Ableton Live 12.4（测试版）中测试；Windows 支持正在测试中。接下来将支持 Renoise 和 Reaper。
+Kumi 1.1 已在 macOS 上的 Ableton Live 12.4（测试版）中测试；Windows 支持正在测试中。接下来将支持 Renoise 和 Reaper。
 
 ## 开发
 
+在本仓库的副本中，使用 Node.js 22 或 24：
+
 ```sh
+npm run setup     # 安装并构建
+npm run kumi      # 运行（npm run kumi -- bridge、-- doctor 等）
 npm run typecheck
 npm test          # 无需 Live 或登录
+node scripts/build-release.mjs   # 生成安装程序下载的包（Node 24）
 ```
 
 `apps/kumi` 是终端应用；`packages/runtime` 包含 Kumi 的代理核心、模型提供方、记忆、音频分析以及与 Live 的集成。Kumi 通过本地桥接（`apps/mcp-server` 及其 Remote Script）与 Live 通信，该桥接也可由其他 MCP 客户端单独使用（[桥接指南（英文）](apps/mcp-server/README.md)）。

@@ -1,0 +1,173 @@
+#!/bin/sh
+# Kumi installer for macOS (and Linux). Run it with:
+#
+#   curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+#
+# It puts Kumi and its own copy of Node in ~/.kumi (no admin rights, nothing outside your home folder),
+# adds ~/.kumi/bin to your PATH, and checks every download against its published checksum. Running it
+# again updates or repairs Kumi. Your settings, sign-ins and conversations in ~/.kumi are never touched.
+#
+# Settings (optional): KUMI_HOME (where to install, default ~/.kumi), KUMI_VERSION (a release such as
+# 1.1.0, default the latest), KUMI_RELEASES (where releases are downloaded from), KUMI_NO_MODIFY_PATH=1
+# (leave shell startup files alone).
+#
+# Everything runs inside main(), so a download cut short can't run half a script.
+
+set -u
+
+main() {
+  KUMI_HOME="${KUMI_HOME:-$HOME/.kumi}"
+  if [ -n "${KUMI_RELEASES:-}" ]; then base="${KUMI_RELEASES%/}"
+  elif [ -n "${KUMI_VERSION:-}" ]; then base="https://github.com/user1303836/kumi/releases/download/v${KUMI_VERSION#v}"
+  else base="https://github.com/user1303836/kumi/releases/latest/download"; fi
+
+  bold=""; dim=""; reset=""
+  if [ -t 1 ]; then bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"; reset="$(printf '\033[0m')"; fi
+  say() { printf '%s\n' "$*"; }
+  step() { printf '%s %s\n' "${dim}›${reset}" "$*"; }
+  fail() { printf '\n%s\n' "Kumi couldn't be installed: $*" >&2; exit 1; }
+
+  say ""
+  say "${bold}Installing Kumi${reset}, a studio partner for Ableton Live"
+  say ""
+
+  # ── What this computer is ──────────────────────────────────────────────
+  os="$(uname -s)"; arch="$(uname -m)"
+  case "$os" in
+    Darwin) platform="darwin" ;;
+    Linux) platform="linux"
+      if [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; then
+        fail "this Linux uses musl (Alpine), which Kumi's Node doesn't support."
+      fi ;;
+    MINGW*|MSYS*|CYGWIN*) fail "on Windows, open PowerShell and run: irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex" ;;
+    *) fail "Kumi runs on macOS and Windows (and Linux); this is $os." ;;
+  esac
+  # A Terminal running under Rosetta says x86_64 on an Apple Silicon Mac; Kumi wants the native Node.
+  if [ "$platform" = "darwin" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then arch="arm64"; fi
+  case "$arch" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64|amd64) arch="x64" ;;
+    *) fail "this processor ($arch) isn't one Kumi's Node is made for." ;;
+  esac
+  if [ "$platform" = "darwin" ]; then
+    macos="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+    if [ "${macos%%.*}" -lt 13 ] 2>/dev/null; then fail "Kumi needs macOS 13 (Ventura) or later; this Mac has macOS $macos."; fi
+  fi
+
+  # ── Tools it needs (every Mac has them) ────────────────────────────────
+  if command -v curl >/dev/null 2>&1; then
+    fetch() { curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"; }
+  elif command -v wget >/dev/null 2>&1; then
+    fetch() { wget -q --tries=3 --timeout=30 -O "$2" "$1"; }
+  else fail "it needs curl or wget to download."; fi
+  command -v tar >/dev/null 2>&1 || fail "it needs tar to unpack."
+  if command -v shasum >/dev/null 2>&1; then sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+  elif command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
+  else fail "it needs shasum or sha256sum to check downloads."; fi
+
+  # ── Room and a place to work ───────────────────────────────────────────
+  mkdir -p "$KUMI_HOME" || fail "couldn't make $KUMI_HOME."
+  free_kb="$(df -Pk "$KUMI_HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [ -n "$free_kb" ] && [ "$free_kb" -lt 300000 ] 2>/dev/null; then
+    fail "there's only $((free_kb / 1024)) MB free; Kumi needs about 300 MB. Free some space and run this again."
+  fi
+  work="$(mktemp -d "$KUMI_HOME/.install.XXXXXX")" || fail "couldn't make a working folder in $KUMI_HOME."
+  trap 'rm -rf "$work"' EXIT INT TERM
+
+  # ── Which Kumi ─────────────────────────────────────────────────────────
+  step "Finding the latest Kumi…"
+  fetch "$base/kumi-release.json" "$work/release.json"; got=$?
+  if [ "$got" -ne 0 ]; then
+    # curl -f exits 22, and wget 8, when the server answered with an error (no release there) rather than not at all.
+    if [ "$got" -eq 22 ] || [ "$got" -eq 8 ]; then fail "there's no Kumi release to install at ${base#https://} yet. Try again later."; fi
+    fail "couldn't reach GitHub ($base). Check your internet connection and try again."
+  fi
+  field() { sed -n "s/.*\"$1\" *: *\"\\([^\"]*\\)\".*/\\1/p" "$work/release.json" | head -n 1; }
+  kumi_version="$(field kumi)"; bundle="$(field bundle)"; bundle_sha="$(field sha256)"; node_version="$(field node)"
+  [ -n "$kumi_version" ] && [ -n "$bundle" ] && [ -n "$bundle_sha" ] && [ -n "$node_version" ] || fail "the release description didn't make sense; try again later."
+
+  # ── Kumi's own Node ────────────────────────────────────────────────────
+  node_dir="$KUMI_HOME/node"
+  if [ -x "$node_dir/bin/node" ] && [ "$("$node_dir/bin/node" --version 2>/dev/null)" = "v$node_version" ]; then
+    step "Node $node_version is already here."
+  else
+    step "Downloading Node $node_version for Kumi (about 50 MB, once)…"
+    node_name="node-v$node_version-$platform-$arch"
+    fetch "https://nodejs.org/dist/v$node_version/SHASUMS256.txt" "$work/SHASUMS256.txt" || fail "couldn't reach nodejs.org. Check your internet connection and try again."
+    fetch "https://nodejs.org/dist/v$node_version/$node_name.tar.gz" "$work/node.tar.gz" || fail "couldn't download Node from nodejs.org."
+    want="$(grep " $node_name.tar.gz\$" "$work/SHASUMS256.txt" | cut -d' ' -f1)"
+    [ -n "$want" ] && [ "$(sha "$work/node.tar.gz")" = "$want" ] || fail "Node's download didn't match its checksum, so it wasn't used. Try again."
+    mkdir -p "$work/node" && tar -xzf "$work/node.tar.gz" -C "$work/node" || fail "couldn't unpack Node."
+    "$work/node/$node_name/bin/node" --version >/dev/null 2>&1 || fail "Node $node_version won't run on this computer (it may be too old for it)."
+    rm -rf "$node_dir.previous"; [ -d "$node_dir" ] && mv "$node_dir" "$node_dir.previous"
+    mv "$work/node/$node_name" "$node_dir" || { [ -d "$node_dir.previous" ] && mv "$node_dir.previous" "$node_dir"; fail "couldn't put Node in place."; }
+    rm -rf "$node_dir.previous"
+  fi
+
+  # ── Kumi ───────────────────────────────────────────────────────────────
+  step "Downloading Kumi $kumi_version…"
+  fetch "$base/$bundle" "$work/kumi.tar.gz" || fail "couldn't download Kumi from GitHub."
+  [ "$(sha "$work/kumi.tar.gz")" = "$bundle_sha" ] || fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."
+  mkdir -p "$work/app" && tar -xzf "$work/kumi.tar.gz" -C "$work/app" || fail "couldn't unpack Kumi."
+  KUMI_INSTALLED=1 KUMI_HOME="$KUMI_HOME" "$node_dir/bin/node" "$work/app/apps/kumi/bin/kumi.mjs" --version >/dev/null 2>&1 || fail "the downloaded Kumi didn't start. Please report this at github.com/user1303836/kumi/issues."
+  app="$KUMI_HOME/app"
+  rm -rf "$app.previous"; [ -d "$app" ] && mv "$app" "$app.previous"
+  mv "$work/app" "$app" || { [ -d "$app.previous" ] && mv "$app.previous" "$app"; fail "couldn't put Kumi in place."; }
+
+  # ── The kumi command ───────────────────────────────────────────────────
+  mkdir -p "$KUMI_HOME/bin"
+  cat > "$KUMI_HOME/bin/kumi" <<'LAUNCHER'
+#!/bin/sh
+# Kumi's launcher, written by its installer: Kumi runs on its own Node, whatever Node this computer has.
+KUMI_HOME="${KUMI_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+export KUMI_HOME KUMI_INSTALLED=1
+exec "$KUMI_HOME/node/bin/node" "$KUMI_HOME/app/apps/kumi/bin/kumi.mjs" "$@"
+LAUNCHER
+  chmod 755 "$KUMI_HOME/bin/kumi"
+
+  # ── PATH ───────────────────────────────────────────────────────────────
+  bin="$KUMI_HOME/bin"; marker="# Added by the Kumi installer"; added=""
+  case ":$PATH:" in *":$bin:"*) on_path=1 ;; *) on_path="" ;; esac
+  if [ -z "${KUMI_NO_MODIFY_PATH:-}" ]; then
+    shell_name="$(basename "${SHELL:-sh}")"
+    case "$shell_name" in
+      zsh) rc="${ZDOTDIR:-$HOME}/.zshrc"; line="export PATH=\"$bin:\$PATH\"" ;;
+      bash)
+        # A bash login shell (every Terminal window on a Mac) reads only the first of these that exists, so
+        # Kumi adds to that one and never makes a .bash_profile that would hide someone's .profile. On Linux,
+        # new terminal windows read .bashrc.
+        rc="$HOME/.profile"
+        if [ "$platform" = "linux" ] && [ -f "$HOME/.bashrc" ]; then rc="$HOME/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then rc="$HOME/.bash_profile"
+        elif [ -f "$HOME/.bash_login" ]; then rc="$HOME/.bash_login"; fi
+        line="export PATH=\"$bin:\$PATH\"" ;;
+      # For each fish session (fish_add_path would keep it in fish's own saved PATH, past an uninstall).
+      fish) rc="$HOME/.config/fish/conf.d/kumi.fish"; line="contains -- \"$bin\" \$PATH; or set -gx PATH \"$bin\" \$PATH" ;;
+      *) rc="$HOME/.profile"; line="export PATH=\"$bin:\$PATH\"" ;;
+    esac
+    if ! grep -qs "$marker" "$rc"; then
+      mkdir -p "$(dirname "$rc")"
+      printf '\n%s\n%s\n' "$marker" "$line" >> "$rc" && added="$rc"
+    fi
+  fi
+
+  # ── Done ───────────────────────────────────────────────────────────────
+  say ""
+  say "${bold}Kumi $kumi_version is installed.${reset}"
+  case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
+  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in $added.${reset}"; fi
+  say ""
+  if [ -z "$on_path" ]; then
+    say "Open a new terminal window (or run: export PATH=\"$bin:\$PATH\"), then:"
+  else
+    say "Next:"
+  fi
+  say ""
+  say "  kumi login      sign in (ChatGPT, or an Anthropic, OpenAI or OpenCode key)"
+  say "  kumi bridge     with Live closed: connect Kumi to Ableton Live (once)"
+  say "  kumi            open Kumi next to your Set"
+  say ""
+  say "${dim}Update with: kumi update · Remove with: kumi uninstall${reset}"
+}
+
+main "$@"

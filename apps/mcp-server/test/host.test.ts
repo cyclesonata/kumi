@@ -448,6 +448,19 @@ test("Session structure indexes only the mutable regular-track collection", asyn
   const value = JSON.parse((valid as any).result.content[0].text); assert.equal((valid as any).result.isError, false); assert.deepEqual(value.prior.tracks.map((track: { name: string }) => track.name), ["Drums"]);
 });
 
+test("a rename Live didn't offer at connection is asked for again before it's refused (a device just added)", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  // The status read at connection is older than the device: device.rename isn't in it until Live is asked again.
+  let stale = true; const status = simulator.status.bind(simulator);
+  (simulator as any).status = () => { const now = status(); return stale ? { ...now, operations: (now.operations ?? []).filter((operation: string) => operation !== "device.rename") } : now; };
+  (simulator as any).refreshStatusAsync = async () => { stale = false; return (simulator as any).status(); };
+  const host = new McpHost(simulator); ready(host);
+  const result = await host.handleAsync({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "live_object_rename_preview", arguments: { kind: "device", ref: "device:utility-1", name: "Mix Glue" } } });
+  const body = JSON.parse((result as any).result.content[0].text);
+  assert.equal((result as any).result.isError, false, JSON.stringify(body)); assert.ok(body.transactionId);
+  assert.equal(stale, false, "Live was asked again");
+});
+
 test("previews, applies, verifies, and undoes a purpose-specific rename", async () => {
   const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
   const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
