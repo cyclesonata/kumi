@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "2a10c61693f79351c1728bad0125c9bc3a9fd40727145e7a194291b995e6cb22",
-  "operationCount": 173,
+  "registryHash": "bebbf478e1f6ee85c85937d4789ea5a676a021bf5cc80b4d56a1763b2ce8c12a",
+  "operationCount": 191,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -358,6 +358,20 @@
           "access": [
             "read"
           ]
+        },
+        {
+          "id": "note.select",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "note.delete-range",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
         }
       ],
       "firstTested": "12.4.5b8 phase 5 (targeted APIs pending exact candidate)"
@@ -568,6 +582,20 @@
           "access": [
             "call"
           ]
+        },
+        {
+          "id": "fire-button.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "track.action",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
         }
       ],
       "firstTested": "12.4.5b8 phase 4 audition (properties pending exact candidate)"
@@ -592,6 +620,13 @@
         },
         {
           "id": "song.time-convert",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "clip.time-convert",
           "status": "executable-negotiated",
           "access": [
             "call"
@@ -710,6 +745,13 @@
         },
         {
           "id": "application.dialog",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "application.message",
           "status": "executable-negotiated",
           "access": [
             "call"
@@ -989,6 +1031,62 @@
           "access": [
             "write"
           ]
+        },
+        {
+          "id": "device.property.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "device.action",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "sample.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "sample.slice",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "wavetable.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "wavetable.modulation.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "plugin.parameter-names",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "device.banks.read",
+          "status": "executable-negotiated",
+          "access": [
+            "read"
+          ]
         }
       ],
       "firstTested": "pending exact candidate (Live 12 device APIs)"
@@ -1037,6 +1135,20 @@
           "status": "executable-negotiated",
           "access": [
             "write"
+          ]
+        },
+        {
+          "id": "automation.step.insert",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "automation.value-at",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
           ]
         }
       ],
@@ -1212,6 +1324,20 @@
           "status": "executable-negotiated",
           "access": [
             "call"
+          ]
+        },
+        {
+          "id": "data.get",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "data.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
           ]
         }
       ],
