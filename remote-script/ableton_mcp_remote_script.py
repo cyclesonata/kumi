@@ -559,10 +559,11 @@ def _authority_row(value: Any, mapper: Any = None) -> Any:
     (with the mapper, a track's or chain's mixer values too, whose rows don't carry that state)."""
     if isinstance(value, dict):
         automated = "automationState" in value and _automation_playing(value.get("automationState"))
-        row = {key: _authority_row(child, mapper) for key, child in value.items() if key not in _CONTINUOUS_FIELDS and not (automated and key in _AUTOMATED_VALUE_FIELDS)}
+        # Only containers are walked: a row's scalars are kept as they are (a big device's rows are thousands).
+        row = {key: _authority_row(child, mapper) if isinstance(child, (dict, list)) else child for key, child in value.items() if key not in _CONTINUOUS_FIELDS and not (automated and key in _AUTOMATED_VALUE_FIELDS)}
         if mapper is not None and isinstance(row.get("mixer"), dict): row["mixer"] = _without_playing_mixer_automation(mapper, row["mixer"])
         return row
-    if isinstance(value, list): return [_authority_row(child, mapper) for child in value]
+    if isinstance(value, list): return [_authority_row(child, mapper) if isinstance(child, (dict, list)) else child for child in value]
     return value
 
 
@@ -10392,7 +10393,15 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
         identity["locators"] = [{key: row.get(key) for key in ("ref", "objectIdentity", "name", "position")} for row in mapper._locator_items()]
     if operation is None or operation.startswith("arrangement.") or operation in _ARRANGEMENT_BOUND_OPERATIONS:
         identity["arrangement"] = mapper._arrangement_identities(sorted({index for reference in references for index in [mapper._ref_track_index(reference)] if index is not None}))
-    return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(identity).encode("utf-8")).hexdigest()
+    return _state_hash(identity)
+
+
+def _state_hash(value: Any) -> str:
+    """A deterministic hash of state the Remote Script compares only with itself (an authority
+    digest the host echoes back unread). The wire's JavaScript-compatible canonical form isn't
+    needed here, and the C encoder is an order of magnitude faster: a parameter of a 5000-parameter
+    plug-in names all its siblings."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
 
 
 # Operations whose outcome depends on what plays and is queued: their authority binds playback.

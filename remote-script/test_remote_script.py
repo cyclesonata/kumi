@@ -7060,3 +7060,49 @@ class OldBoundTests(unittest.TestCase):
         mapper = LiveObjectMapper(song, provenance="real-live")
         result = mapper.invoke("session.capture-midi", {"expectedStateRevision": mapper._capture_authority_revision()}, "old-bound-capture")
         self.assertEqual(len(result["clips"]), 300); validate_operation_payload("session.capture-midi", "result", result)
+
+
+class ScaleBenchmarkTests(unittest.TestCase):
+    """A synthetic big Set: 200 tracks, 1000 devices (four with 5000 parameters), a clip of 20000
+    notes. Timings are printed, not asserted (CI machines vary); what's asserted is what each
+    targeted path reads: nothing below any track but its own."""
+
+    @staticmethod
+    def big_set():
+        song = FakeSong(); song.scenes = [FakeScene(f"S{index}") for index in range(8)]; tracks = []
+        for index in range(200):
+            track = FakeTrack(); track.name = f"Track {index}"; track.clip_slots = [FakeSlot() for _ in range(8)]; track.mixer_device = FakeMixerDevice(); track.devices = []
+            for position in range(5):
+                device = FakeDevice(); device.name = f"Device {index}.{position}"
+                heavy = position == 2 and index in (50, 100, 150, 199)
+                device.parameters = [FakeParameter() for _ in range(5000 if heavy else 1)]
+                track.devices.append(device)
+            tracks.append(track)
+        dense = FakeClip(40000.0); dense.notes = [{"pitch": 36 + note % 60, "start_time": note * 2.0, "duration": 0.5, "velocity": 100, "note_id": note + 1} for note in range(20000)]
+        tracks[100].clip_slots[0].clip = dense
+        song.tracks = tracks
+        return song
+
+    def test_targeted_reads_on_a_big_set_touch_only_their_track(self):
+        song = self.big_set(); mapper = LiveObjectMapper(song); timings = {}
+        started = time.perf_counter(); whole = mapper.snapshot(); timings["full snapshot"] = time.perf_counter() - started
+        self.assertEqual((whole["trackCount"], sum(len(row["devices"]) for row in whole["tracks"]), len(whole["tracks"][100]["clips"][0]["notes"])), (200, 1000, 20000))
+        parameter = whole["tracks"][150]["devices"][2]["parameters"][4999]
+        args = {"ref": parameter["ref"], "value": 0.75, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(mapper, parameter["ref"])}
+        counter = ReadCounter(song.tracks)
+        def measure(name, work, own):
+            counter.reads.clear(); started = time.perf_counter(); result = work(); timings[name] = time.perf_counter() - started
+            self.assertEqual(set(counter.reads) - own, set(), f"{name} read other tracks: {sorted(set(counter.reads) - own)[:10]}")
+            return result
+        focused = measure("focused snapshot (1 of 200 tracks)", lambda: mapper.snapshot({"focus": [100], "parts": ["tracks"]}), {100})
+        self.assertEqual(len(focused["tracks"][100]["clips"][0]["notes"]), 20000); self.assertTrue(focused["tracks"][0]["light"])
+        measure("light snapshot (every track, none walked)", lambda: mapper.snapshot({"focus": [], "parts": ["tracks"]}), set())
+        measure("get(parameter of a 5000-parameter device)", lambda: mapper.get(parameter["ref"]), {150})
+        measure("get(track)", lambda: mapper.get(whole["tracks"][7]["ref"]), {7})
+        measure("authority digest (device.parameter.set)", lambda: _authority_state_digest(mapper, args, "device.parameter.set"), {150})
+        measure("structure revision", mapper._structure_revision, set())
+        measure("playback", mapper._playback, set())
+        changed = measure("device.parameter.set", lambda: mapper.invoke("device.parameter.set", args), {150})
+        self.assertEqual(changed["value"], 0.75)
+        print("\n  scale benchmark (200 tracks, 1000 devices, 4 x 5000 parameters, 20000 notes):")
+        for name, seconds in timings.items(): print(f"    {name:48s} {seconds * 1000:9.1f} ms")
