@@ -303,7 +303,9 @@ test("HISTORY lists Kumi's changes newest first with their own undo, and NOW sho
   assert.ok(!has(lines, "Nothing changed yet"));
   const history = lines.findIndex((line) => line.includes("HISTORY"));
   assert.match(lines[history + 1]!, /■ Bass volume 0\.0 dB → -2\.0 dB, +undo/);
-  assert.match(lines[history + 2]!, /^ +pan C → 5L *$/, "a long title continues on a second line, whole");
+  // The right pane only: the conversation area beside it may hold the welcome.
+  const pane = lines[history]!.indexOf("HISTORY") - 2;
+  assert.match(lines[history + 2]!.slice(pane), /^ +pan C → 5L *$/, "a long title continues on a second line, whole");
   const tempoRow = history + 3;
   assert.match(lines[tempoRow]!, /✓ Tempo 120 → 124 BPM +undo/);
   h.onUndo(() => ({ ...tempo, state: "undone" }));
@@ -480,6 +482,14 @@ test("the welcome screen opens with Kumi's wordmark when the window has room for
   const lines = tall.screen();
   for (const text of [...LOGO_LETTERS.map((line) => line.trim()), LOGO_RULE]) assert.ok(has(lines, text), text);
   assert.ok(lines.findIndex((line) => line.includes(LOGO_RULE)) < lines.findIndex((line) => line.includes("Kumi can see Night Drive.")), "above the welcome");
+  // Centred: the wordmark's middle is the conversation area's middle, and the block sits mid-height.
+  const ruleRow = lines.findIndex((line) => line.includes(LOGO_RULE));
+  const ruleMiddle = lines[ruleRow]!.indexOf(LOGO_RULE) + LOGO_RULE.length / 2;
+  const paneEnd = lines[0]!.length - (lines.find((line) => line.includes("FOCUS"))!.length - lines.find((line) => line.includes("FOCUS"))!.indexOf("FOCUS")) - 2;
+  assert.ok(Math.abs(ruleMiddle - paneEnd / 2) <= 4, `centred across (${ruleMiddle} vs ${paneEnd / 2})`);
+  const firstRow = lines.findIndex((line) => line.includes(LOGO_LETTERS[0]!.trim()));
+  const lastRow = lines.findIndex((line) => line.includes("/conversations goes back"));
+  assert.ok(Math.abs((firstRow + lastRow) / 2 - lines.length / 2) <= 4, `centred down (${firstRow}–${lastRow} of ${lines.length})`);
   await tall.app.close();
   const short = harness(120, 16);
   void short.app.run();

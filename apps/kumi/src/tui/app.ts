@@ -1467,7 +1467,7 @@ export class TuiApp {
   }
 
   private drawWelcome(screen: Screen, x: number, y: number, width: number, height: number): void {
-    const rows: { text: string; style: Style }[] = [];
+    const rows: { text: string; style: Style; center?: boolean }[] = [];
     const add = (text = "", style: Style = st.text) => rows.push({ text, style });
     if (this.connection === "connected" && this.setName) {
       add(`Kumi can see ${this.setName}.`, st.dim);
@@ -1495,9 +1495,14 @@ export class TuiApp {
     add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
     // The wordmark goes above, when the window has room for it and everything under it.
     if (width >= LOGO_WIDTH && height >= rows.length + LOGO_HEIGHT + 1) {
-      rows.unshift(...LOGO_LETTERS.map((text) => ({ text, style: st.bright })), { text: "", style: st.text }, { text: LOGO_RULE, style: st.faint }, { text: "", style: st.text });
+      rows.unshift(...LOGO_LETTERS.map((text) => ({ text, style: st.bright, center: true })), { text: "", style: st.text }, { text: LOGO_RULE, style: st.faint, center: true }, { text: "", style: st.text });
     }
-    rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
+    // Centred in the conversation area, across and down, each line on the middle.
+    const top = y + Math.max(0, Math.floor((height - rows.length) / 2));
+    rows.forEach((row, index) => {
+      const text = truncate(row.text.trim() && !row.center ? row.text.trim() : row.text, width);
+      if (text) screen.put(x + Math.max(0, Math.floor((width - textWidth(text)) / 2)), top + index, text, row.style);
+    });
   }
 
   /** The change NOW is showing, for a few seconds after Kumi makes it. */
