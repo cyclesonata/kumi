@@ -202,7 +202,8 @@ export function bridge(options: Options = {}) {
         if (transaction.name === "live_device_parameter_preview") return wrap({ transactionId: args.transactionId, state: "applied", ...(Array.isArray(transaction.args.values) ? { parameters: (transaction.args.values as JsonObject[]).map((item) => ({ ref: item.parameterRef, value: item.value, revision: 2 })) } : { value: transaction.args.value }) });
         if (transaction.name === "live_browser_load_preview" && options.renders && String(transaction.args.itemId) === "audio_effects/Limiter") {
           const track = tracks[Number(String(transaction.args.trackRef).split(":").at(-1))]!;
-          track.devices = [...(track.devices ?? []), { name: "Limiter", className: "Limiter", params: [{ name: "Gain", value: 0, min: -24, max: 24 }, { name: "Ceiling", value: -0.3, min: -24, max: 0 }] }];
+          // As Live 12 has it: its input 0 to 1 for -24 to +24 dB.
+          track.devices = [...(track.devices ?? []), { name: "Limiter", className: "Limiter", params: [{ name: "Input Gain", value: 0.5, min: 0, max: 1 }, { name: "Ceiling", value: 0.97, min: 0, max: 1 }] }];
           return wrap({ transactionId: args.transactionId, state: "applied", deviceRef: `7:device:${String(transaction.args.trackRef).split(":").at(-1)}:d${track.devices.length - 1}` });
         }
         if (transaction.name === "live_track_structure_preview" && transaction.args.action === "duplicate-track") {

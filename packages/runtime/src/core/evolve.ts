@@ -32,7 +32,7 @@ export interface Slot {
 export interface Trial { slot: string; values: number[]; how: "start" | "nudge" | "cross" | "random" | "recheck" }
 
 /** Names of knobs the search leaves alone: switching a device off, levels the score ignores, safety. */
-const LEAVE = /^(device on|on|power|output|out|volume|gain|master|global volume|limiter.*|ceiling|macro \d+|chain selector|pan|panorama)$/i;
+const LEAVE = /^(device on|on|power|output|out|volume|gain|input|master|global volume|limiter.*|ceiling|macro \d+|chain selector|pan|panorama)$/i;
 
 /** Knobs that shape a sound most, searched first: filters, envelopes, oscillators' shape and level, tuning, drive. */
 const SHAPING = /(filter|freq|cutoff|res(onance)?|q\b|attack|decay|sustain|release|\benv|shape|wave|tone|timbre|bright|color|colour|drive|dist|sat|detune|fine|coarse|level|mix|amount|depth|rate|spread|width|noise|body|decay|damp|stiff|mallet|feedback|morph|position|pw\b|pulse|glide)/i;

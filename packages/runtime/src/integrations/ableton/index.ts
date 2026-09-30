@@ -1573,9 +1573,11 @@ export function createAbletonIntegration(options: Options): Integration {
         // Its input well down: a hot synth into a limiter at 0 dB is limited all the time, and that's heard
         // (a sine chord came back with its upper mids up 20 dB). Down here it only catches a runaway.
         const limiter = read.devices.at(-1);
-        const gain = read.knobs.find((knob) => knob.device === `${read.devices.length - 1}:${String(limiter?.name ?? "Limiter")}` && knob.name === "Gain");
-        if (gain && typeof limiter?.ref === "string" && gain.min < 0) {
-          await quietly(undefined, () => step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: gain.ref, value: Math.max(gain.min, -12) }] }, signal)).catch(() => undefined);
+        const gain = read.knobs.find((knob) => knob.device === `${read.devices.length - 1}:${String(limiter?.name ?? "Limiter")}` && /^(gain|input( gain)?)$/i.test(knob.name));
+        // In dB, or (Live 12's "Input Gain") 0 to 1 for -24 to +24 dB, where -12 dB is 0.25 (read back on real Live).
+        const down = gain ? (gain.min < 0 ? Math.max(gain.min, -12) : gain.min === 0 && gain.max === 1 ? 0.25 : undefined) : undefined;
+        if (gain && down !== undefined && typeof limiter?.ref === "string") {
+          await quietly(undefined, () => step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: gain.ref, value: down }] }, signal)).catch(() => undefined);
           read = await readKnobs(source.name, signal);
         }
       }

@@ -85,6 +85,7 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   assert.equal(names.filter((name) => name.startsWith("Kumi · Goal best")).length, 1, "one best: a better one replaces the last");
   const best = r.b.devicesOf("Kumi · Goal best")!;
   assert.equal(best.at(-1)!.className, "Limiter");
+  assert.equal(best.at(-1)!.params[0]!.value, 0.25, "its input at -12 dB, where it only catches a runaway");
   assert.ok(Math.abs(cutoff(best[0]!.params[1]!.value) - 2600) < 1400, `the best's cutoff ${cutoff(best[0]!.params[1]!.value)} Hz is near the reference's`);
   assert.ok(!names.some((name) => name.startsWith("Kumi · render")), `no scratch tracks left: ${names.join(", ")}`);
   assert.equal(r.b.main.volume, 0.85);
