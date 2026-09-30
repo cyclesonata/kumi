@@ -6,7 +6,7 @@ import { safeError } from "./config.js";
 import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
-import { sanitizeText, StreamingText } from "./text.js";
+import { sanitizeText, StreamingText, webWords } from "./text.js";
 import type { UpdateControl } from "./update.js";
 import { KUMI } from "@kumi/runtime";
 
@@ -353,6 +353,11 @@ export function createTerminal(options: Options): Terminal {
         const words = { captions: "its captions", automatic: "its automatic captions", transcribed: "its speech, transcribed", none: "no words" }[event.words];
         notice(`[watched] “${event.title.slice(0, 120)}”${event.duration ? ` (${at(event.duration)})` : ""}: ${at(event.from)}–${at(event.to)}, ${words}${event.frames.length ? `, frames at ${event.frames.map((frame) => at(frame.at)).join(", ")}` : ""}${event.sound ? `, the sound at ${at(event.sound.from)}–${at(event.sound.to)}` : ""}`);
         for (const note of event.notes.slice(0, 3)) notice(`[watched] ${note}`);
+        break;
+      }
+      case "web": {
+        const words = webWords(event, (value, max) => sanitizeText(value, secrets).replace(/\s+/g, " ").trim().slice(0, max));
+        notice(`[web] ${words.lead} ${words.title}${words.detail ? ` · ${words.detail}` : ""}`);
         break;
       }
       case "turn-complete": {

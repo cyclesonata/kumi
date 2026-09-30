@@ -9,7 +9,7 @@ import {
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
 import type { ModelControl } from "../models.js";
-import { sanitizeText, StreamingText } from "../text.js";
+import { sanitizeText, StreamingText, webWords } from "../text.js";
 import type { UpdateControl } from "../update.js";
 import { Editor, type EditorLayout } from "./editor.js";
 import { Picker, type PickerItem } from "./picker.js";
@@ -552,6 +552,16 @@ export class TuiApp {
           frames: event.frames.slice(0, 16).filter((frame) => frame.thumb.width > 0 && frame.thumb.width <= 64 && frame.thumb.height > 0 && frame.thumb.height <= 64
             && frame.thumb.rgb.length === frame.thumb.width * frame.thumb.height * 3), ...(event.sound ? { sound: event.sound } : {}),
           notes: event.notes.map((note) => clean(note, 300)), pictures: this.depth === "truecolor" || this.depth === "256" }, this.current);
+        break;
+      }
+      case "web": {
+        // What Kumi looked up goes above the answer that uses it, a line each, together.
+        const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replace(/\s+/g, " ").trim().slice(0, max);
+        const line = webWords(event, clean);
+        const at = this.current ? this.transcript.entries.indexOf(this.current) : -1;
+        const above = at > 0 ? this.transcript.entries[at - 1] : at === -1 ? this.transcript.entries.at(-1) : undefined;
+        if (above?.kind === "web" && above.lines.length < 24) { above.lines.push(line); this.transcript.touch(above); }
+        else this.transcript.insertBefore({ kind: "web", lines: [line] }, this.current);
         break;
       }
       case "doing": {

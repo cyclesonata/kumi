@@ -211,6 +211,18 @@ test("a watched video is one line: what it is, where its words came from, the fr
   assert.ok(!f.output.includes("private-token"));
 });
 
+test("a search or a page Kumi read is one line: what it looked for or read, and where", async () => {
+  const f = fixture(); await delay(0);
+  f.emit({ type: "web", action: "searched", title: "erbe verb", where: "github", via: "GitHub", results: 1 });
+  f.emit({ type: "web", action: "read", title: "https://example.com/manual", url: "https://example.com/manual", kind: "a page" });
+  f.emit({ type: "web", action: "searched", title: "nothing like this private-token", where: "web", via: "Exa", results: 0 });
+  f.input.write("/quit\n"); assert.equal(await f.done, 0);
+  assert.match(f.output, /\[web\] Searched GitHub for “erbe verb” · 1 repository/);
+  assert.match(f.output, /\[web\] Read example\.com\/manual\n/);
+  assert.match(f.output, /\[web\] Searched the web for “nothing like this .*” · nothing found/);
+  assert.ok(!f.output.includes("private-token"));
+});
+
 test("plain lines say when a newer Kumi is out, and /update closes Kumi so it updates (or says it's up to date)", async () => {
   let requested = 0; let latest: string | undefined;
   const f = fixture(false, false, undefined, { current: "1.0.0", check: async () => latest, request: () => { requested++; } }); await delay(0);

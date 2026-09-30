@@ -1,3 +1,5 @@
+import type { WebEvent } from "@kumi/runtime";
+
 /** Incremental terminal sanitizer: escape sequences and secret prefixes may span chunks. */
 export class StreamingText {
   private state: "text" | "escape" | "csi" | "string" | "string-escape" = "text";
@@ -50,4 +52,23 @@ export class StreamingText {
 }
 export function sanitizeText(text: string, secrets: readonly string[] = []): string {
   const stream = new StreamingText(secrets); return stream.push(text) + stream.finish();
+}
+
+/**
+ * A search or a page Kumi read, in a line's words: "Searched the web for", “the words”, "8 results";
+ * "Read", “its title”, "where it is · what it is". `clean` makes a page's words safe to show.
+ */
+export function webWords(event: WebEvent, clean: (text: string, max: number) => string): { lead: string; title: string; detail: string } {
+  if (event.action === "searched") {
+    const results = event.results ?? 0;
+    const noun = event.where === "github" ? (results === 1 ? "repository" : "repositories") : results === 1 ? "result" : "results";
+    return { lead: `Searched ${event.where === "github" ? "GitHub" : "the web"} for`, title: `“${clean(event.title, 120)}”`, detail: results ? `${results} ${noun}` : "nothing found" };
+  }
+  let place = "";
+  let path = "";
+  try { const url = new URL(event.url ?? ""); place = url.hostname.replace(/^www\./, ""); path = url.pathname.length > 1 ? url.pathname : ""; } catch { /* no address */ }
+  const titled = Boolean(event.title) && event.title !== event.url;
+  return { lead: "Read", title: titled ? `“${clean(event.title, 120)}”` : clean(`${place}${path}`, 120),
+    detail: [titled ? place : "", event.kind && event.kind !== "a page" ? event.kind : "", event.files !== undefined ? `${event.files} ${event.files === 1 ? "file" : "files"}` : ""]
+      .filter(Boolean).join(" · ") };
 }

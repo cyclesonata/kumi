@@ -1078,6 +1078,32 @@ test("a video Kumi watched goes above the answer: its title, where its words cam
   await h.app.close();
 });
 
+test("what Kumi looked up goes above the answer, a quiet line for each search and page, grouped; a page's title is shown safely", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("make me a reverb like the erbe-verb\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "s1", name: "search_web" });
+  h.emit({ type: "doing", text: "searching the web for “erbe-verb design”" });
+  assert.ok(has(h.screen(), "searching the web for “erbe-verb"), "NOW says what it's looking for (as much as fits)");
+  h.emit({ type: "web", action: "searched", title: "erbe-verb design", where: "web", via: "Exa", results: 8 });
+  h.emit({ type: "tool-end", id: "s1", name: "search_web", isError: false, elapsedMs: 900 });
+  h.emit({ type: "web", action: "read", title: "Building the Erbe-Verb private-token", url: "https://forum.audulus.com/uploads/erbe.pdf", kind: "a PDF", via: "Exa" });
+  h.emit({ type: "web", action: "read", title: "Afturmath/dm-Erbeverb", url: "https://github.com/Afturmath/dm-Erbeverb", kind: "a GitHub repository", files: 29 });
+  h.emit({ type: "text", text: "It's a four-delay FDN reverb." });
+  await delay(5);
+  const lines = h.screen();
+  const searched = lines.findIndex((line) => line.includes("Searched the web for “erbe-verb design” · 8 results"));
+  const pdf = lines.findIndex((line) => line.includes("Read “Building the Erbe-Verb") && line.includes("· forum.audulus.com · a PDF"));
+  const repo = lines.findIndex((line) => line.includes("Read “Afturmath/dm-Erbeverb” · github.com · a GitHub repository · 29 files"));
+  const answer = lines.findIndex((line) => line.includes("It's a four-delay FDN reverb."));
+  assert.ok(searched >= 0 && pdf === searched + 1 && repo === pdf + 1 && answer > repo, lines.join("\n"));
+  assert.ok(!lines.some((line) => line.includes("private-token")), "a page's words are shown safely");
+  await h.app.close();
+});
+
 test("/recipes lists saved ways of working; one without blanks runs straight away, one with blanks asks what to run it on", async () => {
   const ran: string[] = []; const forgotten: string[] = [];
   const recipes = [

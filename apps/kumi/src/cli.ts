@@ -221,6 +221,7 @@ try {
       goals: createGoalStore(loadGoalsDir()),
       gaps: loadGapsFile(),
       watch: { videosDir: loadVideosDir(), toolsDir: loadToolsDir() },
+      web: true,
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";

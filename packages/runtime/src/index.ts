@@ -1,10 +1,12 @@
-export type { CatchUp, ChainNode, ChangeFamily, ChangeRecord, ClipNote, DeviceNode, DevicePlacement, DeviceTree, PinnedNode, ClipView, SessionStrip, ArrangementStrip, ConversationStore, ConversationSummary, DisconnectCause, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, HeardEvent, AuditionEvent, AuditionRequest, AuditionResult, KernelTool, ToolImage, WatchedEvent, LiveFocus, RecipeEvent, RecipeSummary, TechniqueEvent, TechniqueSummary, Memory, MemoryEvent, MemoryNote, MemoryScope, MemoryStore, Observation, SessionController, SessionEvent, SessionStatus, StreamingCall, ToolResult, TurnResult, TurnState, Usage } from "./core/contracts.js";
+export type { CatchUp, ChainNode, ChangeFamily, ChangeRecord, ClipNote, DeviceNode, DevicePlacement, DeviceTree, PinnedNode, ClipView, SessionStrip, ArrangementStrip, ConversationStore, ConversationSummary, DisconnectCause, SavedConversation, TranscriptLine, ConnectionState, Integration, IntegrationFactory, JsonObject, Kernel, KernelEvent, KernelFactory, KernelOptions, KernelCheckpoint, HeardEvent, AuditionEvent, AuditionRequest, AuditionResult, KernelTool, ToolImage, WatchedEvent, WebEvent, LiveFocus, RecipeEvent, RecipeSummary, TechniqueEvent, TechniqueSummary, Memory, MemoryEvent, MemoryNote, MemoryScope, MemoryStore, Observation, SessionController, SessionEvent, SessionStatus, StreamingCall, ToolResult, TurnResult, TurnState, Usage } from "./core/contracts.js";
 export { createMemoryStore, FORGET_TOOL, MAX_NOTE, MAX_NOTES, memoryInstructions, REMEMBER_TOOL } from "./core/memory.js";
 export { checkTechnique, createTechniqueStore, MAX_TECHNIQUES, TECHNIQUE_GUIDANCE, TECHNIQUE_TOOL, techniqueInstructions, TechniqueDrafts, techniqueTools, type Technique, type TechniqueStore } from "./core/techniques.js";
 export { GAP_GUIDANCE, GAP_TOOL, gapTools } from "./core/gaps.js";
 export { analyzeFile, closeness, compare, hear, type Analysis, type Closeness, type Comparison } from "./audio/index.js";
 export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
 export { videoTools, WATCH_VIDEO_TOOL } from "./video/tool.js";
+export { READ_WEB_TOOL, SEARCH_WEB_TOOL, webTools } from "./web/tool.js";
+export { createWebClient, type WebClient } from "./web/net.js";
 export { findFfmpeg, findWhisper, findYtDlp, watchVideo, youtubeId, type Watched, type WatchRequest } from "./video/index.js";
 export { configurePrograms, ffmpegHint, whisperHint } from "./video/programs.js";
 export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";
