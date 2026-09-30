@@ -3,6 +3,77 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.1.0 — 2026-09-30
+
+Kumi installs with one line and keeps itself up to date, makes audio effects and
+instruments, and looks things up on the web. Ships with bridge 1.0.53.
+
+### Installing and updating
+
+- One line installs Kumi with its own Node: no admin rights, git, npm or Node
+  needed. `curl -fsSL …/install.sh | sh` on macOS, `irm …/install.ps1 | iex` in
+  Windows PowerShell. Each download is checked against its checksum, running it
+  again repairs or updates, and your own files in `~/.kumi` are never touched.
+- `kumi update` fetches the newest release, checks it and starts it before
+  swapping it in, and keeps the one before (`kumi update --rollback`).
+  `kumi update --check` only says whether there's a newer Kumi.
+- `/update` does the same from inside Kumi: it asks first, closes Kumi, updates
+  it and opens it again, and the Set's conversation carries on. A newer Kumi is
+  mentioned on the welcome screen, checked at most once a day in the background;
+  `"updateCheck": false` in `~/.kumi/settings.json` (or `KUMI_NO_UPDATE_CHECK`)
+  turns that off.
+- `kumi uninstall` removes Kumi, its Node, its launcher and its PATH lines,
+  offers to take the bridge out of Live (and keeps what Live needs while Live
+  still loads it), and keeps your files unless you add `--all`. `KUMI_HOME`
+  moves everything Kumi keeps.
+- The installer adds Kumi to PATH the way each shell reads it: bash's existing
+  startup file (never a new `.bash_profile` that would hide `.profile`), zsh's
+  `ZDOTDIR`, fish for each session, and on Windows the user PATH with its
+  `%VARIABLES%` kept.
+- `kumi bridge` needs no npm: the bundle carries the bridge ready to install.
+- A release that isn't there yet says so, rather than "check your internet
+  connection".
+
+### Making devices
+
+- `make_device` makes audio effects and instruments too, not just MIDI effects.
+  The model writes the sound in GenExpr (the language of Max's gen~), and Kumi
+  builds the device around it: an effect gets Mix and Output knobs, an
+  instrument up to 8 voices, each with its note, velocity, bend and mod wheel.
+- Kumi's output stage keeps the device's own output safe (no NaN, denormals or
+  DC, held under +6 dBFS). On an effect the dry signal passes untouched, so at
+  Mix 0 the track sounds exactly as it did without it (checked on real Live).
+- Kumi checks the code before it builds the device: outputs assigned, brackets
+  paired, inputs read by an effect and not by an instrument, and no name gen~ or
+  Kumi already uses (a control's Param declared again included).
+
+### Looking things up
+
+- `search_web` searches the web, through Exa's free search (DuckDuckGo when Exa
+  can't answer), and GitHub's repositories for code.
+- `read_web` reads a page, a PDF, a text or code file, a GitHub repository or a
+  file in one, a Max patch or Max for Live device (its controls and its gen~
+  code first), or a picture. Asked for "an audio effect that sounds like the
+  Erbe-Verb" and nothing more, Kumi reads how the original works before it
+  writes any code.
+- Kumi reads only public addresses (checked again as each connection is made,
+  redirects too), and what a page says is information to it, never
+  instructions. What it looked up shows above its answer, a line each.
+
+### Fixes
+
+- A rack Kumi just loaded takes chains at once: a change whose tool isn't
+  listed yet reads Live's catalog again before saying it isn't available.
+- Renaming a device added since Kumi connected works (bridge 1.0.53).
+- A `/goal` with nothing to compare against ends and says why, instead of
+  "setting up" forever.
+- Renders record from the right place on real Live. Kumi no longer moves the
+  playhead while Live is stopped (Live's "continue" plays from where it last
+  stopped): with room before the part it jumps there while playing, and near
+  the Set's start it records from the start.
+- A command typed while a list is open runs, so `/update` works from the model
+  list Kumi opens on its first start.
+
 ## 1.0.0 — 2026-09-30
 
 The first release for producers to use day to day. Ships with bridge 1.0.52.
