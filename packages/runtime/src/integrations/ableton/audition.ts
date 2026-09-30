@@ -62,14 +62,20 @@ export function silentRender(analysis: Analysis): boolean {
   return lufs === null || lufs < -60 || analysis.loudness.samplePeakDbfs < -55;
 }
 
+/** How long before the part a pass starts at least: it jumps there while playing, then starts recording, and each step through the bridge takes a second or so. */
+const LEAD_IN_SECONDS = 3;
+
 /**
- * Where the render starts and what's heard of it: a bar of pre-roll before the part (so a sound's
- * attack isn't cut), and a little tail after, both left out of what's heard.
+ * Where a render pass plays from and how long it waits, in beats: whole bars of lead-in before the
+ * part, at least LEAD_IN_SECONDS of them (twice that for a pass again after one that started late),
+ * and a half bar of tail after it (releases and delays ring on). A part too near the Set's start for
+ * that plays from the start (position 0).
  */
-export function renderSpan(fromBeat: number, beats: number, beatsPerBar: number): { position: number; preroll: number; wait: number } {
-  const position = Math.max(0, fromBeat - beatsPerBar);
+export function renderSpan(fromBeat: number, beats: number, beatsPerBar: number, tempo: number, longer = false): { position: number; preroll: number; wait: number } {
+  const bar = beatsPerBar * 60 / tempo;
+  const lead = Math.max(1, Math.ceil(LEAD_IN_SECONDS * (longer ? 2 : 1) / bar)) * beatsPerBar;
+  const position = fromBeat > lead ? fromBeat - lead : 0;
   const preroll = fromBeat - position;
-  // A half bar of tail: releases and delays ring on past the part.
   return { position, preroll, wait: preroll + beats + beatsPerBar / 2 };
 }
 

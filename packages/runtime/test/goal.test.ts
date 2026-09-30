@@ -202,7 +202,7 @@ test("a goal's analyses are kept by settings: a render already heard isn't heard
   if (typeof rig === "string") return;
   const slot = rig.slots[0]!;
   const trial = { slot: slot.name, knobs: slot.knobs, values: slot.knobs.map((knob) => knob.value) };
-  const passes = () => b.requests.filter((request) => request.name === "live_transport_action_preview" && request.args.action === "continue").length;
+  const passes = () => b.requests.filter((request) => request.name === "live_recording_preview" && request.args.action === "start").length;
   const first = await rig.generation([trial], new AbortController().signal);
   assert.equal(first.cached, 0);
   const before = passes();
