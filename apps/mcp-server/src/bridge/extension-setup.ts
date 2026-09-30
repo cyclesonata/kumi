@@ -4,8 +4,10 @@ import { launchExtension } from "./extension-launcher.js";
 import { routedAdapter } from "./router.js";
 
 export interface ExtensionSetup {
-  /** Where the extension keeps its endpoint, secret and renders; the bridge's state folder has one. */
+  /** Where the extension keeps its endpoint, secret and renders when the bridge starts it; the bridge's state folder has one. */
   storageDirectory: string;
+  /** Where it keeps them when Live runs it (installed in Live's Extensions folder); looked at first. */
+  installedStorage?: string;
   /** Start Live's Extension Host with Kumi's extension when none answers (default true). */
   launch?: boolean;
   liveApp?: string;
@@ -28,7 +30,7 @@ export function withExtension<T extends AsyncLiveAdapter>(remoteScript: T, setup
   };
   // Only a real Live has an Extension Host to reach (a simulated or fake Remote Script doesn't).
   const realLive = () => { const status = remoteScript.status(); return status.connected && status.provenance === "real-live"; };
-  channel = new ExtensionChannel({ storageDirectory: setup.storageDirectory, enabled: realLive, ...(launch ? { launch } : {}), ...(setup.log ? { log: setup.log } : {}) });
+  channel = new ExtensionChannel({ storageDirectory: setup.storageDirectory, ...(setup.installedStorage ? { installedStorage: setup.installedStorage } : {}), enabled: realLive, ...(launch ? { launch } : {}), ...(setup.log ? { log: setup.log } : {}) });
   const attempt = () => { if (!channel!.status()) void channel!.connect(); };
   const timer = setInterval(attempt, setup.retryMs ?? 10_000);
   timer.unref();

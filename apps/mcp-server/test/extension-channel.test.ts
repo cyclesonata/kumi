@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ExtensionChannel, readExtensionEndpoint } from "../src/bridge/extension-channel.js";
 import { findExtensionBundle, launchExtension, parseExtensionHosts } from "../src/bridge/extension-launcher.js";
 import { withExtension } from "../src/bridge/extension-setup.js";
+import { kumiExtensionFolders } from "../src/bridge/live-extension-folders.js";
 import { mergedStatus, routeToExtension, routedAdapter } from "../src/bridge/router.js";
 import { LIVE_REGISTRY_HASH, type AsyncLiveAdapter, type LiveEvent, type LiveInvocation, type LiveStatus } from "../src/live.js";
 
@@ -196,7 +197,7 @@ test("withExtension routes Kumi's extension in once a real Live is connected, an
   await adapter.close();
 });
 
-test("a running Extension Host is recognised: another bridge's Kumi one is shared, Live's own leaves Kumi's to kumi.ablx", () => {
+test("a running Extension Host is recognised: another bridge's Kumi one is shared, Live's own is left alone", () => {
   const folder = "/Users/p/.config/bridge-a/live-extension"; const windowsFolder = "C:/Users/p/AppData/Roaming/bridge/live-extension";
   const tag = (path: string) => `kumi-storage:${Buffer.from(path, "utf8").toString("base64url")}`;
   const kumi = `/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node -e globalThis.__kumiLaunchedHost = true; const config = JSON.parse(process.argv[1]); {"extensions":[{"path":"/k"}]} /x/ExtensionHostNodeModule.node ${tag(folder)}`;
@@ -213,10 +214,29 @@ test("launching uses another bridge's running Kumi extension, and leaves Live's 
   await launchExtension({ storageDirectory: join(root, "mine"), scan: () => ({ kumi: [storage], live: false }), onShared: (folder) => shared.push(folder), log: (line) => lines.push(line) });
   assert.deepEqual(shared, [storage]); assert.equal(lines.length, 0);
   await launchExtension({ storageDirectory: join(root, "mine"), scan: () => ({ kumi: [], live: true }), log: (line) => lines.push(line) });
-  assert.match(lines[0]!, /Live runs its own Extension Host .* kumi\.ablx/);
+  assert.match(lines[0]!, /Live runs its own Extension Host; Kumi's extension runs there once installed \(kumi bridge, then restart Live\)/);
   // The channel follows a shared extension to its folder for the endpoint and the secret.
   const channel = new ExtensionChannel({ storageDirectory: join(root, "mine") });
   channel.share(storage);
   assert.equal(await channel.connect(), true);
   await channel.close();
+});
+
+test("the extension Live runs itself (installed in Live) is used first, and none is started", async () => {
+  let launched = 0;
+  const channel = new ExtensionChannel({ storageDirectory: join(root, "mine"), installedStorage: storage, launch: async () => { launched++; } });
+  assert.equal(await channel.connect(), true);
+  assert.equal(launched, 0); assert.equal(channel.status()?.adapter, "extension");
+  await channel.close();
+  // With nothing installed (or Live not running it), the bridge starts its own (Developer Mode).
+  const fallback = new ExtensionChannel({ storageDirectory: join(root, "mine"), installedStorage: join(root, "not-installed"), launch: async () => { launched++; } });
+  assert.equal(await fallback.connect(), false);
+  assert.equal(launched, 1); assert.equal(fallback.reason, "Kumi's Live extension isn't running");
+});
+
+test("Live keeps Kumi's extension in its Extensions folder, and its data beside it", () => {
+  assert.deepEqual(kumiExtensionFolders({}, "darwin", "/Users/p"), { code: "/Users/p/Library/Application Support/Ableton/Extensions/kumi.kumi", data: "/Users/p/Library/Application Support/Ableton/Extensions Data/kumi.kumi" });
+  assert.deepEqual(kumiExtensionFolders({ ABLETON_MCP_LIVE_EXTENSIONS_DIR: "/x/Extensions" }, "darwin", "/Users/p"), { code: "/x/Extensions/kumi.kumi", data: "/x/Extensions Data/kumi.kumi" });
+  assert.equal(kumiExtensionFolders({}, "linux", "/home/p"), undefined);
+  assert.match(kumiExtensionFolders({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32", "C:/Users/p")!.data, /AppData[\\/]Roaming[\\/]Ableton[\\/]Extensions Data[\\/]kumi\.kumi$/);
 });

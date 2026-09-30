@@ -16,6 +16,8 @@ import { validateLiveOperationRequest, validateLiveOperationResult } from "../re
 export interface ExtensionEndpoint { host: string; port: number; pid: number; extensionVersion: string; registryHash: string; apiVersion: string; startedAt: number }
 export interface ExtensionChannelOptions {
   storageDirectory: string;
+  /** Where Kumi's extension keeps its endpoint and secret when Live runs it (installed in Live's Extensions folder). */
+  installedStorage?: string;
   /** Starts an Extension Host with Kumi's extension when none answers; resolves once it may have. */
   launch?: () => Promise<void>;
   /** Whether looking for the extension makes sense now (a real Live is connected); default always. */
@@ -92,14 +94,25 @@ export class ExtensionChannel {
   /** Use the extension another bridge started, which keeps its endpoint and secret in its own folder. */
   share(storageDirectory: string): void { this.storage = storageDirectory; }
 
+  /**
+   * The running extension to use: the one Live runs itself (installed), else one this bridge or
+   * another started (Live's Developer Mode, where Live starts none), with the folder that holds its secret.
+   */
+  private find(): { folder: string; endpoint: ExtensionEndpoint } | undefined {
+    const folders = [this.options.installedStorage, this.storage, this.options.storageDirectory].filter((folder): folder is string => Boolean(folder));
+    for (const folder of new Set(folders)) { const endpoint = readExtensionEndpoint(folder); if (endpoint) return { folder, endpoint }; }
+    return undefined;
+  }
+
   private async open(): Promise<boolean> {
-    let endpoint = readExtensionEndpoint(this.storage) ?? readExtensionEndpoint(this.options.storageDirectory);
-    if (endpoint && !readExtensionEndpoint(this.storage)) this.storage = this.options.storageDirectory;
-    if (!endpoint && this.options.launch) {
+    let found = this.find();
+    if (!found && this.options.launch) {
       await this.options.launch();
-      endpoint = readExtensionEndpoint(this.storage);
+      found = this.find();
     }
-    if (!endpoint) { this.reason = "Kumi's Live extension isn't running"; return false; }
+    if (!found) { this.reason = "Kumi's Live extension isn't running"; return false; }
+    this.storage = found.folder;
+    const endpoint = found.endpoint;
     if (endpoint.registryHash !== LIVE_REGISTRY_HASH) { this.reason = "Kumi's Live extension is from another bridge version"; return false; }
     let secret: string;
     try { secret = readFileSync(join(this.storage, "secret"), "utf8").trim(); } catch { this.reason = "the extension's secret is missing"; return false; }

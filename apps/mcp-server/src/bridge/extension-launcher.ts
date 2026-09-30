@@ -114,7 +114,8 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
   const running = options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts();
   const shared = running.kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
   if (shared) { options.onShared?.(shared); return; }
-  if (running.live) { log("extension channel: Live runs its own Extension Host (installed extensions); add Kumi's there: Settings → Extensions, then kumi.ablx"); return; }
+  // Live runs the extensions installed in it (kumi bridge installs Kumi's) and lets no other host in.
+  if (running.live) { log("extension channel: Live runs its own Extension Host; Kumi's extension runs there once installed (kumi bridge, then restart Live)"); return; }
   const extension = options.extension ?? findExtensionBundle();
   const host = findExtensionHost(options.liveApp);
   if (!extension || !isExtension(extension)) { log("extension channel: Kumi's Live extension isn't with this bridge"); return; }
