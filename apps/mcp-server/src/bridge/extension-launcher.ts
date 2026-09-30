@@ -65,8 +65,10 @@ export function parseExtensionHosts(listing: string): { kumi: string[]; live: bo
   for (const line of listing.split(/\r?\n/)) {
     if (!/ExtensionHost[\\/]node(\.exe)?\b/.test(line)) continue;
     if (!line.includes("__kumiLaunchedHost")) { live = true; continue; }
-    const match = /"storageDirectory":"((?:[^"\\]|\\.)*)"/.exec(line);
-    if (match) kumi.push(JSON.parse(`"${match[1]}"`) as string);
+    // The folder rides in an argument of its own, spelt so that no platform's quoting rewrites it
+    // (Windows escapes the quotes of a JSON argument in the command line it records).
+    const match = /kumi-storage:([A-Za-z0-9_-]+)/.exec(line);
+    if (match) kumi.push(Buffer.from(match[1]!, "base64url").toString("utf8"));
   }
   return { kumi, live };
 }
@@ -141,7 +143,7 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
       "require(process.argv[2]).initialize(config);",
     ].join(" ");
     // KUMI_LAUNCHED_HOST tells the extension this host is Kumi's to end when Live goes.
-    const child = spawn(host.node, ["-e", script, JSON.stringify(config), host.module], { detached: true, stdio: ["ignore", logFile, logFile], windowsHide: true, env: { ...process.env, KUMI_LAUNCHED_HOST: "1" } });
+    const child = spawn(host.node, ["-e", script, JSON.stringify(config), host.module, `kumi-storage:${Buffer.from(options.storageDirectory, "utf8").toString("base64url")}`], { detached: true, stdio: ["ignore", logFile, logFile], windowsHide: true, env: { ...process.env, KUMI_LAUNCHED_HOST: "1" } });
     closeSync(logFile);
     child.unref();
     log(`extension channel: started Live's Extension Host (pid ${child.pid}) with ${extension}`);

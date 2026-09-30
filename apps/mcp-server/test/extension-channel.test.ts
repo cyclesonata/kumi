@@ -197,11 +197,15 @@ test("withExtension routes Kumi's extension in once a real Live is connected, an
 });
 
 test("a running Extension Host is recognised: another bridge's Kumi one is shared, Live's own leaves Kumi's to kumi.ablx", () => {
-  const kumi = `/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node -e globalThis.__kumiLaunchedHost = true; require("/x/ExtensionHostNodeModule.node").initialize({"extensions":[{"path":"/k/live-extension","storageDirectory":"/Users/p/.config/bridge-a/live-extension","tempDirectory":"/t"}]});`;
+  const folder = "/Users/p/.config/bridge-a/live-extension"; const windowsFolder = "C:/Users/p/AppData/Roaming/bridge/live-extension";
+  const tag = (path: string) => `kumi-storage:${Buffer.from(path, "utf8").toString("base64url")}`;
+  const kumi = `/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node -e globalThis.__kumiLaunchedHost = true; const config = JSON.parse(process.argv[1]); {"extensions":[{"path":"/k"}]} /x/ExtensionHostNodeModule.node ${tag(folder)}`;
+  // Windows records a JSON argument with its quotes escaped (libuv's quoting); the tag is untouched.
+  const windows = `C:\\ProgramData\\Ableton\\Live 12\\Program\\ExtensionHost\\node.exe -e "globalThis.__kumiLaunchedHost = true; …" "{\\"extensions\\":[{\\"storageDirectory\\":\\"${windowsFolder}\\"}]}" C:/x/ExtensionHostNodeModule.node ${tag(windowsFolder)}`;
   const own = "/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node --some-live-arguments";
-  assert.deepEqual(parseExtensionHosts([kumi, "/usr/bin/other", ""].join("\n")), { kumi: ["/Users/p/.config/bridge-a/live-extension"], live: false });
+  assert.deepEqual(parseExtensionHosts([kumi, "/usr/bin/other", ""].join("\n")), { kumi: [folder], live: false });
+  assert.deepEqual(parseExtensionHosts(windows), { kumi: [windowsFolder], live: false });
   assert.deepEqual(parseExtensionHosts(own), { kumi: [], live: true });
-  assert.deepEqual(parseExtensionHosts("C:\\Program\\ExtensionHost\\node.exe -e globalThis.__kumiLaunchedHost = true; x({\"storageDirectory\":\"C:/Users/p/AppData/bridge/live-extension\"})"), { kumi: ["C:/Users/p/AppData/bridge/live-extension"], live: false });
 });
 
 test("launching uses another bridge's running Kumi extension, and leaves Live's own Extension Host alone", async () => {

@@ -248,3 +248,19 @@ test("reads sent together share one reading of the catalog, and a change announc
   assert.equal(tools.has("live_status"), true);
   assert.equal(lists, 2, "one reading for all four, read again once after the change");
 });
+
+test("a discovery page the Remote Script refuses as too big is asked again at 100 rows, and from then on", async () => {
+  // The Remote Script Live loaded may be older than its host and allow 100 rows a page.
+  const limits: unknown[] = [];
+  const endpoint: McpEndpoint = {
+    pid: null, serverInfo: undefined, stderrStatus: () => ({ bytes: 0, truncated: false }), close: async () => undefined,
+    onCatalogChanged: () => () => undefined, onDisconnect: () => () => undefined,
+    list: async () => ({ tools: [{ name: "live_discover", inputSchema: { type: "object" } }] }),
+    call: async (_name, args) => { limits.push(args.limit); return args.limit as number > 100 ? { isError: true, content: [{ type: "text", text: "discovery limit is invalid" }] } : { content: [{ type: "text", text: "{}" }] }; },
+  };
+  const tools = new AllowedTools(endpoint, new Set(["live_discover"]));
+  assert.equal((await tools.call("live_discover", { kind: "track", limit: 100_000 }, freshSignal(), { host: true })).isError, undefined);
+  assert.equal((await tools.call("live_discover", { kind: "device", limit: 100_000 }, freshSignal(), { host: true })).isError, undefined);
+  assert.deepEqual(limits, [100_000, 100, 100]);
+  await tools.close();
+});
