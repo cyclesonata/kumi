@@ -123,6 +123,10 @@ test("an offline render is an audio track's own clips, copied to a name of its o
   assert.notEqual(second.path, first.path); assert.ok(existsSync(first.path)); assert.equal(second.seconds, 2);
   await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:0", fromBeat: 0, toBeat: 8, expectedName: "Keys" }), /isn't an audio track/);
   await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 4, toBeat: 4, expectedName: "Vox" }), /empty/);
+  // A group track (the SDK lists it as an audio track) has no clips of its own to render.
+  const bus = live.track("AudioTrack", "Bus"); live.song.tracks.push(bus); live.vox.group = bus;
+  await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:3", fromBeat: 0, toBeat: 4, expectedName: "Bus" }), /"Bus" is a group: render its tracks/);
+  live.vox.group = null; live.song.tracks.pop();
   client.close();
 });
 
@@ -161,13 +165,17 @@ test("right-click 'Ask Kumi about this' tells every connected host where the pro
 
 test("a group starts its steps together inside one Live transaction, and names a step that fails", async () => {
   const client = await connect();
-  const before = live.created.length;
+  const before = live.created.length; const notesBefore = live.notesSet.length; const transactionsBefore = live.transactions.length;
   const grouped = await client.invoke("transaction.group", { ops: [
-    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 32, length: 4, notes: [], expectedName: "Keys" } },
-    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:1", start: 32, length: 4, notes: [], expectedName: "Drums" } },
+    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 32, length: 4, notes: [{ pitch: 60, start: 0, duration: 1 }], expectedName: "Keys" } },
+    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:1", start: 32, length: 4, notes: [{ pitch: 36, start: 0, duration: 1 }], expectedName: "Drums" } },
   ] });
-  assert.equal(grouped.results.length, 2);
+  assert.deepEqual(grouped.results.map((result) => result.notes), [1, 1]);
+  // Both clips are made in one transaction, then both get their notes in one more: two undo steps in Live.
   assert.deepEqual(live.created.slice(before).map((entry) => entry.insideTransaction), [true, true]);
+  assert.deepEqual(live.notesSet.slice(notesBefore).map((entry) => entry.insideTransaction), [true, true]);
+  const outermost = live.transactions.slice(transactionsBefore).reduce((state, mark) => ({ depth: state.depth + (mark === "begin" ? 1 : -1), opened: state.opened + (mark === "begin" && state.depth === 0 ? 1 : 0) }), { depth: 0, opened: 0 });
+  assert.equal(outermost.opened, 2);
   await assert.rejects(client.invoke("transaction.group", { ops: [{ operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 40, length: 4, notes: [] } }] }), /expectedName is required/);
   await assert.rejects(client.invoke("transaction.group", { ops: [
     { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 40, length: 4, notes: [], expectedName: "Keys" } },

@@ -35,6 +35,8 @@ const renderOffline: Operation = async (context, args, environment) => {
   const track = trackAt(context, path[0]);
   checkName(track, expected(args), "track");
   if (!(track instanceof AudioTrack)) throw new Error(`"${track.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
+  // The SDK lists a group track among the tracks, as an audio track, but it has no clips of its own and Live refuses to render it.
+  if (allTracks(context).some((other) => other.groupTrack?.handle.id === track.handle.id)) throw new Error(`"${track.name}" is a group: render its tracks`);
   const from = num(args.fromBeat); const to = num(args.toBeat);
   if (!(to > from)) throw new Error("the range to render is empty");
   const started = performance.now();
@@ -65,8 +67,15 @@ function noteDescriptions(value: unknown): NoteDescription[] {
   });
 }
 
-/** A MIDI clip in the Arrangement (or a take lane) with its notes: what the Remote Script can't write there. */
-const arrangementMidiClip: Operation = async (context, args) => {
+interface MadeClip { finish: () => void; result: () => Record<string, unknown> }
+
+/**
+ * A MIDI clip in the Arrangement (or a take lane) with its notes: what the Remote Script can't write
+ * there. Two parts, because the SDK makes a clip asynchronously and its notes need the clip: making it,
+ * then (`finish`, synchronous) its notes, name and looping. A group makes all its clips in one undo step
+ * and gives them their notes in a second.
+ */
+async function makeArrangementMidiClip(context: Context, args: Args): Promise<MadeClip> {
   const reference = String(args.trackRef); const { epoch, path } = parseRef(reference);
   const track = trackAt(context, path[0]);
   checkName(track, expected(args), "track");
@@ -79,16 +88,26 @@ const arrangementMidiClip: Operation = async (context, args) => {
     lane = takeLaneAt(context, lanePath); laneIndex = lanePath[1];
   }
   const clip = await lane.createMidiClip(num(args.start), num(args.length));
-  context.withinTransaction(() => {
-    clip.notes = notes;
-    if (typeof args.name === "string") clip.name = args.name;
-    if (typeof args.looping === "boolean") clip.looping = args.looping;
-  });
-  const clips = lane instanceof TakeLane ? lane.clips : track.arrangementClips;
-  const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
-  if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
-  const ref = laneIndex === undefined ? makeRef(epoch, "arrangement_clip", [path[0]!, index]) : makeRef(epoch, "take_lane_clip", [path[0]!, laneIndex, index]);
-  return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
+  return {
+    finish: () => {
+      clip.notes = notes;
+      if (typeof args.name === "string") clip.name = args.name;
+      if (typeof args.looping === "boolean") clip.looping = args.looping;
+    },
+    result: () => {
+      const clips = lane instanceof TakeLane ? lane.clips : track.arrangementClips;
+      const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
+      if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
+      const ref = laneIndex === undefined ? makeRef(epoch, "arrangement_clip", [path[0]!, index]) : makeRef(epoch, "take_lane_clip", [path[0]!, laneIndex, index]);
+      return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
+    },
+  };
+}
+
+const arrangementMidiClip: Operation = async (context, args) => {
+  const made = await makeArrangementMidiClip(context, args);
+  context.withinTransaction(made.finish);
+  return made.result();
 };
 
 /** Every clip in a beat range on a track goes, and a clip crossing either edge is cut at it. */
@@ -150,10 +169,11 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
 };
 
 /**
- * Several of this channel's changes as one Live undo step. The SDK groups only what is started inside
- * its (synchronous) transaction callback, so the steps start there together, each running its own course;
- * they must not depend on one another. Each step's arguments are checked against the registry first,
- * and a failed step is named, with what the others did.
+ * Several of this channel's changes, grouped in Live's undo: the steps start together inside one SDK
+ * transaction (the SDK groups only what starts inside its synchronous callback), so every step's first
+ * change is one undo step; the Arrangement clips' notes, names and looping, which need the clips made
+ * first, then go in one more. Steps must not depend on one another. Each step's arguments are checked
+ * against the registry first, and a failed step is named, with how many others were made.
  */
 export function transactionGroup(validate: (operation: string, args: Args) => void): Operation {
   return async (context, args, environment) => {
@@ -162,15 +182,17 @@ export function transactionGroup(validate: (operation: string, args: Args) => vo
       if (!OPERATIONS[step.operation]) throw new Error(`step ${index + 1}: a group can't hold ${step.operation}`);
       validate(step.operation, step.args);
     }
-    const runs = context.withinTransaction(() => steps.map((step) => OPERATIONS[step.operation]!(context, step.args, environment)));
-    const settled = await Promise.allSettled(runs);
+    const start = (step: { operation: string; args: Args }): Promise<MadeClip | Record<string, unknown>> => step.operation === "arrangement.midi-clip.create" ? makeArrangementMidiClip(context, step.args) : OPERATIONS[step.operation]!(context, step.args, environment);
+    const settled = await context.withinTransaction(() => Promise.allSettled(steps.map(start)));
+    const made = settled.flatMap((outcome) => outcome.status === "fulfilled" && typeof (outcome.value as Partial<MadeClip>).finish === "function" ? [outcome.value as MadeClip] : []);
+    if (made.length) context.withinTransaction(() => { for (const clip of made) clip.finish(); });
     const failed = settled.findIndex((outcome) => outcome.status === "rejected");
     if (failed >= 0) {
       const reason = (settled[failed] as PromiseRejectedResult).reason;
       const done = settled.filter((outcome) => outcome.status === "fulfilled").length;
-      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason)}); ${done} of ${steps.length} steps were made`);
+      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason ?? "Live refused it without a reason")}); ${done} of ${steps.length} steps were made`);
     }
-    return { results: settled.map((outcome) => (outcome as PromiseFulfilledResult<Record<string, unknown>>).value) };
+    return { results: settled.map((outcome) => { const value = (outcome as PromiseFulfilledResult<MadeClip | Record<string, unknown>>).value; return typeof (value as Partial<MadeClip>).finish === "function" ? (value as MadeClip).result() : value as Record<string, unknown>; }) };
   };
 }
 

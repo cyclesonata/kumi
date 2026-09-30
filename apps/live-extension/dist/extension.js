@@ -1214,6 +1214,7 @@ var renderOffline = async (context, args, environment) => {
   const track = trackAt(context, path[0]);
   checkName(track, expected(args), "track");
   if (!(track instanceof import_sdk2.AudioTrack)) throw new Error(`"${track.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
+  if (allTracks(context).some((other) => other.groupTrack?.handle.id === track.handle.id)) throw new Error(`"${track.name}" is a group: render its tracks`);
   const from = num(args.fromBeat);
   const to = num(args.toBeat);
   if (!(to > from)) throw new Error("the range to render is empty");
@@ -1244,7 +1245,7 @@ function noteDescriptions(value) {
     return description;
   });
 }
-var arrangementMidiClip = async (context, args) => {
+async function makeArrangementMidiClip(context, args) {
   const reference = String(args.trackRef);
   const { epoch, path } = parseRef(reference);
   const track = trackAt(context, path[0]);
@@ -1260,16 +1261,25 @@ var arrangementMidiClip = async (context, args) => {
     laneIndex = lanePath[1];
   }
   const clip = await lane.createMidiClip(num(args.start), num(args.length));
-  context.withinTransaction(() => {
-    clip.notes = notes;
-    if (typeof args.name === "string") clip.name = args.name;
-    if (typeof args.looping === "boolean") clip.looping = args.looping;
-  });
-  const clips = lane instanceof import_sdk2.TakeLane ? lane.clips : track.arrangementClips;
-  const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
-  if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
-  const ref = laneIndex === void 0 ? makeRef(epoch, "arrangement_clip", [path[0], index]) : makeRef(epoch, "take_lane_clip", [path[0], laneIndex, index]);
-  return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
+  return {
+    finish: () => {
+      clip.notes = notes;
+      if (typeof args.name === "string") clip.name = args.name;
+      if (typeof args.looping === "boolean") clip.looping = args.looping;
+    },
+    result: () => {
+      const clips = lane instanceof import_sdk2.TakeLane ? lane.clips : track.arrangementClips;
+      const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
+      if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
+      const ref = laneIndex === void 0 ? makeRef(epoch, "arrangement_clip", [path[0], index]) : makeRef(epoch, "take_lane_clip", [path[0], laneIndex, index]);
+      return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
+    }
+  };
+}
+var arrangementMidiClip = async (context, args) => {
+  const made = await makeArrangementMidiClip(context, args);
+  context.withinTransaction(made.finish);
+  return made.result();
 };
 var clearRange = async (context, args) => {
   const reference = String(args.trackRef);
@@ -1331,15 +1341,22 @@ function transactionGroup(validate2) {
       if (!OPERATIONS[step.operation]) throw new Error(`step ${index + 1}: a group can't hold ${step.operation}`);
       validate2(step.operation, step.args);
     }
-    const runs = context.withinTransaction(() => steps.map((step) => OPERATIONS[step.operation](context, step.args, environment)));
-    const settled = await Promise.allSettled(runs);
+    const start = (step) => step.operation === "arrangement.midi-clip.create" ? makeArrangementMidiClip(context, step.args) : OPERATIONS[step.operation](context, step.args, environment);
+    const settled = await context.withinTransaction(() => Promise.allSettled(steps.map(start)));
+    const made = settled.flatMap((outcome) => outcome.status === "fulfilled" && typeof outcome.value.finish === "function" ? [outcome.value] : []);
+    if (made.length) context.withinTransaction(() => {
+      for (const clip of made) clip.finish();
+    });
     const failed = settled.findIndex((outcome) => outcome.status === "rejected");
     if (failed >= 0) {
       const reason = settled[failed].reason;
       const done = settled.filter((outcome) => outcome.status === "fulfilled").length;
-      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason)}); ${done} of ${steps.length} steps were made`);
+      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason ?? "Live refused it without a reason")}); ${done} of ${steps.length} steps were made`);
     }
-    return { results: settled.map((outcome) => outcome.value) };
+    return { results: settled.map((outcome) => {
+      const value = outcome.value;
+      return typeof value.finish === "function" ? value.result() : value;
+    }) };
   };
 }
 
@@ -17207,7 +17224,7 @@ var ExtensionServer = class {
       } else throw new Error(`method unavailable on the Extensions channel: ${String(request.method)}`);
       this.send(connection, { version: LOOPBACK_PROTOCOL, id, ok: true, bridgeEpoch: this.bridgeEpoch, connectionChallenge: connection.challenge, result });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : error === void 0 || error === null ? "Live refused it without giving a reason" : String(error);
       this.log(`request ${id} failed: ${message}`);
       this.error(connection, id, message.slice(0, 1024));
     }

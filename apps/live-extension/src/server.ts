@@ -123,7 +123,7 @@ export class ExtensionServer {
       } else throw new Error(`method unavailable on the Extensions channel: ${String(request.method)}`);
       this.send(connection, { version: LOOPBACK_PROTOCOL, id, ok: true, bridgeEpoch: this.bridgeEpoch, connectionChallenge: connection.challenge, result });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : error === undefined || error === null ? "Live refused it without giving a reason" : String(error);
       this.log(`request ${id} failed: ${message}`);
       this.error(connection, id, message.slice(0, 1024));
     }

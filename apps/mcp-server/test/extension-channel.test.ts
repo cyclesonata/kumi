@@ -148,8 +148,7 @@ function fakeExtensionHost(directory: string, mode: "answer" | "mute"): void {
   writeFileSync(join(directory, "ExtensionHostNodeModule.node"), "");
   const script = join(directory, "fake-host.cjs");
   writeFileSync(script, `
-const source = process.argv[process.argv.indexOf("-e") + 1];
-const config = JSON.parse(source.slice(source.indexOf(".initialize(") + 12, source.lastIndexOf(")")));
+const config = JSON.parse(process.argv[process.argv.indexOf("-e") + 2]);
 const storage = config.extensions[0].storageDirectory;
 ${mode === "answer" ? 'require("node:fs").writeFileSync(require("node:path").join(storage, "endpoint.json"), JSON.stringify({ host: "127.0.0.1", port: 1, pid: process.pid, extensionVersion: "test", registryHash: "x", apiVersion: "1.0.0", startedAt: Date.now() }));' : ""}
 setTimeout(() => undefined, 60000);

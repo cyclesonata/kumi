@@ -23,7 +23,7 @@ export function wav(path, { channels = 2, sampleRate = 44100, bits = 24, seconds
 }
 
 export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
-  let next = 1n; const objects = new Map(); const menu = []; const commands = new Map(); const transactions = []; let depth = 0; const created = [];
+  let next = 1n; const objects = new Map(); const menu = []; const commands = new Map(); const transactions = []; let depth = 0; const created = []; const notesSet = [];
   const make = (cls, fields = {}, parent = null) => { const id = next++; const object = { id, cls, parent, ...fields }; objects.set(id, object); return object; };
   const handle = (object) => ({ id: object.id });
   const get = (h) => { const object = objects.get(h.id); if (!object) throw new Error("stale handle"); return object; };
@@ -31,7 +31,7 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
   const track = (cls, name, { slots = 2 } = {}) => { const t = make(cls, { name, clipSlots: [], arrangementClips: [], takeLanes: [], devices: [] }, song); for (let i = 0; i < slots; i++) t.clipSlots.push(make("ClipSlot", { clip: null }, t)); return t; };
   const device = (cls, name, owner, extra = {}) => make(cls, { name, chains: [], sample: null, ...extra }, owner);
   const clip = (cls, owner, start, duration, name = "") => make(cls, { name, start, end: start + duration, looping: false, notes: [], filePath: cls === "AudioClip" ? "/clip.wav" : undefined }, owner);
-  const model = { app, song, objects, make, track, device, clip, menu, commands, transactions, handle, created };
+  const model = { app, song, objects, make, track, device, clip, menu, commands, transactions, handle, created, notesSet };
   const ok = (resolve, value) => resolve(value);
   const dataModel = {
     getObjectIsOfClass: (h, className) => (CLASSES[get(h).cls] ?? [get(h).cls]).includes(className),
@@ -43,6 +43,7 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
     trackGetName: (h) => get(h).name, trackSetName: (h, value) => { get(h).name = value; },
     trackGetClipSlots: (h) => get(h).clipSlots.map(handle), trackGetTakeLanes: (h) => get(h).takeLanes.map(handle),
     trackGetArrangementClips: (h) => get(h).arrangementClips.map(handle), trackGetDevices: (h) => get(h).devices.map(handle),
+    trackGetGroupTrack: (h) => { const group = get(h).group; return group ? handle(group) : null; },
     trackCreateMidiClip: (h, start, duration, resolve) => { const t = get(h); const c = clip("MidiClip", t, start, duration); created.push({ start, insideTransaction: depth > 0 }); t.arrangementClips.push(c); t.arrangementClips.sort((a, b) => a.start - b.start); ok(resolve, handle(c)); },
     trackClearClipsInRange: (h, from, to, resolve) => {
       const t = get(h); const kept = [];
@@ -62,7 +63,7 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
     clipGetLooping: (h) => get(h).looping, clipSetLooping: (h, value) => { get(h).looping = value; },
     clipGetLoopStart: () => 0, clipGetLoopEnd: (h) => get(h).end - get(h).start, clipGetColor: () => 0n, clipSetColor: () => undefined,
     clipGetMuted: () => false, clipSetMuted: () => undefined,
-    midiclipGetNotes: (h) => get(h).notes.map((note) => ({ ...note })), midiclipSetNotes: (h, notes) => { get(h).notes = notes.map((note) => ({ ...note })); },
+    midiclipGetNotes: (h) => get(h).notes.map((note) => ({ ...note })), midiclipSetNotes: (h, notes) => { get(h).notes = notes.map((note) => ({ ...note })); notesSet.push({ start: get(h).start, insideTransaction: depth > 0 }); },
     audioclipGetFilePath: (h) => get(h).filePath,
     clipslotGetClip: (h) => { const c = get(h).clip; return c ? handle(c) : null; },
     deviceGetName: (h) => get(h).name, deviceGetParameters: () => [],
