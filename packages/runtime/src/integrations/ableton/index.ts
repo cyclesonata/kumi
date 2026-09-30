@@ -100,7 +100,7 @@ interface Options {
   reconnectIntervalMs?: number;
   /** Live's User Library, where the devices Kumi makes go (make_device); Live's default place when left out. */
   userLibrary?: string;
-  /** Where Main's level is kept while an audition renders, to put it back after a crash. */
+  /** Where Main's level is kept while an audition renders, to put it back after a crash (none: not kept). */
   restoreFile?: string;
   /** Each audition, for the conversation's round lines. */
   onAudition?: (event: AuditionEvent) => void;
@@ -142,7 +142,8 @@ export function createAbletonIntegration(options: Options): Integration {
   let rounds = { count: 0, best: undefined as number | undefined };
   /** References heard this session, by file and span: a matching run hears the same one each round. */
   const referenceCache = new Map<string, Analysis>();
-  const restore = restoreStore(options.restoreFile ?? `${homedir()}/.kumi/audition-restore.json`);
+  // Without a file, Main is still put back after every render; only a crash's leftover isn't.
+  const restore = options.restoreFile ? restoreStore(options.restoreFile) : { save() {}, load: () => undefined, clear() {} };
   let toldQuietly = false;
   let closing: Promise<void> | undefined;
   let focusFeed: FocusFeed | undefined;

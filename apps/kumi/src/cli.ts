@@ -5,7 +5,7 @@ import {
 } from "@kumi/runtime";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadGoalsDir, loadMemoryFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadGoalsDir, loadMemoryFile, loadRestoreFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
@@ -128,6 +128,7 @@ try {
           onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },
           onWatch: (on) => terminal?.handleEvent({ type: "watching", on }),
           onAudition: (event) => { controller.watch?.(event); terminal?.handleEvent(event); },
+          restoreFile: loadRestoreFile(),
           projectStore: createProjectStore(loadProjectsDir()),
           ...(liveUserLibrary() ? { userLibrary: liveUserLibrary()! } : {}),
           onCatchUp: (catchUp) => terminal?.handleEvent({ type: "catch-up", catchUp }),

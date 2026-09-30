@@ -5,6 +5,9 @@ import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTo
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
 import { lowDisk } from "../../src/core/disk.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Synthetic bridge responses shaped like the real ones recorded in .pi/kumi-evidence (previews
 // return prior and proposed values, a transaction id and a confirmation; applies return a state).
@@ -263,7 +266,8 @@ export function bridge(options: Options = {}) {
   const auditions: AuditionEvent[] = [];
   const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => { states.push(state); options.onConnection?.(state); }, onChange: (change) => records.push(change),
     onAction: (action) => actions.push(action), changeTimeoutMs: 2_000, reconnectIntervalMs: 10, onAudition: (event) => { auditions.push(event); options.onAudition?.(event); },
-    ...(options.restoreFile ? { restoreFile: options.restoreFile } : {}),
+    // Never the producer's own ~/.kumi: each bridge its own file.
+    restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
     lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
   return {
     integration, requests, records, states, actions, auditions, released, get tempo() { return tempo; },
