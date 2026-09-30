@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import type { ChangeRecord, JsonObject, KernelOptions, KernelTool, SessionEvent, TechniqueEvent } from "../src/core/contracts.js";
 import { createSession } from "../src/core/session.js";
-import { checkTechnique, createTechniqueStore, draftFromBuild, MAX_TECHNIQUES, TECHNIQUE_TOOL, techniqueInstructions, techniqueTools, type Technique, type TechniqueStore } from "../src/core/techniques.js";
+import { checkTechnique, createTechniqueStore, draftFromBuild, MATCHING, MAX_TECHNIQUES, TECHNIQUE_TOOL, techniqueInstructions, techniqueTools, type Technique, type TechniqueStore } from "../src/core/techniques.js";
 import { GAP_TOOL, gapTools } from "../src/core/gaps.js";
 
 const signal = () => new AbortController().signal;
@@ -24,8 +24,8 @@ function judge(settleMs = 60_000) {
   const learned = techniqueTools({ store, onEvent: (event) => events.push(event), settleMs });
   const tool = learned.tools.find((item) => item.name === TECHNIQUE_TOOL)!;
   /** A turn that builds (changes on the Neuro Bass track) and drafts the technique. */
-  async function built(changes: ChangeRecord[] = [change("c1", "applied"), change("c2", "applied")]) {
-    learned.drafts.turnStarted();
+  async function built(changes: ChangeRecord[] = [change("c1", "applied"), change("c2", "applied")], request = "") {
+    learned.drafts.turnStarted(request);
     for (const record of changes) learned.drafts.change(record);
     const result = await tool.execute({ action: "draft", ...neuro }, signal());
     assert.equal(result.reply, "", "drafting needs no model reply");
@@ -111,6 +111,40 @@ test("a drafted technique goes quietly when the producer says no, undoes most of
   await closing.built();
   await closing.learned.drafts.close();
   assert.equal(closing.kept().length, 1);
+});
+
+test("a technique drafted while matching a sound is kept only once it's been heard: an audition, the producer playing it, or their praise", async () => {
+  const request = "make it sound like this reference";
+  // Left alone, moved on from, or saved without anyone listening: a guess at the sound, not kept.
+  for (const [why, after] of [
+    ["left in place", async (j: ReturnType<typeof judge>) => { await delay(60); }],
+    ["moved on", async (j: ReturnType<typeof judge>) => { j.learned.drafts.said("now the drums"); j.learned.drafts.said("and a riser"); }],
+    ["saved", async (j: ReturnType<typeof judge>) => { j.learned.drafts.saved(); }],
+    ["closing", async (j: ReturnType<typeof judge>) => { await j.learned.drafts.close(); }],
+  ] as const) {
+    const j = judge(20);
+    await j.built(undefined, request);
+    await after(j); await delay(5);
+    assert.equal(j.kept().length, 0, why);
+  }
+  // Auditioned in the same turn (the audition says it's playing): kept like any other.
+  const auditioned = judge(20);
+  auditioned.learned.drafts.turnStarted(request);
+  auditioned.learned.drafts.played();
+  await auditioned.tool.execute({ action: "draft", ...neuro }, signal());
+  auditioned.learned.drafts.turnEnded();
+  await delay(60);
+  assert.equal(auditioned.kept().length, 1, "heard in its own turn, then left in place");
+  for (const [why, after] of [
+    ["played later", (j: ReturnType<typeof judge>) => j.learned.drafts.played()],
+    ["praised", (j: ReturnType<typeof judge>) => j.learned.drafts.said("that's perfect")],
+  ] as const) {
+    const j = judge();
+    await j.built(undefined, request);
+    after(j); await delay(5);
+    assert.equal(j.kept().length, 1, why);
+  }
+  assert.ok(MATCHING.test("recreate this sound") && MATCHING.test("can you make my bass sound like the reference") && !MATCHING.test("make a bass"));
 });
 
 test("a technique that refines one merges into it; a new one is added, and the least used makes room when full", async () => {

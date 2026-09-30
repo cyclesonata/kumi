@@ -140,7 +140,13 @@ interface Pending {
   tracks: Set<string>;
   said: number;
   timer?: ReturnType<typeof setTimeout>;
+  /** Drafted while matching a sound: kept only once it's been heard (an audition, or the producer playing it). */
+  needsHearing?: boolean;
+  heard?: boolean;
 }
+
+/** Requests to match something: "make it sound like this", "recreate this sound", "match the reference". */
+export const MATCHING = /\b(sounds? (more )?like|sound closer to|recreate|re-create|match(ing)?|like (this|the) reference|copy (this|that) sound)\b/i;
 
 /** A request's words for what it asks for: "Build me a gritty Reese bass on a new MIDI track: …" → "gritty Reese bass on a new MIDI track". */
 function asked(request: string): string {
@@ -188,11 +194,14 @@ export class TechniqueDrafts {
   private recent: ChangeRecord[] = [];
   /** What the producer asked for this turn, for a draft Kumi writes from the build. */
   private request = "";
+  /** This turn asks to match a sound, and whether something was heard in it (an audition). */
+  private matching = false;
+  private heardThisTurn = false;
 
   constructor(private readonly options: { keep: (draft: Pending["draft"]) => Promise<void>; settleMs?: number }) {}
 
   /** A turn starts: its changes are counted afresh. */
-  turnStarted(request = ""): void { this.recent = []; this.request = request; }
+  turnStarted(request = ""): void { this.recent = []; this.request = request; this.matching = MATCHING.test(request); this.heardThisTurn = false; }
 
   /** The turn was stopped: a draft from it goes, since what it built may be half done. */
   abandon(): void { if (this.pending?.open) this.pending = undefined; }
@@ -202,7 +211,7 @@ export class TechniqueDrafts {
     if (this.pending && !this.pending.open) void this.settle(true);
     const build = new Map(this.recent.map((record) => [record.id, record] as const));
     const tracks = new Set(this.recent.flatMap((record) => (record.track?.name ? [record.track.name] : [])));
-    this.pending = { draft, open: true, build, tracks, said: 0 };
+    this.pending = { draft, open: true, build, tracks, said: 0, ...(this.matching ? { needsHearing: true, heard: this.heardThisTurn } : {}) };
   }
 
   /** A change Kumi made or undid. During the drafting turn it's part of the build; after, a signal. */
@@ -231,8 +240,12 @@ export class TechniqueDrafts {
     if ([...pending.tracks].every((name) => !tracks.includes(name))) void this.settle(false);
   }
 
-  /** Something played in Live: they listened to it. */
-  played(): void { if (this.pending && !this.pending.open) void this.settle(true); }
+  /** Something played in Live (or Kumi auditioned it): it's been heard. */
+  played(): void {
+    this.heardThisTurn = true;
+    if (this.pending?.open) this.pending.heard = true;
+    else if (this.pending) void this.settle(true, true);
+  }
 
   /** The Set was saved. */
   saved(): void { if (this.pending && !this.pending.open) void this.settle(true); }
@@ -242,7 +255,9 @@ export class TechniqueDrafts {
     const pending = this.pending;
     if (!pending || pending.open) return;
     if (NEGATIVE.test(text)) { void this.settle(false); return; }
-    if (POSITIVE.test(text) || ++pending.said >= 2) void this.settle(true);
+    // Praise means they heard it.
+    if (POSITIVE.test(text)) void this.settle(true, true);
+    else if (++pending.said >= 2) void this.settle(true);
   }
 
   /** A turn ended: the drafting turn's build is complete, and the waiting starts. A turn that built a chain
@@ -260,11 +275,13 @@ export class TechniqueDrafts {
   /** Kumi is closing: a draft the producer left in place is kept. */
   async close(): Promise<void> { if (this.pending && !this.pending.open) await this.settle(true); else this.pending = undefined; }
 
-  private async settle(keep: boolean): Promise<void> {
+  private async settle(keep: boolean, heard = false): Promise<void> {
     const pending = this.pending;
     if (!pending) return;
     this.pending = undefined;
     if (pending.timer) clearTimeout(pending.timer);
+    // A match nobody heard is only a guess at the sound: not worth keeping.
+    if (keep && pending.needsHearing && !pending.heard && !heard) return;
     if (keep) await this.options.keep(pending.draft).catch(() => {});
   }
 }
