@@ -597,7 +597,11 @@ export function createSession(options: Options): SessionController {
       if (setup.stopReason !== "completed" || op.controller.signal.aborted) return { ...setup, usage };
       const heard = heardLast as AuditionEvent | undefined;
       if (!heard?.request?.reference) {
-        emit({ type: "notice", message: "The goal needs something to reach: give a reference (a file, or an audio clip in the Set) and try /goal again." });
+        // Nothing to compare with: the model did it as an ordinary request. The GOAL tab says so and
+        // stops rather than waiting on a search that won't start.
+        goalStatusNow = { ...goalStatusNow!, state: "done", why: "no reference to reach, so it was done as a regular request" };
+        emit(goalStatusNow);
+        emit({ type: "notice", message: "A goal searches toward something: with no reference, Kumi did this as a regular request. To search, give /goal a reference too (an audio file, a clip in the Set, or a video)." });
         return { stopReason: "completed", usage };
       }
       request = heard.request;

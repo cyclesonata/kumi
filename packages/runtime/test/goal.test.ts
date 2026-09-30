@@ -30,7 +30,7 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number, options: { reference?: string; leapEvery?: number; beats?: number } = {}) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number, options: { reference?: string; leapEvery?: number; beats?: number; noReference?: boolean } = {}) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
@@ -48,7 +48,8 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook
         const tracks = JSON.parse((await call(tools, "live_discover", { kind: "track", fields: ["name"] })).text).live.items as { ref: string; name: string }[];
         const ref = (name: string) => tracks.find((track) => track.name === name)!.ref;
         const span = { from_beat: 8, beats: options.beats ?? 4, reference: options.reference ?? reference, focus: "sound" };
-        if (input.includes("Set the search up")) await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Dark"), label: "Dark Operator" }, { track: ref("Kumi · Goal · Bright"), label: "Bright Operator" }], ...span });
+        if (input.includes("Set the search up") && options.noReference) emit({ type: "text", text: "Built it as asked." });
+        else if (input.includes("Set the search up")) await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Dark"), label: "Dark Operator" }, { track: ref("Kumi · Goal · Bright"), label: "Bright Operator" }], ...span });
         else if (input.includes("structural leap")) { emit({ type: "text", text: "A third Operator, wider open." }); await call(tools, "audition", { candidates: [{ track: ref("Kumi · Goal · Wide"), label: "Wide Operator" }], ...span }); }
         return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
       },
@@ -103,6 +104,18 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   // Kept on disk as done.
   assert.equal([...r.goals.kept.values()][0]!.status, "done");
   assert.ok(r.events.some((event) => event.type === "notice" && /^Goal done: .*% \(.*\) · \d+ generations · \d+ candidates · the best is on “Kumi · Goal best”/.test(event.message)));
+  await r.session.close();
+});
+
+test("a goal with nothing to reach is done as a regular request, and the GOAL tab says so instead of waiting", async () => {
+  const r = rig(memoryGoals(), render, undefined, undefined, { noReference: true });
+  await r.session.start();
+  await r.session.goal!("make me an extremely convoluted neuro rack on this track");
+  assert.match(r.asked[0]!, /nothing to compare with[\s\S]*ordinary request/, "the model is told what to do without a reference");
+  const last = r.statuses().at(-1)!;
+  assert.equal(last.state, "done"); assert.match(last.why ?? "", /no reference/);
+  assert.equal(r.session.goalStatus?.()?.state, "done", "nothing left 'setting up'");
+  assert.ok(r.events.some((event) => event.type === "notice" && /regular request/.test(event.message)));
   await r.session.close();
 });
 

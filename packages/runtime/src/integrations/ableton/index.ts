@@ -994,6 +994,10 @@ export function createAbletonIntegration(options: Options): Integration {
       signal.throwIfAborted();
       if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
       await ensureCatalog(signal); assertLease(lease, signal);
+      // The bridge offers some tools only once the Set has what they work on (edit_rack once there's a
+      // rack): a plan that just loaded one may be ahead of the bridge's catalog-changed notice, so the
+      // catalog is read again before saying the change isn't available.
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) { await tools.refresh(signal); assertLease(lease, signal); }
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
