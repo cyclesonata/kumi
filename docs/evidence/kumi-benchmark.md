@@ -40,3 +40,38 @@ general improvement to the harness.
 | 4 | b967b50 | Claude Sonnet 5.5 | **63** (the model's own: 45 → 63; 56 heard at full length) | envelope 27, rhythm 37, pitch 50, movement 51, balance 53 | 33:37 | 7.45M in (6.56M cached), 71.0k out | The knob search finds the winner by name. A Drift an octave up (it cured a +11 dB sub excess) → Saturator, low-pass at 4.6 kHz, with the transcribed part snapped to 32nds. The knob search ran but tried only 11 settings (one a pass, and it gave up after 10 without a gain): none beat the start at full length, so nothing changed. Checking why rhythm stays near 37: the render's hits land a steady 90–150 ms after the reference's, 100 ms of it the lead-in a single sound's render is heard with; but re-hearing it at any offset gives at most 38, so it's the hits themselves (how many, how loud), not their timing. |
 | 5 | 3a5f689 | Claude Sonnet 5.5 | **66** (the model's own: 46 → 68) | movement 37, balance 46, rhythm 49, pitch 50, envelope 69 | 35:50 | 8.59M in (7.76M cached), 90.4k out | Reads share one reading of the bridge's catalog (the cause of the "set_device_parameter isn't available" gaps: none this run), sections heard from their first beat, the knob search on the winner plus three copies. A Drift on its saturated wave → Saturator → low-pass at 1.26 kHz → EQ Eight (−9 dB at 1 and 2 kHz), the whole line and its hits in one clip. Still +10 dB in the presence band. The knob search tried 13 settings in about 3 minutes and none beat the start. Replaying its loop on this Set: the score stays within 46–50 whatever the search tries (these 24 knobs barely matter here), and Live refuses to remove copies whose knobs have moved ("created structure content changed after apply"), so the copies were taken out again (single track only). |
 | 6 | 2e23bce | Claude Sonnet 5.5 | **69** (the model's own: 39 → 70) | rhythm 32, pitch 50, movement 58, contour 58, balance 63 | 31:48 | 7.41M in (6.91M cached), 57.6k out | A held rig's every pass records its own take (before, a goal's and the knob search's passes after the first were all scored on the first take, and 0.8 s late). The knob search heard 41 real settings in its 8 minutes, and its full-length reading of the start (69) now matches the audition (70); none beat it. The model built "Scose Blips": a Drift playing the transcribed hits as pitched blips (high-passed, a 1 kHz dip, a +4 dB low shelf), with the pitched line on another track; density 95 and envelope 84 are the best yet, rhythm the weakest (32). Its clip is in scene 2 (`SCENE=1`; the first clip scores 57). |
+
+Run 2's score is from what was in Live when the driver cut it off; the others are from each run's end.
+Runs of one harness vary a lot (53 to 71 across runs 2–6, one prompt, one model), so single runs say
+little about a change on their own; the log says what each run did and why it scored what it did.
+
+## Where it got to
+
+**Score:** 40 (run 0) → 67, 71, 53, 63, 66, 69 (runs 1–6); 64.8 on average over runs 1–6, 64.2 over the clean runs 2–6.
+What moved it most:
+1. **The sequence from the reference** (run 1): transcribing it and writing its notes took density from
+   33 to 87 and contour from 29 to 84; the baseline guessed a phrase.
+2. **Note starts as played** (run 2): rhythm from 24 to 54. Rounding every start to a 16th at a guessed
+   tempo drifted the part away from a reference that isn't on a grid.
+3. **The model keeping its change tools** (run 5 on): parallel reads each refreshed the bridge's catalog
+   and invalidated one another, and an observation built meanwhile offered no change tools; runs 0 and 2
+   filed "set_device_parameter isn't available" and left devices at their defaults for a while.
+4. **A goal's search really listening** (run 6): a held rig recorded only its first pass and scored every
+   later pass on that take, 0.8 s late. Before, the match's knob search (and goals) couldn't find anything;
+   now it hears 41 real settings in 8 minutes, though on this benchmark none has beaten the model's patch.
+
+What still differs most: rhythm (32–54: the hits' number and strength, not their timing; re-hearing a
+render at every offset doesn't raise it), movement, and balance in the presence band.
+
+## Held out
+
+| Reference | Harness | Model | Score | Time | Tokens | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| keys-chord-ref (a single chord) | 2026-09-29 (match runs) | Claude Sonnet 5.5 | the model's own 58 → 73 | 14:36 | | From `kumi-poc.md`. |
+| keys-chord-ref | 3a5f689 | Claude Sonnet 5.5 | the model's own **63 → 82** | 9:32 | 1.94M in (1.80M cached), 14.9k out | Operator sine chord with a quiet sub, 6 ms attack, low-pass at 507 Hz, EQ Eight high-pass. Not re-scored by the scorer: a probe of the knob search changed the winner's knobs before it was scored. |
+| heldout-riff (an 8 s riff, 120 BPM) | 2e23bce | Claude Sonnet 5.5 | **63** over the whole riff (the model's own: 57 → 87 over its first 8 beats) | 26:02 | not captured | A Drift saw → Auto Filter → Saturator with noise. It read the riff at 96 BPM and wrote only its first 8 beats, so its auditions compared half the riff (density 26 over the whole: the second half is silent). The run ended when the Anthropic account ran out of credit, at the wrap-up. |
+
+The baseline harness (a27bcfa) couldn't run the held-out references for a before/after: it can't reach
+the bridge now in Live (its doctor: "Kumi's bridge couldn't reach Live"). The keys chord improved against
+the earlier harness's recorded run (73 → 82 in less time). The riff shows a gap the benchmark doesn't: nothing tells the model when
+its audition covers only part of the reference. It's left unfixed here, since the riff is held out.
