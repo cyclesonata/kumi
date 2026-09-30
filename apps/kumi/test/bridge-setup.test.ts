@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { setupBridge, type BridgeSetupIo, type Ran } from "../src/bridge-setup.js";
+import { liveExtensionsDir } from "../src/live-extension.js";
 
 /** A repository bridge at `bundled`, Live's Remote Scripts folder, and (with `installed`) a bridge installed there. */
 function world(options: { bundled: string; installed?: string }) {
@@ -28,8 +29,10 @@ function world(options: { bundled: string; installed?: string }) {
   let out = "";
   const output = new PassThrough(); output.on("data", (chunk) => { out += String(chunk); });
   const lifecycle: Ran[] = [];
-  const io = (extra: Partial<BridgeSetupIo> = {}): BridgeSetupIo => ({
-    out: output, env: { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_LIVE_EXTENSIONS_DIR: join(root, "Ableton", "Extensions") }, bridgeDir, home: join(root, "kumi"), waitMs: 0, yes: true,
+  // A test's own environment adds to this one: Live's folders always stay in the test's own.
+  const env = { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_LIVE_EXTENSIONS_DIR: join(root, "Ableton", "Extensions") };
+  const io = ({ env: extraEnv, ...extra }: Partial<BridgeSetupIo> = {}): BridgeSetupIo => ({
+    out: output, env: { ...env, ...extraEnv }, bridgeDir, home: join(root, "kumi"), waitMs: 0, yes: true,
     liveRunning: async () => false, sleep: async () => {},
     async run(command, args, cwd) {
       calls.push({ command, args });
@@ -180,4 +183,12 @@ test("without Live's own folder (Live never opened), the extension isn't placed 
     assert.equal(existsSync(join(w.root, "Ableton", "Extensions")), false);
     assert.match(w.out, /Kumi couldn't add its extension to Live \(Live's folder isn't there .*open Live once\); everything else works/);
   } finally { w.done(); }
+});
+
+test("Live's Extensions folder comes from the environment given, never the producer's own home by default", () => {
+  assert.equal(liveExtensionsDir({}, "darwin"), undefined, "no HOME given: no folder (a test's partial environment can't reach the real Live)");
+  assert.equal(liveExtensionsDir({ HOME: "/Users/p" }, "darwin"), join("/Users/p", "Library", "Application Support", "Ableton", "Extensions"));
+  assert.equal(liveExtensionsDir({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32"), join("C:/Users/p/AppData/Roaming", "Ableton", "Extensions"));
+  assert.equal(liveExtensionsDir({ HOME: "/home/p" }, "linux"), undefined);
+  assert.equal(liveExtensionsDir({ KUMI_LIVE_EXTENSIONS_DIR: "/x/Extensions", HOME: "/Users/p" }, "darwin"), "/x/Extensions");
 });
