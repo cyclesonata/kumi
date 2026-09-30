@@ -11,6 +11,7 @@ import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
+import { foldTracks } from "./fold.js";
 import { defaultSampleFolders, findSamples, folderPath, userLibrary, type Sample } from "./samples.js";
 import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
@@ -2215,7 +2216,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         // of one tick each, and the Set can't change between them; each carries the epoch, checked
         // against the status's.
         const setArgs = discoveryArgs({ kind: "set", fields: [...FIELDS.set!, "filePath"] });
-        const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind"], limit: pageLimit() });
+        const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind", "groupTrackRef"], limit: pageLimit() });
         const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: pageLimit() });
         const settle = <T>(work: Promise<T>): Promise<{ value: T } | { error: unknown }> => work.then((value) => ({ value }), (error: unknown) => ({ error }));
         const song = tools!.has("live_song_state") ? settle(tools!.call("live_song_state", {}, signal, { host: true }).then(payload)) : Promise.resolve(undefined);
@@ -2253,7 +2254,8 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
           if (!tracksRead.value.isError) {
             const trackPage = discoveryPayload(tracksRead.value, "track", epoch);
             registerRows("track", trackPage.items, trackArgs, trackPage.nextCursor);
-            trackList = trackPage.items.map((item) => ({ ref: typeof item.ref === "string" ? shortRef(item.ref) : null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null }));
+            trackList = trackPage.items.map((item) => ({ ref: typeof item.ref === "string" ? shortRef(item.ref) : null, name: typeof item.name === "string" ? item.name.slice(0, 120) : null, type: item.kind === "group" ? "group" : item.mediaKind ?? item.kind ?? null,
+              ...(typeof item.groupTrackRef === "string" ? { group: shortRef(item.groupTrackRef) } : {}) }));
             moreTracks = Boolean(trackPage.nextCursor) || trackPage.truncated === true;
             // And the devices on them, so a request about a track's sound goes straight to its parameters.
             try {
@@ -2322,6 +2324,11 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         await ensureCatalog(signal); assertLease(lease, signal);
         const provenance = typeof status.provenance === "string" ? status.provenance : "unknown";
         const source = provenance === "real-live" && status.adapter === "remote-script" ? "Remote Script · real-live" : `unverified/synthetic fixture · ${provenance}`;
+        // A big Set is folded to about the same size as a small one: the tracks in focus (selected in
+        // Live, pinned in Kumi, changed lately) keep their devices, every other track is one line.
+        const focusRefs = new Set<string>([...(selected ? [String((selected.track as JsonObject).ref)] : []), ...(hints?.pinned ? [shortRef(hints.pinned.trackRef)] : [])]);
+        const focusNames = new Set([...changes.values()].slice(-12).flatMap(({ record }) => (record.track?.name ? [record.track.name] : [])));
+        const shown = trackList ? foldTracks(trackList, (track) => focusRefs.has(String(track.ref)) || focusNames.has(String(track.name))) : undefined;
         return {
           key,
           revision: String(tools!.generation),
@@ -2334,7 +2341,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
             adapter: status.adapter, provenance, liveVersion: status.environment && typeof status.environment === "object" ? object(status.environment).liveVersion ?? null : null,
             set: { ref: typeof row.ref === "string" ? shortRef(row.ref) : row.ref, name, tempo: row.tempo ?? null, timeSignature: `${numerator}/${denominator}`, playing: row.playing ?? null, position: row.position ?? null, loop: row.loop ?? null,
               ...(songState ? { recording: { session: songState.sessionRecord === true, arrangement: row.recording ?? null }, swing: songState.swingAmount ?? null } : {}) },
-            ...(trackList ? { tracks: trackList, ...(moreTracks ? { moreTracks: "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
+            ...(shown ? { tracks: shown.tracks, ...(shown.folded ? { folded: shown.folded } : {}), ...(moreTracks || shown.moreTracks ? { moreTracks: shown.moreTracks ?? "More tracks than listed; discover the rest" } : {}), ...(moreDevices ? { moreDevices: "Not every device is listed; discover a track's devices" } : {}) } : {}),
             ...(catchUpContext && project?.identity === identity ? { sinceLastTime: catchUpContext } : {}),
             ...(pinned ? { pinned } : {}),
             ...(selected ? { selectedInLive: selected } : {}),
