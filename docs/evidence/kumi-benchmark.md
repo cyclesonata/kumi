@@ -47,7 +47,7 @@ little about a change on their own; the log says what each run did and why it sc
 
 ## Where it got to
 
-**Score:** 40 (run 0) → 67, 71, 53, 63, 66, 69 (runs 1–6); 64.8 on average over runs 1–6, 64.2 over the clean runs 2–6.
+**Score:** 40 (run 0) → 67, 71, 53, 63, 66, 69 (runs 1–6); 64.8 on average over runs 1–6, 64.4 over the clean runs 2–6.
 What moved it most:
 1. **The sequence from the reference** (run 1): transcribing it and writing its notes took density from
    33 to 87 and contour from 29 to 84; the baseline guessed a phrase.
