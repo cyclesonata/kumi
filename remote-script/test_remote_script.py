@@ -630,7 +630,8 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertTrue(reserved <= set(ids)); self.assertTrue(reserved.isdisjoint(LiveObjectMapper(FakeSong()).status()["operations"]))
 
     def test_lom_audit_lists_every_live_class_with_its_members(self):
-        live = types.ModuleType("Live"); song_module = types.ModuleType("Live.Song")
+        # Inside Live the submodules are named without the "Live." prefix.
+        live = types.ModuleType("Live"); song_module = types.ModuleType("Song"); live.os = os
         class Song:
             """The Live Set."""
             tempo = property(lambda self: 120.0, doc="Tempo in beats per minute")
@@ -651,6 +652,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(members["begin_undo_step"]["kind"], "method"); self.assertEqual(members["View"]["kind"], "class")
         self.assertIn("selected_track", [row["name"] for row in by_path["Live.Song.Song.View"]["members"]])
         self.assertEqual(by_path["Live.Song.Song"]["doc"], "The Live Set.")
+        self.assertFalse(any(path.startswith("Live.os") for path in by_path))
 
     def test_status_result_carries_every_canonical_operation_within_the_bound(self):
         registry, _ = operation_registry()

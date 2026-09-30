@@ -254,7 +254,8 @@ def _lom_audit(live: Any, max_depth: int = 8) -> dict[str, Any]:
             try: child = getattr(owner, name)
             except BaseException: continue
             if isinstance(child, type(live)):
-                if str(getattr(child, "__name__", "")).startswith("Live"): visit(child, f"{path}.{name}", depth + 1)
+                # Live's submodules are named "Song", "Track"... (no "Live." prefix); skip only the standard library.
+                if str(getattr(child, "__name__", "")).split(".")[0] not in getattr(sys, "stdlib_module_names", ()): visit(child, f"{path}.{name}", depth + 1)
                 continue
             if not isinstance(child, type) or id(child) in seen: continue
             members = []
