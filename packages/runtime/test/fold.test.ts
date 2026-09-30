@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { JsonObject } from "../src/core/contracts.js";
 import { FOLDED_NOTE, foldTracks, OBSERVATION_TRACK_BYTES, trackLine } from "../src/integrations/ableton/fold.js";
-import { opened, signal } from "./fixtures/synthetic-bridge.js";
+import { opened, signal, tool } from "./fixtures/synthetic-bridge.js";
 
 const devices = (names: string[]) => names.map((name, index) => ({ ref: `device:${index}`, name }));
 const track = (index: number, extra: JsonObject = {}): JsonObject => ({ ref: `track:${index}`, name: `Track ${index}`, type: "midi", devices: devices(["Operator", "EQ Eight", "Reverb"]), ...extra });
@@ -43,8 +43,13 @@ test("the observation of a 200-track Set stays small: the selected track keeps i
     assert.deepEqual(context.tracks[0], { ref: "track:1", name: "Fixture Bass", type: null }, "the selected track, in full");
     assert.equal(context.tracks[3], "track:4 Part 2 (in track:3) · Operator, EQ Eight +2");
     assert.match(String(context.tracks[2]), /^track:3 Bus 1 \(group\) · Operator/);
-    // Every listed track's reference works in this turn.
+    // A track Kumi changes comes into focus next turn (one per name, however many share it).
+    const changed = await tool(b.tools, "set_mixer").execute({ trackRef: "track:6", volume: 0.5 }, signal());
+    assert.equal(changed.isError, false, changed.text);
     const next = await b.integration.observe(signal());
-    assert.equal(JSON.parse(next.context).tracks.length, 202);
+    const tracks = (JSON.parse(next.context) as { tracks: Array<JsonObject | string> }).tracks;
+    assert.equal(tracks.length, 202);
+    assert.equal((tracks[5] as JsonObject).name, "Part 4", "the changed track, in full");
+    assert.equal(tracks.filter((row) => typeof row === "object").length, 2, "the selected track and the changed one");
   } finally { await b.integration.close(); }
 });

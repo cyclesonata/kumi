@@ -2327,8 +2327,11 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         // A big Set is folded to about the same size as a small one: the tracks in focus (selected in
         // Live, pinned in Kumi, changed lately) keep their devices, every other track is one line.
         const focusRefs = new Set<string>([...(selected ? [String((selected.track as JsonObject).ref)] : []), ...(hints?.pinned ? [shortRef(hints.pinned.trackRef)] : [])]);
-        const focusNames = new Set([...changes.values()].slice(-12).flatMap(({ record }) => (record.track?.name ? [record.track.name] : [])));
-        const shown = trackList ? foldTracks(trackList, (track) => focusRefs.has(String(track.ref)) || focusNames.has(String(track.name))) : undefined;
+        // Changes name their track by name, which duplicates share: each of the last four names Kumi
+        // changed brings in one track, the first with it, so the focus never grows with the Set.
+        const recent = [...new Set([...changes.values()].reverse().flatMap(({ record }) => (record.track?.name ? [record.track.name] : [])))].slice(0, 4);
+        for (const name of recent) { const track = trackList?.find((row) => row.name === name); if (track) focusRefs.add(String(track.ref)); }
+        const shown = trackList ? foldTracks(trackList, (track) => focusRefs.has(String(track.ref))) : undefined;
         return {
           key,
           revision: String(tools!.generation),
