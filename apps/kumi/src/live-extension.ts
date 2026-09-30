@@ -8,7 +8,6 @@
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -18,13 +17,14 @@ export const KUMI_EXTENSION_ID = "kumi.kumi";
 
 /**
  * Live's Extensions folder: KUMI_LIVE_EXTENSIONS_DIR, else where Live keeps it (macOS: seen on Live
- * 12.4; Windows: beside Live's other folders in %APPDATA%\Ableton, to be confirmed there). Undefined
- * where there's no Live.
+ * 12.4; Windows: beside Live's other folders in %APPDATA%\Ableton, to be confirmed there), found from
+ * the environment it's given only: without HOME (APPDATA on Windows) there, it's undefined, so a
+ * partial environment (a test's) never reaches the producer's own Live. Undefined where there's no Live.
  */
-export function liveExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform, home = env.HOME || homedir()): string | undefined {
+export function liveExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
   if (env.KUMI_LIVE_EXTENSIONS_DIR) return env.KUMI_LIVE_EXTENSIONS_DIR;
-  if (platform === "darwin") return join(home, "Library", "Application Support", "Ableton", "Extensions");
-  if (platform === "win32") return join(env.APPDATA || join(home, "AppData", "Roaming"), "Ableton", "Extensions");
+  if (platform === "darwin" && env.HOME) return join(env.HOME, "Library", "Application Support", "Ableton", "Extensions");
+  if (platform === "win32" && env.APPDATA) return join(env.APPDATA, "Ableton", "Extensions");
   return undefined;
 }
 

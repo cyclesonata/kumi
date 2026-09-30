@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { liveRegistryHash, loadLiveRegistry, validateLiveOperationRequest, validateLiveOperationResult } from "../src/registry.js";
 
 // The Remote Script hashes the registry with Python's json.dumps and the host with JSON.stringify:
@@ -12,6 +14,22 @@ test("the Remote Script and the host compute the same registry hash", { skip: sp
   const python = spawnSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); from ableton_mcp_remote_script import operation_registry; print(operation_registry()[1])", remoteScript], { encoding: "utf8" });
   assert.equal(python.status, 0, python.stderr);
   assert.equal(python.stdout.trim(), liveRegistryHash());
+});
+
+// A bridge started from a folder that holds another registry (a checkout of another version) keeps its own.
+test("the bridge's registry is its own, whatever folder it's started from", () => {
+  const folder = mkdtempSync(join(tmpdir(), "registry-cwd-"));
+  try {
+    mkdirSync(join(folder, "protocol"), { recursive: true });
+    writeFileSync(join(folder, "protocol", "ableton-live-v1.operations.json"), JSON.stringify({ version: 1, protocol: "ableton-live/v1", operations: [] }));
+    // Started two folders down, the other registry is both in the folder above that and two above.
+    mkdirSync(join(folder, "a", "b", "protocol"), { recursive: true });
+    writeFileSync(join(folder, "a", "b", "protocol", "ableton-live-v1.operations.json"), JSON.stringify({ version: 1, protocol: "ableton-live/v1", operations: [] }));
+    const module = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "registry.js")).href;
+    const started = spawnSync(process.execPath, ["--input-type=module", "-e", `const { liveRegistryHash } = await import(${JSON.stringify(module)}); process.stdout.write(liveRegistryHash());`], { cwd: join(folder, "a", "b"), encoding: "utf8" });
+    assert.equal(started.status, 0, started.stderr);
+    assert.equal(started.stdout, liveRegistryHash());
+  } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 
 const outputSafety = { safe: true, provenance: "test-operator" };

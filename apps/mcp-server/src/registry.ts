@@ -25,11 +25,18 @@ function canonical(value: unknown, depth = 0): string {
   throw new Error("registry contains an unsupported value");
 }
 
+/**
+ * The registry this code was built with: the repository's (a checkout, built in dist/src or run from
+ * src), else the package's own copy (an installed bridge). Never one found from the working
+ * directory: a bridge started from a checkout of another version would take that one's registry and
+ * no longer agree with its own Remote Script in Live.
+ */
 function registryPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  return [join(here, "../../../protocol/ableton-live-v1.operations.json"), join(process.cwd(), "../../protocol/ableton-live-v1.operations.json"), join(process.cwd(), "protocol/ableton-live-v1.operations.json"), join(here, "../../remote-script/AbletonMcpBridge/ableton-live-v1.operations.json")].find((candidate) => {
+  const candidates = [join(here, "../../../../protocol/ableton-live-v1.operations.json"), join(here, "../../../protocol/ableton-live-v1.operations.json"), join(here, "../../remote-script/AbletonMcpBridge/ableton-live-v1.operations.json")];
+  return candidates.find((candidate) => {
     try { readFileSync(candidate); return true; } catch { return false; }
-  }) ?? join(here, "../../../protocol/ableton-live-v1.operations.json");
+  }) ?? candidates[0]!;
 }
 
 export function loadLiveRegistry(): LiveRegistry {

@@ -86,3 +86,51 @@ Live renamed "1-MIDI" to "1-Drum Rack" when a Drum Rack went in: names used as f
   edit is its own step and splits Kumi's step there.
 - A change through the bridge's three-step authority path (preview, then preflight, prepare, invoke)
   took about 0.8 s on the small Set.
+
+## Reading a big Set: the Remote Script against the SDK
+
+A 200-track Set: each track a copy of one template (Operator, EQ Eight, Compressor, Reverb, and an
+Audio Effect Rack whose chains hold Saturator and Auto Filter, and a nested Audio Effect Rack with
+Utility), 1773 devices and 591 chains in all, and a 1000-beat Arrangement MIDI clip of 20000 notes.
+The Remote Script is bridge 1.0.57 through its adapter (one request each); the SDK side is a probe
+extension timing the same reads with the SDK's getters.
+
+| Read | Remote Script | SDK |
+| --- | --- | --- |
+| Every track (name, type, group) | 109 ms | 3.2 ms |
+| Every device and chain in the Set | 4153 ms | 56 ms |
+| One track's device tree | 349 ms (3 requests) | 0.2 ms |
+| Operator's 195 parameters with their values | 124 ms | 6.4 ms for names and ranges, 58 ms for the values fetched together (21 ms each one by one) |
+| The 20000 notes of the Arrangement clip | none (note discovery reads Session clips only) | 26 ms |
+| The whole Set in one snapshot | 7201 ms | — |
+| Every device's parameter list (69541 parameters) | — | 23 s |
+| A 20000-note Arrangement clip written | — | 277 ms (Kumi's extension) |
+
+The SDK reads from a copy of the Set in the extension's own process: its getters are synchronous and
+never wait on Live. The Remote Script's reads run on Live's UI thread, and a Set-wide device list built
+the whole Set (every parameter, every note) in one request: about four seconds of Live's UI each time
+Kumi looked at this Set. Reads stay on the Remote Script all the same: the SDK knows its own classes
+only (Device, RackDevice, DrumRackDevice, Simpler), not a device's Live class (Operator,
+InstrumentGroupDevice), and has no identity for Live's objects, which Kumi's changes check against.
+The Remote Script's device, note and parameter discovery is being made to read only what's asked, and
+to page by work so no request holds Live's UI for long.
+
+Duplicating the template track through the bridge's three-step change path took 0.92 s at 20 tracks,
+1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: a change still costs more the bigger the Set is.
+
+## Right-click "Ask Kumi about this"
+
+Checked on real Live with Kumi's extension running in Live's own host. Live puts an extension's
+actions in an **Extensions** submenu, prefixed with the extension's name ("kumi: Ask Kumi about this",
+"kumi: Ask Kumi about this selection"). Each click reached the bridge's connection as a `pointed` event:
+
+| Right-clicked | Event payload |
+| --- | --- |
+| A MIDI track's title | `{kind: "track", path: [0], name: "Template", trail: ["Template"]}` |
+| A time selection on a track's Arrangement lane (bars 9–26) | `{kind: "arrangement_selection", lanes: [{kind: "track", path: [1], name: "Template"}], timeSelection: {fromBeat: 32, toBeat: 100}}` |
+| An Arrangement clip | `{kind: "arrangement_clip", path: [0, 0], name: "20000 notes", trail: ["Template", "20000 notes"]}` |
+| A scene | `{kind: "scene", path: [1], name: "", trail: [""]}` (an unnamed scene: Kumi says "Scene 2") |
+
+The SDK's menu scopes are clips, tracks, clip slots, scenes, Simpler, samples and Drum Racks, and the
+selections of clip slots and Arrangement lanes: there is no scope for other devices, so right-clicking
+Operator shows only Live's own items.
