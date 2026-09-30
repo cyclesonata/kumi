@@ -6781,3 +6781,183 @@ class ExplicitDeletionTests(unittest.TestCase):
         preflight = bridge._dispatch_with_holder("preflight", request, holder)
         prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": "explicit-scene-key"}, holder)
         self.assertEqual(bridge._dispatch_with_holder("invoke", {**request, "authorityToken": prepared["authorityToken"]}, holder), {"deleted": scene["ref"]})
+
+
+class Listenable:
+    """Live's observable properties for fakes: add_<name>_listener / remove_<name>_listener for the
+    names in LISTENABLE, and setting one calls its listeners, as Live notifies."""
+    LISTENABLE: frozenset = frozenset()
+
+    def __getattr__(self, name):
+        for prefix in ("add_", "remove_"):
+            if name.startswith(prefix) and name.endswith("_listener") and name[len(prefix):-len("_listener")] in type(self).LISTENABLE:
+                target = name[len(prefix):-len("_listener")]
+                def change(callback, target=target, adding=prefix == "add_"):
+                    listeners = self.__dict__.setdefault("_listeners", {}).setdefault(target, [])
+                    listeners.append(callback) if adding else listeners.remove(callback)
+                return change
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        self.notify(name)
+
+    def notify(self, name):
+        for callback in list(self.__dict__.get("_listeners", {}).get(name, [])): callback()
+
+    def listening(self):
+        return sum(len(callbacks) for callbacks in self.__dict__.get("_listeners", {}).values())
+
+
+class ListenParameter(Listenable, FakeParameter): LISTENABLE = frozenset({"value"})
+class ListenScene(Listenable, FakeScene): LISTENABLE = frozenset({"name", "color_index"})
+class ListenClip(Listenable, FakeClip): LISTENABLE = frozenset({"name", "color_index"})
+class ListenTrackView(Listenable): LISTENABLE = frozenset({"selected_device"})
+class ListenView(Listenable): LISTENABLE = frozenset({"selected_track", "selected_scene", "highlighted_clip_slot", "detail_clip", "selected_parameter", "selected_chain"})
+
+
+class ListenSlot(Listenable, FakeSlot):
+    LISTENABLE = frozenset({"has_clip"})
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if name == "clip": self.notify("has_clip")
+
+
+class ListenMixer:
+    def __init__(self):
+        self.volume = ListenParameter(); self.panning = ListenParameter(); self.sends = [ListenParameter(), ListenParameter()]
+
+
+class ListenTrack(Listenable, FakeTrack):
+    LISTENABLE = frozenset({"name", "color_index", "mute", "solo", "arm", "devices"})
+
+
+class ListenSong(Listenable, FakeSong):
+    LISTENABLE = frozenset({"is_playing", "record_mode", "session_record", "tracks", "scenes", "cue_points"})
+
+
+def listening_song(tracks=4, scenes=3):
+    song = ListenSong(); song.cue_points = []
+    rows = []
+    for index in range(tracks):
+        track = ListenTrack(); track.name = f"T{index}"; track.mute = False; track.solo = False; track.color_index = index
+        track.mixer_device = ListenMixer(); track.clip_slots = [ListenSlot() for _ in range(scenes)]
+        device = FakeDevice(); device.name = f"D{index}"; device.parameters = [ListenParameter(), ListenParameter()]
+        rack = FakeDevice(); rack.name = f"Rack{index}"; rack.can_have_chains = True; nested = FakeDevice(); nested.name = "Nested"; nested.parameters = [ListenParameter()]
+        chain = type("Chain", (), {})(); chain.name = "C"; chain.devices = [nested]; chain.mute = False; chain.solo = False; rack.chains = [chain]; rack.macros = []
+        track.devices = [device, rack]; track.view = ListenTrackView(); track.view.selected_device = device
+        rows.append(track)
+    clip = ListenClip(4.0); clip.name = "Loop"; clip.color_index = 5; rows[1].clip_slots[2].clip = clip
+    main = ListenTrack(); main.name = "Main"; main.mixer_device = ListenMixer(); main.clip_slots = []; main.devices = []
+    song.tracks = rows; song.master_track = main
+    song.scenes = [ListenScene(f"S{index}") for index in range(scenes)]
+    view = ListenView(); view.selected_track = rows[0]; view.selected_scene = song.scenes[0]; view.highlighted_clip_slot = rows[0].clip_slots[0]; view.detail_clip = None; view.selected_parameter = None; view.selected_chain = None
+    song.view = view
+    return song
+
+
+class ListenerEventTests(unittest.TestCase):
+    """WS3.5: Live's listeners push selection, names, mixer values, the selected device's parameters
+    and structure, with the refs a snapshot gives; only what was asked for is listened to."""
+
+    def events(self, subscription, event_type=None):
+        subscription.refresh()
+        return [event for event in subscription.drain() if event["type"] != "reset" and (event_type is None or event["type"] == event_type)]
+
+    def test_types_are_probed_without_walking_the_set(self):
+        song = listening_song(); counter = ReadCounter(song.tracks)
+        self.assertEqual(remote_module._supported_event_types(song), {"reset", "transport", "object", "structure", "selection", "parameter", "name", "mixer"})
+        self.assertEqual(counter.reads, {}, "nothing below a track is read to probe")
+        self.assertEqual(remote_module._supported_event_types(FakeSong()), {"reset"})
+        bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song); holder = {}
+        result = bridge._subscribe_main({"args": {"types": sorted(remote_module._EVENT_TYPES)}}, holder)
+        self.assertTrue(result["subscribed"]); holder["subscription"].close()
+
+    def test_only_the_requested_listeners_attach_and_close_detaches_them_all(self):
+        song = listening_song(); mapper = LiveObjectMapper(song)
+        subscription = _Subscription(mapper, {"name"})
+        self.assertTrue(all(track.listening() == 2 for track in song.tracks), "a track's name and colour, nothing else")
+        self.assertEqual(song.tracks[0].mixer_device.volume.listening(), 0)
+        self.assertEqual(song.tracks[1].clip_slots[2].clip.listening(), 2); self.assertEqual(song.scenes[0].listening(), 2)
+        subscription.close()
+        everything = song.tracks + [song, song.view] + song.scenes + [song.tracks[1].clip_slots[2].clip] + [slot for track in song.tracks for slot in track.clip_slots] + [song.tracks[0].mixer_device.volume]
+        self.assertEqual(sum(item.listening() for item in everything), 0)
+        full = _Subscription(mapper, set(remote_module._EVENT_TYPES) - {"reset"}); full.close()
+        self.assertEqual(sum(item.listening() for item in everything + [parameter for track in song.tracks for parameter in track.devices[0].parameters]), 0)
+
+    def test_selection_events_name_what_a_snapshot_names(self):
+        song = listening_song(); mapper = LiveObjectMapper(song); subscription = _Subscription(mapper, {"selection"})
+        track = song.tracks[2]; rack = track.devices[1]
+        song.view.selected_track = track; track.view.selected_device = rack
+        song.view.highlighted_clip_slot = track.clip_slots[1]; song.view.detail_clip = song.tracks[1].clip_slots[2].clip
+        song.view.selected_parameter = rack.chains[0].devices[0].parameters[0]
+        events = self.events(subscription, "selection")
+        self.assertEqual(len(events), 1, "coalesced to the last selection")
+        selection = mapper.snapshot()["selection"]
+        self.assertEqual(events[-1]["payload"], {"track": selection["trackRef"], "scene": selection["sceneRef"], "clipSlot": selection["slotRef"], "detailClip": selection["detailClipRef"], "device": selection["deviceRef"], "parameter": selection["parameterRef"]})
+        self.assertTrue(all(value is not None for value in events[-1]["payload"].values()), events[-1]["payload"])
+        # The selected track's device changes: the listener moved to the newly selected track.
+        track.view.selected_device = track.devices[0]
+        self.assertEqual(self.events(subscription, "selection")[-1]["payload"]["device"], f"{mapper.refs.epoch}:device:2:0")
+        song.tracks[0].view.selected_device = song.tracks[0].devices[1]
+        self.assertEqual(self.events(subscription, "selection"), [], "another track's device selection isn't the selection")
+        subscription.close()
+
+    def test_names_colours_and_mixer_values_carry_their_objects_refs(self):
+        song = listening_song(); mapper = LiveObjectMapper(song); subscription = _Subscription(mapper, {"name", "mixer"})
+        epoch = mapper.refs.epoch
+        song.tracks[2].name = "Bass"; song.scenes[1].color_index = 9; song.tracks[1].clip_slots[2].clip.name = "Hook"
+        song.tracks[3].mute = True; song.tracks[3].mixer_device.volume.value = 0.8; song.tracks[3].mixer_device.volume.value = 0.9
+        song.tracks[3].mixer_device.sends[0].value = 0.1; song.tracks[3].mixer_device.sends[1].value = 0.2; song.master_track.mixer_device.panning.value = 0.25
+        observed = [(event["type"], event["ref"], event["payload"]) for event in self.events(subscription)]
+        self.assertEqual(observed, [
+            ("name", f"{epoch}:track:2", {"field": "name", "value": "Bass"}),
+            ("name", f"{epoch}:scene:1", {"field": "color", "value": 9}),
+            ("name", f"{epoch}:clip:1:2", {"field": "name", "value": "Hook"}),
+            ("mixer", f"{epoch}:track:3", {"field": "mute", "value": True}),
+            ("mixer", f"{epoch}:track:3", {"field": "volume", "value": 0.9}),
+            ("mixer", f"{epoch}:track:3", {"field": "send", "index": 0, "value": 0.1}),
+            ("mixer", f"{epoch}:track:3", {"field": "send", "index": 1, "value": 0.2}),
+            ("mixer", f"{epoch}:track:4", {"field": "panning", "value": 0.25}),
+        ])
+        snapshot = mapper.snapshot()
+        self.assertEqual({row["ref"] for row in snapshot["tracks"]} >= {f"{epoch}:track:2", f"{epoch}:track:3", f"{epoch}:track:4"}, True)
+        subscription.close()
+
+    def test_the_selected_devices_parameters_report_their_values_and_follow_the_selection(self):
+        song = listening_song(); mapper = LiveObjectMapper(song); subscription = _Subscription(mapper, {"parameter"})
+        first = song.tracks[0].devices[0]
+        first.parameters[1].value = 0.75
+        events = self.events(subscription, "parameter")
+        self.assertEqual(events, [{"epoch": mapper.refs.epoch, "type": "parameter", "payload": {"value": 0.75}, "ref": mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][1]["ref"], "sequence": events[0]["sequence"]}])
+        song.view.selected_track = song.tracks[2]; subscription.refresh()
+        first.parameters[1].value = 0.25
+        self.assertEqual(self.events(subscription, "parameter"), [], "the previous device is no longer followed")
+        song.tracks[2].devices[0].parameters[0].value = 0.5
+        self.assertEqual([event["ref"] for event in self.events(subscription, "parameter")], [mapper.snapshot()["tracks"][2]["devices"][0]["parameters"][0]["ref"]])
+        subscription.close()
+
+    def test_structure_changes_report_and_reattach_by_position(self):
+        song = listening_song(); mapper = LiveObjectMapper(song); subscription = _Subscription(mapper, {"structure", "name"})
+        epoch = mapper.refs.epoch
+        song.tracks[0].clip_slots[1].clip = ListenClip(2.0)
+        added = ListenTrack(); added.name = "New"; added.clip_slots = [ListenSlot() for _ in range(3)]; added.devices = []; added.mixer_device = ListenMixer(); added.view = ListenTrackView()
+        old_first = song.tracks[0]
+        song.tracks = [added] + song.tracks
+        song.tracks[3].notify("devices"); song.cue_points = [FakeLocator(4.0)]
+        observed = [(event["payload"], event.get("ref")) for event in self.events(subscription, "structure")]
+        self.assertEqual(observed, [({"what": "clips"}, f"{epoch}:clip_slot:0:1"), ({"what": "tracks"}, None), ({"what": "devices"}, f"{epoch}:track:3"), ({"what": "locators"}, None)])
+        # Re-attached by position: the old first track is track 1 now, and the new clip reports its name.
+        old_first.name = "Moved"; song.tracks[1].clip_slots[1].clip.name = "Fresh"; added.name = "Renamed"
+        self.assertEqual([(event["ref"], event["payload"]["value"]) for event in self.events(subscription, "name")], [(f"{epoch}:track:1", "Moved"), (f"{epoch}:clip:1:1", "Fresh"), (f"{epoch}:track:0", "Renamed")])
+        song.tracks = song.tracks[1:]; subscription.refresh()
+        self.assertEqual(added.listening(), 0, "a removed track's listeners are detached")
+        subscription.close()
+
+    def test_a_big_sets_listeners_attach_within_the_ticks_budget(self):
+        song = listening_song(tracks=30); mapper = LiveObjectMapper(song)
+        subscription = _Subscription(mapper, {"name"}, deadline=time.monotonic() - 1)
+        self.assertTrue(all(track.listening() == 0 for track in song.tracks), "nothing past the budget")
+        subscription.refresh()
+        self.assertTrue(all(track.listening() == 2 for track in song.tracks))
+        subscription.close()

@@ -5947,6 +5947,82 @@ class LiveObjectMapper:
             result[key] = reference
         return result
 
+    def _device_paths(self, owner: Any, path: str, depth: int = 0) -> Any:
+        """A track's (or chain's) device tree as snapshot refs name it: ("device" | "chain", object,
+        path) in reading order, a rack's chains and their devices after the rack. Identities only."""
+        for index, device in enumerate(self._items(self._read_attr(owner, "devices") or [])):
+            device_path = f"{path}:{index}"
+            yield "device", device, device_path
+            if depth < 32 and self._read_attr(device, "can_have_chains") is True:
+                for chain_index, chain in enumerate(self._items(self._read_attr(device, "chains") or [])):
+                    chain_path = f"{device_path}:{chain_index}"
+                    yield "chain", chain, chain_path
+                    yield from self._device_paths(chain, chain_path, depth + 1)
+
+    def _parameter_ref_of(self, parameter: Any, track_index: int, track: Any) -> str | None:
+        """A parameter's snapshot ref, found on its track: a mixer control, a device parameter (by its
+        place among the device's parameters) or a rack's macro. None where a snapshot has no row."""
+        identity = self._capture_object_identity(parameter)
+        mixer = self._read_attr(track, "mixer_device")
+        if mixer is not None:
+            for name in ("volume", "panning", "cue_volume"):
+                candidate = self._read_attr(mixer, name)
+                if candidate is not None and self._capture_object_identity(candidate) == identity: return self.refs.put("parameter", candidate, f"mixer:{track_index}:{name}")
+            for send_index, send in enumerate(self._items(self._read_attr(mixer, "sends") or [])):
+                if self._capture_object_identity(send) == identity: return self.refs.put("parameter", send, f"mixer:{track_index}:sends:{send_index}")
+        owner = self._read_attr(parameter, "canonical_parent"); owner_identity = self._capture_object_identity(owner) if owner is not None else None
+        for kind, device, path in self._device_paths(track, str(track_index)):
+            if kind != "device" or (owner_identity is not None and self._capture_object_identity(device) != owner_identity): continue
+            device_ref = f"{self.refs.epoch}:device:{path}"
+            for index, candidate in enumerate(self._items(getattr(device, "parameters", []))):
+                if self._capture_object_identity(candidate) != identity: continue
+                numeric = (self._read_attr(candidate, "min", "min_value"), self._read_attr(candidate, "max", "max_value"), self._read_attr(candidate, "value"))
+                if all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in numeric): return self.refs.put("parameter", candidate, f"{device_ref}:{index}")
+            if self._read_attr(device, "can_have_chains") is True:
+                for index, macro in enumerate(self._items(self._read_attr(device, "macros") or [])):
+                    if self._capture_object_identity(macro) == identity: return self.refs.put("parameter", macro, f"{device_ref}:macro:{index}")
+        return None
+
+    def _selection_refs(self) -> dict[str, str | None]:
+        """What's selected, as a snapshot's refs name it, found positionally: identities up Live's
+        canonical_parent chain (else on the selected track) and through the owning track's slots and
+        device tree. No rows are built: this runs for every selection change Live reports."""
+        view = getattr(self.song, "view", None)
+        result: dict[str, str | None] = {"track": None, "scene": None, "clipSlot": None, "detailClip": None, "device": None, "parameter": None}
+        if view is None: return result
+        tracks = self._all_track_objects(); track_indices: dict[str, int] = {}
+        for index, track in enumerate(tracks): track_indices.setdefault(self._capture_object_identity(track), index)
+        selected_track = self._read_attr(view, "selected_track")
+        selected_index = track_indices.get(self._capture_object_identity(selected_track)) if selected_track is not None else None
+        if selected_index is not None: result["track"] = self.refs.put("track", tracks[selected_index], str(selected_index))
+        selected_scene = self._read_attr(view, "selected_scene")
+        if selected_scene is not None:
+            identity = self._capture_object_identity(selected_scene)
+            found = next(((index, scene) for index, scene in enumerate(self._items(getattr(self.song, "scenes", []))) if self._capture_object_identity(scene) == identity), None)
+            if found is not None: result["scene"] = self.refs.put("scene", found[1], str(found[0]))
+        def find(value: Any, on_track: Callable[[int], str | None]) -> str | None:
+            """On the track Live's canonical_parent chain names; without one, on the selected track,
+            then (a shape with no chain at all) on every track."""
+            owner = self._owner_track_index(value, track_indices)
+            if owner is not None: return on_track(owner)
+            found = on_track(selected_index) if selected_index is not None else None
+            return found if found is not None else next((reference for index in range(len(tracks)) if index != selected_index for reference in [on_track(index)] if reference is not None), None)
+        slot = self._read_attr(view, "highlighted_clip_slot")
+        if slot is not None:
+            identity = self._capture_object_identity(slot)
+            result["clipSlot"] = find(slot, lambda index: next((self.refs.put("clip_slot", candidate, f"{index}:{slot_index}") for slot_index, candidate in enumerate(self._items(getattr(tracks[index], "clip_slots", []))) if self._capture_object_identity(candidate) == identity), None))
+        clip = self._read_attr(view, "detail_clip")
+        if clip is not None:
+            clip_identity = self._capture_object_identity(clip)
+            result["detailClip"] = find(clip, lambda index: next((self.refs.put("clip", current, f"{index}:{slot_index}") for slot_index, candidate in enumerate(self._items(getattr(tracks[index], "clip_slots", []))) for current in [getattr(candidate, "clip", None)] if current is not None and self._capture_object_identity(current) == clip_identity), None))
+        device = self._selected_device(view)
+        if device is not None and selected_index is not None:
+            identity = self._capture_object_identity(device)
+            result["device"] = next((self.refs.put("device", candidate, path) for kind, candidate, path in self._device_paths(tracks[selected_index], str(selected_index)) if kind == "device" and self._capture_object_identity(candidate) == identity), None)
+        parameter = self._read_attr(view, "selected_parameter")
+        if parameter is not None: result["parameter"] = find(parameter, lambda index: self._parameter_ref_of(parameter, index, tracks[index]))
+        return result
+
     def _selection_state(self) -> dict[str, Any]:
         """The selection as the snapshot reports it: the host previews selection changes from that."""
         return dict(self._selection_row_targeted())
@@ -9272,20 +9348,52 @@ class LiveObjectMapper:
 
 
 MAX_PENDING_EVENTS = 65_536
-_EVENT_TYPES = {"transport", "object", "reset"}
+_EVENT_TYPES = {"transport", "object", "reset", "selection", "name", "mixer", "parameter", "structure"}
+MAX_SUBSCRIPTION_TYPES = 8
+
+
+def _listens(owner: Any, *names: str) -> bool:
+    return owner is not None and any(callable(getattr(owner, f"add_{name}_listener", None)) for name in names)
+
+
+def _probe_track(song: Any) -> Any:
+    """One track to probe what Live's tracks can report: the main track, else the first."""
+    main = getattr(song, "master_track", None)
+    if main is not None: return main
+    try: tracks = list(getattr(song, "tracks", None) or [])
+    except (TypeError, AttributeError): tracks = []
+    return tracks[0] if tracks else None
 
 
 def _supported_event_types(song: Any) -> set[str]:
+    """The event types this Live shape can push, probed on the Song, its view and one track: never
+    by walking the Set."""
     supported = {"reset"}
-    if any(callable(getattr(song, f"add_{name}_listener", None)) for name in ("is_playing", "record_mode", "session_record")): supported.add("transport")
-    if any(callable(getattr(song, f"add_{name}_listener", None)) for name in ("tracks", "scenes")): supported.add("object")
+    if _listens(song, "is_playing", "record_mode", "session_record"): supported.add("transport")
+    if _listens(song, "tracks", "scenes"): supported.add("object")
+    if _listens(song, "tracks", "scenes", "cue_points"): supported.add("structure")
+    view = getattr(song, "view", None)
+    if _listens(view, "selected_track", "selected_scene", "highlighted_clip_slot", "detail_clip", "selected_parameter"): supported.add("selection")
+    track = _probe_track(song)
+    mixer = getattr(track, "mixer_device", None) if track is not None else None
+    volume = getattr(mixer, "volume", None) if mixer is not None else None
+    if _listens(view, "selected_track") and _listens(volume, "value"): supported.add("parameter")
+    if _listens(track, "name", "color", "color_index"): supported.add("name")
+    if _listens(track, "mute", "solo", "arm") or _listens(volume, "value"): supported.add("mixer")
     return supported
 
 
 class _Subscription:
-    """Per-connection Live listener subscription with bounded coalesced events."""
+    """Per-connection Live listener subscription with bounded coalesced events.
 
-    def __init__(self, mapper: "LiveObjectMapper", filters: set[str]):
+    Song-level listeners (transport, the track and scene lists, cue points, the selection) attach at
+    once. Listeners on objects (each track's name, colour, mixer and devices, each slot's clip, each
+    scene's name, the selected device's parameters) attach in groups (a track, a scene, the selected
+    device) that are re-attached when their collection changes: a callback only marks its group
+    dirty, and `refresh` re-attaches outside Live's notification, on the display tick, within its
+    budget. Callbacks do little: the event's ref comes from the index the group was attached at."""
+
+    def __init__(self, mapper: "LiveObjectMapper", filters: set[str], deadline: float | None = None):
         self.filters = filters
         self.mapper = mapper
         self.epoch = mapper.refs.epoch
@@ -9294,8 +9402,27 @@ class _Subscription:
         self.sequence = 1
         self._lock = threading.Lock()
         self._registrations: list[tuple[Any, str, Callable[[], Any]]] = []
+        # Per-object listeners by group ("track:3", "scene:1", "selected-device", "parameters").
+        self._groups: dict[str, list[tuple[Any, str, Callable[[], Any]]]] = {}
+        self._dirty: set[str] = set()
+        # Bumped when the track or scene list changes: a callback attached in an older generation
+        # finds its object's place again by identity until its group is re-attached.
+        self._generation = 0
         self.events.append({"epoch": self.epoch, "sequence": self.sequence, "type": "reset", "payload": {"subscription": True, "resnapshot": True}})
         self._register(mapper)
+        self._dirty.add("all")
+        self.refresh(deadline)
+
+    def _ref(self, kind: str, path: str) -> str:
+        return f"{self.mapper.refs.epoch}:{kind}:{path}"
+
+    @staticmethod
+    def _quiet(callback: Callable[[], Any]) -> Callable[[], Any]:
+        """A listener never raises into Live's notification."""
+        def run() -> None:
+            try: callback()
+            except Exception: pass
+        return run
 
     def _register(self, mapper: "LiveObjectMapper") -> None:
         song = mapper.song
@@ -9325,6 +9452,185 @@ class _Subscription:
                     self.close()
                     raise
                 self._registrations.append((song, name, callback))
+        per_track = self.filters & {"name", "mixer", "structure"}
+        # The track and scene lists: a structure event, and the per-object groups re-attached.
+        if per_track or "selection" in self.filters or "parameter" in self.filters:
+            def tracks_changed() -> None:
+                self._generation += 1; self._dirty.add("all"); make_event("structure", {"what": "tracks"})
+            def scenes_changed() -> None:
+                self._generation += 1; self._dirty.add("all"); make_event("structure", {"what": "scenes"})
+            for name, callback in (("tracks", tracks_changed), ("scenes", scenes_changed)):
+                self._listen_song(song, name, self._quiet(callback))
+        if "structure" in self.filters:
+            self._listen_song(song, "cue_points", self._quiet(lambda: make_event("structure", {"what": "locators"})))
+        view = getattr(song, "view", None)
+        if view is not None and (self.filters & {"selection", "parameter"}):
+            def selection_changed(track_changed: bool) -> None:
+                if track_changed: self._dirty.update({"selected-device", "parameters"})
+                if "selection" in self.filters: make_event("selection", self.mapper._selection_refs())
+            for name in ("selected_track", "selected_scene", "highlighted_clip_slot", "detail_clip", "selected_parameter", "selected_chain"):
+                self._listen_song(view, name, self._quiet(lambda track_changed=name == "selected_track": selection_changed(track_changed)))
+
+    def _listen_song(self, owner: Any, name: str, callback: Callable[[], Any]) -> None:
+        register = getattr(owner, f"add_{name}_listener", None)
+        if not callable(register): return
+        try: register(callback)
+        except Exception: return
+        self._registrations.append((owner, name, callback))
+
+    def _listen(self, group: str, owner: Any, name: str, callback: Callable[[], Any]) -> None:
+        """One object's listener, in a group; a shape that refuses it just goes without."""
+        register = getattr(owner, f"add_{name}_listener", None) if owner is not None else None
+        if not callable(register): return
+        quiet = self._quiet(callback)
+        try: register(quiet)
+        except Exception: return
+        self._groups.setdefault(group, []).append((owner, name, quiet))
+
+    def _detach(self, group: str) -> None:
+        for owner, name, callback in self._groups.pop(group, []):
+            remover = getattr(owner, f"remove_{name}_listener", None)
+            if callable(remover):
+                try: remover(callback)
+                except Exception: pass
+
+    def _track_position(self, track: Any, index: int, generation: int) -> int | None:
+        """A track's place: where it was attached, unless the track list changed since (then found again by identity; None when gone)."""
+        if generation == self._generation: return index
+        identity = self.mapper._capture_object_identity(track)
+        return next((position for position, candidate in enumerate(self.mapper._all_track_objects()) if self.mapper._capture_object_identity(candidate) == identity), None)
+
+    def _track_ref(self, track: Any, index: int, generation: int) -> str | None:
+        position = self._track_position(track, index, generation)
+        return self._ref("track", str(position)) if position is not None else None
+
+    def _slot_ref(self, kind: str, track: Any, slot: Any, index: int, slot_index: int, generation: int) -> str | None:
+        """A slot's (or its clip's) ref, found again by identity after a structure change."""
+        if generation == self._generation: return self._ref(kind, f"{index}:{slot_index}")
+        position = self._track_position(track, index, generation)
+        if position is None: return None
+        identity = self.mapper._capture_object_identity(slot)
+        found = next((candidate_index for candidate_index, candidate in enumerate(self.mapper._items(getattr(track, "clip_slots", []))) if self.mapper._capture_object_identity(candidate) == identity), None)
+        return self._ref(kind, f"{position}:{found}") if found is not None else None
+
+    def _emit_at(self, event_type: str, payload: dict[str, Any], ref: str | None) -> None:
+        """An event about an object; none when the object has left the Set."""
+        if ref is not None: self._emit(event_type, payload, ref)
+
+    def _attach_track(self, index: int, track: Any) -> None:
+        group = f"track:{index}"; mapper = self.mapper; generation = self._generation
+        track_ref = lambda: self._track_ref(track, index, generation)
+        if "name" in self.filters:
+            self._listen(group, track, "name", lambda: self._emit_at("name", {"field": "name", "value": str(getattr(track, "name", ""))}, track_ref()))
+            color = "color_index" if _listens(track, "color_index") else "color"
+            self._listen(group, track, color, lambda: self._emit_at("name", {"field": "color", "value": self._color(track)}, track_ref()))
+        if "mixer" in self.filters:
+            for field in ("mute", "solo", "arm"):
+                self._listen(group, track, field, lambda field=field: self._emit_at("mixer", {"field": field, "value": mapper._armed(track) if field == "arm" else self._flag(track, field)}, track_ref()))
+            mixer = mapper._read_attr(track, "mixer_device")
+            for field, attribute in (("volume", "volume"), ("panning", "panning")):
+                parameter = mapper._read_attr(mixer, attribute) if mixer is not None else None
+                self._listen(group, parameter, "value", lambda field=field, parameter=parameter: self._emit_at("mixer", {"field": field, "value": self._number(parameter)}, track_ref()))
+            for send_index, send in enumerate(mapper._items(mapper._read_attr(mixer, "sends") or []) if mixer is not None else []):
+                self._listen(group, send, "value", lambda send_index=send_index, send=send: self._emit_at("mixer", {"field": "send", "index": send_index, "value": self._number(send)}, track_ref()))
+        if "structure" in self.filters:
+            self._listen(group, track, "devices", lambda: (self._dirty.add("parameters"), self._emit_at("structure", {"what": "devices"}, track_ref())))
+        if self.filters & {"structure", "name"}:
+            for slot_index, slot in enumerate(mapper._items(getattr(track, "clip_slots", []))):
+                if "structure" in self.filters:
+                    self._listen(group, slot, "has_clip", lambda slot_index=slot_index, slot=slot: (self._dirty.add(group), self._emit_at("structure", {"what": "clips"}, self._slot_ref("clip_slot", track, slot, index, slot_index, generation))))
+                clip = getattr(slot, "clip", None)
+                if clip is not None and "name" in self.filters:
+                    self._listen(group, clip, "name", lambda slot_index=slot_index, slot=slot, clip=clip: self._emit_at("name", {"field": "name", "value": str(getattr(clip, "name", ""))}, self._slot_ref("clip", track, slot, index, slot_index, generation)))
+                    color = "color_index" if _listens(clip, "color_index") else "color"
+                    self._listen(group, clip, color, lambda slot_index=slot_index, slot=slot, clip=clip: self._emit_at("name", {"field": "color", "value": self._color(clip)}, self._slot_ref("clip", track, slot, index, slot_index, generation)))
+
+    def _attach_scene(self, index: int, scene: Any) -> None:
+        group = f"scene:{index}"; generation = self._generation
+        def scene_ref() -> str | None:
+            if generation == self._generation: return self._ref("scene", str(index))
+            identity = self.mapper._capture_object_identity(scene)
+            position = next((position for position, candidate in enumerate(self.mapper._items(getattr(self.mapper.song, "scenes", []))) if self.mapper._capture_object_identity(candidate) == identity), None)
+            return self._ref("scene", str(position)) if position is not None else None
+        self._listen(group, scene, "name", lambda: self._emit_at("name", {"field": "name", "value": str(getattr(scene, "name", ""))}, scene_ref()))
+        color = "color_index" if _listens(scene, "color_index") else "color"
+        self._listen(group, scene, color, lambda: self._emit_at("name", {"field": "color", "value": self._color(scene)}, scene_ref()))
+
+    def _attach_selected_device(self) -> None:
+        """The selected track's selected device: when it changes, the selection changed, and the
+        parameters followed are the new device's."""
+        mapper = self.mapper; view = getattr(mapper.song, "view", None)
+        track = mapper._read_attr(view, "selected_track") if view is not None else None
+        track_view = getattr(track, "view", None) if track is not None else None
+        def changed() -> None:
+            self._dirty.add("parameters")
+            if "selection" in self.filters: self._emit("selection", mapper._selection_refs())
+        self._listen("selected-device", track_view, "selected_device", changed)
+
+    def _attach_parameters(self) -> None:
+        """Every parameter of the selected device, each reporting its value by its snapshot ref."""
+        mapper = self.mapper; view = getattr(mapper.song, "view", None)
+        device = mapper._selected_device(view) if view is not None else None
+        if device is None: return
+        tracks = mapper._all_track_objects(); identity = mapper._capture_object_identity(device)
+        selected = mapper._read_attr(view, "selected_track"); selected_identity = mapper._capture_object_identity(selected) if selected is not None else None
+        index = next((position for position, track in enumerate(tracks) if mapper._capture_object_identity(track) == selected_identity), None)
+        path = next((found for kind, candidate, found in mapper._device_paths(tracks[index], str(index)) if kind == "device" and mapper._capture_object_identity(candidate) == identity), None) if index is not None else None
+        if path is None: return
+        generation = self._generation
+        def device_path() -> str | None:
+            # The device's place, found again (by identity) once the track list changed under it.
+            if generation == self._generation: return path
+            current = mapper._all_track_objects()
+            return next((found for position, track in enumerate(current) for kind, candidate, found in mapper._device_paths(track, str(position)) if kind == "device" and mapper._capture_object_identity(candidate) == identity), None)
+        for parameter_index, parameter in enumerate(mapper._items(getattr(device, "parameters", []))):
+            numeric = (mapper._read_attr(parameter, "min", "min_value"), mapper._read_attr(parameter, "max", "max_value"), mapper._read_attr(parameter, "value"))
+            if not all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in numeric): continue
+            def changed(parameter_index: int = parameter_index, parameter: Any = parameter) -> None:
+                where = device_path(); epoch = self.mapper.refs.epoch
+                self._emit_at("parameter", {"value": self._number(parameter)}, f"{epoch}:parameter:{epoch}:device:{where}:{parameter_index}" if where is not None else None)
+            self._listen("parameters", parameter, "value", changed)
+
+    def refresh(self, deadline: float | None = None) -> None:
+        """Re-attach the groups whose collections changed, on Live's thread outside a notification;
+        with a deadline, what doesn't fit waits for the next tick."""
+        if not self._dirty: return
+        mapper = self.mapper
+        tracks = mapper._all_track_objects() if self.filters & {"name", "mixer", "structure"} else []
+        scenes = mapper._items(getattr(mapper.song, "scenes", [])) if "name" in self.filters else []
+        if "all" in self._dirty:
+            self._dirty.discard("all")
+            wanted = {f"track:{index}" for index in range(len(tracks))} | {f"scene:{index}" for index in range(len(scenes))}
+            if self.filters & {"selection", "parameter"}: wanted.add("selected-device")
+            if "parameter" in self.filters: wanted.add("parameters")
+            for group in [group for group in self._groups if group not in wanted]: self._detach(group)
+            self._dirty.update(wanted)
+        for group in sorted(self._dirty, key=lambda name: (name.split(":")[0], int(name.split(":")[1]) if ":" in name else -1)):
+            if deadline is not None and time.monotonic() >= deadline: break
+            self._dirty.discard(group); self._detach(group)
+            kind, _, position = group.partition(":")
+            if kind == "track" and int(position) < len(tracks): self._attach_track(int(position), tracks[int(position)])
+            elif kind == "scene" and int(position) < len(scenes): self._attach_scene(int(position), scenes[int(position)])
+            elif kind == "selected-device": self._attach_selected_device()
+            elif kind == "parameters" and "parameter" in self.filters: self._attach_parameters()
+
+    def _color(self, owner: Any) -> int | None:
+        value = self.mapper._read_attr(owner, "color_index")
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 69 else None
+
+    def _flag(self, owner: Any, name: str) -> bool | None:
+        value = self.mapper._read_attr(owner, name)
+        return value if isinstance(value, bool) else None
+
+    def _number(self, parameter: Any) -> float | None:
+        value = self.mapper._read_attr(parameter, "value")
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
+
+    @staticmethod
+    def _coalescing_field(payload: dict[str, Any]) -> Any:
+        """The field an event reports: a mixer field (each send by its index), a structure's `what`."""
+        field = payload.get("field", payload.get("what"))
+        return f"send:{payload.get('index')}" if field == "send" else field
 
     def _emit(self, event_type: str, payload: dict[str, Any], ref: str | None = None) -> None:
         if event_type not in self.filters:
@@ -9338,11 +9644,12 @@ class _Subscription:
             if ref is not None:
                 event["ref"] = ref
             # A replaced event was never delivered, so retain its sequence and
-            # do not misreport ordinary coalescing as continuity loss.
-            if self.events and self.events[-1]["type"] == event_type and self.events[-1].get("ref") == event.get("ref"):
-                previous = self.events[-1]
-                event["sequence"] = previous["sequence"]
-                event["coalesced"] = int(previous.get("coalesced", 0)) + 1
+            # do not misreport ordinary coalescing as continuity loss. Events
+            # coalesce by (type, ref, field): a fader drag is one event per tick.
+            last = self.events[-1] if self.events else None
+            if last is not None and last["type"] == event_type and last.get("ref") == event.get("ref") and self._coalescing_field(last.get("payload", {})) == self._coalescing_field(payload):
+                event["sequence"] = last["sequence"]
+                event["coalesced"] = int(last.get("coalesced", 0)) + 1
                 self.events[-1] = event
             elif len(self.events) >= MAX_PENDING_EVENTS:
                 self.dropped += 1
@@ -9369,7 +9676,8 @@ class _Subscription:
                 except Exception:
                     pass
         self._registrations.clear()
-
+        for group in list(self._groups): self._detach(group)
+        self._dirty.clear()
 
 REALTIME_MAX_DATAGRAM = 512
 REALTIME_RATE_PER_SECOND = 64.0
@@ -10195,6 +10503,7 @@ class AbletonMcpBridge:
         try:
             subscription = connection.holder.get("subscription")
             if subscription is not None:
+                subscription.refresh(deadline)
                 for event in subscription.drain():
                     frame: dict[str, Any] = {"version": PROTOCOL, "id": "event", "ok": True, "bridgeEpoch": connection.auth.bridge_epoch, "connectionChallenge": connection.auth.connection_challenge, "result": {"event": event}}
                     frame["mac"] = connection.auth.sign(frame)
@@ -10262,11 +10571,12 @@ class AbletonMcpBridge:
         supported = _supported_event_types(self.mapper.song)
         if types is None:
             types = sorted(supported)
-        if not isinstance(types, list) or len(types) > 3 or len(set(types)) != len(types) or any(not isinstance(item, str) or item not in supported for item in types):
+        if not isinstance(types, list) or len(types) > MAX_SUBSCRIPTION_TYPES or len(set(types)) != len(types) or any(not isinstance(item, str) or item not in supported for item in types):
             raise ValueError("subscription types are invalid or unavailable on this Live shape")
         if not types:
             return {"subscribed": False, "subscriptionId": "none"}
-        holder["subscription"] = _Subscription(self.mapper, set(types))
+        # Listeners on a big Set's objects attach over the next ticks, within each tick's budget.
+        holder["subscription"] = _Subscription(self.mapper, set(types), time.monotonic() + PUMP_BUDGET_SECONDS)
         return {"subscribed": True, "subscriptionId": secrets.token_urlsafe(12)}
 
     def _claim_mutation(self, idempotency_key: str, transaction_id: str, operation: str, digest: str) -> Callable[..., None]:
