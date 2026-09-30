@@ -159,7 +159,8 @@ export function bridge(options: Options = {}) {
           if (transaction.args.action === "stop" && transport.refuseStop && transport.playing) return refusal("request failed: missing, expired, stale, or mismatched mutation preflight");
           // Like Live: playing with recording on records from where it starts; stopping writes the takes.
           if (transaction.args.action === "start" || transaction.args.action === "continue") { transport.playing = true; if (transport.arrangementRecord) recordingFrom = position; }
-          if (transaction.args.action === "stop") { transport.playing = false; takes(); }
+          // And, as on real Live, stopping ends the recording: the next pass records only once it's started again.
+          if (transaction.args.action === "stop") { transport.playing = false; takes(); transport.arrangementRecord = false; }
           return wrap({ transactionId: args.transactionId, state: "applied", done: transaction.args.action });
         }
         if (transaction.name === "live_transport_preview" && typeof transaction.args.position === "number") position = transaction.args.position;

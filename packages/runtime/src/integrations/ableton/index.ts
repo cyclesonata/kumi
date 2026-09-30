@@ -1525,6 +1525,11 @@ export function createAbletonIntegration(options: Options): Integration {
           if (supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
           lap("back to arrangement");
           if (held) held.primed = primeKey;
+        } else {
+          // Every held pass plays from the same spot: Live's "start" plays from its start marker, not where
+          // the pass is primed (on real Live the part came 0.8 s late and a chord was heard cut short).
+          await step("set_transport", { position: span.position }, signal);
+          lap("transport");
         }
         started = true;
         // Recording stays on in a held rig; arming anew (something disarmed a track) starts it afresh.
@@ -1534,14 +1539,17 @@ export function createAbletonIntegration(options: Options): Integration {
           if (held) held.recording = true;
           lap("record start");
         }
-        // From the start marker (the primed position) every pass; "continue" only once, before anything has played.
-        await step("play", { action: held ? "start" : "continue" }, signal);
+        // From where the pass is primed.
+        await step("play", { action: "continue" }, signal);
         lap("play");
         await delay(span.wait * 60 / tempo * 1000, undefined, { signal });
         lap("wait");
         await step("play", { action: "stop" }, signal);
         lap("stop");
         if (!held) { await step("record", { action: "stop", lane: "arrangement" }, signal); lap("record stop"); }
+        // Stopping ends Live's recording too, held or not: the next pass starts it again (without that, a
+        // held rig's later passes recorded nothing, and each was scored on the first pass's take).
+        else held.recording = false;
         started = false;
         // Each source's take covering the part (the newest: a pass records over the last), read together.
         await Promise.all(rig.sources.map(async (source, index) => {

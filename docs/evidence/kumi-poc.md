@@ -1110,6 +1110,15 @@ mutations. Every bridge step costs about 2.5 s; the audio itself is 4.9 s of a p
 | before (1.0.50: Main, transport, recording set and reset every pass) | 30 s | 10–19 s | 5.9 |
 | after (held rig: play, wait, stop) | 12 s | 10–17 s | 10.8 |
 
+**Correction (2026-09-30, found running the benchmark):** the held rig above heard only its first pass.
+Stopping the transport ends Live's recording, and the held rig left it off, so every later pass recorded
+nothing and was scored on the first pass's take (the same file, pass after pass); and Live's "start" plays
+from its start marker, so even that take came 0.8 s late against where Kumi listened (a chord heard as
+1.2 s of 2.1). A held pass is now: position, record, play, wait, stop (about 10 s, one step more), each its
+own take, checked on real Live (a closed filter heard as silence, then the same patch back at 70%). The
+candidates-a-minute figure stands; what those candidates were scored on didn't until this fix, so goal
+gains measured with a held rig before it (and the match runs' knob search) weren't real searches.
+
 Setting a generation's knobs in one batch (the host's live_batch) was tried and dropped: a knob
 Live won't take failed the whole batch after its 15 s deadline and left the host uncertain.
 Snippet screening only pays for parts of six seconds or more; it's covered by the goal tests
