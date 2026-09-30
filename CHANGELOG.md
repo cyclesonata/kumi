@@ -5,7 +5,7 @@ each Kumi release names the bridge it ships with.
 
 ## 1.0.0 — 2026-09-29
 
-The first release for producers to use day to day. Ships with bridge 1.0.49.
+The first release for producers to use day to day. Ships with bridge 1.0.50.
 
 ### Changes to the Set
 
@@ -78,6 +78,10 @@ The first release for producers to use day to day. Ships with bridge 1.0.49.
   (bridge 1.0.49; 1.0.46 checked it in the host, and Live refused it).
 - One recording can take several armed tracks when Kumi names them all, so
   several sources render in one pass (bridge 1.0.48).
+- Long sessions no longer run out of room: the bridge kept every applied change
+  for its undo, 64 of a kind, then refused new ones (a match run's renders
+  filled it in minutes). It keeps 512, and Kumi gives up the undo of its own
+  render steps as it goes (bridge 1.0.50).
 - Kumi's instructions say where note ids come from (the clip's notes, listed
   like any other part of the Set).
 

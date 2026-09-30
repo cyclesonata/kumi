@@ -153,6 +153,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { prefix: "live_object_rename_", prereq: { capabilitiesAny: ["tracks", "scenes", "clips", "devices"], operationsAny: ["track.rename", "scene.rename", "clip.rename", "device.rename", "locator.rename", "take-lane.rename"] } },
   { prefix: "live_batch_", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { name: "live_undo", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
+  { name: "live_transaction_release", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { name: "live_recovery_finalize", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { prefix: "live_", prereq: { never: true } },
 ];
@@ -782,6 +783,12 @@ const toolDescriptors = [
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  },
+  {
+    name: "live_transaction_release",
+    description: "Give up the undo of applied transactions the client will never undo (a render's own steps, a search's settings), so they stop holding the host's transaction capacity. Nothing changes in Live.",
+    inputSchema: { type: "object", properties: { transactionIds: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } } }, required: ["transactionIds"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   {
     name: "live_recovery_finalize",

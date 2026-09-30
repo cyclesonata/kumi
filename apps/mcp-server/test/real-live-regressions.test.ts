@@ -155,6 +155,18 @@ test("a track the client made as scratch goes on an undo with discard, though it
   assert.equal((simulator as any).state.tracks.some((track: any) => track.name === "Kumi Listen"), false);
 });
 
+test("a client releases applied changes it won't undo: they stop holding capacity, and an undo of one says it's gone", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { call, apply } = hostFor(simulator);
+  const made = await call("live_session_structure_preview", { tracks: [{ name: "Scratch", kind: "audio" }], scenes: [] });
+  assert.equal((await apply(made, "release-me")).body.state, "applied");
+  const released = await call("live_transaction_release", { transactionIds: [made.body.transactionId, "never-heard-of-it"] });
+  assert.deepEqual(released.body, { released: 1 }, "the unknown one is simply gone already");
+  const undo = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "after-release" });
+  assert.equal(undo.isError, true, "no undo left for it");
+  assert.equal((simulator as any).state.tracks.some((track: any) => track.name === "Scratch"), true, "and nothing changed in Live");
+  assert.equal((await call("live_transaction_release", { transactionIds: [] })).isError ?? true, true);
+});
+
 test("an undo the bridge refuses before anything reaches Live is a refusal, and the change stays applied", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, apply, undo } = hostFor(simulator);
   const created = await call("live_track_structure_preview", { action: "create-return", name: "Sweep Return" });
