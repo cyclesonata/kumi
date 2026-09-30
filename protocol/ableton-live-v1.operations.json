@@ -1704,7 +1704,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "args": {
       "type": "object",
@@ -1750,7 +1750,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "argsDigest": {
       "type": "string",
@@ -1830,7 +1830,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 128,
-      "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
      },
      "argsDigest": {
       "type": "string",
@@ -12973,18 +12973,37 @@
          "count"
         ],
         "additionalProperties": false
+       },
+       "focus": {
+        "type": "array",
+        "items": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 100000
+        },
+        "uniqueItems": true
+       },
+       "parts": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "enum": [
+          "set",
+          "tracks",
+          "scenes",
+          "arrangement",
+          "playback",
+          "selection"
+         ]
+        },
+        "maxItems": 6,
+        "uniqueItems": true
        }
       },
       "additionalProperties": false
      }
     },
-    "required": [
-     "set",
-     "tracks",
-     "scenes",
-     "arrangement",
-     "playback"
-    ],
+    "required": [],
     "additionalProperties": false
    }
   },
@@ -14669,7 +14688,7 @@
          "type": "string",
          "minLength": 3,
          "maxLength": 128,
-         "pattern": "^[a-z]+(?:[.-][a-z]+)+$"
+         "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
         },
         "args": {
          "type": "object",

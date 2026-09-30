@@ -367,6 +367,15 @@ class RemoteScriptTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 remote.sign({"version": PROTOCOL, "id": "oversized-array", "method": "status", "values": list(range(513))})
 
+    def test_operation_names_with_digits_reach_the_mapper(self):
+        # EQ Eight's operation is eq8.set: a name with a digit must pass the wire's name check.
+        seen = []
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: seen.append(request["operation"]) or {"preflightToken": "p" * 24, "confirmation": "c" * 24, "operation": request["operation"], "argsDigest": "a" * 64, "stateDigest": "b" * 64, "impact": "mutates-live", "expiresAt": 1})
+        unsigned = remote.bound({"version": PROTOCOL, "id": "eq8", "method": "preflight", "operation": "eq8.set", "args": {}, "nonce": "digit-operation-0001", "sequence": 1, "transactionId": "transaction-eq8"})
+        response = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        self.assertNotEqual(response.get("error"), "operation is required")
+        self.assertEqual(seen, ["eq8.set"])
+
     def test_direct_authenticated_mutation_without_prepared_authority_is_rejected(self):
         calls = []
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: calls.append((method, request["operation"])))
@@ -621,7 +630,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "0cf7d8d9c0d306687cdcaa2b1df1298b8057f7273009d20e1c24a91c8ae0113e")
+        self.assertEqual(digest, "01eb8c0617599cf79982899247af498b064bc0e28cc0496c57fd972c3f4f5af2")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]

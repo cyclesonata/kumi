@@ -675,7 +675,7 @@ class AuthenticatedRemoteScript:
         ):
             return self._error(request.get("id", "invalid"), "invalid request")
         if request["method"] in {"invoke", "preflight", "prepare", "discover"}:
-            if request["method"] in {"invoke", "preflight", "prepare"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z]+(?:[.-][a-z]+)+", request["operation"])):
+            if request["method"] in {"invoke", "preflight", "prepare"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", request["operation"])):
                 return self._error(request["id"], "operation is required")
             if not isinstance(request.get("args", {}), dict) or len(request.get("args", {})) > 32:
                 return self._error(request["id"], "args must be a bounded object")
