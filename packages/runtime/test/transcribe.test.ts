@@ -34,10 +34,10 @@ test("the notes in a part are transcribed: when each starts, its pitch, and how 
   assert.ok(played.every(([time]) => peak(time) > 0.2));
 });
 
-test("transcribed notes reach the model as rows in beats at the Set's tempo, to a 16th, with what's played most", async () => {
+test("transcribed notes reach the model as rows in beats at the Set's tempo, as played (not snapped to the grid), with what's played most", async () => {
   const { transcription } = await import("../src/audio/tools.js");
   const rows = transcription([{ time: 0.52, duration: 0.24, midi: 60, velocity: 100, confidence: 0.9 }, { time: 1.01, duration: 0.1, midi: null, velocity: 80, confidence: 0 }, { time: 1.49, duration: 0.5, midi: 60, velocity: 90, confidence: 0.9 }], 120);
-  assert.deepEqual(rows.rows, [[1, 60, 100, 0.5], [2, null, 80, 0.25], [3, 60, 90, 1]]);
+  assert.deepEqual(rows.rows, [[1.04, 60, 100, 0.48], [2.02, null, 80, 0.2], [2.98, 60, 90, 1]]);
   assert.equal(rows.pitched, 2); assert.equal(rows.unpitched, 1);
   assert.deepEqual(rows.mostPlayed, [{ midi: 60, count: 2 }]);
   assert.match(String(rows.unit), /beats at 120 BPM/);

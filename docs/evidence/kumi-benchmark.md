@@ -22,6 +22,10 @@ the model's own view of its score during the run is noted too. Each run's render
 1. `keys-chord-ref.wav`: a 2.3 s Operator chord (a single sound).
 2. A two-bar riff rendered from a patch built for it (a sequence with its own rhythm).
 
+**Clean runs.** From run 2 on, each run starts with empty techniques, playbook and memory files (`KUMI_TECHNIQUES_FILE`,
+`KUMI_PLAYBOOK_FILE`, `KUMI_MEMORY_FILE`, `KUMI_PROJECTS_DIR` pointed at a fresh folder), so a run can't lean on what an
+earlier run on this reference saved. Run 1 didn't: it read two techniques saved from earlier work on this track.
+
 **No special-casing.** No presets, notes or anything particular to this reference: every change is a
 general improvement to the harness.
 
@@ -30,3 +34,4 @@ general improvement to the harness.
 | Run | Commit | Model | Score | Features (lowest) | Time | Tokens | What changed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | a27bcfa | Claude Sonnet 5.5 | **40** (the model's own: 26 → 72, before timing counted) | rhythm 0, movement 10, contour 29, density 33, balance 39 | 25:32 | 5.29M in (4.75M cached), 40.4k out | Baseline. Four candidates (Collision, Analog, Operator, Drift, Wavetable), the winner an Analog with a saturator, noise and air, a dense phrase an octave up, as a Session clip on a new track (not the selected one). It set the Set's tempo to 185 BPM (the reference's estimate). Its sequence was a guess: nothing lines up with the reference's onsets, and it doesn't swell. |
+| 1 | 57a3ac6 | Claude Sonnet 5.5 | **67** (the model's own: 55 → 70) | rhythm 24, movement 47, balance 53, envelope 54 | 28:52 | 8.35M in (7.68M cached), 47.7k out | Transcription, rhythm and contour in the score, the selection in the observation, the wrap-up mutes. It transcribed the reference at 185 BPM and wrote its 153 notes (so density 87, contour 84), then tuned five candidates to a Drift saw → Saturator → Utility → EQ Eight (a 5 dB cut at 1.4 kHz). Not clean: it read two techniques saved from earlier work on this track. Still on a new track, not the selected one. Rhythm stayed low: the render's hits lag the reference's by 60 ms at first and 130 ms a second in, since the transcription rounded every start to a 16th at a guessed tempo and the reference isn't on a grid. Most of its 30 auditions were one candidate and one knob at a time (about 40 s each). |

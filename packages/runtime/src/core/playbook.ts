@@ -68,12 +68,19 @@ export function createPlaybookStore(file: string): PlaybookStore {
   };
 }
 
+/** The producer's sentences, links left out: a request can open with a video's address ("https://www.youtube.com/…"). */
+export const sentencesOf = (request: string) =>
+  request.replace(/\b(?:https?:\/\/|www\.)\S+/gi, " ").split(/(?<=[.!?])\s+|\n|:\s/).map((sentence) => sentence.replace(/[.!?]+$/, "").trim()).filter(Boolean);
+
 /** "Make my pad sound like this reference: …" → "my pad". What was matched, briefly. */
 export function matchedFrom(request: string): string {
-  const first = request.split(/[.!?\n]/, 1)[0] ?? request;
-  const what = /(?:make|get|build|create)\s+(?:me\s+)?(?:the\s+|my\s+|this\s+|it\s+|an?\s+)?(?:new\s+)?(?:(?:midi|audio)\s+track\s+with\s+(?:an?\s+)?)?(.+?)\s+(?:that\s+|which\s+)?(?:sounds?\s+(?:more\s+)?like|closer to|match)/i.exec(first)?.[1]
-    ?? /(?:recreate|re-create|match)\s+(?:this\s+|the\s+|that\s+)?(.+)$/i.exec(first)?.[1] ?? first;
-  return text(what, 160) || "a sound";
+  const sentences = sentencesOf(request);
+  for (const sentence of sentences) {
+    const what = /(?:make|get|build|create)\s+(?:me\s+)?(?:the\s+|my\s+|this\s+|it\s+|an?\s+)?(?:new\s+)?(?:(?:midi|audio)\s+track\s+with\s+(?:an?\s+)?)?(.+?)\s+(?:that\s+|which\s+)?(?:sounds?\s+(?:more\s+)?like|closer to|match)/i.exec(sentence)?.[1]
+      ?? /(?:recreate|re-create|match)\s+(?:this\s+|the\s+|that\s+)?(.+?)(?:\s+(?:on|using|with|in|from|for)\s+.*)?$/i.exec(sentence)?.[1];
+    if (what) return text(what, 160) || "a sound";
+  }
+  return text(sentences[0] ?? "", 160) || "a sound";
 }
 
 /** A run's lesson: what it matched, what won, and which auditions moved the score. None for a run with nothing heard. */

@@ -22,18 +22,19 @@ const trimSound = (analysis: Analysis, tempo?: number) => {
 
 /**
  * Transcribed notes as the model writes MIDI: rows of [start, pitch, velocity, length], in beats at the Set's
- * tempo when given (to a 16th), else seconds; a hit with no clear pitch has pitch null.
+ * tempo when given, else seconds; a hit with no clear pitch has pitch null. Starts are as played, not snapped
+ * to a grid: a reference that isn't on the grid (or whose tempo is a guess) drifts when every note is rounded.
  */
 export function transcription(notes: readonly HeardNote[], tempo?: number): JsonObject {
   const unit = tempo ? tempo / 60 : 1;
-  const at = (seconds: number) => (tempo ? Math.round(seconds * unit * 4) / 4 : Math.round(seconds * 1000) / 1000);
-  const rows = notes.slice(0, 400).map((note) => [at(note.time), note.midi, note.velocity, Math.max(tempo ? 0.25 : 0.02, at(note.duration))]);
+  const at = (seconds: number) => (tempo ? Math.round(seconds * unit * 100) / 100 : Math.round(seconds * 1000) / 1000);
+  const rows = notes.slice(0, 400).map((note) => [at(note.time), note.midi, note.velocity, Math.max(tempo ? 0.1 : 0.02, at(note.duration))]);
   const pitched = notes.filter((note) => note.midi !== null);
   const counts = new Map<number, number>(); for (const note of pitched) counts.set(note.midi!, (counts.get(note.midi!) ?? 0) + 1);
-  return { unit: tempo ? `beats at ${tempo} BPM (a 16th is 0.25)` : "seconds", columns: ["start", "pitch (MIDI; null: a hit with no clear pitch)", "velocity", "length"], rows,
+  return { unit: tempo ? `beats at ${tempo} BPM (a 16th is 0.25; starts as played, not on the grid)` : "seconds", columns: ["start", "pitch (MIDI; null: a hit with no clear pitch)", "velocity", "length"], rows,
     ...(notes.length > 400 ? { more: notes.length - 400 } : {}), pitched: pitched.length, unpitched: notes.length - pitched.length,
     mostPlayed: [...counts].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([midi, count]) => ({ midi, count })),
-    note: "Monophonic: the strongest line. Write it with write_midi_clip (unpitched hits as a drum or percussive voice), then audition the result against the reference." };
+    note: `Monophonic: the strongest line. Write it with write_midi_clip at these starts as they are${tempo ? `, with the Set at ${tempo} BPM` : ""} (rounding them to the grid moves the rhythm away from the reference's), unpitched hits as a drum or percussive voice; then audition it against the reference.` };
 }
 
 /**

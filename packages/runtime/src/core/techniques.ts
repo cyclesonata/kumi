@@ -13,6 +13,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ChangeRecord, KernelTool, TechniqueEvent } from "./contracts.js";
 import { suspectNote } from "./memory.js";
+import { sentencesOf } from "./playbook.js";
 
 export interface Technique {
   /** "t3": what the model and /memory name it by. */
@@ -150,8 +151,9 @@ export const MATCHING = /\b(sounds? (more )?like|sound closer to|recreate|re-cre
 
 /** A request's words for what it asks for: "Build me a gritty Reese bass on a new MIDI track: …" → "gritty Reese bass on a new MIDI track". */
 function asked(request: string): string {
-  const first = request.split(/[.!?:;\n]/, 1)[0] ?? "";
-  return first.replace(/^\s*(please\s+)?((can|could|would) you\s+)?(please\s+)?(build|make|give|create|design|set up|put together)(\s+me)?\s+(an?\s+|the\s+|some\s+)?/i, "").trim();
+  const sentences = sentencesOf(request).flatMap((sentence) => sentence.split(/[;:]/)).map((sentence) => sentence.trim()).filter(Boolean);
+  const first = sentences.find((sentence) => /\b(build|make|give|create|design|set up|put together|recreate)\b/i.test(sentence)) ?? sentences[0] ?? "";
+  return first.replace(/^\s*(please\s+)?((can|could|would) you\s+)?(please\s+)?(build|make|give|create|recreate|design|set up|put together)(\s+me)?\s+(an?\s+|the\s+|some\s+)?/i, "").trim();
 }
 
 /**

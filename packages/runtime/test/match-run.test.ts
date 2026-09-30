@@ -61,7 +61,7 @@ test("a model that stops at a first draft is sent back in with the score and its
   assert.equal(r.asked.length, 5, "four rounds and the wrap-up");
   assert.match(r.asked[1]!, /^\[Kumi\] Score 50% \(best: Drift\)\. Budget left: 12 rounds, about 45 minutes\. Biggest gaps: attack too slow\. Keep going/);
   assert.match(r.asked[2]!, /^\[Kumi\] Score 50% → 60%/);
-  assert.match(r.asked[4]!, /That reaches 93%.*mute every other candidate track.*the score before and after \(50% → 93%\)/);
+  assert.match(r.asked[4]!, /That reaches 93%.*rebuild it there.*Mute every other candidate track.*the score before and after \(50% → 93%\)/);
   const last = r.status().at(-1)!;
   assert.deepEqual([last.state, last.stop, last.first, last.best?.score], ["done", "reached", 50, 93]);
   const complete = r.events.filter((event) => event.type === "turn-complete");
@@ -179,6 +179,7 @@ test("lessons are kept in a file only this user can read, checked on the way in;
     assert.equal(matchedFrom("recreate this sound"), "sound");
     assert.equal(matchedFrom("Make a new MIDI track with a sound that sounds like this reference: ~/ref.wav. It's a chord."), "sound");
     assert.equal(matchedFrom("build me a warm pad that sounds like the intro"), "warm pad");
+    assert.equal(matchedFrom("https://www.youtube.com/watch?v=abc Listen to 0:05 - 0:25 of this track. Recreate the sound and the sequence on this track using native devices."), "sound and the sequence", "a link isn't what was matched");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
