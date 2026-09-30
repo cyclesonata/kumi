@@ -1,67 +1,69 @@
-# Kumi
+<p align="center">
+  <img src="docs/assets/kumi-logo.svg" alt="kumi" width="300">
+</p>
 
-[English](README.md) · 简体中文 · [日本語](README.ja.md)
+<p align="center">
+  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-以一只猫命名的个人音乐制作助手：在终端中全屏运行，围绕当前打开的 Ableton Live
-工程对话。它回答关于工程的问题，并执行你要求的几乎所有 Live 脚本接口允许的修改：
-速度、拍号、律动与音阶，调音台、路由与侧链，轨道、返回轨与场景，片段、音符与
-MIDI 变换，设备、机架及其参数，以及它在你电脑上找到的采样。每项修改都显示在
-HISTORY 中，并可单独撤销。在你要求时，它还能播放、录音，并通过重采样把声音转成
-音频。它可以聆听音频（参考曲、采样或它自己的录音），并把你的混音与参考曲对比。
-它还能观看 YouTube 或本地文件中的视频教程，并在工程中搭建出教程里做的内容。
-它还能按你的描述制作 Max for Live MIDI 效果器，并放到你的轨道上。
-它会把你的工作流程存为可重放的配方，也能通过观察你的操作学会流程。它会记下你告诉
-它的简短笔记。它会保存每个工程的对话，下次打开时从上次停下的地方继续（`/conversations`
-可回到之前的对话）；对已保存的工程，还会告诉你 Kumi 关闭期间发生了哪些变化。
+<p align="center">
+  <a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a>
+</p>
+
+**为 Ableton Live 打造、会学习你工作方式的录音室搭档。** 用平常的话告诉 Kumi 你想要什么，它就在你的工程里动手完成，从繁琐的杂活，到你根本没时间琢磨的事情：照着 YouTube 教程重建一个声音、把你的混音与参考曲对比、编写你描述的 Max for Live 设备，或者改造你指着的那个机架。每项修改都有各自的撤销，不会有任何事在你背后发生；它还会记住你保留下来的技巧，所以每次使用都更贴合你。
+
+<p align="center">
+  <img src="docs/assets/kumi-screenshot.png" alt="Kumi 根据视频教程重建 Drift 贝斯：记录每一步的对话、显示新轨道设备链的 FOCUS，以及每项修改都可撤销的 HISTORY" width="760">
+</p>
+
+## 它能做什么
+
+- **修改工程里几乎任何东西：** 速度、音阶与律动；调音台、路由与侧链；轨道、场景与片段；音符与 MIDI 变换；设备、机架及其参数。每项修改都可单独撤销。
+- **聆听：** 混音、采样或它自己弹出的音频的响度、音色平衡、声像宽度、速度与调性，以及你的混音与参考曲的差别。
+- **观看教程：** 观看 YouTube 或本地文件中的视频，并在新轨道上搭建出教程里做的内容。
+- **播放、录音与重采样**，在你要求时进行。
+- **制作 Max for Live 设备：** 按你的描述制作设备，并放到你的轨道上。
+- **显示你在哪里：** FOCUS 跟随你在 Live 中触碰的对象，显示为设备树、钢琴卷帘，或 Session、Arrangement 视图的条带。点击某个设备即可指向它：“这个 Saturator 太刺耳了”。
+- **记住：** 关于你和每个工程的笔记、从你保留的声音中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
+- **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。
+- **用你的模型：** 使用 ChatGPT 登录，或使用 OpenAI、Anthropic、OpenCode 的 API 密钥。
 
 ## 开始使用
 
-需要 **Node.js 22 或 24**（使用 [nodejs.org](https://nodejs.org) 的 Node 24 LTS
-安装程序即可；Node 25 已停止维护）。在仓库根目录运行：
+需要 **Node.js 22 或 24**（[nodejs.org](https://nodejs.org)）和 Ableton Live 12。
 
 ```sh
-npm run setup                          # 安装并构建全部组件，约一分钟
-npm run kumi -- login openai-codex     # 使用 ChatGPT 套餐登录（无浏览器环境用 --device）
-npm run kumi -- bridge                 # 先关闭 Live：把桥接装入 Live（或更新它）
-npm run kumi                           # 讨论当前打开的 Live 工程
-npm run kumi -- doctor                 # 遇到问题时：检查所有环节并告诉你该运行什么
+npm run setup                        # 安装并构建，约一分钟
+npm run kumi -- login openai-codex   # 使用 ChatGPT 登录（或设置 API 密钥）
+npm run kumi -- bridge               # 在 Live 关闭时：把 Kumi 连接到 Live
+npm run kumi                         # 在你的工程旁打开 Kumi
 ```
 
-登录后会自动选择默认模型，可随时用 `npm run kumi -- model <provider>/<model>` 更改。
-也可以使用 API 密钥：`openai/`、`anthropic/`、`opencode/` 模型分别使用
-`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENCODE_API_KEY`，运行
-`npm run kumi -- auth` 可查看可用的提供方。
+首次使用时，请在 Live 的 **Settings → Link, Tempo & MIDI** 中将 **AbletonMcpBridge** 选为控制界面（Control Surface）。之后 Kumi 会自己找到 Live。
 
-要连接 Live，请先关闭 Live，再运行 `npm run kumi -- bridge`：它会安装（或更新）桥接的
-Remote Script，然后等待你打开 Live。首次安装时，请在 Live 的
-**Settings → Link, Tempo & MIDI** 中将 `AbletonMcpBridge` 选为控制界面（Control Surface）。
-之后 Kumi 会自动找到桥接。在此之前 Kumi 仍可启动和对话，并提示尚未连接 Live
-（[连接 Live（英文）](docs/en/KUMI_POC.md#connect-to-live)）。
+遇到问题？`npm run kumi -- doctor` 会检查所有环节并告诉你该运行什么。`npm run kumi -- report` 把出错的情况整理成一个可以发给我们的文件，`npm run kumi -- update` 让 Kumi 和桥接保持最新。
 
-- [Kumi 设置、命令与限制（英文）](docs/en/KUMI_POC.md)
-- [桥接配置](docs/zh-CN/USER_GUIDE.md) · [安全边界](docs/zh-CN/LIVE_SAFETY.md)
-- [包含真实 Live 验收的验证记录（英文）](docs/evidence/kumi-poc.md)
+在 Kumi 中输入 `/` 查看命令。Esc 停止 Kumi 正在做的事，`/stop` 停止 Live。
 
-在终端中全屏运行（对话、Live 面板和输入框）。输入 `/` 查看命令，Esc 停止当前
-工作，`/stop` 停止 Live，Ctrl-C 先清空输入框，空时退出。Live 关闭后再次打开时，Kumi 会从中断的
-地方继续。`/new` 开始新的对话，之前的对话仍会保留。[更新日志（英文）](CHANGELOG.md)。
-使用 `npm run typecheck` 和 `npm test` 进行测试，无需凭据或 Live。
+[完整指南（英文）](docs/en/KUMI_POC.md) · [命令与界面（英文）](docs/en/KUMI_TUI.md) · [更新日志（英文）](CHANGELOG.md)
 
-## 测试环境与后续计划
+## 当前状态
 
-目前 Kumi 只在 Ableton Live 12.4.15b4 上测试过，其他版本的 Live 尚未试用。接下来将支持
-Renoise 和 Reaper。
+Kumi 1.0 已在 macOS 上的 Ableton Live 12.4（测试版）中测试；Windows 支持正在测试中。接下来将支持 Renoise 和 Reaper。
 
-## Ableton MCP Beyond — 独立桥接组件
+## 开发
 
-[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
+```sh
+npm run typecheck
+npm test          # 无需 Live 或登录
+```
 
-`@ableton-mcp/mcp-server` 仍可由其他 MCP 客户端独立使用，保留自己的锁文件、
-Node 支持策略、安全契约和 CI。Kumi 使用桥接的 Live 读取、编辑、走带与录音工具（带经过验证的撤销），并自行分析音频。
+`apps/kumi` 是终端应用；`packages/runtime` 包含 Kumi 的代理核心、模型提供方、记忆、音频分析以及与 Live 的集成。Kumi 通过本地桥接（`apps/mcp-server` 及其 Remote Script）与 Live 通信，该桥接也可由其他 MCP 客户端单独使用（[桥接指南（英文）](apps/mcp-server/README.md)）。
 
-[桥接入口（英文）](apps/mcp-server/README.md) ·
-[能力列表](docs/zh-CN/CAPABILITY_MATRIX.md) · [支持矩阵](docs/zh-CN/SUPPORT_MATRIX.md) ·
-[运维](docs/zh-CN/OPERATIONS.md) · [恢复](docs/zh-CN/RECOVERY.md) · [交付](docs/zh-CN/DELIVERY.md)
+## 许可证
 
-托管仓库的更名由所有者另行完成。
-[MIT 许可证](LICENSE.md)。本项目不代表与 Ableton AG 存在关联或获得其认可。
+[MIT](LICENSE.md)。Ableton Live 是 Ableton AG 的商标；Kumi 与 Ableton 没有关联，也未获其认可。

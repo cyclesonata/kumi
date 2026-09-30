@@ -1,71 +1,69 @@
-# Kumi
+<p align="center">
+  <img src="docs/assets/kumi-logo.svg" alt="kumi" width="300">
+</p>
 
-[English](README.md) · [简体中文](README.zh-CN.md) · 日本語
+<p align="center">
+  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-猫の名前にちなんだ、音楽制作のためのパーソナルアシスタントです。
-全画面のターミナルで、現在開いている Ableton Live Set について会話します。
-Set についての質問に答え、Live のスクリプトで変更できることのほぼすべてを、頼んだとおりに
-行います。対象はテンポ、拍子、スウィングとスケール、ミキサー、ルーティングとサイドチェイン、
-トラック・リターン・シーン、クリップ・ノート・MIDI 変換、デバイス・ラックとその
-パラメータ、そしてコンピューター上で見つけたサンプルです。変更はそれぞれ HISTORY に表示され、
-個別に元に戻せます。頼めば再生や録音も行い、リサンプリングで音をオーディオに書き出します。
-リファレンス曲やサンプル、自分の録音といった音声を聴いて、ミックスをリファレンスと比較できます。
-YouTube やファイルのビデオチュートリアルを見て、その内容を Set に組み立てることもできます。
-言葉で説明した Max for Live の MIDI エフェクトを作り、トラックに載せることもできます。
-作業の手順をレシピとして保存して再実行でき、あなたの作業を見て手順を覚えることもできます。
-あなたが伝えたことを短いメモとして覚えます。Set ごとに会話を保存し、次に開いたときは続きから
-再開します（`/conversations` で以前の会話に戻れます）。保存済みの Set では、Kumi が閉じていた間の変更も伝えます。
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · 日本語
+</p>
 
-## 開始
+**あなたの作業のしかたを覚える、Ableton Live のためのスタジオパートナー。** やりたいことを普段の言葉で伝えれば、Kumi があなたの Set で作業します。面倒な作業から、自分では調べる時間のないことまで。YouTube のチュートリアルから音を作り直したり、ミックスをリファレンスと比べたり、言葉で説明した Max for Live デバイスを作ったり、指し示したラックを作り直したりします。変更にはそれぞれ取り消しが付くので、知らないうちに何かが変わることはありません。気に入って残したテクニックは覚えておくので、使うほどあなたに合っていきます。
 
-**Node.js 22 または 24** が必要です（[nodejs.org](https://nodejs.org) の
-Node 24 LTS インストーラーで構いません。Node 25 はサポート終了）。リポジトリのルートで実行します。
+<p align="center">
+  <img src="docs/assets/kumi-screenshot.png" alt="ビデオチュートリアルから Drift のベースを作り直す Kumi：手順ごとの会話、新しいトラックのデバイスチェーンを表示する FOCUS、変更ごとに取り消しの付いた HISTORY" width="760">
+</p>
+
+## できること
+
+- **Set のほぼすべてを変更：** テンポ、スケール、グルーヴ。ミキサー、ルーティング、サイドチェイン。トラック、シーン、クリップ。ノートと MIDI 変換。デバイス、ラックとそのパラメータ。変更は一つずつ取り消せます。
+- **聴く：** ミックス、サンプル、自分でバウンスした音のラウドネス、トーンバランス、ステレオ幅、テンポとキー。ミックスとリファレンスの違いも聴き分けます。
+- **チュートリアルを見る：** YouTube やファイルのビデオを見て、その内容を新しいトラックに組み立てます。
+- **再生・録音・リサンプリング**を、頼まれたときに行います。
+- **Max for Live デバイスを作る：** 言葉で説明したデバイスを作り、トラックに載せます。
+- **いまいる場所を表示：** FOCUS は Live で触れたものを追い、デバイスツリー、ピアノロール、セッションやアレンジメントの帯として表示します。デバイスをクリックして指し示せます。「このサチュレーター、きつすぎる」のように。
+- **覚える：** あなたと各 Set についてのメモ、残した音から学んだテクニック、再実行できるレシピ。保存したものはすべて表示され、クリック一つで忘れさせられます。
+- **会話を保存：** Set ごとに会話を保存し、閉じていた間に変わったことも伝えます。
+- **好きなモデルで：** ChatGPT でサインインするか、OpenAI・Anthropic・OpenCode の API キーを使います。
+
+## はじめかた
+
+**Node.js 22 または 24**（[nodejs.org](https://nodejs.org)）と Ableton Live 12 が必要です。
 
 ```sh
-npm run setup                          # すべてをインストール・ビルド（約 1 分）
-npm run kumi -- login openai-codex     # ChatGPT プランでサインイン（ブラウザがない環境では --device）
-npm run kumi -- bridge                 # Live を閉じてから：ブリッジを Live に入れる（または更新する）
-npm run kumi                           # 開いている Live Set について話す
-npm run kumi -- doctor                 # うまくいかないとき：すべてを確認し、実行すべきことを表示
+npm run setup                        # インストールとビルド（約 1 分）
+npm run kumi -- login openai-codex   # ChatGPT でサインイン（または API キーを設定）
+npm run kumi -- bridge               # Live を閉じた状態で：Kumi を Live につなぐ
+npm run kumi                         # Set の横で Kumi を開く
 ```
 
-サインインするとデフォルトのモデルも設定されます。`npm run kumi -- model <provider>/<model>`
-でいつでも変更できます。API キーも使えます。`openai/`・`anthropic/`・`opencode/` の
-モデルは `OPENAI_API_KEY`・`ANTHROPIC_API_KEY`・`OPENCODE_API_KEY` を使用し、
-`npm run kumi -- auth` で利用可能なものを確認できます。
+初回は、Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** をコントロールサーフェスとして選びます。その後は Kumi が自分で Live を見つけます。
 
-Live に接続するには、Live を閉じてから `npm run kumi -- bridge` を実行します。ブリッジの
-Remote Script をインストール（または更新）し、Live を開くのを待ちます。初回は Live の
-**Settings → Link, Tempo & MIDI** で `AbletonMcpBridge` をコントロールサーフェスとして選択します。
-その後は Kumi が自動でブリッジを見つけます。それまでも Kumi は起動して会話でき、
-Live に接続されていないことを表示します（[Live への接続（英語）](docs/en/KUMI_POC.md#connect-to-live)）。
+うまくいかないときは、`npm run kumi -- doctor` がすべてを確認し、実行すべきことを教えます。`npm run kumi -- report` は起きたことを送れるファイル一つにまとめ、`npm run kumi -- update` は Kumi とブリッジを最新に保ちます。
 
-- [Kumi の設定・コマンド・制限（英語）](docs/en/KUMI_POC.md)
-- [ブリッジ設定](docs/ja/USER_GUIDE.md) · [安全性](docs/ja/LIVE_SAFETY.md)
-- [実機 Live を含む検証結果（英語）](docs/evidence/kumi-poc.md)
+Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。
 
-ターミナルでは全画面で動作します（会話、Live ペイン、入力欄）。`/` でコマンド、
-Esc で処理を中止、`/stop` で Live を停止、Ctrl-C で入力欄をクリアし、空なら終了します。
-Live が閉じても、再び開くと Kumi は中断したところから続けます。`/new` は新しい会話を始め、前の会話は保存されたままです。
-[変更履歴（英語）](CHANGELOG.md)。
-テストは `npm run typecheck` と `npm test`。認証情報や Live は不要です。
+[ガイド（英語）](docs/en/KUMI_POC.md) · [コマンドと画面（英語）](docs/en/KUMI_TUI.md) · [変更履歴（英語）](CHANGELOG.md)
 
-## 動作確認と今後の予定
+## 現状
 
-Kumi の動作確認は、今のところ Ableton Live 12.4.15b4 でのみ行っています。ほかのバージョンの
-Live ではまだ試していません。次は Renoise と Reaper への対応を予定しています。
+Kumi 1.0 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows 対応は確認中です。次は Renoise と Reaper への対応を予定しています。
 
-## Ableton MCP Beyond — 独立したブリッジ
+## 開発
 
-[![Node 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933)](apps/mcp-server/package.json)
+```sh
+npm run typecheck
+npm test          # Live もサインインも不要
+```
 
-`@ableton-mcp/mcp-server` は引き続き他の MCP クライアントから単独で使用できます。
-独自のロックファイル、Node 対応方針、安全性の契約、CI を維持します。
-Kumi はブリッジの Live 読み取り・編集・トランスポート・録音ツール（検証済みの取り消し付き）を使用し、音声の解析は自前で行います。
+`apps/kumi` はターミナルアプリ、`packages/runtime` は Kumi のエージェントコア、プロバイダー、メモリー、音声解析、Live との連携を持ちます。Kumi はローカルのブリッジ（`apps/mcp-server` とその Remote Script）を通じて Live と通信します。このブリッジは他の MCP クライアントからも単独で使えます（[ブリッジのガイド（英語）](apps/mcp-server/README.md)）。
 
-[ブリッジ概要（英語）](apps/mcp-server/README.md) ·
-[能力一覧](docs/ja/CAPABILITY_MATRIX.md) · [互換性](docs/ja/SUPPORT_MATRIX.md) ·
-[運用](docs/ja/OPERATIONS.md) · [復旧](docs/ja/RECOVERY.md) · [配布](docs/ja/DELIVERY.md)
+## ライセンス
 
-ホストされているリポジトリの改名は所有者が別途行います。
-[MIT ライセンス](LICENSE.md)。Ableton AG との提携・承認を意味しません。
+[MIT](LICENSE.md)。Ableton Live は Ableton AG の商標です。Kumi は Ableton と提携しておらず、Ableton の承認を受けたものでもありません。

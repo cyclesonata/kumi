@@ -3,7 +3,7 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## 1.0.0 — 2026-09-29
+## 1.0.0 — 2026-09-30
 
 The first release for producers to use day to day. Ships with bridge 1.0.52.
 
