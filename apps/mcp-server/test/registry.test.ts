@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { loadLiveRegistry, validateLiveOperationRequest, validateLiveOperationResult } from "../src/registry.js";
+import { fileURLToPath } from "node:url";
+import { liveRegistryHash, loadLiveRegistry, validateLiveOperationRequest, validateLiveOperationResult } from "../src/registry.js";
+
+// The Remote Script hashes the registry with Python's json.dumps and the host with JSON.stringify:
+// a number the two spell differently (1e-06 against 0.000001) would keep Live from ever connecting.
+test("the Remote Script and the host compute the same registry hash", { skip: spawnSync("python3", ["--version"]).status !== 0 ? "python3 is unavailable" : false }, () => {
+  const remoteScript = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "remote-script");
+  const python = spawnSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); from ableton_mcp_remote_script import operation_registry; print(operation_registry()[1])", remoteScript], { encoding: "utf8" });
+  assert.equal(python.status, 0, python.stderr);
+  assert.equal(python.stdout.trim(), liveRegistryHash());
+});
 
 const outputSafety = { safe: true, provenance: "test-operator" };
 

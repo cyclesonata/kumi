@@ -2331,7 +2331,7 @@
      },
      "length": {
       "type": "number",
-      "minimum": 1e-06,
+      "minimum": 0.001,
       "maximum": 1000000000
      },
      "value": {
@@ -7924,7 +7924,7 @@
      },
      "timeSpan": {
       "type": "number",
-      "minimum": 1e-06,
+      "minimum": 0.001,
       "maximum": 1000000000
      },
      "expectedClipAuthority": {
