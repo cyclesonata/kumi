@@ -8537,7 +8537,7 @@ class LiveObjectMapper:
                     if group["typeLabel"] is not None: setattr(track, group["typeAttribute"], group["priorType"])
                     setattr(track, group["channelAttribute"], group["priorChannel"])
                 except BaseException: rollback_failed = True
-            restored_routing = self._routing_row(track); restored_state = {"inputType": restored_routing.get("inputType"), "inputSubRouting": restored_routing.get("inputSubRouting"), "outputType": restored_routing.get("outputType"), "outputSubRouting": restored_routing.get("outputSubRouting"), "arm": self._read_attr(track, "arm"), "monitoring": self._monitoring_state(self._read_attr(track, "current_monitoring_state"))}
+            restored_routing = self._routing_row(track); restored_state = {"inputType": restored_routing.get("inputType"), "inputSubRouting": restored_routing.get("inputSubRouting"), "outputType": restored_routing.get("outputType"), "outputSubRouting": restored_routing.get("outputSubRouting"), "arm": self._armed(track), "monitoring": self._monitoring_state(self._read_attr(track, "current_monitoring_state"))}
             if self._bounded_canonical(restored_state) != self._bounded_canonical(state): rollback_failed = True
             if rollback_failed: raise ValueError("routing change failed and exact rollback failed") from error
             # Live offers a track's inputs by what's there now: an audio input with no audio device, or a track

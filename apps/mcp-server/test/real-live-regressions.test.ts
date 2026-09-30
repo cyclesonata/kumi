@@ -81,6 +81,19 @@ test("loop, metronome and arm that Live applies on its next tick are confirmed i
   assert.equal((simulator as any).state.tracks[0].armed, false);
 });
 
+test("a playhead-only undo refused while playing leaves the change applied: undone after stopping, with a new key", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { call, apply, undo } = hostFor(simulator);
+  const moved = await call("live_transport_preview", { position: 32 });
+  assert.equal((await apply(moved, "playhead-move")).body.state, "applied");
+  (simulator as any).state.playback.transport.playing = true;
+  const refused = await undo(moved, "playhead-undo-playing");
+  assert.equal(refused.isError, true);
+  assert.match(JSON.stringify(refused.body), /stop playback first/);
+  (simulator as any).state.playback.transport.playing = false;
+  const undone = await undo(moved, "playhead-undo-stopped");
+  assert.equal(undone.body.state, "undone", JSON.stringify(undone.body));
+});
+
 test("a playhead, loop or locators past the end of the Set are refused with where it ends, and nothing is uncertain", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, apply } = hostFor(simulator);
   const pastEnd = "request failed: past the end of the Set: its arrangement ends at beat 1536, and Live can't go further; nothing changed. Pick an earlier spot, or make the arrangement longer first";

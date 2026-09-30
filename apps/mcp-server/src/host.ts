@@ -1805,10 +1805,13 @@ export class McpHost {
     if (transaction.state === "undone" && transaction.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "undone", idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.undoKey === params.idempotencyKey;
     if (transaction.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain transport transaction can be undone");
+    // A refusal before anything reaches Live leaves the change applied, with no recovery plan: a retry with a
+    // new key starts over instead of reconciling one that never ran.
+    const refuse = (message: string) => { this.undoRecoveryPlans.delete(transaction); return this.transactionError(id, message); };
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string);
       const status = this.requireConnected("transport");
-      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+      if (status.epoch !== transaction.epoch) return refuse("Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
@@ -1824,17 +1827,17 @@ export class McpHost {
         if (field === "punchIn" && typeof prior.punchIn === "boolean") restore.punchIn = prior.punchIn;
         if (field === "punchOut" && typeof prior.punchOut === "boolean") restore.punchOut = prior.punchOut;
       }
-      if (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity) return this.transactionError(id, "transport Set identity changed after apply; undo refused");
+      if (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity) return refuse("transport Set identity changed after apply; undo refused");
       // Playing, stopping and recording since change the playback revision and move the playhead, so undo
       // puts the change back as long as each field it changed still reads as it left it; the playhead only
       // while stopped, since moving it while playing would be heard.
       const current = snapshot.playback.transport;
       if (!reconciliation && current.playing === true) delete restore.position;
-      if (!reconciliation && Object.keys(restore).length === 0) return this.transactionError(id, "transport undo refused while playing: only the playhead changed; stop playback first");
+      if (!reconciliation && Object.keys(restore).length === 0) return refuse("transport undo refused while playing: only the playhead changed; stop playback first");
       if (reconciliation) {
         await this.confirmTransportFields(adapter, context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
       } else {
-        for (const [field, proposed] of Object.entries(transaction.proposed)) if (field !== "position" && !McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return this.transactionError(id, "transport field changed after apply; undo refused");
+        for (const [field, proposed] of Object.entries(transaction.proposed)) if (field !== "position" && !McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return refuse("transport field changed after apply; undo refused");
         const result = await this.invokeUndoRecovery(transaction, adapter, "transport.set", { ...restore, expectedRevision: snapshot.playback.revision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("transport undo was not confirmed");
       }
@@ -8665,8 +8668,9 @@ export class McpHost {
       try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await adapter.snapshotAsync(context());
         // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
         const discard = params.discard === true;
-        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !discard && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
-        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await adapter.snapshotAsync(context()); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; if (!discard && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
+        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !(discard && item.kind === "track") && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
+        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await adapter.snapshotAsync(context()); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
+if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
         const after = await adapter.snapshotAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
       catch (cause) {
         // Refused because what it made has changed since: nothing was touched, so it stays applied (a later undo, with discard, can still go).
