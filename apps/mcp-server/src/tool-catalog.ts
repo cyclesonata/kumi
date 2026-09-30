@@ -153,6 +153,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { prefix: "live_object_rename_", prereq: { capabilitiesAny: ["tracks", "scenes", "clips", "devices"], operationsAny: ["track.rename", "scene.rename", "clip.rename", "device.rename", "locator.rename", "take-lane.rename"] } },
   { prefix: "live_batch_", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { name: "live_undo", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
+  { name: "live_change", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { name: "live_transaction_release", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { name: "live_recovery_finalize", prereq: { mutationAvailable: true, operationsAll: ["snapshot"] } },
   { prefix: "live_", prereq: { never: true } },
@@ -783,6 +784,12 @@ const toolDescriptors = [
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  },
+  {
+    name: "live_change",
+    description: "Make one change in one call: runs the named preview tool (tool) with its arguments (args), then its apply on that preview's transaction, and answers with the apply's transaction record, so live_undo undoes it as usual; the preview's own answer is under preview. Give an idempotencyKey to retry safely: the same key with the same change reconciles it instead of making it twice. Changes the producer decides on after seeing their preview (auditions, clip launches, captures, recording, realtime arming, Live's dialogs) aren't fused: preview and apply those with their own tools.",
+    inputSchema: { type: "object", properties: { tool: { type: "string", pattern: "^live_[a-z0-9_]+_preview$", minLength: 1, maxLength: 128, description: "A *_preview tool whose family has an *_apply, e.g. live_mixer_preview." }, args: { type: "object", description: "The preview tool's own arguments." }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["tool", "args"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
   {
     name: "live_transaction_release",
