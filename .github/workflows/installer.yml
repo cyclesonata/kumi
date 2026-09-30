@@ -60,8 +60,13 @@ jobs:
       - name: Serve the release locally
         shell: bash
         run: |
-          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &) && sleep 2
-          curl -fsS http://127.0.0.1:8765/kumi-release.json
+          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          # The server can take a few seconds to listen on a busy runner (Windows especially): wait for it.
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/kumi-release.json; then exit 0; fi
+            sleep 1
+          done
+          exit 1
 
       - name: Install, use, update and remove (macOS, Linux)
         if: runner.os != 'Windows'
