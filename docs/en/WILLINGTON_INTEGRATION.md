@@ -56,3 +56,5 @@ chain parent and returns its mixer parameters with ranges and identities. Mappin
 `targetRef` must come from discovery in the current turn. Rack history titles now
 name the action in ordinary language. Full-screen TUI behavior, playback and
 save/reload persistence were not exercised by this chat trial.
+
+Follow Action capability is advertised whenever its native provider is ready, including an empty Set. Exact clip state is validated at preview/apply time; clients can therefore plan clip creation and Follow Action edits in the same request.

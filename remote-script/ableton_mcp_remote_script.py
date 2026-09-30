@@ -896,7 +896,11 @@ class LiveObjectMapper:
         if operation == "arrangement.audio-clip.create":
             return any(callable(getattr(track, "create_audio_clip", None)) for track in tracks)
         if operation == "clip.follow-actions.set":
-            return self._follow_action_ready() and any(all(value is not None for value in self._follow_action_fields(getattr(slot, "clip", None)).values()) for track in tracks for slot in self._items(getattr(track, "clip_slots", [])) if getattr(slot, "clip", None) is not None)
+            # Provider readiness is independent of current clip contents. Hiding
+            # this operation in an empty Set prevents clients from planning a
+            # create-clip + Follow Action workflow. Validate the exact target
+            # and all ten fields when previewing/applying instead.
+            return self._follow_action_ready()
         if operation == "clip.set":
             clips = [getattr(slot, "clip", None) for track in tracks for slot in self._items(getattr(track, "clip_slots", []))]
             clips += [clip for track in tracks for clip in self._items(self._read_attr(track, "arrangement_clips") or [])]

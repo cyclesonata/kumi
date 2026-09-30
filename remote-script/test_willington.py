@@ -34,6 +34,17 @@ class WillingtonTests(unittest.TestCase):
         return {**before, **changes, 'ref': self.row['ref'], 'expectedObjectIdentity': self.row['objectIdentity'],
                 'expectedAuthorityRevision': self.mapper._clip_authority_digest(self.row['ref']),
                 'expectedStateRevision': hashlib.sha256(self.mapper._bounded_canonical(before).encode()).hexdigest()}
+    def test_follow_capability_is_available_before_the_first_clip_exists(self):
+        self.song.tracks[0].clip_slots[0].clip = None
+        self.assertTrue(self.mapper._operation_supported('clip.follow-actions.set'))
+        self.song.tracks[0].clip_slots[0].clip = FakeClip(4)
+        self.row = self.mapper.snapshot()['tracks'][0]['clips'][0]
+        self.assertTrue(self.mapper._operation_supported('clip.follow-actions.set'))
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            self.mapper._follow_action_set(self.args())
+        self.mapper.willington_follow_writes = False
+        self.assertFalse(self.mapper._operation_supported('clip.follow-actions.set'))
+
     def test_follow_read_write_and_explicit_restoration(self):
         self.assertTrue(self.mapper._operation_supported('clip.follow-actions.set'))
         prior = self.mapper._follow_action_fields(self.clip)
