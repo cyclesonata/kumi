@@ -620,7 +620,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "507cbfef788eb966d677c7a96d22e44806fb89f8ae013fafeff7f99e8f37d918")
+        self.assertEqual(digest, "a04384186aab64327446734075e888368565522e35062acf1eb0bbf343884bac")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -1647,6 +1647,9 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", delete_args, "attacker-transaction")
         song.tracks[1].arrangement_clips = [FakeClip(4.0)]; delete_args["expectedStructureRevision"] = mapper._structure_revision()
         with self.assertRaisesRegex(ValueError, "changed after creation"): mapper.invoke("track.delete", delete_args, transaction, created["ownershipToken"])
+        # The client's own scratch track, recorded onto: it goes when the client says so, and only with the creating transaction's authority.
+        with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, "attacker-transaction")
+        self.assertEqual(mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, transaction, created["ownershipToken"]), {"deleted": created["ref"]})
         clean_song = FakeSong(); clean_mapper = LiveObjectMapper(clean_song); clean = clean_mapper.invoke("scene.create", {"name": "Owned Scene", "index": 1, "expectedStructureRevision": clean_mapper._structure_revision()}, transaction); clean_args = {"ref": clean["ref"], "expectedStructureRevision": clean_mapper._structure_revision(), "expectedObjectIdentity": clean["objectIdentity"]}
         self.assertEqual(clean_mapper.invoke("scene.delete", clean_args, transaction, clean["ownershipToken"]), {"deleted": clean["ref"]}); clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"]); clean_mapper.retire_transaction_ownership(transaction)
         with self.assertRaisesRegex(ValueError, "transaction-owned"): clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"])

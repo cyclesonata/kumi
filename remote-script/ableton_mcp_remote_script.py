@@ -3489,7 +3489,9 @@ class LiveObjectMapper:
         record = self._owned_cleanup_tokens.get(str(ownership_token)) if isinstance(ownership_token, str) else None
         if record is None or record.get("transactionId") != transaction_id or record.get("ref") != reference or record.get("objectIdentity") != expected_identity: raise ValueError("destructive cleanup lacks exact transaction-owned authority")
         if record.get("deleted") is True: return
-        if not hmac.compare_digest(self._ownership_fingerprint(str(reference)), record["fingerprint"]): raise ValueError("transaction-owned object changed after creation; cleanup refused")
+        # A client's own scratch track (a render it recorded onto) goes as it is when the client says so.
+        discard = operation == "track.delete" and args.get("discardChanges") is True
+        if not discard and not hmac.compare_digest(self._ownership_fingerprint(str(reference)), record["fingerprint"]): raise ValueError("transaction-owned object changed after creation; cleanup refused")
         if operation in {"track.delete", "scene.delete"}:
             target_text = str(reference).rsplit(":", 1)[-1]
             if not target_text.isdigit(): raise ValueError("transaction-owned structure reference is malformed")
