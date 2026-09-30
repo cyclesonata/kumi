@@ -8,15 +8,17 @@ import {
 import { LOOPBACK_PROTOCOL_VERSION, type RemoteBridgeRequest, type LoopbackResponse } from "../loopback.js";
 import { validateLiveOperationRequest, validateLiveOperationResult } from "../registry.js";
 
-const MAX_FRAME_BYTES = 4 * 1_048_576;
-const MAX_PENDING = 64;
+// As large as the Remote Script sends (its MAX_WIRE_BYTES): big Sets make big frames, and what keeps
+// Live responsive is paging on its side, not a cap here.
+const MAX_FRAME_BYTES = 256 * 1_048_576;
+const MAX_PENDING = 4096;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
 const EVENT_TYPES = new Set(["transport", "object", "reset"]);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
-export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"]);
+export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into
@@ -47,13 +49,13 @@ type Pending = {
 type Hello = LoopbackResponse & { id: "hello"; result: { protocol: string; registryHash: string; maxDeadlineMs: number } };
 
 function canonical(value: unknown, depth = 0): string {
-  // As deep as the Remote Script allows (racks nested in racks' chains): both ends sign the same text.
-  if (depth > 64) throw new Error("wire payload is too deeply nested");
+  // The Remote Script's own bounds (MAX_WIRE_DEPTH and the rest): both ends sign the same text.
+  if (depth > 256) throw new Error("wire payload is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
-  if (typeof value === "string") { if (value.length > 16_384) throw new Error("wire string is too large"); return JSON.stringify(value); }
+  if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("wire string is too large"); return JSON.stringify(value); }
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("wire number is not finite"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-  if (Array.isArray(value)) { if (value.length > 512) throw new Error("wire array is too large"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
-  if (typeof value === "object") { const object = value as Record<string, unknown>; const keys = Object.keys(object); if (keys.length > 256) throw new Error("wire object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key], depth + 1)}`).join(",")}}`; }
+  if (Array.isArray(value)) { if (value.length > 10_000_000) throw new Error("wire array is too large"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
+  if (typeof value === "object") { const object = value as Record<string, unknown>; const keys = Object.keys(object); if (keys.length > 1_000_000) throw new Error("wire object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key], depth + 1)}`).join(",")}}`; }
   throw new Error("unsupported wire value");
 }
 function mac(secret: string, value: unknown): string { const encoded = canonical(value); if (Buffer.byteLength(encoded) > MAX_FRAME_BYTES) throw new Error("wire payload is too large"); return createHmac("sha256", secret).update(encoded).digest("base64url"); }
@@ -88,9 +90,9 @@ function validStatus(value: unknown): value is LiveStatus {
   const operations = status.operations;
   if (typeof status.connected !== "boolean" || typeof status.adapter !== "string" || !ADAPTERS.has(status.adapter) ||
       !(status.epoch === null || (typeof status.epoch === "number" && Number.isSafeInteger(status.epoch) && status.epoch >= 1)) ||
-      status.protocol !== LIVE_PROTOCOL || !Array.isArray(capabilities) || capabilities.length > 256 ||
+      status.protocol !== LIVE_PROTOCOL || !Array.isArray(capabilities) || capabilities.length > 4096 ||
       !capabilities.every((capability) => typeof capability === "string" && capability.length > 0 && capability.length <= 128) ||
-      status.registryHash !== LIVE_REGISTRY_HASH || !Array.isArray(operations) || operations.length > 256) return false;
+      status.registryHash !== LIVE_REGISTRY_HASH || !Array.isArray(operations) || operations.length > 4096) return false;
   if (new Set(capabilities).size !== capabilities.length || !capabilities.every((capability) => (LIVE_CAPABILITIES as readonly string[]).includes(capability))) return false;
   if (!operations.every((operation) => typeof operation === "string" && operation.length > 0 && operation.length <= 128) ||
       new Set(operations).size !== operations.length ||
@@ -120,6 +122,8 @@ function registryRequest(operationId: string, fields: Omit<RemoteBridgeRequest, 
 export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   private socket?: Socket;
   private buffer = Buffer.alloc(0);
+  private pieces: Buffer[] = [];
+  private piecesLength = 0;
   private sequence = 0;
   private epoch: number | null = null;
   private bridgeEpoch?: string;
@@ -285,7 +289,7 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (this.reopening) return this.contextualReconnectWait(this.reopening, context);
     if (this.socket && !this.socket.destroyed && this.bridgeEpoch && this.connectionChallenge) return Promise.resolve();
     const priorBridgeEpoch = this.bridgeEpoch; const priorLiveEpoch = this.epoch;
-    this.bridgeEpoch = undefined; this.connectionChallenge = undefined; this.buffer = Buffer.alloc(0); this.sequence = 0;
+    this.bridgeEpoch = undefined; this.connectionChallenge = undefined; this.buffer = Buffer.alloc(0); this.pieces = []; this.piecesLength = 0; this.sequence = 0;
     this.reopening = (async () => {
       await this.open();
       const value = await this.requestAsync({ method: "status" }, "status") as LiveStatus;
@@ -352,8 +356,13 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   }
 
   private onData(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    if (this.buffer.length > MAX_FRAME_BYTES) { this.failPending(new Error("remote frame exceeds limit")); this.socket?.destroy(); return; }
+    // A frame arrives in many pieces: keep them until one holds a line end, then join once.
+    if (chunk.indexOf(10) < 0) {
+      this.pieces.push(chunk); this.piecesLength += chunk.length;
+      if (this.buffer.length + this.piecesLength > MAX_FRAME_BYTES) { this.failPending(new Error("remote frame exceeds limit")); this.socket?.destroy(); }
+      return;
+    }
+    this.buffer = Buffer.concat([this.buffer, ...this.pieces, chunk]); this.pieces = []; this.piecesLength = 0;
     while (true) {
       const index = this.buffer.indexOf(10); if (index < 0) return;
       const frame = this.buffer.subarray(0, index); this.buffer = this.buffer.subarray(index + 1); if (frame.length === 0) continue;

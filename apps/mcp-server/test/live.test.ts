@@ -163,14 +163,14 @@ test("loopback rejects oversized nonces before retaining them", () => {
 
 test("loopback signing rejects oversized, deeply nested, and non-finite wire values", () => {
   const transport = new AuthenticatedLoopback(new DeterministicLiveSimulator(), secret);
-  assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "large", method: "invoke", operation: "browser.search", args: { query: "x".repeat(16_385) }, nonce: "large-wire-value-0001" }), /wire string is too large/);
+  assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "large", method: "invoke", operation: "browser.search", args: { query: "x".repeat(1_048_577) }, nonce: "large-wire-value-0001" }), /wire string is too large/);
   let nested: unknown = "value";
-  for (let index = 0; index < 65; index += 1) nested = { value: nested };
+  for (let index = 0; index < 257; index += 1) nested = { value: nested };
   assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "deep", method: "invoke", operation: "browser.search", args: nested as Record<string, unknown>, nonce: "deep-wire-value-0001" }), /too deeply nested/);
   assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "nan", method: "invoke", operation: "browser.search", args: { value: Number.NaN }, nonce: "nan-wire-value-0001" }), /not finite/);
-  const notes = Array.from({ length: 512 }, (_, index) => ({ pitch: index % 128, start: index, duration: 0.25, velocity: 100, channel: 1 }));
-  assert.doesNotThrow(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "bounded-note-batch", method: "invoke", operation: "note.add-batch", args: { ref: "1:clip:0:0", notes }, nonce: "bounded-note-batch-0001" }));
-  assert.throws(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "oversized-note-batch", method: "invoke", operation: "note.add-batch", args: { ref: "1:clip:0:0", notes: [...notes, notes[0]] }, nonce: "oversized-note-batch-0001" }), /wire array is too large/);
+  // A big clip's notes go in one request: 20000 notes sign as easily as 512 did.
+  const notes = Array.from({ length: 20_000 }, (_, index) => ({ pitch: index % 128, start: index / 4, duration: 0.25, velocity: 100, channel: 1 }));
+  assert.doesNotThrow(() => transport.authenticate({ version: LOOPBACK_PROTOCOL_VERSION, id: "large-note-batch", method: "invoke", operation: "note.add-batch", args: { ref: "1:clip:0:0", notes }, nonce: "large-note-batch-0001" }));
 });
 
 test("loopback retains replay protection beyond the old eviction threshold", () => {

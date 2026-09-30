@@ -353,18 +353,19 @@ class RemoteScriptTests(unittest.TestCase):
 
     def test_wire_signing_rejects_oversized_and_deep_values(self):
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: method)
-        oversized = {"version": PROTOCOL, "id": "large", "method": "invoke", "operation": "browser.search", "args": {"query": "x" * 16_385}, "nonce": "large-wire-value-0001", "sequence": 1}
+        oversized = {"version": PROTOCOL, "id": "large", "method": "invoke", "operation": "browser.search", "args": {"query": "x" * (remote_module.MAX_WIRE_STRING_LENGTH + 1)}, "nonce": "large-wire-value-0001", "sequence": 1}
         with self.assertRaises(ValueError):
             remote.sign(oversized)
         nested = "value"
-        for _ in range(65):
+        for _ in range(remote_module.MAX_WIRE_DEPTH + 1):
             nested = {"value": nested}
         deeply_nested = {"version": PROTOCOL, "id": "deep", "method": "invoke", "operation": "browser.search", "args": nested, "nonce": "deep-wire-value-0001", "sequence": 1}
         with self.assertRaises(ValueError):
             remote.sign(deeply_nested)
-        remote.sign({"version": PROTOCOL, "id": "bounded-array", "method": "status", "values": list(range(512))})
-        with self.assertRaises(ValueError):
-            remote.sign({"version": PROTOCOL, "id": "oversized-array", "method": "status", "values": list(range(513))})
+        with patch.object(remote_module, "MAX_WIRE_ARRAY_LENGTH", 512):
+            remote.sign({"version": PROTOCOL, "id": "bounded-array", "method": "status", "values": list(range(512))})
+            with self.assertRaises(ValueError):
+                remote.sign({"version": PROTOCOL, "id": "oversized-array", "method": "status", "values": list(range(513))})
 
     def test_direct_authenticated_mutation_without_prepared_authority_is_rejected(self):
         calls = []
@@ -620,7 +621,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "a04384186aab64327446734075e888368565522e35062acf1eb0bbf343884bac")
+        self.assertEqual(digest, "2a10c61693f79351c1728bad0125c9bc3a9fd40727145e7a194291b995e6cb22")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -628,10 +629,33 @@ class ControlSurfaceTests(unittest.TestCase):
         reserved = {"project.save", "arrangement.automation.create", "audio.warp-marker.add", "audio.take-lane.read", "audio.comp.read", "browser.preview.start"}
         self.assertTrue(reserved <= set(ids)); self.assertTrue(reserved.isdisjoint(LiveObjectMapper(FakeSong()).status()["operations"]))
 
+    def test_lom_audit_lists_every_live_class_with_its_members(self):
+        live = types.ModuleType("Live"); song_module = types.ModuleType("Live.Song")
+        class Song:
+            """The Live Set."""
+            tempo = property(lambda self: 120.0, doc="Tempo in beats per minute")
+            def begin_undo_step(self):
+                """Opens an undo step."""
+            class View:
+                selected_track = property(lambda self: None)
+        song_module.Song = Song; live.Song = song_module
+        mapper = LiveObjectMapper(FakeSong())
+        with patch.dict(sys.modules, {"Live": None}): self.assertFalse(mapper._operation_supported("dev.lom-audit"))
+        with patch.dict(sys.modules, {"Live": live}):
+            self.assertTrue(mapper._operation_supported("dev.lom-audit"))
+            result = mapper.invoke("dev.lom-audit", {})
+        validate_operation_payload("dev.lom-audit", "result", result)
+        by_path = {row["path"]: row for row in result["classes"]}
+        members = {row["name"]: row for row in by_path["Live.Song.Song"]["members"]}
+        self.assertEqual(members["tempo"]["kind"], "property"); self.assertEqual(members["tempo"]["doc"], "Tempo in beats per minute")
+        self.assertEqual(members["begin_undo_step"]["kind"], "method"); self.assertEqual(members["View"]["kind"], "class")
+        self.assertIn("selected_track", [row["name"] for row in by_path["Live.Song.Song.View"]["members"]])
+        self.assertEqual(by_path["Live.Song.Song"]["doc"], "The Live Set.")
+
     def test_status_result_carries_every_canonical_operation_within_the_bound(self):
         registry, _ = operation_registry()
         ids = [item["id"] for item in registry["operations"]]
-        self.assertLessEqual(len(ids), 192)
+        self.assertLessEqual(len(ids), 4096)
         payload = {"adapter": "remote-script", "connected": True, "epoch": 1, "protocol": "ableton-live/v1", "registryHash": operation_registry()[1], "operations": ids}
         validate_operation_payload("status", "result", payload)
 
@@ -1308,8 +1332,10 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"], {"index": 2}); self.assertEqual(events[-1]["coalesced"], 1)
 
     def test_subscription_overflow_emits_epoch_bound_reset(self):
-        mapper = LiveObjectMapper(FakeSong()); subscription = _Subscription(mapper, {"transport", "object"})
-        for index in range(300): subscription._emit("transport" if index % 2 == 0 else "object", {"index": index})
+        mapper = LiveObjectMapper(FakeSong())
+        with patch.object(remote_module, "MAX_PENDING_EVENTS", 256):
+            subscription = _Subscription(mapper, {"transport", "object"})
+            for index in range(300): subscription._emit("transport" if index % 2 == 0 else "object", {"index": index})
         events = subscription.drain(); reset = events[-1]
         self.assertEqual(reset["type"], "reset"); self.assertEqual(reset["epoch"], mapper.refs.epoch); self.assertTrue(reset["payload"]["resnapshot"]); self.assertGreater(reset["payload"]["overflow"], 0)
         old_epoch = mapper.refs.epoch; mapper.invoke("session.reconnect", {}); subscription._emit("object", {"afterReconnect": True}); reconnected = subscription.drain()
@@ -2076,7 +2102,7 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "set_notes replacement is refused"): mapper.invoke("note.add-batch", {"ref": row["ref"], "notes": [{"pitch": 61, "start": 1, "duration": 0.25, "velocity": 100, "channel": 1}], **authority})
         self.assertFalse(clip.set_called)
         oversized = LegacyClip(513); song.tracks[0].clip_slots[0].clip = oversized
-        with self.assertRaisesRegex(ValueError, "exceeds its authoritative bound"): LiveObjectMapper(song).snapshot()
+        with patch.object(remote_module, "MAX_WIRE_ARRAY_LENGTH", 512), self.assertRaisesRegex(ValueError, "exceeds its authoritative bound"): LiveObjectMapper(song).snapshot()
 
     def test_partial_native_note_addition_rolls_back_new_stable_ids(self):
         class Note:
@@ -2366,7 +2392,7 @@ class ControlSurfaceTests(unittest.TestCase):
         class BroadBrowser:
             instruments = Item("instruments", [Item(f"Item {index}") for index in range(257)])
         mapper._browser = lambda: BroadBrowser()
-        with self.assertRaisesRegex(ValueError, "traversal bound"): mapper.invoke("browser.search", {"category": "instruments", "query": "never-matches", "limit": 10})
+        with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaisesRegex(ValueError, "traversal bound"): mapper.invoke("browser.search", {"category": "instruments", "query": "never-matches", "limit": 10})
 
     def test_browser_inspect_follows_the_returned_path_without_scanning_unrelated_subtrees(self):
         class Item:
@@ -2865,7 +2891,7 @@ class RealtimePlaneTests(unittest.TestCase):
         try:
             hidden = FakeParameter(); hidden.min = None
             bridge.mapper.song.tracks[0].devices[0].parameters = [hidden] + [FakeParameter() for _ in range(256)]
-            with self.assertRaisesRegex(ValueError, "complete-state bound"): bridge.mapper.snapshot()
+            with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaisesRegex(ValueError, "complete-state bound"): bridge.mapper.snapshot()
             bridge.mapper.song.tracks[0].devices[0].parameters = [hidden] + [FakeParameter() for _ in range(255)]
             rows = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"]
             self.assertEqual(len(rows), 255)
@@ -2892,7 +2918,7 @@ class RealtimePlaneTests(unittest.TestCase):
             self.assertEqual(macro_arm["parameterRefs"], [macro_ref]); bridge._realtime.disarm()
             oversized_rack = FakeDevice(); oversized_rack.can_have_chains = True; oversized_rack.macros = []; oversized_rack.chains = [type("Chain", (), {"devices": []})() for _ in range(257)]
             bridge.mapper.song.tracks[0].devices = [oversized_rack, FakeDevice()]; later_ref = bridge.mapper.snapshot()["tracks"][0]["devices"][1]["parameters"][0]["ref"]
-            with self.assertRaises(ValueError): bridge.mapper._realtime_parameter_authority(later_ref)
+            with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaises(ValueError): bridge.mapper._realtime_parameter_authority(later_ref)
         finally:
             bridge.disconnect()
 

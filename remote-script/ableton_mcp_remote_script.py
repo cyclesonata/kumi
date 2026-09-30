@@ -229,6 +229,53 @@ class _DiagnosticsSink:
 _ACTIVE_DIAGNOSTICS: _DiagnosticsSink | None = None
 
 
+def _live_module() -> Any:
+    """Live's own Python module, inside Live; None anywhere else."""
+    try:
+        import Live  # type: ignore
+        return Live
+    except BaseException:
+        return None
+
+
+def _lom_audit(live: Any, max_depth: int = 8) -> dict[str, Any]:
+    """Every class reachable from Live's module, with its members' names, kinds and docstrings: what
+    the Live Object Model offers on this Live, for checking what the bridge covers (developers only)."""
+    if live is None: raise ValueError("Live's module is unavailable")
+    classes: list[dict[str, Any]] = []; seen: set[int] = set()
+    def doc_of(value: Any) -> str | None:
+        text = getattr(value, "__doc__", None)
+        return text[:16384] if isinstance(text, str) else None
+    def visit(owner: Any, path: str, depth: int) -> None:
+        if depth > max_depth or id(owner) in seen: return
+        seen.add(id(owner))
+        for name in sorted(dir(owner)):
+            if name.startswith("__"): continue
+            try: child = getattr(owner, name)
+            except BaseException: continue
+            if isinstance(child, type(live)):
+                if str(getattr(child, "__name__", "")).startswith("Live"): visit(child, f"{path}.{name}", depth + 1)
+                continue
+            if not isinstance(child, type) or id(child) in seen: continue
+            members = []
+            for member in sorted(dir(child)):
+                if member.startswith("__"): continue
+                try: attribute = getattr(child, member)
+                except BaseException: continue
+                kind = "property" if isinstance(attribute, property) else "method" if callable(attribute) and not isinstance(attribute, type) else "class" if isinstance(attribute, type) else type(attribute).__name__
+                members.append({"name": member, "kind": kind, "doc": doc_of(attribute)})
+            classes.append({"name": str(getattr(child, "__name__", name)), "path": f"{path}.{name}", "doc": doc_of(child), "members": members})
+            visit(child, f"{path}.{name}", depth + 1)
+    visit(live, "Live", 0)
+    version = None
+    try:
+        application = live.Application.get_application()
+        version = f"{application.get_major_version()}.{application.get_minor_version()}.{application.get_bugfix_version()}"
+    except BaseException:
+        pass
+    return {"liveVersion": version, "classes": classes}
+
+
 def _set_diagnostics_sink(sink: _DiagnosticsSink | None) -> None:
     global _ACTIVE_DIAGNOSTICS
     prior, _ACTIVE_DIAGNOSTICS = _ACTIVE_DIAGNOSTICS, sink
@@ -250,7 +297,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"}
+_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -387,15 +434,17 @@ def validate_operation_payload(operation_id: str, side: str, value: Any) -> None
     validate_registry_value(operation[side], value, f"{operation_id}.{side}")
 
 MAX_NONCE_LENGTH = 256
-MAX_WIRE_BYTES = 4 * 1_048_576
+# Big Sets make big frames: a frame is bounded only by what one request can build within the
+# pump budget, and requests that could be large are paged (snapshot windows, discovery pages).
+MAX_WIRE_BYTES = 256 * 1_048_576
 # Racks nest inside racks' chains: each level is four deep on the wire (chains, a chain, its devices, a
 # device), so a device two racks down with its parameters' names already passed 16.
-MAX_WIRE_DEPTH = 64
-MAX_WIRE_STRING_LENGTH = 16_384
-MAX_WIRE_ARRAY_LENGTH = 512
-MAX_WIRE_OBJECT_PROPERTIES = 256
-MAX_DISCOVERY_COLLECTION_LENGTH = 256
-MAX_QUEUE_ITEMS = 128
+MAX_WIRE_DEPTH = 256
+MAX_WIRE_STRING_LENGTH = 1_048_576
+MAX_WIRE_ARRAY_LENGTH = 10_000_000
+MAX_WIRE_OBJECT_PROPERTIES = 1_000_000
+MAX_DISCOVERY_COLLECTION_LENGTH = 10_000_000
+MAX_QUEUE_ITEMS = 65_536
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
 
@@ -790,6 +839,8 @@ class LiveObjectMapper:
             return True
         if operation == "session.playback":
             return True
+        if operation == "dev.lom-audit":
+            return _live_module() is not None
         if operation == "subscribe":
             return bool(_supported_event_types(self.song) - {"reset"})
         if operation == "transport.set":
@@ -2856,6 +2907,8 @@ class LiveObjectMapper:
             return self._set_parameter_value(reference, args.get("value"))
         if operation == "device.parameters.set":
             return self._device_parameters_set(args)
+        if operation == "dev.lom-audit":
+            return _lom_audit(_live_module(), int(args.get("maxDepth", 8)))
         raise ValueError("live operation unavailable")
 
     def _check_parameter_authority(self, reference: str, args: dict[str, Any]) -> None:
@@ -8685,7 +8738,7 @@ class LiveObjectMapper:
         return {"added": True, "noteId": result["noteIds"][0]}
 
 
-MAX_PENDING_EVENTS = 256
+MAX_PENDING_EVENTS = 65_536
 _EVENT_TYPES = {"transport", "object", "reset"}
 
 
@@ -9426,8 +9479,8 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> s
     return hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(identity).encode("utf-8")).hexdigest()
 
 
-MAX_BRIDGE_CONNECTIONS = 8
-MAX_FRAMES_PER_PUMP = 32
+MAX_BRIDGE_CONNECTIONS = 64
+MAX_FRAMES_PER_PUMP = 1024
 PUMP_BUDGET_SECONDS = 0.05
 MAX_OUTBOUND_BYTES = 4 * MAX_WIRE_BYTES
 

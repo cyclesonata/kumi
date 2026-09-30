@@ -4,11 +4,12 @@ import { validateLiveOperationRequest, validateLiveOperationResult } from "./reg
 
 export const LOOPBACK_PROTOCOL_VERSION = "ableton-loopback/v1";
 const MAX_NONCE_LENGTH = 256;
-const MAX_WIRE_BYTES = 4 * 1_048_576;
-const MAX_WIRE_DEPTH = 64; // as the Remote Script: racks nest inside racks' chains
-const MAX_WIRE_STRING_LENGTH = 16_384;
-const MAX_WIRE_ARRAY_LENGTH = 512;
-const MAX_WIRE_OBJECT_PROPERTIES = 256;
+// The Remote Script's wire bounds (MAX_WIRE_BYTES and the rest in ableton_mcp_remote_script.py).
+const MAX_WIRE_BYTES = 256 * 1_048_576;
+const MAX_WIRE_DEPTH = 256;
+const MAX_WIRE_STRING_LENGTH = 1_048_576;
+const MAX_WIRE_ARRAY_LENGTH = 10_000_000;
+const MAX_WIRE_OBJECT_PROPERTIES = 1_000_000;
 type WireRequestBase = { version: string; id: string; ref?: LiveRef; operation?: LiveInvocation["operation"]; args?: Record<string, unknown>; nonce: string; sequence: number; bridgeEpoch: string; connectionChallenge: string; deadlineMs: number; mac: string };
 export type LoopbackRequest = WireRequestBase & { method: "status" | "snapshot" | "discover" | "get" | "invoke" | "subscribe" | "reconnect" };
 export type RemoteBridgeRequest = WireRequestBase & { method: "status" | "snapshot" | "discover" | "get" | "preflight" | "prepare" | "invoke" | "subscribe" | "reconnect" | "retire"; preflightToken?: string; confirmation?: string; idempotencyKey?: string; authorityToken?: string; transactionId?: string; ownershipToken?: string; terminal?: boolean };

@@ -40,7 +40,7 @@ test("canonical registry includes strict snapshot and playback contracts", () =>
   validateLiveOperationRequest("authority.retire", { transactionId: "transaction-123", terminal: true });
   validateLiveOperationResult("authority.retire", { retired: 3 });
   assert.throws(() => validateLiveOperationRequest("authority.retire", { transactionId: "short" }), /shorter/);
-  assert.throws(() => validateLiveOperationResult("authority.retire", { retired: 4097 }), /numeric bounds/);
+  assert.throws(() => validateLiveOperationResult("authority.retire", { retired: 10_000_001 }), /numeric bounds/);
   assert.throws(() => validateLiveOperationResult("clip.move", { ref: "1:clip:0:1", objectIdentity: "live:clip:1", name: "Moved", createdFingerprint: "a".repeat(64), ownershipToken: "x".repeat(32) }), /not allowed/);
 });
 
@@ -54,7 +54,10 @@ test("transport actions fence on the playback revision and explicit deletions ca
   validateLiveOperationRequest("device.delete", { ...device, explicitDeletion: true });
   assert.throws(() => validateLiveOperationRequest("device.delete", { ...device, explicitDeletion: false }), /constant/);
   validateLiveOperationRequest("track.delete-return", { ref: "1:track:3", expectedObjectIdentity: "live:return-1", expectedStructureRevision: "a".repeat(64), explicitDeletion: true });
-  assert.throws(() => validateLiveOperationRequest("track.delete", { ref: "1:track:3", expectedObjectIdentity: "live:track-3", expectedStructureRevision: "a".repeat(64), explicitDeletion: true }), /not allowed/);
+  // Clips, scenes, tracks and locators the producer asks to delete are explicit deletions too.
+  validateLiveOperationRequest("track.delete", { ref: "1:track:3", expectedObjectIdentity: "live:track-3", expectedStructureRevision: "a".repeat(64), explicitDeletion: true });
+  validateLiveOperationRequest("scene.delete", { ref: "1:scene:2", expectedObjectIdentity: "live:scene-2", expectedStructureRevision: "a".repeat(64), explicitDeletion: true });
+  assert.throws(() => validateLiveOperationRequest("track.delete", { ref: "1:track:3", expectedObjectIdentity: "live:track-3", expectedStructureRevision: "a".repeat(64), explicitDeletion: false }), /constant/);
 });
 
 test("runtime registry validation rejects missing, unknown, and weak playback fields", () => {
