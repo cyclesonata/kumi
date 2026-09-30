@@ -7967,3 +7967,108 @@ class TargetedDiscoveryTests(unittest.TestCase):
         self.assertEqual(listed, [{"ref": row["ref"], "parentRef": row["parentRef"], "name": row["name"], "noteCount": 50}])
         asked = mapper.discover("arrangement_clip", 10, None, row["parentRef"], None, ["notes", "notesRevision"])["items"][0]
         self.assertEqual(len(asked["notes"]), 50); self.assertEqual(asked["notesRevision"], hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(long_clip)).encode()).hexdigest())
+
+
+def read_all(mapper, kind, parent=None, limit=100000, fields=None, filters=None):
+    """Every page of a budgeted discovery, as the host reads them: (items, pages)."""
+    items, pages, cursor = [], 0, None
+    while True:
+        page = mapper.discover(kind, limit, cursor, parent, filters, fields, budgeted=True); pages += 1
+        validate_operation_payload("discover", "result", page)
+        items += page["items"]; cursor = page.get("nextCursor")
+        assert page["truncated"] == (cursor is not None)
+        if not cursor: return items, pages
+
+
+class ReadBudgetTests(unittest.TestCase):
+    """C: a read the host asks for holds Live's thread no longer than its budget: it stops after at
+    least one unit, saying how to go on."""
+
+    def set(self, tracks=3):
+        song = FakeSong(); song.tracks = [lean_track(f"Track {index + 1}") for index in range(tracks)]
+        clip = FakeNoteClip(64.0, [FakeMidiNote(index + 1, 36 + index % 24, index * 0.25, 0.25) for index in range(40)]); clip.start_time = 0.0; song.tracks[0].arrangement_clips = [clip]
+        return song, LiveObjectMapper(song)
+
+    @staticmethod
+    def check_like_the_host(answer, request):
+        """The host's checkSnapshotAnswer rules for a windowed or focused answer."""
+        window = answer["window"]; rows = answer["tracks"]; start = window.get("tracks", {}).get("from", 0)
+        if "tracks" in window: assert 1 <= window["tracks"]["count"] <= request["tracks"]["count"] and len(rows) == min(window["tracks"]["count"], answer["trackCount"] - start)
+        if "focus" in window: assert set(window["focus"]) <= set(request["focus"])
+        focus = set(window["focus"]) if "focus" in window else None
+        for position, row in enumerate(rows): assert (row.get("light") is True) == (focus is not None and start + position not in focus), position
+
+    def test_a_snapshot_window_ends_and_a_focus_goes_light_when_the_budget_is_spent(self):
+        song, mapper = self.set(); mapper.read_budget_seconds = 0
+        window = {"tracks": {"from": 0, "count": 3}}
+        cut = mapper.snapshot(window, budgeted=True); validate_operation_payload("snapshot", "result", cut); self.check_like_the_host(cut, window)
+        self.assertEqual((cut["window"]["tracks"], len(cut["tracks"])), ({"from": 0, "count": 1}, 1))
+        focused = {"focus": [0, 1, 2]}
+        cut = mapper.snapshot(focused, budgeted=True); self.check_like_the_host(cut, focused)
+        self.assertEqual((cut["window"]["focus"], [row.get("light") is True for row in cut["tracks"]]), ([0], [False, True, True]))
+        self.assertEqual(len(mapper.snapshot(focused, budgeted=True)["arrangement"]["clips"]), 1)
+        # Unbudgeted (Live's own checks) and with room, it's all there; without arguments, always the whole Set.
+        self.assertEqual(mapper.snapshot(focused)["window"]["focus"], [0, 1, 2])
+        self.assertNotIn("window", mapper.snapshot(None, budgeted=True))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(mapper.snapshot(window, budgeted=True)["window"]["tracks"], {"from": 0, "count": 3})
+        # The wire's snapshots are budgeted.
+        bridge = immediate_bridge(song); bridge.mapper.read_budget_seconds = 0
+        self.assertEqual(bridge._dispatch_with_holder("snapshot", {"args": window}, {})["window"]["tracks"]["count"], 1)
+
+    def test_the_sets_devices_page_track_by_track_and_notes_and_parameters_by_index(self):
+        song, mapper = self.set(); fields = ["parentRef", "name", "className", "chainList"]
+        whole = mapper.discover("device", 100000, None, None, None, fields)["items"]
+        mapper.read_budget_seconds = 0
+        items, pages = read_all(mapper, "device", fields=fields)
+        self.assertEqual((items, pages), (whole, len(whole)))
+        mapper.read_budget_seconds = 10
+        items, pages = read_all(mapper, "device", fields=fields, limit=4)
+        self.assertEqual((items, pages), (whole, 7))
+        self.assertEqual(read_all(mapper, "device", fields=fields, filters={"className": "Operator"})[0], [item for item in whole if item["className"] == "Operator"])
+        # A cursor holds its place in the Set's tracks as they were: another track ends it.
+        first = mapper.discover("device", 4, None, None, None, fields, budgeted=True)
+        song.tracks.append(lean_track("Late"))
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("device", 4, first["nextCursor"], None, None, fields, budgeted=True)
+        # Whole rows (no fields asked) stop where the budget does.
+        mapper.read_budget_seconds = 0; page = mapper.discover("device", 100, None, None, None, None, budgeted=True)
+        self.assertEqual(len(page["items"]), 1); self.assertIn("parameters", page["items"][0]); self.assertTrue(page["truncated"])
+        # A clip's notes and a device's parameters, by index.
+        clip_ref = f"{mapper.refs.epoch}:arrangement_clip:0:0"; notes = mapper.discover("note", 100000, None, clip_ref)["items"]
+        self.assertEqual(read_all(mapper, "note", clip_ref), (notes, 40))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(read_all(mapper, "note", clip_ref, limit=16), (notes, 3))
+        first = mapper.discover("note", 16, None, clip_ref, None, None, budgeted=True); song.tracks[0].arrangement_clips[0].stored.pop(40)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("note", 16, first["nextCursor"], clip_ref, None, None, budgeted=True)
+        operator = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual(read_all(mapper, "parameter", operator["ref"], limit=50), (operator["parameters"], 4))
+        mapper.read_budget_seconds = 0
+        self.assertEqual(read_all(mapper, "parameter", operator["ref"])[0], operator["parameters"])
+
+    def test_a_page_of_whole_tracks_stops_at_its_budget(self):
+        song, mapper = self.set(); mapper.read_budget_seconds = 0
+        whole = [mapper._whole_track_row(index) for index in range(3)]
+        items, pages = read_all(mapper, "track")
+        self.assertEqual((items, pages), (whole, 3))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(read_all(mapper, "track", fields=["name"])[1], 1)
+
+
+class SelectionWithoutRowsTests(unittest.TestCase):
+    """C: a snapshot's selection names what's selected by identity on its track, without building
+    the track's whole row (every device's parameters)."""
+
+    def test_the_selection_reads_only_the_selected_parameters_device(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Bass")]; track = song.tracks[1]
+        utility = track.devices[4].chains[1].devices[0].chains[0].devices[0]; chosen = utility._parameters[3]
+        song.view = types.SimpleNamespace(selected_track=track, selected_scene=None, highlighted_clip_slot=track.clip_slots[2], detail_clip=None, selected_parameter=chosen, selected_chain=track.devices[4].chains[1])
+        track.view = types.SimpleNamespace(selected_device=utility)
+        mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        expected = mapper._selection_row(whole["tracks"], whole["scenes"])
+        self.assertEqual(expected["parameterRef"], whole["tracks"][1]["devices"][4]["chains"][1]["devices"][0]["chains"][0]["devices"][0]["parameters"][3]["ref"])
+        LeanDevice.parameter_reads = 0
+        self.assertEqual(mapper._selection_row_targeted(), expected)
+        # Without canonical_parent to name the owner, every device on the selected track is looked at, not built.
+        self.assertLessEqual(LeanDevice.parameter_reads, 9)
+        answer = mapper.snapshot({"focus": [0], "parts": ["selection"]}, budgeted=True)
+        self.assertEqual(answer["selection"], expected)

@@ -858,6 +858,9 @@ class LiveObjectMapper:
         self._request_owner: Any = None
         # The browser preview browser.preview.start began, by its previewId.
         self._browser_preview: str | None = None
+        # How long one read the host asks for (a snapshot with arguments, a discovery page) may hold
+        # Live's thread before it stops and says where to go on. Encoding the answer comes after.
+        self.read_budget_seconds = READ_BUDGET_SECONDS
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -1690,46 +1693,48 @@ class LiveObjectMapper:
         for row in rows: visit(row)
         return flattened
 
-    def _parameter_rows(self, device: Any, device_ref: str, start: int = 0, stop: int | None = None) -> list[dict[str, Any]]:
-        """A device's parameters as its whole row lists them (those from start to stop, by Live's index)."""
-        parameters: list[dict[str, Any]] = []; native_parameters = self._items(getattr(device, "parameters", []))
+    def _parameter_rows(self, device: Any, device_ref: str) -> list[dict[str, Any]]:
+        """A device's parameters as its whole row lists them."""
+        native_parameters = self._items(getattr(device, "parameters", []))
         if len(native_parameters) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device parameter collection exceeds its complete-state bound")
-        for parameter_index, parameter in enumerate(native_parameters[start:stop], start):
-            minimum = self._read_attr(parameter, "min", "min_value")
-            maximum = self._read_attr(parameter, "max", "max_value")
-            value = self._read_attr(parameter, "value")
-            numeric = (minimum, maximum, value)
-            if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in numeric):
-                continue
-            parameter_ref = self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}")
-            # Live's own text for the value, as its panel shows it ("20.0 kHz"). Live 12's
-            # display_value is a bare number in those units, so it is only the fallback.
-            display = None
-            formatter = self._read_attr(parameter, "str_for_value")
-            if callable(formatter):
-                try:
-                    display = formatter(value)
-                except Exception:
-                    display = None
-            if display is None or str(display) == "":
-                display = self._read_attr(parameter, "display_value")
-            if display is None:
-                display = value
-            parameters.append({
-                "ref": parameter_ref, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(parameter),
-                "name": str(self._read_attr(parameter, "name") or f"Parameter {parameter_index + 1}"),
-                "value": float(value), "min": float(minimum), "max": float(maximum),
-                "quantization": self._parameter_step(parameter),
-                "enabled": bool(self._read_attr(parameter, "is_enabled", "enabled") if self._read_attr(parameter, "is_enabled", "enabled") is not None else True),
-                "automatable": bool(self._read_attr(parameter, "is_automatable", "automatable") if self._read_attr(parameter, "is_automatable", "automatable") is not None else True),
-                "automationState": str(self._read_attr(parameter, "automation_state") or "none"),
-                "displayValue": str(display), "revision": self.refs.revision(parameter_ref),
-                "defaultValue": float(self._read_attr(parameter, "default_value")) if isinstance(self._read_attr(parameter, "default_value"), (int, float)) and not isinstance(self._read_attr(parameter, "default_value"), bool) and math.isfinite(float(self._read_attr(parameter, "default_value"))) else None,
-                "originalName": str(self._read_attr(parameter, "original_name") or "") if isinstance(self._read_attr(parameter, "original_name"), str) else None,
-                "state": int(self._read_attr(parameter, "state")) if isinstance(self._read_attr(parameter, "state"), int) and not isinstance(self._read_attr(parameter, "state"), bool) else None,
-                "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])] if self._read_attr(parameter, "value_items") is not None else None,
-            })
-        return parameters
+        return [row for parameter_index, parameter in enumerate(native_parameters) for row in [self._parameter_row(parameter, parameter_index, device_ref)] if row is not None]
+
+    def _parameter_row(self, parameter: Any, parameter_index: int, device_ref: str) -> dict[str, Any] | None:
+        """One parameter's row; None for one without a numeric value and range (rows leave it out)."""
+        minimum = self._read_attr(parameter, "min", "min_value")
+        maximum = self._read_attr(parameter, "max", "max_value")
+        value = self._read_attr(parameter, "value")
+        numeric = (minimum, maximum, value)
+        if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in numeric):
+            return None
+        parameter_ref = self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}")
+        # Live's own text for the value, as its panel shows it ("20.0 kHz"). Live 12's
+        # display_value is a bare number in those units, so it is only the fallback.
+        display = None
+        formatter = self._read_attr(parameter, "str_for_value")
+        if callable(formatter):
+            try:
+                display = formatter(value)
+            except Exception:
+                display = None
+        if display is None or str(display) == "":
+            display = self._read_attr(parameter, "display_value")
+        if display is None:
+            display = value
+        return {
+            "ref": parameter_ref, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(parameter),
+            "name": str(self._read_attr(parameter, "name") or f"Parameter {parameter_index + 1}"),
+            "value": float(value), "min": float(minimum), "max": float(maximum),
+            "quantization": self._parameter_step(parameter),
+            "enabled": bool(self._read_attr(parameter, "is_enabled", "enabled") if self._read_attr(parameter, "is_enabled", "enabled") is not None else True),
+            "automatable": bool(self._read_attr(parameter, "is_automatable", "automatable") if self._read_attr(parameter, "is_automatable", "automatable") is not None else True),
+            "automationState": str(self._read_attr(parameter, "automation_state") or "none"),
+            "displayValue": str(display), "revision": self.refs.revision(parameter_ref),
+            "defaultValue": float(self._read_attr(parameter, "default_value")) if isinstance(self._read_attr(parameter, "default_value"), (int, float)) and not isinstance(self._read_attr(parameter, "default_value"), bool) and math.isfinite(float(self._read_attr(parameter, "default_value"))) else None,
+            "originalName": str(self._read_attr(parameter, "original_name") or "") if isinstance(self._read_attr(parameter, "original_name"), str) else None,
+            "state": int(self._read_attr(parameter, "state")) if isinstance(self._read_attr(parameter, "state"), int) and not isinstance(self._read_attr(parameter, "state"), bool) else None,
+            "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])] if self._read_attr(parameter, "value_items") is not None else None,
+        }
 
     def _device_row(self, device: Any, device_ref: str, track_ref: str, track_index: int, path: str, index: int, traversal: dict[str, Any], depth: int) -> dict[str, Any]:
         identity = self._capture_object_identity(device); seen = traversal["seen"]
@@ -2040,13 +2045,19 @@ class LiveObjectMapper:
             normalized["parts"] = list(parts)
         return normalized
 
-    def snapshot(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    def snapshot(self, args: dict[str, Any] | None = None, budgeted: bool = False) -> dict[str, Any]:
         """The Set as rows. Without arguments, all of it (with trackCount and sceneCount). A `tracks`
         or `scenes` window ({from, count}) pages it by snapshot index; `focus` names the tracks
         whose rows are whole, the others being light rows (nothing below the track is walked);
         `parts` names the top-level parts to build. Any argument makes the result echo them in
-        `window`. Within a shared read, a snapshot is built once per distinct arguments."""
+        `window`. Within a shared read, a snapshot is built once per distinct arguments.
+
+        Budgeted (the host's own reads), a snapshot with arguments builds whole rows only while its
+        budget lasts (at least one): a track window then ends at the last whole row (window.tracks
+        says how many), and focused tracks past it come light (window.focus says which came whole).
+        A snapshot without arguments is always the whole Set, however long that takes."""
         normalized = self._snapshot_arguments(args)
+        if budgeted and normalized: return self._build_snapshot(normalized, _ReadBudget(self.read_budget_seconds))
         key = "snapshot" if not normalized else "snapshot:" + json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         cache = self._read_cache
         if cache is not None and key in cache: return cache[key]
@@ -2281,7 +2292,7 @@ class LiveObjectMapper:
         if window is None: return range(total)
         return range(min(window["from"], total), min(window["from"] + window["count"], total))
 
-    def _build_snapshot(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_snapshot(self, args: dict[str, Any] | None = None, budget: "_ReadBudget | None" = None) -> dict[str, Any]:
         args = args or {}
         parts = set(args["parts"]) if "parts" in args else set(self._SNAPSHOT_PARTS)
         track_window, scene_window = args.get("tracks"), args.get("scenes")
@@ -2296,11 +2307,19 @@ class LiveObjectMapper:
         track_indices = self._window_range(track_window, len(track_entries))
         whole_indices = [index for index in track_indices if focus is None or index in focus]
         track_rows: list[dict[str, Any]] = []
+        window_cut = focus_cut = False
         if "tracks" in parts:
+            built: list[int] = []
             for index in track_indices:
                 track, track_kind = track_entries[index]
-                track_rows.append(self._track_row(track, track_kind, index) if focus is None or index in focus else self._light_track_row(track, track_kind, index))
-            result["tracks"] = track_rows
+                if focus is None or index in focus:
+                    if budget is not None and not budget.room():
+                        # The budget is spent: a window ends here; a focus goes on with light rows.
+                        if focus is None: window_cut = True; break
+                        focus_cut = True; track_rows.append(self._light_track_row(track, track_kind, index)); continue
+                    track_rows.append(self._track_row(track, track_kind, index)); built.append(index)
+                else: track_rows.append(self._light_track_row(track, track_kind, index))
+            result["tracks"] = track_rows; whole_indices = built
         scene_rows: list[dict[str, Any]] = []
         if "scenes" in parts:
             scene_rows = [self._scene_row(scenes[index], index) for index in self._window_range(scene_window, len(scenes))]
@@ -2314,7 +2333,11 @@ class LiveObjectMapper:
         result["epoch"] = self.refs.epoch
         result["trackCount"] = len(track_entries)
         result["sceneCount"] = len(scenes)
-        if args: result["window"] = {key: args[key] for key in ("tracks", "scenes", "focus", "parts") if key in args}
+        if args:
+            result["window"] = {key: args[key] for key in ("tracks", "scenes", "focus", "parts") if key in args}
+            # What a budget cut short: the window's rows delivered, the focused tracks that came whole.
+            if window_cut: result["window"]["tracks"] = {"from": track_window["from"], "count": len(track_rows)}
+            if focus_cut: result["window"]["focus"] = [index for index in args["focus"] if index in set(whole_indices)]
         return result
 
     def _read_notes(self, clip: Any) -> list[dict[str, Any]]:
@@ -2475,11 +2498,17 @@ class LiveObjectMapper:
 
     _DISCOVERY_TRACK_KINDS = {"track": {"regular", "group"}, "group_track": {"group"}, "return_track": {"return"}, "main_track": {"main"}}
 
-    def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = MAX_TRAVERSAL) -> dict[str, Any]:
+    def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = MAX_TRAVERSAL, budgeted: bool = False) -> dict[str, Any]:
         """A page of one kind of object. What it reads follows what it lists: a parent's track alone
         for what lives under a track; light rows for the Set's tracks (whole rows only for the page,
         and only when the requested fields need them); scene rows; the locators. A Set-wide list's
-        revision (which binds its cursors) comes from its members' identities, names and order."""
+        revision (which binds its cursors) comes from its members' identities, names and order.
+
+        Budgeted (the host's own reads), a page also ends when the request's time on Live's thread
+        runs out (after at least one item), with a cursor to go on: `truncated` and `nextCursor`
+        can come before `limit` items. A Set-wide device list is walked track by track, a clip's
+        notes and a device's parameters by their index, so a page reads only what it lists."""
+        deadline = _ReadBudget(self.read_budget_seconds) if budgeted else None
         supported = {"set", "song", "track", "group_track", "return_track", "main_track", "scene", "clip_slot", "clip", "session_clip", "arrangement_clip", "note", "locator", "device", "parameter", "selection", "routing_choice", "session_playback"}
         if kind not in supported:
             raise ValueError("unsupported discovery kind")
@@ -2517,6 +2546,8 @@ class LiveObjectMapper:
         elif kind == "scene":
             items = [self._scene_row(scene, index) for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
             identity_fields = ("ref", "objectIdentity", "name")
+        elif kind == "device" and parent is None and budgeted:
+            return self._set_device_page(limit, cursor, filters, requested_fields, traversal_budget, deadline)
         elif kind == "device":
             # Devices are walked light, from the Set's tracks (or the parent's track alone), without
             # their parameters or anything a track holds besides; whole rows come only for the page,
@@ -2537,10 +2568,13 @@ class LiveObjectMapper:
             items = self._slot_discovery(kind, parent, requested_fields is None or bool({"notes", "notesRevision"} & wanted))
         elif kind == "parameter":
             # A device's parameters, read from that device alone (found on its track's light walk).
-            items = self._parameter_discovery(parent)
+            device = self._parameter_parent(parent)
+            if device is not None and budgeted: return self._indexed_page("parameter", parent, device, limit, cursor, filters, requested_fields, traversal_budget, deadline)
+            items = self._parameter_rows(device, parent) if device is not None else []
         elif kind == "note":
             # A clip's notes, Session or Arrangement, read from that clip alone.
             clip = self._note_parent(parent)
+            if clip is not None and budgeted: return self._indexed_page("note", parent, clip, limit, cursor, filters, requested_fields, traversal_budget, deadline)
             items = [note | {"ref": f"{parent}:note:{index}", "parentRef": parent} for index, note in enumerate(self._read_notes(clip))] if clip is not None else []
         elif kind == "arrangement_clip":
             track_index = self._ref_track_index(parent)
@@ -2591,18 +2625,118 @@ class LiveObjectMapper:
         if not 0 <= offset <= len(items):
             raise ValueError("invalid discovery cursor")
         page = items[offset:offset + limit]
-        next_offset = offset + len(page)
-        next_cursor = self._cursor(next_offset, revision) if next_offset < len(items) else None
+        def whole(build: Callable[[dict[str, Any]], dict[str, Any]]) -> list[dict[str, Any]]:
+            # Whole rows while the budget lasts (at least one): the page ends where they stop.
+            built: list[dict[str, Any]] = []
+            for item in page:
+                if deadline is not None and not deadline.room(): break
+                built.append(build(item))
+            return built
         if light and (requested_fields is None or not set(requested_fields) <= self._LIGHT_TRACK_FIELDS):
             # The page's tracks whole, and only the page's.
-            page = [self._whole_track_row(self._ref_track_index(item["ref"])) or item for item in page]
+            page = whole(lambda item: self._whole_track_row(self._ref_track_index(item["ref"])) or item)
         if light_devices is not None and (requested_fields is None or not set(requested_fields) <= self._LIGHT_DEVICE_FIELDS):
             # The page's devices whole, and only the page's.
-            page = [self._whole_device_row(*light_devices[item["ref"]][:3], item) for item in page]
+            page = whole(lambda item: self._whole_device_row(*light_devices[item["ref"]][:3], item))
+        next_offset = offset + len(page)
+        next_cursor = self._cursor(next_offset, revision) if next_offset < len(items) else None
         if requested_fields is not None:
             allowed = set(requested_fields) | {"ref", "parentRef"}
             page = [{key: value for key, value in item.items() if key in allowed} for item in page]
         return {"epoch": self.refs.epoch, "items": page, "truncated": next_cursor is not None, "revision": revision, "kind": kind, **({"nextCursor": next_cursor} if next_cursor else {})}
+
+    def _page_result(self, kind: str, page: list[dict[str, Any]], revision: str, next_cursor: str | None, requested_fields: list[str] | None) -> dict[str, Any]:
+        if requested_fields is not None:
+            allowed = set(requested_fields) | {"ref", "parentRef"}
+            page = [{key: value for key, value in item.items() if key in allowed} for item in page]
+        return {"epoch": self.refs.epoch, "items": page, "truncated": next_cursor is not None, "revision": revision, "kind": kind, **({"nextCursor": next_cursor} if next_cursor else {})}
+
+    def _walk_cursor(self, revision: str, *position: int) -> str:
+        payload = f"{self.refs.epoch}|{revision}|w{'.'.join(str(value) for value in position)}".encode("ascii")
+        tag = hmac.new(self.refs._cursor_key, payload, hashlib.sha256).hexdigest()[:24]
+        return base64.urlsafe_b64encode(payload + b":" + tag.encode("ascii")).decode("ascii").rstrip("=")
+
+    def _walk_position(self, cursor: str, revision: str, size: int) -> list[int]:
+        """Where a walk cursor says to go on, if it was made for this list as it is (else refused)."""
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("ascii")
+            payload_text, tag = raw.rsplit(":", 1)
+            epoch, actual_revision, position = payload_text.split("|", 2)
+            expected = hmac.new(self.refs._cursor_key, payload_text.encode("ascii"), hashlib.sha256).hexdigest()[:24]
+            if not hmac.compare_digest(tag, expected) or int(epoch) != self.refs.epoch or actual_revision != revision: raise ValueError("stale discovery cursor")
+            values = [int(value) for value in position[1:].split(".")] if position.startswith("w") else []
+        except (ValueError, TypeError, UnicodeError, OSError) as error:
+            raise ValueError("invalid discovery cursor") from error
+        if len(values) != size or any(not 0 <= value <= MAX_TRAVERSAL for value in values): raise ValueError("invalid discovery cursor")
+        return values
+
+    def _set_device_page(self, limit: int, cursor: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
+        """The Set's devices, a page at a time, track by track: a page walks on from where the last
+        stopped (its cursor holds the track and the place in its device walk) until `limit` rows or
+        the budget, reading only the tracks it lists. The cursor, and the list's revision, are bound
+        to the Set's tracks (their identities, in order) and the filters: a track added, removed or
+        moved ends it; a device changing on a track already listed doesn't."""
+        entries = self._track_entries(kinds=False)
+        whole_filter = bool(filters) and any(key not in self._LIGHT_DEVICE_FIELDS for key in filters)
+        whole_rows = whole_filter or requested_fields is None or not set(requested_fields) <= self._LIGHT_DEVICE_FIELDS
+        basis = {"tracks": [self._capture_object_identity(track) for track, _ in entries], "filters": filters or {}}
+        revision = f"{self.refs.epoch}:device:tracks:{len(entries)}:{hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, separators=(',', ':')).encode('utf-8')).hexdigest()[:16]}"
+        track_index, offset, emitted = self._walk_position(cursor, revision, 3) if cursor is not None else (0, 0, 0)
+        page: list[dict[str, Any]] = []; full = False
+        while track_index < len(entries) and not full:
+            track = entries[track_index][0]
+            walked = list(self._light_device_walk(track, self.refs.put("track", track, str(track_index)), str(track_index)))
+            while offset < len(walked):
+                if len(page) >= limit or emitted >= traversal_budget or (deadline is not None and not deadline.room()):
+                    full = True; break
+                device, path, depth, row = walked[offset]; offset += 1
+                candidate = self._whole_device_row(device, path, depth, row) if whole_rows else row
+                if not filters or all(candidate.get(key) == value for key, value in filters.items()):
+                    page.append(candidate); emitted += 1
+            if not full: track_index += 1; offset = 0
+        more = track_index < len(entries) and emitted < traversal_budget
+        return self._page_result("device", page, revision, self._walk_cursor(revision, track_index, offset, emitted) if more else None, requested_fields)
+
+    def _indexed_page(self, kind: str, parent: str, owner: Any, limit: int, cursor: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
+        """A clip's notes or a device's parameters, a page at a time by their index: a page reads the
+        items it lists (and how many there are), not the rest. The cursor, and the list's revision,
+        are bound to the owner's identity and its item count."""
+        if kind == "note":
+            vector = self._note_vector(owner)
+            convert = lambda item, index: self._note_rows_from([item])[0] | {"ref": f"{parent}:note:{index}", "parentRef": parent}
+        else:
+            vector = self._items(getattr(owner, "parameters", []))
+            convert = lambda item, index: self._parameter_row(item, index, parent)
+        total = len(vector)
+        revision = f"{self.refs.epoch}:{kind}:{hashlib.sha256(f'{parent}|{self._capture_object_identity(owner)}|{total}'.encode('utf-8')).hexdigest()[:16]}:{total}"
+        index = self._cursor_offset(cursor, revision) if cursor is not None else 0
+        if not 0 <= index <= total: raise ValueError("invalid discovery cursor")
+        end = min(total, traversal_budget); page: list[dict[str, Any]] = []
+        while index < end and len(page) < limit:
+            if deadline is not None and not deadline.room(): break
+            row = convert(vector[index], index); index += 1
+            if row is not None and (not filters or all(row.get(key) == value for key, value in filters.items())): page.append(row)
+        return self._page_result(kind, page, revision, self._cursor(index, revision) if index < end else None, requested_fields)
+
+    def _note_vector(self, clip: Any) -> Any:
+        """A clip's notes as Live hands them over (its note vector, indexed without reading each
+        note), or as rows from an older Live's get_notes; empty for audio."""
+        if self._read_attr(clip, "is_audio_clip") is True: return []
+        reader = getattr(clip, "get_all_notes_extended", None)
+        if callable(reader):
+            try: vector = reader()
+            except (AttributeError, RuntimeError, TypeError) as error: raise ValueError("complete MIDI note enumeration failed") from error
+            try:
+                len(vector); vector[0] if len(vector) else None
+                return vector
+            except (TypeError, IndexError, AttributeError): return self._items(vector)
+        return self._read_notes(clip)
+
+    def _parameter_parent(self, parent: Any) -> Any:
+        """The device a parameter list names, at its place now (found on its track's light walk)."""
+        track_index = self._ref_track_index(parent); entry = self._track_entry(track_index) if track_index is not None else None
+        if entry is None or not isinstance(parent, str) or parent.split(":")[1:2] != ["device"]: return None
+        return next((device for device, _, _, row in self._light_device_walk(entry[0], self.refs.put("track", entry[0], str(track_index)), str(track_index)) if row["ref"] == parent), None)
 
     def _slot_discovery(self, kind: str, parent: Any, notes: bool) -> list[dict[str, Any]]:
         """The rows a slot or clip list can hold: a track's slots (their parent is the track), or a
@@ -2616,14 +2750,6 @@ class LiveObjectMapper:
         if parts[1:2] != ["clip_slot"] or len(parts) != 4 or not parts[3].isdigit() or int(parts[3]) >= len(slots): return []
         slot_index = int(parts[3]); slot = slots[slot_index]; clip = getattr(slot, "clip", None)
         return [self._session_clip_row(self.refs.put("clip_slot", slot, f"{track_index}:{slot_index}"), track_index, slot_index, clip, notes)] if clip is not None else []
-
-    def _parameter_discovery(self, parent: Any) -> list[dict[str, Any]]:
-        """A device's parameters as its whole row lists them, reading that device alone."""
-        track_index = self._ref_track_index(parent); entry = self._track_entry(track_index) if track_index is not None else None
-        if entry is None or not isinstance(parent, str) or parent.split(":")[1:2] != ["device"]: return []
-        for device, _, _, row in self._light_device_walk(entry[0], self.refs.put("track", entry[0], str(track_index)), str(track_index)):
-            if row["ref"] == parent: return self._parameter_rows(device, parent)
-        return []
 
     def _note_parent(self, parent: Any) -> Any:
         """The clip a note list names, at its place now: a Session clip (clip:t:s), an Arrangement
@@ -3622,7 +3748,7 @@ class LiveObjectMapper:
                 raise ValueError("discovery arguments are invalid")
             if any(key in args and args[key] is not None and not isinstance(args[key], expected) for key, expected in (("kind", str), ("limit", int), ("cursor", str), ("parent", str), ("filters", dict), ("requestedFields", list), ("traversalBudget", int))):
                 raise ValueError("discovery arguments are invalid")
-            return self.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL))
+            return self.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL), budgeted=True)
         if operation == "session.status":
             return self.status()
         if operation == "session.reconnect":
@@ -6580,26 +6706,66 @@ class LiveObjectMapper:
             identity = self._capture_object_identity(selected_scene)
             found = next(((index, scene) for index, scene in enumerate(self._items(getattr(self.song, "scenes", []))) if self._capture_object_identity(scene) == identity), None)
             if found is not None: result["sceneRef"] = self.refs.put("scene", found[1], str(found[0]))
-        known_by_track: dict[int, dict[tuple[str, str], str]] = {}
-        def known_on(index: int) -> dict[tuple[str, str], str]:
-            if index not in known_by_track:
-                row = self._whole_track_row(index)
-                known_by_track[index] = self._selection_known([row], []) if row is not None else {}
-            return known_by_track[index]
         for key, kind, attribute in self._SELECTION_KINDS[2:]:
             if keys is not None and key not in keys: continue
             value = self._selected_object(view, attribute)
             if value is None: continue
             identity = self._capture_object_identity(value); owner = self._owner_track_index(value, track_indices)
             if owner is not None:
-                result[key] = known_on(owner).get((kind, identity))
+                result[key] = self._selection_ref_on(owner, kind, value, identity)
                 continue
-            reference = known_on(selected_index).get((kind, identity)) if selected_index is not None else None
+            reference = self._selection_ref_on(selected_index, kind, value, identity) if selected_index is not None else None
             if reference is None:
-                # No canonical_parent to follow, and not on the selected track: every track is read.
-                reference = next((found for index in range(len(entries)) for found in [known_on(index).get((kind, identity))] if found is not None), None)
+                # No canonical_parent to follow, and not on the selected track: every track is looked at.
+                reference = next((found for index in range(len(entries)) for found in [self._selection_ref_on(index, kind, value, identity)] if found is not None), None)
             result[key] = reference
         return result
+
+    def _selection_ref_on(self, index: int, kind: str, value: Any, identity: str) -> str | None:
+        """The ref track `index`'s whole row gives a selected slot, Session clip, device, chain or
+        parameter (as _selection_known finds it there), found by identity without building the row:
+        the track's slots, its devices' light walk, and a parameter's own device or the mixer."""
+        entry = self._track_entry(index)
+        if entry is None: return None
+        track = entry[0]; track_ref = self.refs.put("track", track, str(index))
+        if kind in {"clip_slot", "clip"}:
+            for slot_index, slot in enumerate(self._items(getattr(track, "clip_slots", []))):
+                target = slot if kind == "clip_slot" else getattr(slot, "clip", None)
+                if target is not None and self._capture_object_identity(target) == identity: return self.refs.put(kind, target, f"{index}:{slot_index}")
+            return None
+        owner_identity = None
+        if kind == "parameter":
+            mixer = self._read_attr(track, "mixer_device")
+            if mixer is not None:
+                for name in ("volume", "panning", "cue_volume"):
+                    candidate = self._read_attr(mixer, name)
+                    if candidate is not None and self._capture_object_identity(candidate) == identity: return self.refs.put("parameter", candidate, f"mixer:{index}:{name}")
+                for send_index, send in enumerate(self._items(self._read_attr(mixer, "sends") or [])):
+                    if self._capture_object_identity(send) == identity: return self.refs.put("parameter", send, f"mixer:{index}:sends:{send_index}")
+            owner = self._read_attr(value, "canonical_parent"); owner_identity = self._capture_object_identity(owner) if owner is not None else None
+        for device, path, _, row in self._light_device_walk(track, track_ref, str(index)):
+            if kind == "device" and row["objectIdentity"] == identity: return row["ref"]
+            if kind == "chain":
+                chains = self._items(self._read_attr(device, "chains") or []) if row["kind"] == "rack" else []
+                for chain_index, chain in enumerate(chains):
+                    if self._capture_object_identity(chain) == identity: return self.refs.put("chain", chain, f"{path}:{chain_index}")
+                if self._read_attr(device, "can_have_drum_pads") is True:
+                    listed = {self._capture_object_identity(chain) for chain in chains}
+                    for pad_index, pad in enumerate(self._rack_pads(device)):
+                        pad_chains = self._items(self._read_attr(pad, "chains") or []); identities = [self._capture_object_identity(chain) for chain in pad_chains]
+                        if identities and all(item in listed for item in identities): continue
+                        for chain_index, chain in enumerate(pad_chains):
+                            if identities[chain_index] == identity: return self.refs.put("chain", chain, f"{path}:{pad_index}:{chain_index}")
+            if kind == "parameter" and (owner_identity is None or row["objectIdentity"] == owner_identity):
+                # A rack's macros are among its parameters too: its parameter row names them first.
+                for parameter_index, parameter in enumerate(self._items(getattr(device, "parameters", []))):
+                    if self._capture_object_identity(parameter) != identity: continue
+                    numeric = (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))
+                    if all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in numeric): return self.refs.put("parameter", parameter, f"{row['ref']}:{parameter_index}")
+                if row["kind"] == "rack":
+                    for macro_index, macro in enumerate(self._items(self._read_attr(device, "macros") or [])):
+                        if self._capture_object_identity(macro) == identity: return self.refs.put("parameter", macro, f"{row['ref']}:macro:{macro_index}")
+        return None
 
     def _device_paths(self, owner: Any, path: str, depth: int = 0) -> Any:
         """A track's (or chain's) device tree as snapshot refs name it: ("device" | "chain", object,
@@ -11510,6 +11676,31 @@ _LOCATOR_BOUND_OPERATIONS = frozenset({"locator.add", "locator.delete", "locator
 # tracks holding them): their authority binds the named tracks' Arrangement clips.
 _ARRANGEMENT_BOUND_OPERATIONS = frozenset({"clip.duplicate", "clip.move", "recording.arrangement", "track.delete", "track.delete-return", "track.duplicate", "take-lane.create", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete"})
 
+# A read the host asks for runs on Live's UI thread from start to end: past this, it stops with what
+# it has and a way to go on (a shorter snapshot window, a discovery cursor). At least one unit (a
+# track's whole row, a device, a note) is always delivered.
+READ_BUDGET_SECONDS = 0.03
+
+
+class _ReadBudget:
+    """A read's time on Live's thread: the first unit always, then another only while the slowest
+    unit so far would still end before the deadline (so a whole track row can't overrun it by its
+    own cost)."""
+
+    __slots__ = ("deadline", "slowest", "mark", "units")
+
+    def __init__(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + seconds; self.slowest = 0.0; self.mark = time.monotonic(); self.units = 0
+
+    def room(self) -> bool:
+        now = time.monotonic()
+        if self.units: self.slowest = max(self.slowest, now - self.mark)
+        self.mark = now
+        if self.units and now + self.slowest > self.deadline: return False
+        self.units += 1
+        return True
+
+
 MAX_BRIDGE_CONNECTIONS = 64
 MAX_FRAMES_PER_PUMP = 1024
 PUMP_BUDGET_SECONDS = 0.05
@@ -11609,11 +11800,11 @@ class AbletonMcpBridge:
     @staticmethod
     def _dispatch_main_for(method: str, request: dict[str, Any], mapper: LiveObjectMapper) -> Any:
         if method == "status": return mapper.status()
-        if method == "snapshot": return mapper.snapshot(dict(request.get("args", {})))
+        if method == "snapshot": return mapper.snapshot(dict(request.get("args", {})), budgeted=True)
         if method == "discover":
             args = dict(request.get("args", {}))
             if args.get("kind") == "session_playback": return mapper._playback()
-            return mapper.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL))
+            return mapper.discover(args.get("kind", "track"), args.get("limit", 100), args.get("cursor"), args.get("parent"), args.get("filters"), args.get("requestedFields"), args.get("traversalBudget", MAX_TRAVERSAL), budgeted=True)
         if method == "get": return mapper.get(str(request.get("ref")))
         if method == "reconnect": return mapper.invoke("session.reconnect", {})
         if method == "invoke": return mapper.invoke(str(request.get("operation")), dict(request.get("args", {})))
