@@ -29,7 +29,7 @@
           ]
         }
       ],
-      "firstTested": "Kumi integration pending exact-candidate validation"
+      "firstTested": "Live 12.4.15b4 ARM64: Kumi preview/apply/readback/history undo for macro names, mapping ranges and variation names (stopped fixture)"
     },
     {
       "family": "willington-follow-actions",
@@ -43,7 +43,7 @@
           ]
         }
       ],
-      "firstTested": "Kumi integration pending exact-candidate real-Live validation; standalone binding evidence is not Kumi evidence"
+      "firstTested": "Live 12.4.15b4 ARM64: Kumi Session clip preview/apply/readback/history undo (stopped fixture; scheduling and persistence unverified)"
     },
     {
       "family": "session-read",
