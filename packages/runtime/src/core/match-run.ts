@@ -5,7 +5,7 @@
  * trying something genuinely different, or the budget spent) or sends the model back in with the
  * score, what's left of the budget and the biggest gaps. A first draft can't end a run.
  */
-import type { AuditionEvent, AuditionRequest } from "./contracts.js";
+import type { AuditionCandidate, AuditionEvent, AuditionRequest } from "./contracts.js";
 import { MATCHING } from "./techniques.js";
 
 export interface MatchBudget {
@@ -18,9 +18,11 @@ export interface MatchBudget {
   /** Checks in a row without this much gain make a plateau. */
   plateauChecks: number;
   minGain: number;
+  /** After the model's ideas run out, how long Kumi's own knob search may tune the best (none when left out). */
+  polishMs?: number;
 }
 /** Generous: the producer cares about the result, and every round is shown. */
-export const MATCH_BUDGET: MatchBudget = { rounds: 12, ms: 45 * 60_000, target: 92, plateauChecks: 2, minGain: 2 };
+export const MATCH_BUDGET: MatchBudget = { rounds: 12, ms: 45 * 60_000, target: 92, plateauChecks: 2, minGain: 2, polishMs: 8 * 60_000 };
 
 /** A request that starts a match run. */
 export const startsMatch = (request: string) => MATCHING.test(request);
@@ -44,6 +46,10 @@ export class MatchRun {
   /** The last audition's request and result, and whether the Set changed since. */
   last?: { request?: AuditionRequest; event: AuditionEvent };
   best?: { label: string; score: number };
+  /** The best's track, as auditioned: what Kumi's knob search tunes at the end. */
+  bestCandidate?: AuditionCandidate;
+  /** Kumi's knob search has had its turn (once a run). */
+  polished = false;
   first?: number;
   changedSince = false;
   /** The reference as heard, for the lesson. */
@@ -73,8 +79,24 @@ export class MatchRun {
     if (!event.best) return;
     this.history.push(event.best);
     this.first ??= event.best.score;
-    if (!this.best || event.best.score > this.best.score) this.best = event.best;
+    if (!this.best || event.best.score > this.best.score) {
+      this.best = event.best;
+      // Its track: the candidate of that label (or, unlabelled, in that place).
+      const candidates = event.request?.candidates ?? request?.candidates ?? [];
+      const index = event.takes.findIndex((take) => take.label === event.best!.label);
+      const candidate = candidates.find((item) => item.label === event.best!.label) ?? (candidates.every((item) => !item.label) ? candidates[index] : undefined);
+      if (candidate) this.bestCandidate = candidate; else delete this.bestCandidate;
+    }
   }
+  /** Kumi's knob search tuned the best: its score, heard at full length, is the run's new best. */
+  tuned(label: string, score: number): void {
+    this.polished = true;
+    this.history.push({ label, score });
+    if (!this.best || score > this.best.score) this.best = { label, score };
+  }
+  /** Whether a stop should first let Kumi's knob search tune the best. */
+  get polishes(): boolean { return !this.polished && Boolean(this.budget.polishMs && this.bestCandidate && this.last?.request?.reference); }
+  get polishMs(): number { return this.budget.polishMs ?? 0; }
   /** Kumi changed the Set: the last audition no longer says how it sounds. */
   changed(): void { this.changedSince = true; }
 
@@ -97,13 +119,21 @@ export class MatchRun {
       return { next: "[Kumi] Before finishing, audition what you built against the reference (the audition tool; several candidates on their own tracks render together). If the producer gave no reference, listen to what they pointed at, or ask them for one and stop." };
     }
     this.checks.push(this.best.score);
-    const wrapUp = (why: string) => `[Kumi] ${why} Tidy up, then give your final answer. Put the winner where the producer asked for it: when they asked for it on a track ("this track", one they named or had selected) and it won elsewhere, rebuild it there (the same devices, the settings you gave them, its clip) and audition it once to check it scores the same; otherwise keep it on its own. Mute every other candidate track you made (don't undo them: Live removes a track only from the last one back, and not one changed since). Then say the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which muted tracks hold the others for the producer to A/B or delete. Call it the closest you got.`;
+    const wrapUp = (why: string) => this.wrapUp(why);
     if (this.best.score >= this.budget.target) return { stop: "reached", ...(this.continuations ? { wrapUp: wrapUp(`That reaches ${this.best.score}%, close enough to stop.`) } : {}) };
     if (left.rounds <= 0 || elapsed >= this.budget.ms) return { stop: "budget", wrapUp: wrapUp("That's the run's budget spent.") };
     // A plateau: the last checks gained less than minGain over the best before them.
     const n = this.budget.plateauChecks;
     const stalled = this.checks.length > n && this.checks.at(-1)! - this.checks.at(-1 - n)! < this.budget.minGain;
     if (stalled && this.explored) return { stop: "plateau", wrapUp: wrapUp("Refining and new ideas both stopped gaining.") };
+    return this.carryOn(left, stalled);
+  }
+  /** The last prompt of a run: tidy up and say how it went. */
+  wrapUp(why: string): string {
+    return `[Kumi] ${why} Tidy up, then give your final answer. Put the winner where the producer asked for it: when they asked for it on a track ("this track", one they named or had selected) and it won elsewhere, rebuild it there (the same devices, the settings you gave them, its clip) and audition it once to check it scores the same; otherwise keep it on its own. Mute every other candidate track you made (don't undo them: Live removes a track only from the last one back, and not one changed since). Then say the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which muted tracks hold the others for the producer to A/B or delete. Call it the closest you got.`;
+  }
+  private carryOn(left: { rounds: number; minutes: number }, stalled: boolean): MatchDecision {
+    if (!this.best) return { stop: "no-audition" };
     const gaps = this.last?.event.gaps.length ? ` Biggest gaps: ${this.last.event.gaps.join("; ")}.` : "";
     const scores = this.checks.length > 1 ? `${this.checks.at(-2)}% → ${this.best.score}%` : `${this.best.score}%`;
     // A first round of one idea is a guess: the search starts wide.

@@ -462,7 +462,13 @@ export function createSession(options: Options): SessionController {
         await integration.audition(run.last!.request!, op.controller.signal).catch(() => undefined);
         assertCurrent(op);
       }
-      const decision = run.decide();
+      let decision = run.decide();
+      // The model's ideas have run out: Kumi's own knob search tunes the best before the wrap-up.
+      if ("stop" in decision && (decision.stop === "plateau" || decision.stop === "budget") && run.polishes) {
+        const tuned = await polish(op, run);
+        assertCurrent(op);
+        if (tuned) decision = { ...decision, wrapUp: `${tuned} ${run.wrapUp(decision.stop === "plateau" ? "Refining and new ideas both stopped gaining." : "That's the run's budget spent.")}` };
+      }
       emit(run.status("running"));
       const text = "next" in decision ? decision.next : decision.wrapUp;
       if (!text) { emit(run.status("done", "stop" in decision ? decision.stop : undefined)); break; }
@@ -472,6 +478,65 @@ export function createSession(options: Options): SessionController {
       if ("stop" in decision) { emit(run.status("done", decision.stop)); break; }
     }
     return { ...result, usage };
+  }
+  /**
+   * A match run's last step: Kumi's knob search (a goal's, on one candidate) tunes the best for a few
+   * minutes, far more settings than the model can try one audition at a time. What it finds is kept only
+   * when heard at full length it beats the settings it started from; otherwise they're put back. What it
+   * says goes to the model, for the wrap-up (and the knobs it moved, to rebuild it elsewhere).
+   */
+  const round3 = (value: number) => Number(value.toPrecision(3));
+  async function polish(op: Operation, run: MatchRun): Promise<string | undefined> {
+    const request = run.last?.request; const candidate = run.bestCandidate; const label = run.best?.label;
+    run.polished = true;
+    if (!integration?.goal || !request?.reference || !candidate || !label) return undefined;
+    op.extend?.(run.polishMs + 10 * 60_000);
+    op.progress?.({ type: "tool-start" });
+    emit({ type: "doing", text: `Tuning ${label}'s knobs` });
+    const signal = op.controller.signal;
+    try {
+      const rig = await integration.goal({ ...request, candidates: [{ ...candidate, label }] }, signal).catch((error: unknown) => error instanceof Error ? error.message : "it couldn't start");
+      if (typeof rig === "string") { emit({ type: "notice", message: `Kumi's knob search couldn't tune ${label}: ${rig}` }); return undefined; }
+      const evolution = new Evolution(options.goalRandom ?? Math.random);
+      const slot = evolution.add(rig.slots[0]!);
+      const knobs = slot.knobs; const start = slot.elite.slice();
+      let from: number | undefined; let to: number | undefined; let kept = false; const notes: string[] = [];
+      try {
+        // Where it starts, heard at full length: what the tuning has to beat.
+        from = (await rig.generation([{ slot: slot.name, knobs, values: start }], signal, { screen: false })).scores.get(slot.name);
+        if (from === undefined) return undefined;
+        const began = Date.now();
+        while (Date.now() - began < run.polishMs && !signal.aborted) {
+          const trials = evolution.propose();
+          const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: evolution.slots[0]!.knobs, values: trial.values, ...(trial.how === "recheck" ? { fresh: true } : {}) })), signal, { screen: rig.screens });
+          evolution.scored(trials, result.scores);
+          for (const [name, keys] of result.frozen) evolution.freeze(name, keys);
+          op.progress?.({ type: "tool-start" }); op.progress?.({ type: "tool-end" });
+          emit({ type: "doing", text: `Tuning ${label}'s knobs · ${evolution.rendered} settings heard` });
+          if (!result.scores.size || evolution.stalledFor >= 10) break;
+        }
+        const best = evolution.slots[0]!;
+        // The search's best, heard at full length (a long part is searched on a window of it).
+        if (best.knobs.some((knob, index) => best.elite[index] !== start[knobs.indexOf(knob)])) to = (await rig.generation([{ slot: best.name, knobs: best.knobs, values: best.elite, fresh: true }], signal, { screen: false })).scores.get(best.name);
+        kept = to !== undefined && to >= from + 1;
+      } finally {
+        notes.push(...await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."]));
+        const best = evolution.slots[0]!;
+        const cleanup = AbortSignal.timeout(120_000);
+        // Left at what won: the tuned settings, or the ones it started from.
+        const settled = kept ? await rig.settle(best.name, best.knobs, best.elite, cleanup) : await rig.settle(slot.name, knobs, start, cleanup);
+        if (settled) notes.push(`Its settings couldn't all be put back (${settled}); check ${best.name}.`);
+      }
+      const best = evolution.slots[0]!;
+      const heard = `Kumi's knob search then tried ${evolution.rendered} settings of ${label} (on “${best.name}”)`;
+      if (!kept) return `[Kumi] ${heard}: none beat it at full length (${Math.round(from)}%), so its settings are as you left them.${notes.length ? ` ${notes.join(" ")}` : ""}`;
+      run.tuned(`${label}, tuned`, Math.round(to!));
+      const moved = best.knobs.flatMap((knob, index) => {
+        const was = start[knobs.indexOf(knob)]; const now = best.elite[index]!;
+        return was === undefined || Math.abs(now - was) < 1e-6 * Math.max(1, knob.max - knob.min) ? [] : [`${knob.device.replace(/^\d+:/, "")} ${knob.name} ${round3(was)} → ${round3(now)}`];
+      });
+      return `[Kumi] ${heard}: ${Math.round(from)}% → ${Math.round(to!)}% at full length, kept on the track (and a Limiter ends its chain for safety). The knobs it moved: ${moved.slice(0, 30).join("; ")}${moved.length > 30 ? `; and ${moved.length - 30} more` : ""}. Use these values if you rebuild it elsewhere.${notes.length ? ` ${notes.join(" ")}` : ""}`;
+    } finally { op.progress?.({ type: "tool-end" }); }
   }
   /**
    * A goal, as one long answer: the model sets up the candidates (or a kept goal is picked up), then

@@ -187,6 +187,8 @@ export interface GoalRig {
     /** Rendered on the short window, and how many trials were heard from the cache. */ screened: boolean; cached: number }>;
   /** The best so far on a track of its own ("Kumi · Goal best"), replacing the last copy; its name, or why not. */
   keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
+  /** A slot left where it is at these values, its safety limiter's input back at 0 dB (a match's winner, tuned); why not, if it couldn't be. */
+  settle(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string | undefined>;
   /** A finished goal's candidates: the top ones muted for the producer to A/B, the rest removed; what it did. */
   tidy(top: readonly string[], signal: AbortSignal): Promise<string[]>;
   /** The rig's scratch tracks go and the transport comes back; anything the producer should know. */

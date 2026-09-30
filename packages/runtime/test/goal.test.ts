@@ -238,3 +238,41 @@ test("goals need bridge 1.0.50, which releases their render steps' undo", async 
   assert.match(String(await b.integration.goal!({ candidates: [{ track: "Kumi · Goal · Dark" }], fromBeat: 8, beats: 4, reference }, new AbortController().signal)), /needs the Ableton bridge 1\.0\.50 or later/);
   await b.integration.close();
 });
+
+test("a match run's last step: Kumi's knob search tunes the best, keeps what beats it at full length, and tells the model what it moved", async () => {
+  const events: SessionEvent[] = []; const asked: string[] = [];
+  let session!: ReturnType<typeof createSession>;
+  const b = bridge({ transport: true, version: "1.0.50", tempo: 480, renders: render, extraTracks: [{ name: "Kumi · Goal · Dark", devices: operator(0.05) }], onAudition: (event) => session.watch?.(event) });
+  const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
+  session = createSession({
+    onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goalRandom: seeded(5),
+    match: { rounds: 1, polishMs: 3_000 },
+    kernelFactory: async ({ tools }) => ({
+      async run(input) {
+        asked.push(input.split("<current_observation")[0]!);
+        if (!input.startsWith("[Kumi]")) {
+          const tracks = JSON.parse((await call(tools, "live_discover", { kind: "track", fields: ["name"] })).text).live.items as { ref: string; name: string }[];
+          await call(tools, "audition", { candidates: [{ track: tracks.find((track) => track.name === "Kumi · Goal · Dark")!.ref, label: "Dark Operator" }], from_beat: 8, beats: 4, reference, focus: "sound" });
+        }
+        return { stopReason: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+      },
+      async close() {},
+    }),
+    integrationFactory: () => b.integration,
+  });
+  await session.start();
+  await session.submit("make my pad sound like the reference");
+  const wrapUp = asked.at(-1)!;
+  assert.match(wrapUp, /^\[Kumi\] Kumi's knob search then tried \d+ settings of Dark Operator \(on “Kumi · Goal · Dark”\): (\d+)% → (\d+)% at full length, kept on the track/);
+  const [, from, to] = /(\d+)% → (\d+)% at full length/.exec(wrapUp)!.map(Number);
+  assert.ok(to! > from!, `${from} → ${to}`);
+  assert.match(wrapUp, /The knobs it moved: Operator Filter Freq 0\.05 → [\d.]+/);
+  assert.match(wrapUp, /Tidy up, then give your final answer/, "then the usual wrap-up");
+  // Left on the track at what won, its limiter's input back at 0 dB; the render tracks gone and Main back.
+  const dark = b.devicesOf("Kumi · Goal · Dark")!;
+  assert.ok(dark[0]!.params[1]!.value > 0.05, `Filter Freq ${dark[0]!.params[1]!.value}`);
+  assert.equal(dark.at(-1)!.className, "Limiter"); assert.equal(dark.at(-1)!.params[0]!.value, 0.5);
+  assert.ok(!b.trackNames().some((name) => name.startsWith("Kumi · render")));
+  assert.equal(b.main.volume, 0.85);
+  await session.close();
+});

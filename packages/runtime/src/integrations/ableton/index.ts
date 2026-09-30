@@ -1684,6 +1684,23 @@ export function createAbletonIntegration(options: Options): Integration {
     }
     /** Analyses by candidate settings (and window): a render already heard isn't heard again. */
     const heardBefore = new Map<string, { score: number; gaps: string[]; structural?: { gap: string; move: string } }>();
+    /** A slot's knobs set to these values, by name (references move when tracks do). */
+    const setSlot = async (slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal) => {
+      const last = current.get(slot)!; const fresh = await readKnobs(slot, signal);
+      const byKey = new Map(fresh.knobs.map((knob) => [key(knob), knob]));
+      const byDevice = new Map<string, { parameterRef: string; value: number }[]>();
+      knobs.forEach((knob, index) => { const now_ = byKey.get(key(knob)); const device = fresh.devices[Number(knob.device.split(":")[0])]?.ref; if (now_ && typeof device === "string") byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value: values[index]! }]); });
+      await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) await step("set_device_parameters", { deviceRef, values: set }, signal); });
+      knobs.forEach((knob, index) => last.set(key(knob), values[index]!));
+    };
+    /** A track's closing limiter (the search's safety) with its input back at 0 dB. */
+    const limiterAtUnity = async (track: string, signal: AbortSignal) => {
+      const read = await readKnobs(track, signal);
+      const limiter = read.devices.at(-1);
+      const input = limiter?.className === "Limiter" ? read.knobs.find((knob) => knob.device === `${read.devices.length - 1}:${String(limiter.name ?? "Limiter")}` && /^(gain|input( gain)?)$/i.test(knob.name)) : undefined;
+      const unity = input ? (input.min < 0 ? 0 : input.min === 0 && input.max === 1 ? 0.5 : undefined) : undefined;
+      if (input && unity !== undefined && typeof limiter?.ref === "string") await quietly(undefined, () => step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: input.ref, value: unity }] }, signal));
+    };
 
     return {
       slots,
@@ -1780,16 +1797,20 @@ export function createAbletonIntegration(options: Options): Integration {
         if (process.env.KUMI_TIMING) console.error(`[generation · ${trials.length} trials] set ${renderFrom - setFrom} ms · render ${heardFrom - renderFrom} ms · hear ${Date.now() - heardFrom} ms`);
         return { scores, gaps, silent, frozen, structural, screened, cached };
       },
+      async settle(slot, knobs, values, given) {
+        const signal = AbortSignal.any([given, lifetime.signal]);
+        try {
+          await setSlot(slot, knobs, values, signal);
+          // It stays where it is, at the level it was made at: the search's limiter input back at 0 dB.
+          await limiterAtUnity(slot, signal);
+          return undefined;
+        } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "Its settings couldn't be put back."; }
+      },
       async keepBest(slot, knobs, values, given) {
         const signal = AbortSignal.any([given, lifetime.signal]);
         try {
           // The slot back at its best values, then copied to a track of its own: that one's the producer's to keep.
-          const last = current.get(slot)!; const fresh = await readKnobs(slot, signal);
-          const byKey = new Map(fresh.knobs.map((knob) => [key(knob), knob]));
-          const byDevice = new Map<string, { parameterRef: string; value: number }[]>();
-          knobs.forEach((knob, index) => { const now_ = byKey.get(key(knob)); const device = fresh.devices[Number(knob.device.split(":")[0])]?.ref; if (now_ && typeof device === "string") byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value: values[index]! }]); });
-          await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) await step("set_device_parameters", { deviceRef, values: set }, signal); });
-          knobs.forEach((knob, index) => last.set(key(knob), values[index]!));
+          await setSlot(slot, knobs, values, signal);
           // Copying a track moves every track after it: the knobs' references are read again.
           known.clear();
           // The last copy goes first: there's one best.
@@ -1808,11 +1829,7 @@ export function createAbletonIntegration(options: Options): Integration {
             // The candidate may be muted (kept for A/B): its copy plays.
             await step("set_mixer", { trackRef: copy.ref, mute: false }, signal).catch(() => undefined);
             // And at the level it was made at: the search's limiter took its input 12 dB down; the copy's goes back to 0 dB.
-            const copied = await readKnobs(String((await rows("track", { fields: ["name"] }, signal)).find((row) => row.ref === copy.ref)?.name ?? name), signal).catch(() => undefined);
-            const limiter = copied?.devices.at(-1);
-            const input = limiter?.className === "Limiter" ? copied!.knobs.find((knob) => knob.device === `${copied!.devices.length - 1}:${String(limiter.name ?? "Limiter")}` && /^(gain|input( gain)?)$/i.test(knob.name)) : undefined;
-            const unity = input ? (input.min < 0 ? 0 : input.min === 0 && input.max === 1 ? 0.5 : undefined) : undefined;
-            if (input && unity !== undefined && typeof limiter?.ref === "string") await step("set_device_parameters", { deviceRef: limiter.ref, values: [{ parameterRef: input.ref, value: unity }] }, signal).catch(() => undefined);
+            await limiterAtUnity(String((await rows("track", { fields: ["name"] }, signal)).find((row) => row.ref === copy.ref)?.name ?? name), signal).catch(() => undefined);
           });
           return name;
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "The best couldn't be kept on its own track."; }
