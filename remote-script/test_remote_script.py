@@ -8163,3 +8163,97 @@ class FlatChangeTests(unittest.TestCase):
         owner = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]
         expected = {"ref": device["ref"], "objectIdentity": device["objectIdentity"], "trackRef": mapper.snapshot()["tracks"][0]["ref"], "trackIdentity": mapper.snapshot()["tracks"][0]["objectIdentity"], "ownerRef": owner["ref"], "ownerIdentity": owner["objectIdentity"], "siblings": [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in owner["devices"]]}
         self.assertEqual(mapper._rename_authority_revision("device", device["ref"]), hashlib.sha256(mapper._bounded_canonical(expected).encode()).hexdigest())
+
+
+class LeanNoteClip:
+    """A long Arrangement MIDI clip: notes as Live 12 hands them over (a vector of note objects)."""
+    is_audio_clip = False
+
+    def __init__(self, notes, length=1000.0):
+        self.name = "Long MIDI"; self.length = length; self.start_time = 0.0; self.looping = False; self.muted = False
+        self.notes = [FakeMidiNote(index + 1, 36 + index % 48, index * length / notes, 0.25) for index in range(notes)]
+
+    def get_all_notes_extended(self): return list(self.notes)
+    def add_new_notes(self, notes): pass
+
+
+class WatchedLeanTrack(Listenable, FakeTrack):
+    LISTENABLE = frozenset({"name"})
+
+
+def measured_set(tracks=200, notes=20000, watched=False):
+    """The Set measured on real Live: tracks copied from one template (Operator, EQ Eight,
+    Compressor, Reverb, an Audio Effect Rack with two chains, one holding a nested rack), about
+    470 parameters a track; track 0 holds a 1000-beat Arrangement clip of `notes` notes."""
+    song = WatchedSong() if watched else FakeSong(); song.return_tracks = []
+    def make(name):
+        track = lean_track(name)
+        if watched: track.__class__ = WatchedLeanTrack
+        return track
+    song.tracks = [make(f"Track {index + 1}") for index in range(tracks)]; song.scenes = [(ListenScene if watched else FakeScene)(f"Scene {index + 1}") for index in range(8)]
+    song.tracks[0].arrangement_clips = [LeanNoteClip(notes)]
+    def duplicate_track(index): song.tracks = song.tracks[:index + 1] + [make(song.tracks[index].name + " copy")] + song.tracks[index + 1:]
+    song.duplicate_track = duplicate_track
+    return song
+
+
+class MeasuredSetBenchmarkTests(unittest.TestCase):
+    """E: the reads and changes measured on real Live, on a fake of the same Set. Prints what each
+    costs (total, the slowest single request: what Live's UI feels, and how many requests); asserts
+    what each reads and that no budgeted request runs away."""
+
+    def paged(self, mapper, kind, parent=None, fields=None):
+        items, pages, slowest, total, cursor = [], 0, 0.0, 0.0, None
+        while True:
+            started = time.perf_counter(); page = mapper.discover(kind, 100000, cursor, parent, None, fields, budgeted=True); elapsed = time.perf_counter() - started
+            items += page["items"]; pages += 1; slowest = max(slowest, elapsed); total += elapsed; cursor = page.get("nextCursor")
+            if not cursor: return items, total * 1000, slowest * 1000, pages
+
+    def test_the_measured_sets_reads_and_changes(self):
+        song = measured_set(); mapper = LiveObjectMapper(song); report = []
+        line = lambda label, total, slowest=None, requests=1: report.append(f"    {label:58} {total:8.1f} ms" + (f"  slowest {slowest:6.1f} ms  {requests:4d} requests" if slowest is not None else ""))
+        tracks, total, slowest, pages = self.paged(mapper, "track", fields=["name", "kind", "mediaKind", "groupTrackRef"]); line("discover track (observation fields)", total, slowest, pages)
+        self.assertEqual(len(tracks), 200)
+        LeanDevice.parameter_reads = 0
+        devices, total, slowest, pages = self.paged(mapper, "device", fields=["parentRef", "name", "className", "chainList"]); line("discover device, Set-wide (observation fields)", total, slowest, pages)
+        self.assertEqual((len(devices), LeanDevice.parameter_reads), (1800, 0))
+        tree_fields = ["parentRef", "name", "className", "canHaveChains", "canHaveDrumPads", "chainList", "deviceType"]; started = time.perf_counter(); level = self.paged(mapper, "device", tracks[0]["ref"], tree_fields)[0]; requests = 1
+        chains = [chain["ref"] for device in level for chain in device.get("chainList", [])]
+        while chains:
+            requests += len(chains); chains = [item["ref"] for chain in chains for device in self.paged(mapper, "device", chain, tree_fields)[0] for item in device.get("chainList", [])]
+        line(f"one track's device tree, level by level ({requests} requests)", (time.perf_counter() - started) * 1000)
+        LeanDevice.parameter_reads = 0
+        parameters, total, slowest, pages = self.paged(mapper, "parameter", devices[0]["ref"]); line("discover parameter, parent Operator", total, slowest, pages)
+        self.assertEqual((len(parameters), LeanDevice.parameter_reads), (195, 1))
+        notes, total, slowest_notes, pages = self.paged(mapper, "note", f"{mapper.refs.epoch}:arrangement_clip:0:0"); line("discover note, parent the Arrangement clip", total, slowest_notes, pages)
+        self.assertEqual(len(notes), 20000)
+        started = time.perf_counter(); whole = mapper.snapshot(); line("snapshot without arguments (the whole Set, unbudgeted)", (time.perf_counter() - started) * 1000)
+        self.assertNotIn("notes", whole["arrangement"]["clips"][0]); self.assertEqual(whole["arrangement"]["clips"][0]["noteCount"], 20000)
+        start, requests, slowest_window, total = 0, 0, 0.0, 0.0
+        while start < 200:
+            began = time.perf_counter(); page = mapper.snapshot({"tracks": {"from": start, "count": 16}, "parts": ["tracks", "arrangement"]}, budgeted=True); elapsed = time.perf_counter() - began
+            start += page["window"]["tracks"]["count"]; requests += 1; slowest_window = max(slowest_window, elapsed); total += elapsed
+        line("snapshot, the whole Set in windows of 16 tracks", total * 1000, slowest_window * 1000, requests)
+        # No budgeted request runs away: its budget, plus one unit at most (a whole track row here).
+        self.assertLess(max(slowest_notes, slowest_window * 1000), 150)
+        for size in (20, 200):
+            bridge = immediate_bridge(measured_set(size, 10), provenance="real-live"); row = bridge.mapper.discover("track", 1)["items"][0]
+            args = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": bridge.mapper._structure_revision()}
+            holder = {}; started = time.perf_counter()
+            pre = bridge._dispatch_with_holder("preflight", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench"}, holder)
+            prepared = bridge._dispatch_with_holder("prepare", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench", "preflightToken": pre["preflightToken"], "confirmation": pre["confirmation"], "idempotencyKey": "bench-duplicate-0001"}, holder)
+            bridge._dispatch_with_holder("invoke", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench", "authorityToken": prepared["authorityToken"]}, holder)
+            line(f"track.duplicate, preflight/prepare/invoke, {size} tracks", (time.perf_counter() - started) * 1000)
+        for watched in (False, True):
+            bridge = immediate_bridge(measured_set(200, 10, watched), provenance="real-live"); mapper = bridge.mapper; track = mapper.discover("track", 200)["items"][100]
+            rows = []; built = LiveObjectMapper._track_row
+            with patch.object(LiveObjectMapper, "_track_row", lambda self, *row_args: rows.append(row_args[2]) or built(self, *row_args)):
+                for attempt in range(2):
+                    args = {"ref": track["ref"], "name": f"Renamed {attempt}", "expectedName": mapper.song.tracks[100].name, "expectedObjectIdentity": track["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", track["ref"])}
+                    started = time.perf_counter()
+                    digest = mapper.invoke("authority.digest", {"operation": "track.rename", "args": args})["stateDigest"]
+                    bridge._dispatch_with_holder("mutate", {"operation": "track.rename", "transactionId": "transaction-rename", "idempotencyKey": f"bench-rename-{watched:d}{attempt}", "stateDigest": digest, "args": args}, {})
+                    elapsed = (time.perf_counter() - started) * 1000
+            self.assertEqual(mapper.song.tracks[100].name, "Renamed 1"); self.assertEqual(rows, [], "a rename builds no track's whole row")
+            line(f"track.rename, one mutate, 200 tracks ({'watched' if watched else 'unwatched'} structure)", elapsed)
+        print("\n  the measured Set (200 tracks, 1800 devices, a 20000-note Arrangement clip), Remote Script side:\n" + "\n".join(report))
