@@ -145,7 +145,7 @@ test("remote adapter retries an operation that waits for Live's playhead, with a
   });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const result = await adapter.invokeAsync({ operation: "locator.add", args: { name: "Drop", position: 16, expectedCollectionRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 5000, idempotencyKey: "locator-drop-key", transactionId: "locator-transaction" }) as { name?: string };
     assert.equal(result.name, "Drop");
     assert.deepEqual(seen, ["status", "preflight", "prepare", "invoke", "preflight", "prepare", "invoke"]);
@@ -164,7 +164,7 @@ test("remote adapter obtains mutation preflight authority with stable transactio
   });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const context = { deadlineMs: Date.now() + 5000, idempotencyKey: "scene-capture-apply-key", transactionId: "host-scene-capture-transaction" };
     await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, context); await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, context);
     await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, { ...context, transactionId: "second-scene-capture-transaction" });
@@ -177,7 +177,7 @@ test("remote adapter hides cleanup tokens and binds destructive cleanup to the c
   const seen: Record<string, unknown>[] = []; const token = "o".repeat(48);
   const server = framedServer((request, socket) => { seen.push(request); if (request.method === "status") { socket.write(`${JSON.stringify(response(request.id as string, status({ operations: [...requiredOperations, "track.create", "track.delete"] })))}\n`); return; } if (request.method === "retire") { socket.write(`${JSON.stringify(response(request.id as string, { retired: 1 }))}\n`); return; } const argsDigest = createHash("sha256").update(canonical(request.args ?? {})).digest("hex"); if (request.method === "preflight") socket.write(`${JSON.stringify(response(request.id as string, { preflightToken: "p".repeat(32), confirmation: "c".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), impact: "mutates-live", expiresAt: Date.now() + 5000 }))}\n`); else if (request.method === "prepare") socket.write(`${JSON.stringify(response(request.id as string, { authorityToken: "t".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), expiresAt: Date.now() + 5000 }))}\n`); else if (request.operation === "track.create") socket.write(`${JSON.stringify(response(request.id as string, { ref: "1:track:1", objectIdentity: "live:track:1", name: "Owned", kind: "midi", index: 1, createdFingerprint: "f".repeat(64), ownershipToken: token }))}\n`); else { assert.equal(request.ownershipToken, token); socket.write(`${JSON.stringify(response(request.id as string, { deleted: "1:track:1" }))}\n`); } });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined; const transactionId = "creating-structure-transaction";
-  try { adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 }); const created = await adapter.invokeAsync({ operation: "track.create", args: { name: "Owned", kind: "midi", index: 1, expectedStructureRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 1000, idempotencyKey: "create-owned-track", transactionId }) as Record<string, unknown>; assert.equal(created.ownershipToken, undefined); await adapter.retireTransactionAsync(transactionId, { deadlineMs: Date.now() + 1000 }); const deleteInvocation = { operation: "track.delete" as const, args: { ref: "1:track:1", expectedStructureRevision: "b".repeat(64), expectedObjectIdentity: "live:track:1" } }; await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-delete", transactionId: "foreign-structure-transaction" }), /lacks transaction-owned authority/); const beforeDelete = seen.length; assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-delete", transactionId }), { deleted: "1:track:1" }); assert.equal(seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke"].includes(String(row.method))).every((row) => row.ownershipToken === token), true); }
+  try { adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 }); const created = await adapter.invokeAsync({ operation: "track.create", args: { name: "Owned", kind: "midi", index: 1, expectedStructureRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 1000, idempotencyKey: "create-owned-track", transactionId }) as Record<string, unknown>; assert.equal(created.ownershipToken, undefined); await adapter.retireTransactionAsync(transactionId, { deadlineMs: Date.now() + 1000 }); const deleteInvocation = { operation: "track.delete" as const, args: { ref: "1:track:1", expectedStructureRevision: "b".repeat(64), expectedObjectIdentity: "live:track:1" } }; await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-delete", transactionId: "foreign-structure-transaction" }), /lacks transaction-owned authority/); const beforeDelete = seen.length; assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-delete", transactionId }), { deleted: "1:track:1" }); const sent = seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke", "mutate"].includes(String(row.method))); assert.deepEqual(sent.map((row) => row.method), ["mutate"]); assert.equal(sent.every((row) => row.ownershipToken === token), true); }
   finally { await adapter?.close(); await close(server); }
 });
 
@@ -205,7 +205,9 @@ test("remote adapter retains and strips audio-clip creation tokens across create
     await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-clip-delete", transactionId: "foreign-audio-transaction" }), /lacks transaction-owned authority/);
     const beforeDelete = seen.length;
     assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-clip-delete", transactionId }), { deleted: "1:clip:0:1" });
-    assert.equal(seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke"].includes(String(row.method))).every((row) => row.ownershipToken === token), true);
+    const sent = seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke", "mutate"].includes(String(row.method)));
+    assert.deepEqual(sent.map((row) => row.method), ["mutate"]);
+    assert.equal(sent.every((row) => row.ownershipToken === token), true);
   }
   finally { await adapter?.close(); await close(server); }
 });
@@ -407,7 +409,7 @@ test("an explicit deletion of an existing device, return or track goes out with 
   const device = { ref: "1:device:0:1", expectedObjectIdentity: "live:device:eq", expectedOwnerRef: "1:track:0", expectedOwnerIdentity: "live:track:0", expectedSiblings: [{ ref: "1:device:0:0", objectIdentity: "live:device:synth" }, { ref: "1:device:0:1", objectIdentity: "live:device:eq" }], expectedTrackRef: "1:track:0", expectedTrackIdentity: "live:track:0" };
   const ret = { ref: "1:track:2", expectedObjectIdentity: "live:return:a", expectedStructureRevision: "a".repeat(64) };
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const before = seen.length;
     await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: device }, context("unowned-device-delete")), notDispatched(/lacks transaction-owned authority/));
     await assert.rejects(adapter.invokeAsync({ operation: "track.delete-return", args: ret }, context("unowned-return-delete")), notDispatched(/lacks transaction-owned authority/));

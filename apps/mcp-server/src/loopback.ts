@@ -12,7 +12,7 @@ const MAX_WIRE_ARRAY_LENGTH = 10_000_000;
 const MAX_WIRE_OBJECT_PROPERTIES = 1_000_000;
 type WireRequestBase = { version: string; id: string; ref?: LiveRef; operation?: LiveInvocation["operation"]; args?: Record<string, unknown>; nonce: string; sequence: number; bridgeEpoch: string; connectionChallenge: string; deadlineMs: number; mac: string };
 export type LoopbackRequest = WireRequestBase & { method: "status" | "snapshot" | "discover" | "get" | "invoke" | "subscribe" | "reconnect" };
-export type RemoteBridgeRequest = WireRequestBase & { method: "status" | "snapshot" | "discover" | "get" | "preflight" | "prepare" | "invoke" | "subscribe" | "reconnect" | "retire"; preflightToken?: string; confirmation?: string; idempotencyKey?: string; authorityToken?: string; transactionId?: string; ownershipToken?: string; terminal?: boolean };
+export type RemoteBridgeRequest = WireRequestBase & { method: "status" | "snapshot" | "discover" | "get" | "preflight" | "prepare" | "invoke" | "mutate" | "subscribe" | "reconnect" | "retire"; preflightToken?: string; confirmation?: string; idempotencyKey?: string; authorityToken?: string; transactionId?: string; ownershipToken?: string; terminal?: boolean; stateDigest?: string };
 export type LoopbackResponse = { version: string; id: string; ok: boolean; bridgeEpoch: string; connectionChallenge: string; result?: unknown; error?: string; mac: string };
 export type LoopbackExchange = (request: LoopbackRequest) => LoopbackResponse;
 

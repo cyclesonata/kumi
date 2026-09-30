@@ -187,7 +187,7 @@ export class ExtensionChannel {
       if (frame.ok === true) {
         try { if (pending.operation !== "status") validateLiveOperationResult(pending.operation, frame.result); pending.resolve(frame.result); }
         catch (error) { pending.reject(error as Error); }
-      } else pending.reject(new Error(typeof frame.error === "string" ? frame.error : "Kumi's Live extension refused the request"));
+      } else pending.reject(new Error(typeof frame.error === "string" ? `Kumi's Live extension: ${frame.error}` : "Kumi's Live extension refused the request"));
     }
     if (buffer.length > 0) { this.pieces.push(buffer); this.buffered = buffer.length; }
   }
