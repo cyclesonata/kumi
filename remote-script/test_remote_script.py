@@ -4316,9 +4316,12 @@ class OwnershipAcrossTransactionsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity changed"): mapper.invoke("track.delete-return", {**delete_return, "expectedObjectIdentity": "live:replacement", "explicitDeletion": True}, "transaction-stale-return")
         self.assertEqual(mapper.invoke("track.delete-return", {**delete_return, "explicitDeletion": True}, "transaction-return-delete"), {"deleted": returned["ref"]})
         self.assertEqual(song.return_tracks, [])
-        # The authority is only for those two: any other deletion still needs its creation's token.
+        # The authority is for the deletions a producer confirms (devices, returns, tracks, scenes, clips,
+        # Arrangement clips, locators), only when named: anything else still needs its creation's token.
         clip_ref = f"{mapper.refs.epoch}:clip:0:0"
-        self.assertFalse(remote_module._explicit_deletion("clip.delete", {"ref": clip_ref, "explicitDeletion": True}))
+        self.assertTrue(remote_module._explicit_deletion("clip.delete", {"ref": clip_ref, "explicitDeletion": True}))
+        self.assertFalse(remote_module._explicit_deletion("clip.delete", {"ref": clip_ref, "explicitDeletion": False}))
+        self.assertFalse(remote_module._explicit_deletion("note.delete", {"ref": clip_ref, "explicitDeletion": True}))
 
     def test_an_explicitly_deleted_creation_loses_its_ownership(self):
         song = self.song_with_returns(); mapper = LiveObjectMapper(song, provenance="real-live")
@@ -6713,3 +6716,68 @@ class MutateOverTheWireTests(_BridgeSocketFixture, unittest.TestCase):
         answer = self.read_lines(client, 1)[0]
         self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"]["value"], 0.75)
         self.assertEqual(mapper.song.tracks[0].devices[0].parameters[0].value, 0.75)
+
+
+class ExplicitDeletionTests(unittest.TestCase):
+    """WS3.3: a producer-confirmed deletion of a clip, Arrangement clip, scene, track or locator names
+    explicitDeletion instead of a creating transaction's token, and every identity fence still holds."""
+
+    def test_clips_scenes_tracks_and_locators_delete_on_their_fences_without_ownership(self):
+        song = FakeArrangementSong(); song.tracks = [FakeTrack(), FakeTrack(), FakeTrack()]; song.scenes = [FakeScene("A"), FakeScene("B")]
+        for index, track in enumerate(song.tracks): track.name = f"T{index}"; track.clip_slots = [FakeSlot(), FakeSlot()]; track.delete_clip = lambda clip, track=track: track.arrangement_clips.remove(clip); track.arrangement_clips = [FakeClip(1.0), FakeClip(2.0)]
+        song.tracks[0].clip_slots[0].clip = FakeClip(4.0)
+        mapper = LiveObjectMapper(song, provenance="real-live"); snapshot = mapper.snapshot(); transaction = "transaction-explicit"
+        clip = snapshot["tracks"][0]["clips"][0]; authority = mapper._session_clip_authority(clip["ref"])
+        for operation, args in (("clip.delete", {"ref": clip["ref"], **authority}),):
+            with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper.invoke(operation, args, transaction)
+        stale = {**authority, "expectedSlotIdentity": "live:replacement"}
+        with self.assertRaisesRegex(ValueError, "identity changed"): mapper.invoke("clip.delete", {"ref": clip["ref"], **stale, "explicitDeletion": True}, transaction)
+        request = {"ref": clip["ref"], **authority, "explicitDeletion": True}; validate_operation_payload("clip.delete", "request", request)
+        self.assertEqual(mapper.invoke("clip.delete", request, transaction), {"deleted": clip["ref"]}); self.assertIsNone(song.tracks[0].clip_slots[0].clip)
+        arrangement = mapper.snapshot()["arrangement"]["clips"][1]
+        arrangement_request = {"ref": arrangement["ref"], "expectedObjectIdentity": arrangement["objectIdentity"], "expectedAuthorityRevision": mapper._arrangement_clip_authority_revision(arrangement["ref"]), "explicitDeletion": True}
+        validate_operation_payload("arrangement.clip.delete", "request", arrangement_request)
+        with self.assertRaisesRegex(ValueError, "hierarchy changed"): mapper.invoke("arrangement.clip.delete", {**arrangement_request, "expectedAuthorityRevision": "0" * 64}, transaction)
+        self.assertEqual(mapper.invoke("arrangement.clip.delete", arrangement_request, transaction), {"deleted": arrangement["ref"]}); self.assertEqual(len(song.tracks[0].arrangement_clips), 1)
+        scene = mapper.snapshot()["scenes"][1]
+        scene_request = {"ref": scene["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": scene["objectIdentity"], "explicitDeletion": True}
+        with self.assertRaisesRegex(ValueError, "structure changed"): mapper.invoke("scene.delete", {**scene_request, "expectedStructureRevision": "0" * 64}, transaction)
+        self.assertEqual(mapper.invoke("scene.delete", scene_request, transaction), {"deleted": scene["ref"]}); self.assertEqual([item.name for item in song.scenes], ["A"])
+        track = mapper.snapshot()["tracks"][2]
+        track_request = {"ref": track["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": track["objectIdentity"], "explicitDeletion": True}
+        with self.assertRaisesRegex(ValueError, "identity changed"): mapper.invoke("track.delete", {**track_request, "expectedObjectIdentity": "live:replacement"}, transaction)
+        self.assertEqual(mapper.invoke("track.delete", track_request, transaction), {"deleted": track["ref"]}); self.assertEqual([item.name for item in song.tracks], ["T0", "T1"])
+        locator = mapper.snapshot()["arrangement"]["locators"][0]
+        locator_request = {"ref": locator["ref"], "expectedObjectIdentity": locator["objectIdentity"], "expectedCollectionRevision": mapper.snapshot()["arrangement"]["locatorRevision"], "explicitDeletion": True}
+        with self.assertRaisesRegex(ValueError, "locator collection changed"): mapper.invoke("locator.delete", {**locator_request, "expectedCollectionRevision": "0" * 64}, transaction)
+        self.assertEqual(mapper.invoke("locator.delete", locator_request, transaction), {"deleted": locator["ref"]}); self.assertEqual(song.cue_points, [])
+
+    def test_objects_an_explicit_deletion_moved_lose_their_ownership(self):
+        song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack()]; mapper = LiveObjectMapper(song, provenance="real-live")
+        made = mapper.invoke("track.create", {"name": "Made later", "kind": "midi", "index": 2, "expectedStructureRevision": mapper._structure_revision()}, "transaction-maker")
+        scene = mapper.invoke("scene.create", {"name": "Scene later", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, "transaction-maker")
+        first = mapper.snapshot()["tracks"][0]
+        mapper.invoke("track.delete", {"ref": first["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": first["objectIdentity"], "explicitDeletion": True}, "transaction-explicit")
+        # The made track is now track 1, not 2: its undo is refused for lacking ownership, not run on another track.
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper._require_cleanup_ownership("track.delete", {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"]}, "transaction-maker", made["ownershipToken"])
+        # A scene deletion before the made scene moves it too.
+        first_scene = mapper.snapshot()["scenes"][0]
+        mapper.invoke("scene.delete", {"ref": first_scene["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": first_scene["objectIdentity"], "explicitDeletion": True}, "transaction-explicit")
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper._require_cleanup_ownership("scene.delete", {"ref": scene["ref"], "expectedObjectIdentity": scene["objectIdentity"]}, "transaction-maker", scene["ownershipToken"])
+        self.assertEqual(mapper._owned_cleanup_tokens, {})
+
+    def test_an_owned_deletion_is_unchanged(self):
+        song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live")
+        made = mapper.invoke("scene.create", {"name": "Owned", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, "transaction-owner")
+        args = {"ref": made["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": made["objectIdentity"]}
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): mapper.invoke("scene.delete", args, "transaction-other")
+        self.assertEqual(mapper.invoke("scene.delete", args, "transaction-owner", made["ownershipToken"]), {"deleted": made["ref"]})
+        self.assertTrue(mapper._owned_cleanup_tokens[made["ownershipToken"]]["deleted"])
+
+    def test_preflight_takes_an_explicit_deletion_without_ownership(self):
+        bridge = immediate_bridge(provenance="real-live"); holder = {}
+        scene = bridge.mapper.snapshot()["scenes"][0]
+        request = {"operation": "scene.delete", "transactionId": "transaction-explicit-preflight", "args": {"ref": scene["ref"], "expectedStructureRevision": bridge.mapper._structure_revision(), "expectedObjectIdentity": scene["objectIdentity"], "explicitDeletion": True}}
+        preflight = bridge._dispatch_with_holder("preflight", request, holder)
+        prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflight["preflightToken"], "confirmation": preflight["confirmation"], "idempotencyKey": "explicit-scene-key"}, holder)
+        self.assertEqual(bridge._dispatch_with_holder("invoke", {**request, "authorityToken": prepared["authorityToken"]}, holder), {"deleted": scene["ref"]})

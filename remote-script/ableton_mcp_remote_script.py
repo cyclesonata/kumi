@@ -308,8 +308,10 @@ _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.d
 # Deletions of an existing object the producer previewed and confirmed, never an undo or a cleanup:
 # they name explicitDeletion instead of presenting a creating transaction's ownership token, and are
 # held to the exact identity fences in their arguments (device: itself, its owner, siblings and track;
-# return track: itself and the Session structure). Mirrors EXPLICIT_DELETIONS in the host adapter.
-_EXPLICIT_DELETIONS = {"device.delete", "track.delete-return"}
+# track, return track or scene: itself and the Session structure; Session clip: itself, its track,
+# slot and scene; Arrangement clip: itself, its track and siblings; locator: itself and the locators).
+# Mirrors EXPLICIT_DELETIONS in the host adapter.
+_EXPLICIT_DELETIONS = {"device.delete", "track.delete-return", "clip.delete", "arrangement.clip.delete", "scene.delete", "track.delete", "locator.delete"}
 def _explicit_deletion(operation: str, args: Any) -> bool: return operation in _EXPLICIT_DELETIONS and isinstance(args, dict) and args.get("explicitDeletion") is True
 # Changes to Live's own undo history, not to the Set: no preflight->prepare fence, and a Live-thread
 # guard closes an open step (deadline, connection close, reconnect, shutdown). Mirrors the host adapter.
@@ -3999,15 +4001,32 @@ class LiveObjectMapper:
 
     def _retire_explicitly_deleted_ownership(self, operation: str, args: dict[str, Any]) -> None:
         """After an explicit deletion, a transaction that made the deleted object no longer owns it,
-        and for a return track, what followed it on the track axis has moved: those lose their
-        ownership too, so their undo is refused for lacking it instead of mistaking the objects."""
+        and objects whose positional references the deletion moved or took lose their ownership too
+        (what a deleted track or scene held and what followed it; what followed a return track; the
+        Arrangement clips after a deleted one on its track; the locators after a deleted one), so
+        their undo is refused for lacking it instead of mistaking the objects."""
         identity = args.get("expectedObjectIdentity")
         for token, row in list(self._owned_cleanup_tokens.items()):
             if row.get("objectIdentity") == identity and row.get("deleted") is not True: self._owned_cleanup_tokens.pop(token, None)
+        parts = str(args.get("ref")).split(":")
         if operation == "track.delete-return":
-            parts = str(args.get("ref")).split(":")
             if len(parts) == 3 and parts[1] == "track" and parts[2].isdigit():
                 for token, _ in self._owned_positions("track", int(parts[2]), strict=True): self._owned_cleanup_tokens.pop(token, None)
+            return
+        if len(parts) < 3 or parts[0] != str(self.refs.epoch) or not all(part.isdigit() for part in parts[2:]): return
+        deleted = [int(part) for part in parts[2:]]
+        if len(deleted) != (2 if operation == "arrangement.clip.delete" else 1): return
+        def moved(row: dict[str, Any]) -> bool:
+            owned = str(row.get("ref", "")).split(":")
+            if len(owned) < 3 or owned[0] != str(self.refs.epoch) or not all(part.isdigit() for part in owned[2:]): return False
+            kind, place = owned[1], [int(part) for part in owned[2:]]
+            if operation == "track.delete": return kind in {"track", "clip", "arrangement_clip", "device"} and place[0] >= deleted[0]
+            if operation == "scene.delete": return (kind == "scene" and place[0] >= deleted[0]) or (kind == "clip" and len(place) >= 2 and place[1] >= deleted[0])
+            if operation == "arrangement.clip.delete": return kind == "arrangement_clip" and len(place) == 2 and place[0] == deleted[0] and place[1] > deleted[1]
+            if operation == "locator.delete": return kind == "locator" and place[0] > deleted[0]
+            return False
+        for token, row in list(self._owned_cleanup_tokens.items()):
+            if row.get("deleted") is not True and moved(row): self._owned_cleanup_tokens.pop(token, None)
 
     def retire_transaction_ownership(self, transaction_id: str, terminal: bool = False) -> None:
         for token, row in list(self._owned_cleanup_tokens.items()):
