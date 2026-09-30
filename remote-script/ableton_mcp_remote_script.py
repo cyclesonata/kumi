@@ -8569,11 +8569,24 @@ class LiveObjectMapper:
             destination = matches[0]
         elif action == "start" or destination_identity is not None:
             raise ValueError("recording start requires an exact destination track identity")
+        # Tracks recorded alongside the destination (renders of several sources at once): each exact and armed.
+        also_refs, also_identities = args.get("alsoTrackRefs") or [], args.get("alsoTrackIdentities") or []
+        if not isinstance(also_refs, list) or not isinstance(also_identities, list) or len(also_refs) != len(also_identities) or len(also_refs) > 7 or (also_refs and action != "start"):
+            raise ValueError("tracks recorded alongside are invalid")
+        also = []
+        for ref, identity in zip(also_refs, also_identities):
+            if not isinstance(ref, str) or not isinstance(identity, str):
+                raise ValueError("tracks recorded alongside are invalid")
+            referenced = self.refs.get(ref); matches = [candidate for candidate in tracks if self._capture_same_object(candidate, referenced, identity)]
+            if not hmac.compare_digest(self._capture_object_identity(referenced), identity) or len(matches) != 1 or self._read_attr(matches[0], "arm") is not True:
+                raise ValueError("a track recorded alongside is stale, ambiguous or not armed")
+            also.append(matches[0])
         if action == "start":
             armed_tracks = [track for track in tracks if self._armed(track) is True]
             armed_matches = [track for track in armed_tracks if self._capture_same_object(track, destination, str(destination_identity))]
-            if destination is None or self._read_attr(destination, "arm") is not True or len(armed_tracks) != 1 or len(armed_matches) != 1:
-                raise ValueError("recording destination must be the only unambiguous armed track")
+            others = [track for track in armed_tracks if not any(track is item for item in also) and not self._capture_same_object(track, destination, str(destination_identity))]
+            if destination is None or self._read_attr(destination, "arm") is not True or len(armed_matches) != 1 or others or len(armed_tracks) != 1 + len(also):
+                raise ValueError("recording destination must be the only unambiguous armed track" if not also else "recording tracks must be exactly the armed ones")
         if lane == "session" and action == "start" and current_session:
             raise ValueError("Session recording is already active")
         if lane == "arrangement" and action == "start" and current_arrangement:

@@ -341,7 +341,14 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     const recordingAuthority = (): void => {
       if (typeof args.expectedSessionRecord !== "boolean" || typeof args.expectedArrangementRecord !== "boolean" || args.expectedSessionRecord !== this.state.playback.transport.sessionRecord || args.expectedArrangementRecord !== this.state.playback.transport.arrangementRecord) throw new Error("recording state changed since preview");
       if (!args.outputSafety || typeof args.outputSafety !== "object" || (args.outputSafety as { safe?: unknown }).safe !== true || !["string"].includes(typeof (args.outputSafety as { provenance?: unknown }).provenance) || ["", "unknown", "simulator"].includes(String((args.outputSafety as { provenance?: unknown }).provenance))) throw new Error("authoritative output safety is required");
-      if (args.action === "start") { const destination = this.findTrack(objectRef("destinationTrackRef")); const armed = this.state.tracks.filter((track) => track.armed === true); if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || armed.length !== 1 || armed[0] !== destination) throw new Error("recording destination identity must be the only armed track"); }
+      if (args.action === "start") {
+        const destination = this.findTrack(objectRef("destinationTrackRef")); const armed = this.state.tracks.filter((track) => track.armed === true);
+        // Tracks recorded alongside: each armed, and together with the destination exactly the armed ones.
+        const alsoRefs = Array.isArray(args.alsoTrackRefs) ? args.alsoTrackRefs as LiveRef[] : []; const alsoIdentities = Array.isArray(args.alsoTrackIdentities) ? args.alsoTrackIdentities : [];
+        const also = alsoRefs.map((ref) => this.findTrack(ref));
+        if (also.some((track, index) => !track || track.objectIdentity !== alsoIdentities[index] || track.armed !== true)) throw new Error("a track recorded alongside changed identity or is not armed");
+        if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || armed.length !== 1 + also.length || !armed.every((track) => track === destination || also.includes(track))) throw new Error(also.length ? "recording tracks must be exactly the armed ones" : "recording destination identity must be the only armed track");
+      }
       else if (args.destinationTrackRef !== null || args.destinationTrackIdentity !== null) throw new Error("recording stop destination authority must be null");
     };
     switch (operation) {

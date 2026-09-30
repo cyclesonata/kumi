@@ -2421,7 +2421,8 @@ export class McpHost {
   }
 
   private async liveRecordingPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["action", "lane", "intent", "destinationTrackRef", "outputSafety"]) || (params.action !== "start" && params.action !== "stop") || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
+    if (!isObject(params) || !hasOnly(params, ["action", "lane", "intent", "destinationTrackRef", "alsoTrackRefs", "outputSafety"]) || (params.action !== "start" && params.action !== "stop")
+      || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 7 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
     try {
       this.validateOutputSafety(params.outputSafety);
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
@@ -2432,6 +2433,8 @@ export class McpHost {
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       let destinationTrackIdentity: string | null = null;
+      // Tracks recorded alongside the destination, each armed too (renders of several sources at once).
+      const also: { ref: string; identity: string }[] = [];
       if (params.action === "start") {
         const alreadyRecording = params.lane === "session" ? transport.sessionRecord === true : transport.arrangementRecord === true;
         if (alreadyRecording) throw new Error(`${params.lane} recording is already active`);
@@ -2440,11 +2443,18 @@ export class McpHost {
         if (!destination || !isNonEmptyString(destination.objectIdentity, 256)) throw new Error("destination track identity is not authoritative");
         destinationTrackIdentity = destination.objectIdentity;
         if (destination.armed !== true) throw new Error("destination track is not armed for recording; arm it through live_routing_preview first");
-        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => item.ref !== params.destinationTrackRef && item.armed === true);
-        if (additionallyArmed.length > 0) throw new Error("recording start requires the exact destination to be the only armed track");
+        for (const ref of (params.alsoTrackRefs ?? []) as string[]) {
+          const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === ref);
+          if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("a track recorded alongside is not authoritative");
+          if (track.armed !== true) throw new Error("a track recorded alongside is not armed; arm it through live_routing_preview first");
+          also.push({ ref, identity: track.objectIdentity });
+        }
+        const recorded = new Set([params.destinationTrackRef, ...also.map((item) => item.ref)]);
+        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => !recorded.has(item.ref as string) && item.armed === true);
+        if (additionallyArmed.length > 0) throw new Error(also.length ? "recording start requires exactly the named tracks to be armed" : "recording start requires the exact destination to be the only armed track");
       }
       const fence = JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing });
-      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "recording");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, lane: params.lane, intent: params.intent, prior: transaction.prior, impact: params.action === "start" ? "starts-recording" : "stops-recording", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Recording preview refused; obtain fresh authoritative state and explicit output-safety evidence."); }
@@ -2470,7 +2480,10 @@ export class McpHost {
       if (!reconciliation && transaction.payload.action === "start") {
         const destinationRef = transaction.payload.destinationTrackRef;
         const armed = (snapshot.tracks as unknown as JsonObject[]).filter((track) => track.armed === true);
-        if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || armed.length !== 1 || armed[0]?.ref !== destinationRef || armed[0]?.objectIdentity !== transaction.payload.destinationTrackIdentity) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
+        const also = (transaction.payload.also ?? []) as { ref: string; identity: string }[];
+        const expected = [{ ref: destinationRef, identity: transaction.payload.destinationTrackIdentity }, ...also];
+        const same = armed.length === expected.length && expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
+        if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || !same) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
       }
       const operation = transaction.payload.lane === "session" ? "recording.session" : "recording.arrangement";
       const prior = transaction.prior as Record<string, unknown>;
@@ -2481,6 +2494,7 @@ export class McpHost {
         expectedArrangementRecord: prior.arrangementRecord,
         destinationTrackRef: transaction.payload.destinationTrackRef ?? null,
         destinationTrackIdentity: transaction.payload.destinationTrackIdentity ?? null,
+        ...(transaction.payload.also ? { alsoTrackRefs: (transaction.payload.also as { ref: string }[]).map((item) => item.ref), alsoTrackIdentities: (transaction.payload.also as { identity: string }[]).map((item) => item.identity) } : {}),
         outputSafety: transaction.payload.outputSafety,
       } }, context) as { recording?: unknown };
       const expected = transaction.payload.action === "start";

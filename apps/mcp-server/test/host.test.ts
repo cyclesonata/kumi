@@ -2222,6 +2222,36 @@ test("realtime control requires real provenance and arms exact bounded channels 
   assert.equal(armCalls, 2);
 });
 
+test("one recording takes several armed tracks when they're named: exactly those and the destination armed", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const body = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const structure = simulator.snapshot(); const expectedStructureRevision = createHash("sha256").update(JSON.stringify({ tracks: structure.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: structure.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex");
+  simulator.invoke({ operation: "track.create", args: { name: "Render B", kind: "audio", index: 1, expectedStructureRevision } });
+  const tracks = (simulator as any).state.tracks; tracks[0].armed = true; tracks[1].armed = true;
+  const safety = { safe: true, provenance: "operator-confirmed" };
+  const alone = await call(101, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, outputSafety: safety });
+  assert.equal(body(alone).reason, "recording start requires the exact destination to be the only armed track");
+  const repeated = await call(102, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[0].ref], outputSafety: safety });
+  assert.equal((repeated as any).error?.code, -32602, "the destination can't be named twice");
+  const preview = body(await call(103, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
+  assert.equal(preview.impact, "starts-recording");
+  const applied = body(await call(104, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-both" }));
+  assert.equal(applied.state, "applied");
+  assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
+  const stop = body(await call(105, "live_recording_preview", { action: "stop", lane: "arrangement", intent: "stop", outputSafety: safety }));
+  await call(106, "live_recording_apply", { transactionId: stop.transactionId, confirmation: "apply", idempotencyKey: "rec-both-stop" });
+  // A third track armed since the preview: refused, nothing recorded.
+  const again = body(await call(107, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
+  simulator.invoke({ operation: "track.create", args: { name: "Late", kind: "audio", index: 2, expectedStructureRevision: createHash("sha256").update(JSON.stringify({ tracks: simulator.snapshot().tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: simulator.snapshot().scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex") } });
+  (simulator as any).state.tracks[2].armed = true;
+  const raced = await call(108, "live_recording_apply", { transactionId: again.transactionId, confirmation: "apply", idempotencyKey: "rec-raced" });
+  assert.equal((raced as any).result.isError, true);
+  assert.equal((simulator as any).state.playback.transport.arrangementRecord, false);
+});
+
 test("recording preview gates intent, destination, and recording state", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);

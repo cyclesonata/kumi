@@ -1618,6 +1618,19 @@ class ControlSurfaceTests(unittest.TestCase):
         returned = rows[1]; mapper.invoke("track.rename", {"ref": returned["ref"], "name": "Return Renamed", "expectedName": returned["name"], "expectedObjectIdentity": returned["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", returned["ref"])})
         self.assertEqual(song.return_tracks[0].name, "Return Renamed")
 
+    def test_recording_takes_tracks_alongside_when_exactly_they_and_the_destination_are_armed(self):
+        song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack(), FakeTrack()]
+        for index, track in enumerate(song.tracks): track._live_ptr = 400 + index; track.arm = index < 2
+        mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"]
+        args = {"action": "start", "expectedSessionRecord": False, "expectedArrangementRecord": False, "destinationTrackRef": rows[0]["ref"], "destinationTrackIdentity": "live:400", "outputSafety": {"safe": True, "provenance": "unit-test"}}
+        with self.assertRaisesRegex(ValueError, "only unambiguous armed track"): mapper._recording_authority(args, "arrangement")
+        both = {**args, "alsoTrackRefs": [rows[1]["ref"]], "alsoTrackIdentities": ["live:401"]}
+        self.assertEqual(mapper._recording_authority(both, "arrangement"), "start")
+        song.tracks[2].arm = True
+        with self.assertRaisesRegex(ValueError, "exactly the armed ones"): mapper._recording_authority(both, "arrangement")
+        song.tracks[1].arm = False; song.tracks[2].arm = False
+        with self.assertRaisesRegex(ValueError, "not armed"): mapper._recording_authority(both, "arrangement")
+
     def test_duplicate_proxy_identities_and_route_labels_are_refused(self):
         song = FakeSong(); first, second = FakeDevice(), FakeDevice(); first._live_ptr = 301; second._live_ptr = 302; song.tracks[0].devices = [first, second]; mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; device = track["devices"][0]; siblings = [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for row in track["devices"]]
         second._live_ptr = 301
