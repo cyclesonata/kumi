@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { liveRegistryHash, liveRegistryOperations } from "./registry.js";
 
 /**
@@ -239,6 +242,7 @@ export type LiveOperation =
   | "project.bounce" | "project.collect" | "project.export" | "project.new" | "project.open" | "project.save" | "project.save-as"
   | "authority.digest" | "dev.lom-audit"
   | "undo.step.begin" | "undo.step.end" | "song.undo" | "song.redo"
+  | "render.offline" | "arrangement.midi-clip.create" | "clip.clear-range" | "device.duplicate" | "drum-pad.sample-chain" | "project.import" | "transaction.group"
   | "performance.read" | "realtime.arm" | "realtime.disarm" | "realtime.stats" | "recording.arrangement" | "recording.session" | "routing.set"
   | "scene.capture" | "scene.create" | "scene.delete" | "scene.fire-selected" | "scene.rename" | "scene.set" | "session.audio-clip.create" | "session.audition-launch" | "session.audition-stop" | "session.capture-midi" | "session.clip-launch" | "session.clip-stop" | "session.discover" | "session.emergency-stop"
   | "song.read" | "song.set" | "song.time-convert" | "scene.duplicate" | "tempo.set" | "track.create" | "track.create-return" | "track.delete" | "track.delete-return" | "track.duplicate" | "track.rename" | "track.select-instrument" | "track.set" | "track.view.set" | "transport.action" | "transport.set" | "groove.edit" | "groove.read" | "groove.set" | "take-lane.create" | "take-lane.rename" | "take-lane.clip.create" | "take-lane.audio-clip.create" | "tuning.read" | "tuning.set" | "view.control" | "view.set" | "subscribe";
@@ -517,7 +521,22 @@ export function ownedDeviceFingerprintRow(row: unknown): unknown {
     .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
 }
 
-export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control", "undo.step.begin", "undo.step.end", "song.undo", "song.redo"] as const;
+export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control", "undo.step.begin", "undo.step.end", "song.undo", "song.redo", "render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import", "transaction.group"] as const;
+/** What Kumi's Live extension offers (apps/live-extension), which the simulator does on its own Set too. */
+export const EXTENSION_OPERATIONS = ["render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import", "transaction.group"] as const;
+
+/** A silent 24-bit stereo WAV of `seconds` at 44.1 kHz, as the simulator's offline render; its size in bytes. */
+function writeSilentWav(path: string, seconds: number): number {
+  const channels = 2; const sampleRate = 44_100; const bytesPerSample = 3;
+  const data = Math.round(sampleRate * seconds) * channels * bytesPerSample;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0); header.writeUInt32LE(36 + data, 4); header.write("WAVE", 8); header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(channels, 22); header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * bytesPerSample, 28); header.writeUInt16LE(channels * bytesPerSample, 32); header.writeUInt16LE(bytesPerSample * 8, 34);
+  header.write("data", 36); header.writeUInt32LE(data, 40);
+  writeFileSync(path, Buffer.concat([header, Buffer.alloc(data)]));
+  return 44 + data;
+}
 
 export class DeterministicLiveSimulator implements LiveAdapter {
   private state = createSimulatorState();
@@ -619,6 +638,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       else if (args.destinationTrackRef !== null || args.destinationTrackIdentity !== null) throw new Error("recording stop destination authority must be null");
     };
     switch (operation) {
+      case "render.offline": case "arrangement.midi-clip.create": case "clip.clear-range": case "device.duplicate": case "drum-pad.sample-chain": case "project.import": case "transaction.group":
+        return this.extensionOperation(operation, args);
       // Live's own undo history: one open step at a time (opening another closes it), and Live's undo and redo.
       case "undo.step.begin": {
         const closedPrevious = this.undoStep !== undefined; if (this.undoStep) this.closedUndoSteps.push(this.undoStep.stepId);
@@ -1913,7 +1934,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       case "drum-pad.load-samples": {
         // In order; when one fails, the pads loaded before it are cleared again, as the Remote Script does.
         const pads = args.pads;
-        if (!Array.isArray(pads) || pads.length < 1 || pads.length > 16) throw new Error("drum pad authority is invalid");
+        if (!Array.isArray(pads) || pads.length < 1 || pads.length > 128) throw new Error("drum pad authority is invalid");
         const loaded: Array<{ ref: LiveRef }> = [];
         for (const [index, item] of pads.entries()) {
           try { loaded.push(this.loadDrumPadSample(item as Record<string, unknown>, operation)); }
@@ -2299,7 +2320,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     return checkSnapshotAnswer(value, request);
   }
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
+    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
     return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
@@ -2504,6 +2525,106 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     pad.chains.push(chain);
     this.emit({ type: "object", ref: pad.ref, payload: { operation } });
     return { ref: pad.ref, objectIdentity: pad.objectIdentity, chainIdentity: (chain as unknown as { objectIdentity: string }).objectIdentity, deviceIdentity: device.objectIdentity!, samplePath, route: drumSampler ? "preset" : "chain", tried: [] };
+  }
+
+  /**
+   * What Kumi's Live extension does (apps/live-extension/src/operations.ts), done on the simulated Set: an
+   * offline render, an Arrangement MIDI clip with its notes, clearing a range, a device's copy, a pad's
+   * sample through a new chain, a file copied into the project, and several of those grouped. The object
+   * at a reference must still bear the name the host read (expectedName), as the extension checks.
+   */
+  private extensionOperation(operation: string, args: Record<string, unknown>): Record<string, unknown> {
+    const named = (actual: string, what: string): void => { if (typeof args.expectedName === "string" && args.expectedName !== actual) throw new Error(`the ${what} there is "${actual}" now, not "${args.expectedName}"`); };
+    const number = (key: string): number => { const value = args[key]; if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${key} must be a number`); return value; };
+    const track = (): Track => { const found = this.findTrack(args.trackRef as LiveRef); if (!found) throw new Error("track reference is stale or invalid"); named(found.name, "track"); return found; };
+    switch (operation) {
+      case "render.offline": {
+        const target = track();
+        if (target.kind !== "audio") throw new Error(`track "${target.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
+        const from = number("fromBeat"); const to = number("toBeat");
+        if (!(to > from)) throw new Error("the range to render is empty");
+        const seconds = ((to - from) * 60) / (this.state.set.tempo ?? 120);
+        const path = join(tmpdir(), `kumi-simulated-render-${process.pid}-${++this.sequence}.wav`);
+        return { path, format: "wav", channels: 2, sampleRate: 44_100, bitDepth: 24, seconds, bytes: writeSilentWav(path, seconds), renderMs: 0 };
+      }
+      case "arrangement.midi-clip.create": {
+        const target = track();
+        if (target.kind !== "midi") throw new Error(`track "${target.name}" isn't a MIDI track`);
+        if (args.takeLaneRef !== undefined) throw new Error("the simulator makes Arrangement clips on a track's own lane");
+        const start = number("start"); const length = number("length");
+        if (!Array.isArray(args.notes)) throw new TypeError("notes must be a list");
+        const notes = (args.notes as Array<Record<string, unknown>>).map((note) => ({ pitch: note.pitch as number, start: note.start as number, duration: note.duration as number, velocity: (note.velocity as number | undefined) ?? 100, channel: 1, id: this.nextNoteId++, mute: (note.mute as boolean | undefined) ?? false, probability: (note.probability as number | undefined) ?? 1, velocityDeviation: (note.velocityDeviation as number | undefined) ?? 0, releaseVelocity: (note.releaseVelocity as number | undefined) ?? 64 }));
+        const clip: Clip = { ref: ref("arrangement-clip", `${target.ref}:${++this.sequence}`), objectIdentity: `simulator:arrangement-clip:${this.sequence}`, name: typeof args.name === "string" ? args.name : "", kind: "midi", start, length, notes, notesRevision: simulatorRevision(notes), warp: false, takes: [], automation: [], ...(typeof args.looping === "boolean" ? { looping: args.looping } : {}) };
+        this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: target.ref }];
+        this.emit({ type: "object", ref: target.ref, payload: { operation, clip: clip.ref } });
+        return { ref: clip.ref, trackRef: target.ref, name: clip.name, start, end: start + length, notes: notes.length };
+      }
+      case "clip.clear-range": {
+        const target = track();
+        if (args.takeLaneRef !== undefined) throw new Error("a range is cleared on the track's own lane");
+        const from = number("fromBeat"); const to = number("toBeat");
+        if (!(to > from)) throw new Error("the range to clear is empty");
+        const all = this.state.arrangementClips ?? []; const mine = all.filter((item) => item.trackRef === target.ref);
+        const removed = mine.filter((item) => item.clip.start >= from && item.clip.start + item.clip.length <= to);
+        for (const item of mine) {
+          if (removed.includes(item)) continue;
+          const end = item.clip.start + item.clip.length;
+          if (item.clip.start < to && end > from) { if (item.clip.start < from) item.clip.length = from - item.clip.start; else { item.clip.length = end - to; item.clip.start = to; } }
+        }
+        this.state.arrangementClips = all.filter((item) => !removed.includes(item));
+        this.emit({ type: "object", ref: target.ref, payload: { operation } });
+        return { trackRef: target.ref, clipsBefore: mine.length, clipsAfter: mine.length - removed.length, removed: removed.map((item) => ({ name: item.clip.name, start: item.clip.start, end: item.clip.start + item.clip.length, isAudio: item.clip.kind === "audio" })) };
+      }
+      case "device.duplicate": {
+        const reference = args.ref as LiveRef;
+        for (const owner of this.deviceOwners()) {
+          const index = owner.devices.findIndex((device) => device.ref === reference);
+          if (index < 0) continue;
+          const device = owner.devices[index]!;
+          named(device.name, "device");
+          if (args.expectedObjectIdentity !== undefined && args.expectedObjectIdentity !== device.objectIdentity) throw new Error("device identity changed since preview");
+          if (args.expectedSiblings !== undefined && simulatorCanonical(args.expectedSiblings) !== simulatorCanonical(owner.devices.map((item) => ({ ref: item.ref, objectIdentity: item.objectIdentity })))) throw new Error("device siblings changed since preview");
+          const copy: Device = { ...structuredClone(device), ref: ref("device", `${owner.ref}:copy-${++this.sequence}`), objectIdentity: `simulator:device:copy-${this.sequence}` };
+          owner.devices.splice(index + 1, 0, copy);
+          this.emit({ type: "object", ref: owner.ref, payload: { operation, device: copy.ref } });
+          return { ref: copy.ref, name: copy.name, index: index + 1, objectIdentity: copy.objectIdentity!, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(copy)) };
+        }
+        throw new Error("device reference is stale or invalid");
+      }
+      case "drum-pad.sample-chain": {
+        const rack = this.allDevices().find((device) => device.ref === args.rackRef);
+        if (!rack || !(rack.drumPads ?? []).length) throw new Error("that isn't a Drum Rack");
+        named(rack.name, "Drum Rack");
+        const note = number("note"); const pad = (rack.drumPads ?? []).find((candidate) => candidate.note === note);
+        if (!pad) throw new Error(`the Drum Rack has no pad on note ${note}`);
+        if (pad.chains.length) throw new Error(`drum pad ${note} of "${rack.name}" already plays something; clear it first`);
+        const loaded = this.loadDrumPadSample({ ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath: args.samplePath, name: args.name }, operation);
+        const chain = pad.chains[0]!;
+        return { chainRef: chain.ref, deviceRef: chain.devices[0]!.ref, note, samplePath: loaded.samplePath as string };
+      }
+      case "project.import": {
+        const path = String(args.filePath);
+        return { path: join(tmpdir(), "Kumi Simulated Project", "Samples", "Imported", path.split(/[\\/]/).pop() ?? "sample") };
+      }
+      case "transaction.group": {
+        const steps = Array.isArray(args.ops) ? args.ops as Array<{ operation: string; args: Record<string, unknown> }> : [];
+        const results: Array<Record<string, unknown>> = [];
+        for (const [index, step] of steps.entries()) {
+          if (step.operation === "transaction.group" || !EXTENSION_OPERATIONS.includes(step.operation as typeof EXTENSION_OPERATIONS[number])) throw new Error(`step ${index + 1}: a group can't hold ${step.operation}`);
+          try { results.push(this.extensionOperation(step.operation, step.args)); }
+          catch (error) { throw new Error(`step ${index + 1} failed (${error instanceof Error ? error.message : String(error)}); ${results.length} of ${steps.length} steps were made`); }
+        }
+        return { results };
+      }
+    }
+    throw new Error(`unknown operation: ${operation}`);
+  }
+
+  /** Every collection of devices in the Set: each track's, and each rack chain's at any depth. */
+  private deviceOwners(): Array<{ ref: LiveRef; devices: Device[] }> {
+    const owners: Array<{ ref: LiveRef; devices: Device[] }> = this.state.tracks.map((track) => ({ ref: track.ref, devices: track.devices }));
+    for (let at = 0; at < owners.length; at++) for (const device of owners[at]!.devices) for (const chain of device.chains ?? []) owners.push({ ref: chain.ref, devices: chain.devices });
+    return owners;
   }
 
   private findDrumPad(reference: LiveRef): { device: Device; pad: DrumPad } | undefined {
