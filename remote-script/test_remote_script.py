@@ -4999,12 +4999,18 @@ class RackMacroDrumPadTests(unittest.TestCase):
         with patch.object(LiveObjectMapper, "_build_snapshot", lambda self, args=None: builds.append(1) or build(self, args)), patch.object(LiveObjectMapper, "_track_row", lambda self, *row_args: rows.append(row_args[2]) or track_row(self, *row_args)):
             shared = _authority_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(builds, [], "no whole-Set snapshot for 42 references")
-        self.assertEqual(rows, [0], "only their track's row, once")
+        self.assertEqual(rows, [], "no track's whole row: the parameter's own row, and its siblings' identities")
         self.assertIsNone(mapper._read_cache, "and it's gone afterwards")
         alone = remote_module._reference_state_digest(mapper, args, "device.parameter.set")
         self.assertEqual(shared, alone, "the same digest as reading each reference on its own")
+        # Siblings are identities the change fences itself: a sibling's value isn't what it depends on,
+        # the parameter's own value is, and so is a sibling replaced.
         device.parameters[3].value = 0.75
-        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "and a later change still shows")
+        self.assertEqual(_authority_state_digest(mapper, args, "device.parameter.set"), shared, "a sibling's value isn't bound")
+        device.parameters[0].value = 0.25
+        moved = _authority_state_digest(mapper, args, "device.parameter.set"); self.assertNotEqual(moved, shared, "its own value is")
+        device.parameters[3] = FakeParameter()
+        self.assertNotEqual(_authority_state_digest(mapper, args, "device.parameter.set"), moved, "and a sibling replaced is")
 
     def test_a_drum_rack_with_sounds_on_its_pads_reads_and_edits_like_any_rack(self):
         """Live lists a Drum Rack's chains both on the rack and on their pads; that isn't a cycle."""
@@ -6374,9 +6380,10 @@ class TargetedReadTests(unittest.TestCase):
         mapper = LiveObjectMapper(rich_song(tracks=12)); whole = mapper.snapshot()
         device = whole["tracks"][4]["devices"][0]; nested = device["chains"][0]["devices"][0]
         cases = [
-            (whole["tracks"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["clips"][0]),
-            (nested["ref"], [4], nested),
-            (nested["parameters"][0]["ref"], [4], nested["parameters"][0]),
+            # A clip from its slot, a device (and a parameter) from its track's light walk: no whole track row.
+            (whole["tracks"][0]["clips"][0]["ref"], [], whole["tracks"][0]["clips"][0]),
+            (nested["ref"], [], nested),
+            (nested["parameters"][0]["ref"], [], nested["parameters"][0]),
             (whole["tracks"][0]["takeLanes"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]),
             (whole["tracks"][0]["takeLanes"][0]["clips"][0]["ref"], [0], whole["tracks"][0]["takeLanes"][0]["clips"][0]),
             (whole["tracks"][7]["ref"], [7], whole["tracks"][7]),
@@ -7790,3 +7797,463 @@ class AuditRowFieldTests(unittest.TestCase):
         with patch.dict(sys.modules, {"Live": live}):
             environment = LiveObjectMapper(FakeSong())._environment_probe()
         self.assertEqual((environment["liveVersion"], environment["liveEdition"], environment["unavailableFeatures"]), ("12.4.15b5", "Suite", ["push_apps"]))
+
+
+class LeanParameter:
+    __slots__ = ("name", "value", "min", "max", "is_quantized", "is_enabled", "automation_state", "default_value")
+
+    def __init__(self, name):
+        self.name = name; self.value = 0.5; self.min = 0.0; self.max = 1.0; self.is_quantized = False; self.is_enabled = True; self.automation_state = 0; self.default_value = 0.5
+
+
+class LeanChain:
+    def __init__(self, name, devices):
+        self.name = name; self.devices = devices; self.mute = False; self.solo = False
+
+
+class LeanDevice:
+    """A device as a big Set has thousands: parameters, and chains when it's a rack."""
+    parameter_reads = 0
+
+    def __init__(self, name, class_name, parameters, chains=None, kind=2):
+        self.name = name; self.class_name = class_name; self._parameters = [LeanParameter(f"{name} {index + 1}") for index in range(parameters)]
+        self.is_active = True; self.type = kind; self.can_have_chains = chains is not None; self.can_have_drum_pads = False
+        if chains is not None:
+            self.chains = chains; self.return_chains = []; self.macros = self._parameters[1:9]; self.visible_macro_count = 8; self.variation_count = 0; self.selected_variation_index = -1
+
+    @property
+    def parameters(self):
+        LeanDevice.parameter_reads += 1
+        return self._parameters
+
+
+class LeanPad:
+    def __init__(self, name, chains):
+        self.name = name; self.chains = chains; self.mute = False; self.solo = False; self.note = 36
+
+
+def lean_template_devices():
+    """The measured Set's template: Operator, EQ Eight, Compressor, Reverb, and an Audio Effect Rack
+    with two chains (Saturator + Auto Filter; a nested rack with Utility). Nine devices."""
+    nested = LeanDevice("Audio Effect Rack", "AudioEffectGroupDevice", 17, [LeanChain("Chain", [LeanDevice("Utility", "StereoGain", 20)])])
+    rack = LeanDevice("Audio Effect Rack", "AudioEffectGroupDevice", 17, [LeanChain("Drive", [LeanDevice("Saturator", "Saturator", 25), LeanDevice("Auto Filter", "AutoFilter", 40)]), LeanChain("Nest", [nested])])
+    return [LeanDevice("Operator", "Operator", 195, kind=1), LeanDevice("EQ Eight", "Eq8", 87), LeanDevice("Compressor", "Compressor2", 30), LeanDevice("Reverb", "Reverb", 37), rack]
+
+
+def lean_track(name, devices=None):
+    track = FakeTrack(); track.name = name; track.clip_slots = [FakeSlot() for _ in range(8)]; track.mixer_device = FakeMixerDevice(); track.arrangement_clips = []
+    track.devices = lean_template_devices() if devices is None else devices
+    return track
+
+
+def drum_rack():
+    """A Drum Rack whose pads' chains the rack lists, and one pad with a chain it doesn't."""
+    kick, snare = LeanChain("Kick", [LeanDevice("Simpler", "OriginalSimpler", 10)]), LeanChain("Snare", [LeanDevice("Simpler", "OriginalSimpler", 10)])
+    rack = LeanDevice("Drum Rack", "DrumGroupDevice", 17, [kick, snare]); rack.can_have_drum_pads = True
+    rack.visible_drum_pads = [LeanPad("Kick", [kick]), LeanPad("Snare", [snare]), LeanPad("Hat", [LeanChain("Hat", [LeanDevice("Simpler", "OriginalSimpler", 10)])])]
+    return rack
+
+
+class LightDeviceDiscoveryTests(unittest.TestCase):
+    """A: devices are listed from light rows, which read no parameters; whole rows only for a page
+    whose fields need them. What's listed is exactly what whole-row discovery listed."""
+
+    FIELDS = ["parentRef", "name", "className", "chainList"]
+
+    @staticmethod
+    def whole_items(mapper, parent=None):
+        """Device discovery's items as they were built from whole track rows."""
+        rows = [{**device, "chainList": [{"ref": chain["ref"], "name": chain.get("name")} for chain in device["chains"]]} if device.get("chains") else device for track in mapper.snapshot()["tracks"] for device in mapper._flatten_device_rows(track["devices"])]
+        return [row for row in rows if parent is None or row.get("parentRef") == parent]
+
+    @staticmethod
+    def only(rows, fields):
+        allowed = set(fields) | {"ref", "parentRef"}
+        return [{key: value for key, value in row.items() if key in allowed} for row in rows]
+
+    def set_with_racks(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Drums", [drum_rack(), LeanDevice("Glue", "GlueCompressor", 12)]), lean_track("Empty", [])]
+        return song, LiveObjectMapper(song)
+
+    def test_a_device_list_reads_no_parameters_and_lists_what_whole_rows_listed(self):
+        song, mapper = self.set_with_racks(); expected = self.only(self.whole_items(mapper), self.FIELDS)
+        LeanDevice.parameter_reads = 0
+        listed = mapper.discover("device", 1000, None, None, None, self.FIELDS)
+        self.assertEqual(LeanDevice.parameter_reads, 0); self.assertEqual(listed["items"], expected)
+        self.assertEqual(len(expected), 9 + 5)  # a template track, and a Drum Rack's three Simplers (the unlisted pad's too) with a Glue Compressor
+        validate_operation_payload("discover", "result", listed)
+        # A track's devices and a chain's, as whole rows listed them.
+        row = mapper.snapshot()["tracks"][0]; rack = row["devices"][4]
+        for parent in (row["ref"], rack["chains"][0]["ref"], rack["chains"][1]["ref"], rack["chains"][1]["devices"][0]["chains"][0]["ref"]):
+            self.assertEqual(mapper.discover("device", 1000, None, parent, None, self.FIELDS)["items"], self.only(self.whole_items(mapper, parent), self.FIELDS), parent)
+        # A filter on a light field stays light; on what only a whole row has, whole rows filter.
+        LeanDevice.parameter_reads = 0
+        self.assertEqual([item["name"] for item in mapper.discover("device", 1000, None, None, {"className": "OriginalSimpler"}, self.FIELDS)["items"]], ["Simpler"] * 3)
+        self.assertEqual(LeanDevice.parameter_reads, 0)
+        self.assertEqual(mapper.discover("device", 1000, None, None, {"latencySamples": None}, self.FIELDS)["items"], self.only([row for row in self.whole_items(mapper) if row.get("latencySamples") is None], self.FIELDS))
+
+    def test_whole_rows_come_for_the_page_alone_and_the_revision_follows_identities(self):
+        song, mapper = self.set_with_racks(); whole = self.whole_items(mapper)
+        LeanDevice.parameter_reads = 0
+        first = mapper.discover("device", 2)
+        self.assertEqual(first["items"], whole[:2]); self.assertEqual(LeanDevice.parameter_reads, 2)
+        pages, cursor = [first["items"]], first.get("nextCursor")
+        while cursor:
+            page = mapper.discover("device", 2, cursor); pages.append(page["items"]); cursor = page.get("nextCursor")
+        self.assertEqual([item for page in pages for item in page], whole)
+        # A parameter moving isn't a new list; a renamed device is.
+        revision = first["revision"]; song.tracks[0].devices[0]._parameters[0].value = 0.9
+        self.assertEqual(mapper.discover("device", 2)["revision"], revision)
+        song.tracks[0].devices[0].name = "FM"
+        self.assertNotEqual(mapper.discover("device", 2)["revision"], revision)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("device", 2, first["nextCursor"])
+
+
+class CountingNoteClip(FakeNoteClip):
+    """A note clip that counts how often its notes are read."""
+
+    def __init__(self, length=4.0, notes=()):
+        super().__init__(length, notes); self.note_reads = 0
+
+    def get_all_notes_extended(self):
+        self.note_reads += 1
+        return super().get_all_notes_extended()
+
+
+class TargetedDiscoveryTests(unittest.TestCase):
+    """B: slots and clips read their track's slots alone, parameters their device alone, notes their
+    clip alone (Arrangement clips too); Arrangement clip rows hold their notes only when asked."""
+
+    def song(self):
+        song = FakeSong(); song.tracks = [lean_track("Keys"), lean_track("Bass")]
+        session = CountingNoteClip(4.0, [FakeMidiNote(index + 1, 60 + index, index * 0.5, 0.25) for index in range(6)]); song.tracks[0].clip_slots[1].clip = session
+        long_clip = CountingNoteClip(64.0, [FakeMidiNote(index + 1, 36 + index % 24, index * 0.25, 0.25) for index in range(50)]); long_clip.start_time = 8.0
+        song.tracks[1].arrangement_clips = [long_clip]
+        return song, session, long_clip
+
+    def test_slots_clips_and_parameters_read_only_their_parent(self):
+        song, session, _ = self.song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()["tracks"]
+        track_ref, slot_ref = whole[0]["ref"], whole[0]["clipSlots"][1]["ref"]
+        counter = ReadCounter(song.tracks); LeanDevice.parameter_reads = 0; session.note_reads = 0
+        self.assertEqual(mapper.discover("clip_slot", 100, None, track_ref)["items"], whole[0]["clipSlots"])
+        self.assertEqual(counter.reads, {0: {"clip_slots"}}); self.assertEqual(LeanDevice.parameter_reads, 0)
+        # A clip's notes are read when its fields want them, not otherwise.
+        light = mapper.discover("session_clip", 1, None, slot_ref, None, ["name", "length", "isAudio"])["items"]
+        self.assertEqual((light, session.note_reads), ([{"ref": whole[0]["clips"][0]["ref"], "parentRef": slot_ref, "name": "", "length": 4.0, "isAudio": False}], 0))
+        self.assertEqual(mapper.discover("session_clip", 1, None, slot_ref)["items"], whole[0]["clips"]); self.assertEqual(session.note_reads, 1)
+        self.assertEqual(mapper.discover("clip", 5, None, track_ref)["items"], [])  # a clip's parent is its slot
+        # A device's parameters, reading that device's alone.
+        operator = whole[0]["devices"][0]; LeanDevice.parameter_reads = 0
+        self.assertEqual(mapper.discover("parameter", 1000, None, operator["ref"])["items"], operator["parameters"])
+        self.assertEqual(LeanDevice.parameter_reads, 1)
+        nested = whole[0]["devices"][4]["chains"][1]["devices"][0]["chains"][0]["devices"][0]
+        self.assertEqual(mapper.discover("parameter", 1000, None, nested["ref"])["items"], nested["parameters"])
+
+    def test_notes_list_from_their_clip_session_or_arrangement(self):
+        song, session, long_clip = self.song(); mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        clip_row = whole["tracks"][0]["clips"][0]
+        self.assertEqual(mapper.discover("note", 100, None, clip_row["ref"])["items"], [note | {"ref": f"{clip_row['ref']}:note:{index}", "parentRef": clip_row["ref"]} for index, note in enumerate(clip_row["notes"])])
+        arrangement_ref = f"{mapper.refs.epoch}:arrangement_clip:1:0"; notes = mapper._read_notes(long_clip)
+        listed, cursor = [], None
+        while True:
+            page = mapper.discover("note", 20, cursor, arrangement_ref); listed += page["items"]; cursor = page.get("nextCursor")
+            validate_operation_payload("discover", "result", page)
+            if not cursor: break
+        self.assertEqual(listed, [note | {"ref": f"{arrangement_ref}:note:{index}", "parentRef": arrangement_ref} for index, note in enumerate(notes)])
+        self.assertEqual(len(listed), 50)
+        song.arrangement_clips = [long_clip]; song_level = f"{mapper.refs.epoch}:arrangement_clip:0"
+        self.assertEqual(len(mapper.discover("note", 100, None, song_level)["items"]), 50)
+        self.assertEqual(mapper.discover("note", 100, None, f"{mapper.refs.epoch}:arrangement_clip:1:7")["items"], [])
+
+    def test_arrangement_clip_rows_hold_their_notes_only_when_asked(self):
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); long_clip.note_reads = 0
+        row = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]
+        self.assertNotIn("notes", row); self.assertNotIn("notesRevision", row); self.assertEqual(row["noteCount"], 50)
+        self.assertEqual(mapper.get(row["ref"])["noteCount"], 50); self.assertNotIn("notes", mapper.get(row["ref"]))
+        listed = mapper.discover("arrangement_clip", 10, None, row["parentRef"], None, ["name", "noteCount"])["items"]
+        self.assertEqual(listed, [{"ref": row["ref"], "parentRef": row["parentRef"], "name": row["name"], "noteCount": 50}])
+        asked = mapper.discover("arrangement_clip", 10, None, row["parentRef"], None, ["notes", "notesRevision"])["items"][0]
+        self.assertEqual(len(asked["notes"]), 50); self.assertEqual(asked["notesRevision"], hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(long_clip)).encode()).hexdigest())
+
+
+def read_all(mapper, kind, parent=None, limit=100000, fields=None, filters=None):
+    """Every page of a budgeted discovery, as the host reads them: (items, pages)."""
+    items, pages, cursor = [], 0, None
+    while True:
+        page = mapper.discover(kind, limit, cursor, parent, filters, fields, budgeted=True); pages += 1
+        validate_operation_payload("discover", "result", page)
+        items += page["items"]; cursor = page.get("nextCursor")
+        assert page["truncated"] == (cursor is not None)
+        if not cursor: return items, pages
+
+
+class ReadBudgetTests(unittest.TestCase):
+    """C: a read the host asks for holds Live's thread no longer than its budget: it stops after at
+    least one unit, saying how to go on."""
+
+    def set(self, tracks=3):
+        song = FakeSong(); song.tracks = [lean_track(f"Track {index + 1}") for index in range(tracks)]
+        clip = FakeNoteClip(64.0, [FakeMidiNote(index + 1, 36 + index % 24, index * 0.25, 0.25) for index in range(40)]); clip.start_time = 0.0; song.tracks[0].arrangement_clips = [clip]
+        return song, LiveObjectMapper(song)
+
+    @staticmethod
+    def check_like_the_host(answer, request):
+        """The host's checkSnapshotAnswer rules for a windowed or focused answer."""
+        window = answer["window"]; rows = answer["tracks"]; start = window.get("tracks", {}).get("from", 0)
+        if "tracks" in window: assert 1 <= window["tracks"]["count"] <= request["tracks"]["count"] and len(rows) == min(window["tracks"]["count"], answer["trackCount"] - start)
+        if "focus" in window: assert set(window["focus"]) <= set(request["focus"])
+        focus = set(window["focus"]) if "focus" in window else None
+        for position, row in enumerate(rows): assert (row.get("light") is True) == (focus is not None and start + position not in focus), position
+
+    def test_a_snapshot_window_ends_and_a_focus_goes_light_when_the_budget_is_spent(self):
+        song, mapper = self.set(); mapper.read_budget_seconds = 0
+        window = {"tracks": {"from": 0, "count": 3}}
+        cut = mapper.snapshot(window, budgeted=True); validate_operation_payload("snapshot", "result", cut); self.check_like_the_host(cut, window)
+        self.assertEqual((cut["window"]["tracks"], len(cut["tracks"])), ({"from": 0, "count": 1}, 1))
+        focused = {"focus": [0, 1, 2]}
+        cut = mapper.snapshot(focused, budgeted=True); self.check_like_the_host(cut, focused)
+        self.assertEqual((cut["window"]["focus"], [row.get("light") is True for row in cut["tracks"]]), ([0], [False, True, True]))
+        self.assertEqual(len(mapper.snapshot(focused, budgeted=True)["arrangement"]["clips"]), 1)
+        # Unbudgeted (Live's own checks) and with room, it's all there; without arguments, always the whole Set.
+        self.assertEqual(mapper.snapshot(focused)["window"]["focus"], [0, 1, 2])
+        self.assertNotIn("window", mapper.snapshot(None, budgeted=True))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(mapper.snapshot(window, budgeted=True)["window"]["tracks"], {"from": 0, "count": 3})
+        # The wire's snapshots are budgeted.
+        bridge = immediate_bridge(song); bridge.mapper.read_budget_seconds = 0
+        self.assertEqual(bridge._dispatch_with_holder("snapshot", {"args": window}, {})["window"]["tracks"]["count"], 1)
+
+    def test_the_sets_devices_page_track_by_track_and_notes_and_parameters_by_index(self):
+        song, mapper = self.set(); fields = ["parentRef", "name", "className", "chainList"]
+        whole = mapper.discover("device", 100000, None, None, None, fields)["items"]
+        mapper.read_budget_seconds = 0
+        items, pages = read_all(mapper, "device", fields=fields)
+        self.assertEqual((items, pages), (whole, len(whole)))
+        mapper.read_budget_seconds = 10
+        items, pages = read_all(mapper, "device", fields=fields, limit=4)
+        self.assertEqual((items, pages), (whole, 7))
+        self.assertEqual(read_all(mapper, "device", fields=fields, filters={"className": "Operator"})[0], [item for item in whole if item["className"] == "Operator"])
+        # A cursor holds its place in the Set's tracks as they were: another track ends it.
+        first = mapper.discover("device", 4, None, None, None, fields, budgeted=True)
+        song.tracks.append(lean_track("Late"))
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("device", 4, first["nextCursor"], None, None, fields, budgeted=True)
+        # Whole rows (no fields asked) stop where the budget does.
+        mapper.read_budget_seconds = 0; page = mapper.discover("device", 100, None, None, None, None, budgeted=True)
+        self.assertEqual(len(page["items"]), 1); self.assertIn("parameters", page["items"][0]); self.assertTrue(page["truncated"])
+        # A clip's notes and a device's parameters, by index.
+        clip_ref = f"{mapper.refs.epoch}:arrangement_clip:0:0"; notes = mapper.discover("note", 100000, None, clip_ref)["items"]
+        self.assertEqual(read_all(mapper, "note", clip_ref), (notes, 40))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(read_all(mapper, "note", clip_ref, limit=16), (notes, 3))
+        first = mapper.discover("note", 16, None, clip_ref, None, None, budgeted=True); song.tracks[0].arrangement_clips[0].stored.pop(40)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("note", 16, first["nextCursor"], clip_ref, None, None, budgeted=True)
+        operator = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual(read_all(mapper, "parameter", operator["ref"], limit=50), (operator["parameters"], 4))
+        mapper.read_budget_seconds = 0
+        self.assertEqual(read_all(mapper, "parameter", operator["ref"])[0], operator["parameters"])
+
+    def test_a_page_of_whole_tracks_stops_at_its_budget(self):
+        song, mapper = self.set(); mapper.read_budget_seconds = 0
+        whole = [mapper._whole_track_row(index) for index in range(3)]
+        items, pages = read_all(mapper, "track")
+        self.assertEqual((items, pages), (whole, 3))
+        mapper.read_budget_seconds = 10
+        self.assertEqual(read_all(mapper, "track", fields=["name"])[1], 1)
+
+
+class SelectionWithoutRowsTests(unittest.TestCase):
+    """C: a snapshot's selection names what's selected by identity on its track, without building
+    the track's whole row (every device's parameters)."""
+
+    def test_the_selection_reads_only_the_selected_parameters_device(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Bass")]; track = song.tracks[1]
+        utility = track.devices[4].chains[1].devices[0].chains[0].devices[0]; chosen = utility._parameters[3]
+        song.view = types.SimpleNamespace(selected_track=track, selected_scene=None, highlighted_clip_slot=track.clip_slots[2], detail_clip=None, selected_parameter=chosen, selected_chain=track.devices[4].chains[1])
+        track.view = types.SimpleNamespace(selected_device=utility)
+        mapper = LiveObjectMapper(song); whole = mapper.snapshot()
+        expected = mapper._selection_row(whole["tracks"], whole["scenes"])
+        self.assertEqual(expected["parameterRef"], whole["tracks"][1]["devices"][4]["chains"][1]["devices"][0]["chains"][0]["devices"][0]["parameters"][3]["ref"])
+        LeanDevice.parameter_reads = 0
+        self.assertEqual(mapper._selection_row_targeted(), expected)
+        # Without canonical_parent to name the owner, every device on the selected track is looked at, not built.
+        self.assertLessEqual(LeanDevice.parameter_reads, 9)
+        answer = mapper.snapshot({"focus": [0], "parts": ["selection"]}, budgeted=True)
+        self.assertEqual(answer["selection"], expected)
+
+
+class CreationScopeTests(unittest.TestCase):
+    """D: a creation's rollback check reads the contents of the tracks it names, not the Set's."""
+
+    def song(self, tracks=20):
+        song = FakeSong(); song.tracks = [lean_track(f"Track {index + 1}") for index in range(tracks)]
+        def duplicate_track(index): song.tracks.insert(index + 1, lean_track(song.tracks[index].name + " copy"))
+        song.duplicate_track = duplicate_track
+        return song
+
+    def test_a_track_duplicate_reads_below_the_track_it_names_alone(self):
+        song = self.song(); bridge = immediate_bridge(song, provenance="real-live"); mapper = bridge.mapper
+        row = mapper.discover("track", 20, None, None, None, ["objectIdentity"])["items"][7]
+        args = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}
+        counter = ReadCounter(song.tracks)
+        made = mutate_through(bridge, "track.duplicate", args, "duplicate-scope-0001", transaction="transaction-scope")
+        self.assertEqual(set(counter.reads), {7}); self.assertEqual(song.tracks[8].name, "Track 8 copy")
+        # Its transaction still undoes it exactly.
+        delete = {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}
+        self.assertEqual(bridge._dispatch_with_holder("mutate", {"operation": "track.delete", "transactionId": "transaction-scope", "idempotencyKey": "undo-scope-0001", "ownershipToken": made["ownershipToken"], "args": delete}, {}), {"deleted": made["ref"]})
+        self.assertEqual(len(song.tracks), 20)
+
+    def test_the_topology_details_only_the_scope(self):
+        song = self.song(4); mapper = LiveObjectMapper(song)
+        whole = json.loads(mapper._creation_topology()); scoped = json.loads(mapper._creation_topology([2])); bare = json.loads(mapper._creation_topology(()))
+        self.assertEqual([sorted(row) for row in whole["tracks"]], [["arrangement", "devices", "identity", "slots"]] * 4)
+        self.assertEqual([sorted(row) for row in scoped["tracks"]], [["identity"], ["identity"], ["arrangement", "devices", "identity", "slots"], ["identity"]])
+        self.assertEqual(scoped["tracks"][2], whole["tracks"][2]); self.assertEqual([row["identity"] for row in bare["tracks"]], [row["identity"] for row in whole["tracks"]])
+        self.assertEqual(mapper._creation_scope("clip.duplicate", {"ref": f"{mapper.refs.epoch}:clip:1:0", "targetTrackRef": f"{mapper.refs.epoch}:track:3"}), [1, 3])
+        self.assertIsNone(mapper._creation_scope("scene.capture", {}))
+
+
+class WatchedSong(ListenSong):
+    LISTENABLE = ListenSong.LISTENABLE | {"return_tracks"}
+
+
+class FlatChangeTests(unittest.TestCase):
+    """D: an ordinary change binds what it depends on, and the structure revision is kept between
+    requests while Live's listeners watch it."""
+
+    def watched_song(self, tracks=6):
+        song = WatchedSong(); song.return_tracks = []; song.scenes = [ListenScene(f"Scene {index + 1}") for index in range(3)]
+        song.tracks = [ListenTrack() for _ in range(tracks)]
+        for index, track in enumerate(song.tracks): track.name = f"Track {index + 1}"
+        return song
+
+    def test_the_structure_revision_is_kept_until_a_listener_or_the_ticks_drop_it(self):
+        song = self.watched_song(); mapper = LiveObjectMapper(song); reads = []
+        entries = LiveObjectMapper._track_entries
+        with patch.object(LiveObjectMapper, "_track_entries", lambda self, kinds=True: reads.append(kinds) or entries(self, kinds)):
+            first = mapper._structure_revision(); self.assertEqual(len(reads), 1)
+            self.assertEqual(mapper._structure_revision(), first); self.assertEqual(len(reads), 1, "kept: nothing read")
+            song.tracks[2].name = "Bass"
+            renamed = mapper._structure_revision(); self.assertNotEqual(renamed, first); self.assertEqual(len(reads), 2)
+            song.tracks = song.tracks + [ListenTrack()]
+            added = mapper._structure_revision(); self.assertNotEqual(added, renamed)
+            song.tracks[6].name = "New"
+            self.assertNotEqual(mapper._structure_revision(), added, "a new track's name is watched too")
+            count = len(reads)
+            for _ in range(LiveObjectMapper.STRUCTURE_HOLD_TICKS): mapper.structure_tick()
+            mapper._structure_revision(); self.assertEqual(len(reads), count + 1, "and the ticks age it")
+        self.assertGreater(song.listening(), 0)
+        mapper.invoke("session.reconnect", {})
+        self.assertEqual((song.listening(), sum(track.listening() for track in song.tracks)), (0, 0)); self.assertIsNone(mapper._structure_held)
+        # A Live that can't be watched is read every time.
+        plain = LiveObjectMapper(FakeSong()); plain._structure_revision(); self.assertIsNone(plain._structure_held)
+
+    def test_a_rename_binds_the_track_not_what_it_holds(self):
+        song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Bass")]; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][1]
+        args = {"ref": row["ref"], "name": "Sub", "expectedName": "Bass", "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", row["ref"])}
+        digest = _authority_state_digest(mapper, args, "track.rename")
+        LeanDevice.parameter_reads = 0
+        song.tracks[1].devices.append(LeanDevice("Utility", "StereoGain", 20)); song.tracks[1].devices[0]._parameters[0].value = 0.9
+        self.assertEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "what the track holds isn't what a rename depends on")
+        self.assertEqual(LeanDevice.parameter_reads, 0)
+        song.tracks[1].arm = True
+        self.assertNotEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "the track's own state is")
+        self.assertEqual(mapper.invoke("track.rename", args), {"renamed": row["ref"], "name": "Sub"})
+        # A device rename's authority, from the light walk, is the one whole rows gave.
+        device = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]["devices"][0]
+        owner = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]
+        expected = {"ref": device["ref"], "objectIdentity": device["objectIdentity"], "trackRef": mapper.snapshot()["tracks"][0]["ref"], "trackIdentity": mapper.snapshot()["tracks"][0]["objectIdentity"], "ownerRef": owner["ref"], "ownerIdentity": owner["objectIdentity"], "siblings": [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in owner["devices"]]}
+        self.assertEqual(mapper._rename_authority_revision("device", device["ref"]), hashlib.sha256(mapper._bounded_canonical(expected).encode()).hexdigest())
+
+
+class LeanNoteClip:
+    """A long Arrangement MIDI clip: notes as Live 12 hands them over (a vector of note objects)."""
+    is_audio_clip = False
+
+    def __init__(self, notes, length=1000.0):
+        self.name = "Long MIDI"; self.length = length; self.start_time = 0.0; self.looping = False; self.muted = False
+        self.notes = [FakeMidiNote(index + 1, 36 + index % 48, index * length / notes, 0.25) for index in range(notes)]
+
+    def get_all_notes_extended(self): return list(self.notes)
+    def add_new_notes(self, notes): pass
+
+
+class WatchedLeanTrack(Listenable, FakeTrack):
+    LISTENABLE = frozenset({"name"})
+
+
+def measured_set(tracks=200, notes=20000, watched=False):
+    """The Set measured on real Live: tracks copied from one template (Operator, EQ Eight,
+    Compressor, Reverb, an Audio Effect Rack with two chains, one holding a nested rack), about
+    470 parameters a track; track 0 holds a 1000-beat Arrangement clip of `notes` notes."""
+    song = WatchedSong() if watched else FakeSong(); song.return_tracks = []
+    def make(name):
+        track = lean_track(name)
+        if watched: track.__class__ = WatchedLeanTrack
+        return track
+    song.tracks = [make(f"Track {index + 1}") for index in range(tracks)]; song.scenes = [(ListenScene if watched else FakeScene)(f"Scene {index + 1}") for index in range(8)]
+    song.tracks[0].arrangement_clips = [LeanNoteClip(notes)]
+    def duplicate_track(index): song.tracks = song.tracks[:index + 1] + [make(song.tracks[index].name + " copy")] + song.tracks[index + 1:]
+    song.duplicate_track = duplicate_track
+    return song
+
+
+class MeasuredSetBenchmarkTests(unittest.TestCase):
+    """E: the reads and changes measured on real Live, on a fake of the same Set. Prints what each
+    costs (total, the slowest single request: what Live's UI feels, and how many requests); asserts
+    what each reads and that no budgeted request runs away."""
+
+    def paged(self, mapper, kind, parent=None, fields=None):
+        items, pages, slowest, total, cursor = [], 0, 0.0, 0.0, None
+        while True:
+            started = time.perf_counter(); page = mapper.discover(kind, 100000, cursor, parent, None, fields, budgeted=True); elapsed = time.perf_counter() - started
+            items += page["items"]; pages += 1; slowest = max(slowest, elapsed); total += elapsed; cursor = page.get("nextCursor")
+            if not cursor: return items, total * 1000, slowest * 1000, pages
+
+    def test_the_measured_sets_reads_and_changes(self):
+        song = measured_set(); mapper = LiveObjectMapper(song); report = []
+        line = lambda label, total, slowest=None, requests=1: report.append(f"    {label:58} {total:8.1f} ms" + (f"  slowest {slowest:6.1f} ms  {requests:4d} requests" if slowest is not None else ""))
+        tracks, total, slowest, pages = self.paged(mapper, "track", fields=["name", "kind", "mediaKind", "groupTrackRef"]); line("discover track (observation fields)", total, slowest, pages)
+        self.assertEqual(len(tracks), 200)
+        LeanDevice.parameter_reads = 0
+        devices, total, slowest, pages = self.paged(mapper, "device", fields=["parentRef", "name", "className", "chainList"]); line("discover device, Set-wide (observation fields)", total, slowest, pages)
+        self.assertEqual((len(devices), LeanDevice.parameter_reads), (1800, 0))
+        tree_fields = ["parentRef", "name", "className", "canHaveChains", "canHaveDrumPads", "chainList", "deviceType"]; started = time.perf_counter(); level = self.paged(mapper, "device", tracks[0]["ref"], tree_fields)[0]; requests = 1
+        chains = [chain["ref"] for device in level for chain in device.get("chainList", [])]
+        while chains:
+            requests += len(chains); chains = [item["ref"] for chain in chains for device in self.paged(mapper, "device", chain, tree_fields)[0] for item in device.get("chainList", [])]
+        line(f"one track's device tree, level by level ({requests} requests)", (time.perf_counter() - started) * 1000)
+        LeanDevice.parameter_reads = 0
+        parameters, total, slowest, pages = self.paged(mapper, "parameter", devices[0]["ref"]); line("discover parameter, parent Operator", total, slowest, pages)
+        self.assertEqual((len(parameters), LeanDevice.parameter_reads), (195, 1))
+        notes, total, slowest_notes, pages = self.paged(mapper, "note", f"{mapper.refs.epoch}:arrangement_clip:0:0"); line("discover note, parent the Arrangement clip", total, slowest_notes, pages)
+        self.assertEqual(len(notes), 20000)
+        started = time.perf_counter(); whole = mapper.snapshot(); line("snapshot without arguments (the whole Set, unbudgeted)", (time.perf_counter() - started) * 1000)
+        self.assertNotIn("notes", whole["arrangement"]["clips"][0]); self.assertEqual(whole["arrangement"]["clips"][0]["noteCount"], 20000)
+        start, requests, slowest_window, total = 0, 0, 0.0, 0.0
+        while start < 200:
+            began = time.perf_counter(); page = mapper.snapshot({"tracks": {"from": start, "count": 16}, "parts": ["tracks", "arrangement"]}, budgeted=True); elapsed = time.perf_counter() - began
+            start += page["window"]["tracks"]["count"]; requests += 1; slowest_window = max(slowest_window, elapsed); total += elapsed
+        line("snapshot, the whole Set in windows of 16 tracks", total * 1000, slowest_window * 1000, requests)
+        # No budgeted request runs away: its budget, plus one unit at most (a whole track row here).
+        self.assertLess(max(slowest_notes, slowest_window * 1000), 150)
+        for size in (20, 200):
+            bridge = immediate_bridge(measured_set(size, 10), provenance="real-live"); row = bridge.mapper.discover("track", 1)["items"][0]
+            args = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": bridge.mapper._structure_revision()}
+            holder = {}; started = time.perf_counter()
+            pre = bridge._dispatch_with_holder("preflight", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench"}, holder)
+            prepared = bridge._dispatch_with_holder("prepare", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench", "preflightToken": pre["preflightToken"], "confirmation": pre["confirmation"], "idempotencyKey": "bench-duplicate-0001"}, holder)
+            bridge._dispatch_with_holder("invoke", {"operation": "track.duplicate", "args": args, "transactionId": "transaction-bench", "authorityToken": prepared["authorityToken"]}, holder)
+            line(f"track.duplicate, preflight/prepare/invoke, {size} tracks", (time.perf_counter() - started) * 1000)
+        for watched in (False, True):
+            bridge = immediate_bridge(measured_set(200, 10, watched), provenance="real-live"); mapper = bridge.mapper; track = mapper.discover("track", 200)["items"][100]
+            rows = []; built = LiveObjectMapper._track_row
+            with patch.object(LiveObjectMapper, "_track_row", lambda self, *row_args: rows.append(row_args[2]) or built(self, *row_args)):
+                for attempt in range(2):
+                    args = {"ref": track["ref"], "name": f"Renamed {attempt}", "expectedName": mapper.song.tracks[100].name, "expectedObjectIdentity": track["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", track["ref"])}
+                    started = time.perf_counter()
+                    digest = mapper.invoke("authority.digest", {"operation": "track.rename", "args": args})["stateDigest"]
+                    bridge._dispatch_with_holder("mutate", {"operation": "track.rename", "transactionId": "transaction-rename", "idempotencyKey": f"bench-rename-{watched:d}{attempt}", "stateDigest": digest, "args": args}, {})
+                    elapsed = (time.perf_counter() - started) * 1000
+            self.assertEqual(mapper.song.tracks[100].name, "Renamed 1"); self.assertEqual(rows, [], "a rename builds no track's whole row")
+            line(f"track.rename, one mutate, 200 tracks ({'watched' if watched else 'unwatched'} structure)", elapsed)
+        print("\n  the measured Set (200 tracks, 1800 devices, a 20000-note Arrangement clip), Remote Script side:\n" + "\n".join(report))
