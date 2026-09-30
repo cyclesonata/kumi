@@ -9164,6 +9164,8 @@ export class McpHost {
       || !params.transactionIds.every((value) => isNonEmptyString(value, 128))) return error(id, -32602, "transactionIds (1 to 64) are required");
     let released = 0; const kept: string[] = [];
     for (const transactionId of params.transactionIds as string[]) {
+      // Batches keep their own records.
+      if (transactionId.startsWith("batch_")) { if (!IN_FLIGHT_TRANSACTION_IDS.has(transactionId) && this.batchTransactions.release(transactionId)) released++; else kept.push(transactionId); continue; }
       for (const holder of Object.values(this)) {
         if (!(holder instanceof Map) || !holder.has(transactionId)) continue;
         const transaction = holder.get(transactionId) as { state?: unknown } | undefined;

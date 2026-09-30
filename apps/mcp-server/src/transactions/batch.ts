@@ -336,6 +336,14 @@ export class BatchTransactionManager {
     this.records.set(record.transactionId, record);
   }
 
+  /** The client gives up an applied batch's undo (see live_transaction_release). True when it was one. */
+  release(transactionId: string): boolean {
+    const record = this.records.get(transactionId);
+    if (!record || record.state !== "applied") return false;
+    this.records.delete(transactionId);
+    return true;
+  }
+
   private asyncAdapter(): AsyncLiveAdapter {
     const value = this.adapter as Partial<AsyncLiveAdapter>;
     if (typeof value.snapshotAsync !== "function" || typeof value.getAsync !== "function" || typeof value.invokeAsync !== "function") throw new Error("live adapter does not support asynchronous operations");

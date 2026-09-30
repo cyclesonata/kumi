@@ -256,3 +256,14 @@ test("batch clip.set edits clip properties with exact prior-state undo", async (
   assert.equal(clip.muted, false);
   assert.equal(clip.colorIndex, 0, "the exact prior colorIndex is restored");
 });
+
+test("an applied batch the client won't undo can be released, so batches don't fill their room", async () => {
+  const { simulator, call, parse, parseError } = connectedHost();
+  const { device, parameter } = firstParameter(simulator);
+  const preview = await parse(call("live_batch_preview", { operations: [{ kind: "device.parameter.set", deviceRef: device.ref, parameterRef: parameter.ref, value: parameter.min }] }));
+  await parse(call("live_batch_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "batch-release" }));
+  assert.deepEqual(await parse(call("live_transaction_release", { transactionIds: [preview.transactionId] })), { released: 1 });
+  const undo = await parseError(call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "batch-release-undo" }));
+  assert.ok(undo.toolError || undo.protocolError, "no undo left for it");
+  assert.equal(parameter.value, parameter.min, "and nothing changed in Live");
+});
