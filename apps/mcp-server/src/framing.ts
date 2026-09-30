@@ -1,6 +1,8 @@
 import { TextDecoder } from "node:util";
 
-export const MAX_FRAME_BYTES = 64 * 1024 * 1024;
+// One MCP message as large as a string can be: V8 stops strings at about 512 MiB, and a record becomes
+// one string when it is decoded. Big Sets make big messages; the bound is JavaScript's, not the Set's.
+export const MAX_FRAME_BYTES = 500 * 1024 * 1024;
 
 export type FrameEvent =
   | { type: "record"; value: string }
@@ -12,6 +14,9 @@ export class NdjsonFramer {
   private chunks: Uint8Array[] = [];
   private retained = 0;
   private discarding = false;
+
+  /** `maxBytes` bounds one record (MAX_FRAME_BYTES unless a test asks for less). */
+  public constructor(private readonly maxBytes = MAX_FRAME_BYTES) {}
 
   public push(chunk: Uint8Array): FrameEvent[] {
     const events: FrameEvent[] = [];
@@ -49,7 +54,7 @@ export class NdjsonFramer {
 
   private append(part: Uint8Array): boolean {
     if (part.length === 0) return true;
-    if (this.retained + part.length > MAX_FRAME_BYTES) {
+    if (this.retained + part.length > this.maxBytes) {
       this.clear();
       this.discarding = true;
       return false;

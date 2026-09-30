@@ -33,9 +33,9 @@ import { LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VE
 /** Kept as the legacy initialize version for existing embedded callers. */
 export const PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSION;
 export { MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS };
-export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+// The framer's bound (framing.ts): about the largest string V8 makes (~512 MiB).
+export const MAX_MESSAGE_BYTES = 500 * 1024 * 1024;
 const MAX_TRACKED_REQUEST_IDS = 4096;
-const MAX_TOOL_CALLS_PER_MINUTE = 120;
 
 type JsonObject = Record<string, unknown>;
 type RequestId = string | number;
@@ -488,7 +488,6 @@ export class McpHost {
   private shuttingDown = false;
   private readonly seenIds = new Set<string>();
   private readonly idOrder: string[] = [];
-  private readonly toolCallTimes: number[] = [];
   private readonly analysisRunner = new AnalysisRunner();
   private readonly audioCaptureTransactions = new BoundedTransactionMap<AudioCaptureTransaction>();
   private readonly transactions = new BoundedTransactionMap<TempoTransaction>(MAX_TRANSACTIONS);
@@ -863,18 +862,9 @@ export class McpHost {
     };
   }
 
-  private consumeAnalysisRateLimit(): boolean {
-    const now = Date.now();
-    while (this.toolCallTimes.length > 0 && now - (this.toolCallTimes[0] ?? now) >= 60_000) this.toolCallTimes.shift();
-    if (this.toolCallTimes.length >= MAX_TOOL_CALLS_PER_MINUTE) return false;
-    this.toolCallTimes.push(now);
-    return true;
-  }
-
   private async audioAnalyzeAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     const parsed = this.encodedAnalysisSource(params, 32, true);
     if (!parsed || parsed.sampleCount > 10_000_000) return error(id, -32602, "audio_analyze requires bounded normalized float32 pcmBase64, sampleRate, and matching channel metadata");
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
       const result = await this.analysisRunner.run({ mode: "analyze", source: parsed.source }, signal);
       if (signal?.aborted) return null;
@@ -896,7 +886,6 @@ export class McpHost {
       if (!isObject(params.alignment) || !hasOnly(params.alignment, ["mode", "maxLagSeconds", "manualOffsetSeconds"]) || (params.alignment.mode !== undefined && !["auto", "manual", "disabled"].includes(String(params.alignment.mode))) || (params.alignment.maxLagSeconds !== undefined && (typeof params.alignment.maxLagSeconds !== "number" || !Number.isFinite(params.alignment.maxLagSeconds) || params.alignment.maxLagSeconds < 0 || params.alignment.maxLagSeconds > 10)) || (params.alignment.manualOffsetSeconds !== undefined && (typeof params.alignment.manualOffsetSeconds !== "number" || !Number.isFinite(params.alignment.manualOffsetSeconds) || Math.abs(params.alignment.manualOffsetSeconds) > 10))) return error(id, -32602, "audio comparison alignment is invalid");
       alignment = params.alignment as typeof alignment;
     }
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
       const result = await this.analysisRunner.run({ mode: "compare", project: project.source, reference: reference.source, ...(alignment ? { alignment } : {}) }, signal);
       if (signal?.aborted) return null;
@@ -943,7 +932,6 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["pcmBase64", "sampleRate", "channels", "channelLayout", "trackRef", "provenance"]) || !isNonEmptyString(params.trackRef, 256) || !isObject(params.provenance) || !hasOnly(params.provenance, ["observedAt", "description"]) || !isNonEmptyString(params.provenance.observedAt, 128) || !isNonEmptyString(params.provenance.description, 512)) return error(id, -32602, "bounded PCM, trackRef, and explicit source provenance are required");
     const parsed = this.encodedAnalysisSource({ pcmBase64: params.pcmBase64, sampleRate: params.sampleRate, ...(params.channels === undefined ? {} : { channels: params.channels }), ...(params.channelLayout === undefined ? {} : { channelLayout: params.channelLayout }) }, 2, false);
     if (!parsed || parsed.sampleCount > 4_000_000) return error(id, -32602, "diagnosis PCM metadata is invalid or exceeds the bounded source limit");
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || status.epoch === null || !(status.capabilities ?? []).includes("session.read")) throw new Error("fresh Live context is unavailable");

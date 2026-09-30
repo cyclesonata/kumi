@@ -1042,7 +1042,7 @@ test("accepts MCP metadata and reports value errors as tool errors", async () =>
   assert.equal((host.handle({ jsonrpc: "2.0", id: 3, method: "ping" }) as any).result instanceof Object, true);
 });
 
-test("does not let invalid audio requests consume the rate limit", async () => {
+test("refuses invalid audio requests before any analysis, however many come", async () => {
   const host = new McpHost();
   ready(host);
   for (let id = 2; id <= 121; id += 1) {
@@ -1054,7 +1054,7 @@ test("does not let invalid audio requests consume the rate limit", async () => {
   assert.equal((result as any).result.isError, false);
 });
 
-test("rejects audio schema values before decoding or consuming the rate limit", async () => {
+test("rejects audio schema values before decoding", async () => {
   const host = new McpHost();
   ready(host);
   const base = { pcmBase64: Buffer.alloc(4).toString("base64"), sampleRate: 44100 };
