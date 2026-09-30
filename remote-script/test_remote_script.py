@@ -7550,3 +7550,74 @@ class DeviceFamilyTests(unittest.TestCase):
         self.assertEqual(looper.calls, ["double", "half"])
         request = {"ref": rows[2]["ref"], "action": "recall-last-variation", "expectedObjectIdentity": rows[2]["objectIdentity"], "expectedStateRevision": host_rack_state_revision(rows[2])}
         validate_operation_payload("rack.action", "request", request); self.assertTrue(mapper.invoke("rack.action", request)["done"]); self.assertEqual(rack.recalled, 1)
+
+
+class PreviewBrowser:
+    def __init__(self):
+        self.samples = types.SimpleNamespace(name="Samples", children=[types.SimpleNamespace(name="Kick 808.wav", children=[], is_loadable=True), types.SimpleNamespace(name="Snare.wav", children=[], is_loadable=True)])
+        self.previews = []
+    def preview_item(self, item): self.previews.append(item.name)
+    def stop_preview(self): self.previews.append("stop")
+
+
+class ReadsMessagesAndPreviewTests(unittest.TestCase):
+    """plugin.parameter-names, device.banks.read and clip.time-convert (reads), application.message
+    (authority-free) and browser.preview.start/stop (named previews)."""
+
+    def test_plug_in_names_max_banks_and_clip_times_are_reads(self):
+        song = FakeSong(); names = [f"Param {index}" for index in range(300)]
+        plugin = FakeDevice(); plugin.name = "Serum"; plugin.class_name = "PluginDevice"; plugin.get_parameter_names = lambda begin=0, end=-1: names[begin:] if end == -1 else names[begin:end]
+        banks = [("Main", [0, 1, -1]), ("Extra", [2])]; max_device = FakeDevice(); max_device.name = "LFO"; max_device.class_name = "MaxDevice"
+        max_device.get_bank_count = lambda: len(banks); max_device.get_bank_name = lambda index: banks[index][0]; max_device.get_bank_parameters = lambda index: banks[index][1]
+        clip = FakeCapturedAudioClip(); clip.is_recording = False; clip.sample_rate = 48000
+        clip.beat_to_sample_time = lambda beats: beats * 24000.0; clip.sample_to_beat_time = lambda samples: samples / 24000.0; clip.seconds_to_sample_time = lambda seconds: seconds * 48000.0
+        song.tracks[0].devices = [plugin, max_device]; song.tracks[0].clip_slots[0].clip = clip
+        bridge = immediate_bridge(song); row = bridge.mapper.snapshot()["tracks"][0]; plugin_ref, max_ref, clip_ref = row["devices"][0]["ref"], row["devices"][1]["ref"], row["clips"][0]["ref"]
+        for operation in ("plugin.parameter-names", "device.banks.read", "clip.time-convert"):
+            self.assertFalse(remote_module._mutation_authority_required(operation), operation); self.assertTrue(bridge.mapper._operation_supported(operation), operation)
+            self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported(operation), operation)
+        self.assertEqual(read_through(bridge, "plugin.parameter-names", {"ref": plugin_ref}), {"names": names, "total": 300})
+        self.assertEqual(read_through(bridge, "plugin.parameter-names", {"ref": plugin_ref, "begin": 10, "end": 12}), {"names": ["Param 10", "Param 11"], "total": None})
+        with self.assertRaisesRegex(ValueError, "only a plug-in"): bridge.mapper.invoke("plugin.parameter-names", {"ref": max_ref})
+        with self.assertRaisesRegex(ValueError, "arguments are invalid"): bridge.mapper.invoke("plugin.parameter-names", {"ref": plugin_ref, "begin": 5, "end": 2})
+        self.assertEqual(read_through(bridge, "device.banks.read", {"ref": max_ref}), {"banks": [{"name": "Main", "parameters": [0, 1, -1]}, {"name": "Extra", "parameters": [2]}]})
+        with self.assertRaisesRegex(ValueError, "only a Max for Live device"): bridge.mapper.invoke("device.banks.read", {"ref": plugin_ref})
+        self.assertEqual(read_through(bridge, "clip.time-convert", {"ref": clip_ref, "from": "beats", "value": 2}), {"beats": 2.0, "samples": 48000.0, "seconds": 1.0})
+        self.assertEqual(read_through(bridge, "clip.time-convert", {"ref": clip_ref, "from": "seconds", "value": 0.5}), {"beats": 1.0, "samples": 24000.0, "seconds": 0.5})
+        self.assertEqual(read_through(bridge, "clip.time-convert", {"ref": clip_ref, "from": "samples", "value": 12000}), {"beats": 0.5, "samples": 12000.0, "seconds": 0.25})
+        # Live can't convert (an unwarped sample has no beat time): null, not a guess.
+        def unwarped(_value): raise RuntimeError("the sample is not warped")
+        clip.beat_to_sample_time = unwarped; clip.sample_to_beat_time = unwarped
+        self.assertEqual(read_through(bridge, "clip.time-convert", {"ref": clip_ref, "from": "beats", "value": 2}), {"beats": 2.0, "samples": None, "seconds": None})
+        song.tracks[0].clip_slots[0].clip = FakeNoteClip(4.0); midi_ref = bridge.mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        with self.assertRaisesRegex(ValueError, "only an audio clip"): bridge.mapper.invoke("clip.time-convert", {"ref": midi_ref, "from": "beats", "value": 1})
+
+    def test_a_message_in_live_needs_no_mutation_authority(self):
+        shown = []; application = types.SimpleNamespace(show_on_the_fly_message=lambda text: shown.append(("passing", text)), show_message=lambda text: shown.append(("modal", text)))
+        bridge = immediate_bridge(FakeSong()); bridge.mapper._application = lambda: application
+        self.assertIn("application.message", remote_module._AUTHORITY_FREE_INVOKES); self.assertNotIn("application.message", remote_module._READ_ONLY_INVOKES)
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
+        unsigned = remote.bound({"version": PROTOCOL, "id": "message", "method": "invoke", "operation": "application.message", "args": {"text": "Bounced the drums"}, "nonce": "message-nonce-0001", "sequence": 1})
+        answer = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"], {"shown": True})
+        self.assertEqual(bridge._dispatch_with_holder("invoke", {"operation": "application.message", "args": {"text": "Check the mix", "modal": True}}, {}), {"shown": True})
+        self.assertEqual(shown, [("passing", "Bounced the drums"), ("modal", "Check the mix")])
+        with self.assertRaisesRegex(ValueError, "message arguments are invalid"): bridge.mapper.invoke("application.message", {"text": ""})
+        self.assertTrue(bridge.mapper._operation_supported("application.message"))
+        # The undo steps keep their own probe.
+        self.assertFalse(bridge.mapper._operation_supported("undo.step.begin"))
+        def unavailable(): raise ValueError("Live's application is unavailable")
+        bridge.mapper._application = unavailable; self.assertFalse(bridge.mapper._operation_supported("application.message"))
+
+    def test_a_preview_is_named_and_only_its_own_name_stops_it(self):
+        browser = PreviewBrowser(); bridge = immediate_bridge(FakeSong()); bridge.mapper._browser = lambda: browser
+        self.assertTrue(bridge.mapper._operation_supported("browser.preview.start") and bridge.mapper._operation_supported("browser.preview.stop"))
+        kick, snare = (bridge.mapper.invoke("browser.inspect", {"itemId": f"samples/{name}"}) for name in ("Kick 808.wav", "Snare.wav"))
+        start = lambda item, key: mutate_through(bridge, "browser.preview.start", {"itemId": item["id"], "expectedName": item["name"], "expectedItemIdentity": item["objectIdentity"]}, key)
+        first = start(kick, "preview-key-0001"); self.assertTrue(first["started"]); self.assertGreaterEqual(len(first["previewId"]), 32)
+        second = start(snare, "preview-key-0002")
+        with self.assertRaisesRegex(ValueError, "isn't playing any more"): bridge.mapper.invoke("browser.preview.stop", {"previewId": first["previewId"]})
+        self.assertEqual(mutate_through(bridge, "browser.preview.stop", {"previewId": second["previewId"]}, "preview-key-0003"), {"stopped": True})
+        self.assertEqual(browser.previews, ["Kick 808.wav", "Snare.wav", "stop"])
+        with self.assertRaisesRegex(ValueError, "identity changed since it was found"): bridge.mapper.invoke("browser.preview.start", {"itemId": kick["id"], "expectedName": "Kick 909.wav", "expectedItemIdentity": kick["objectIdentity"]})
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("browser.preview.start"))

@@ -301,7 +301,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at"}
+_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -313,9 +313,10 @@ _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.d
 # Mirrors EXPLICIT_DELETIONS in the host adapter.
 _EXPLICIT_DELETIONS = {"device.delete", "track.delete-return", "clip.delete", "arrangement.clip.delete", "scene.delete", "track.delete", "locator.delete"}
 def _explicit_deletion(operation: str, args: Any) -> bool: return operation in _EXPLICIT_DELETIONS and isinstance(args, dict) and args.get("explicitDeletion") is True
-# Changes to Live's own undo history, not to the Set: no preflight->prepare fence, and a Live-thread
-# guard closes an open step (deadline, connection close, reconnect, shutdown). Mirrors the host adapter.
-_AUTHORITY_FREE_INVOKES = {"undo.step.begin", "undo.step.end"}
+# Changes to Live's own undo history and messages shown in Live, not to the Set: no preflight->prepare
+# fence. A Live-thread guard closes an open undo step (deadline, connection close, reconnect, shutdown).
+# Mirrors the host adapter.
+_AUTHORITY_FREE_INVOKES = {"undo.step.begin", "undo.step.end", "application.message"}
 def _mutation_authority_required(operation: str) -> bool: return operation not in _READ_ONLY_INVOKES and operation not in _AUTHORITY_FREE_INVOKES
 
 def _require_output_safety(args: dict[str, Any]) -> None:
@@ -855,6 +856,8 @@ class LiveObjectMapper:
         self._held_fire_buttons: dict[str, dict[str, Any]] = {}
         # The connection a change came through, while it runs (see AbletonMcpBridge._apply_mutation).
         self._request_owner: Any = None
+        # The browser preview browser.preview.start began, by its previewId.
+        self._browser_preview: str | None = None
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -1013,8 +1016,16 @@ class LiveObjectMapper:
             return True
         if operation == "dev.lom-audit":
             return _live_module() is not None
-        if operation in _AUTHORITY_FREE_INVOKES:
+        if operation in {"undo.step.begin", "undo.step.end"}:
             return callable(getattr(song, "begin_undo_step", None)) and callable(getattr(song, "end_undo_step", None))
+        if operation == "application.message":
+            try: application = self._application()
+            except ValueError: return False
+            return callable(getattr(application, "show_on_the_fly_message", None)) or callable(getattr(application, "show_message", None))
+        if operation in {"browser.preview.start", "browser.preview.stop"}:
+            try: browser = self._browser()
+            except ValueError: return False
+            return callable(getattr(browser, "preview_item", None)) and callable(getattr(browser, "stop_preview", None))
         if operation in {"song.undo", "song.redo"}:
             return callable(getattr(song, "undo" if operation == "song.undo" else "redo", None))
         if operation == "data.get":
@@ -1045,6 +1056,12 @@ class LiveObjectMapper:
             return self._offers_any("wavetable", *self._WAVETABLE_FIELDS.values(), method=False)
         if operation == "wavetable.modulation.set":
             return self._offers("wavetable", "get_modulation_value", "set_modulation_value")
+        if operation == "plugin.parameter-names":
+            return self._offers("plugin", "get_parameter_names")
+        if operation == "device.banks.read":
+            return self._offers("max", "get_bank_count", "get_bank_name", "get_bank_parameters")
+        if operation == "clip.time-convert":
+            return self._offers("audio_clip", "beat_to_sample_time", "sample_to_beat_time")
         if operation == "subscribe":
             return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
@@ -3413,7 +3430,7 @@ class LiveObjectMapper:
             return self.status()
         if operation == "session.reconnect":
             # A step (or a pressed fire button) the previous session held can't be let go by its references any more.
-            self._end_undo_step(); self._release_fire_buttons()
+            self._end_undo_step(); self._release_fire_buttons(); self._browser_preview = None
             self.refs.reset()
             self._playback_state_digest = None
             self._playback_revision_counter = 0
@@ -3440,8 +3457,14 @@ class LiveObjectMapper:
             return self._device_parameters_set(args)
         if operation == "dev.lom-audit":
             return _lom_audit(_live_module(), int(args.get("maxDepth", 8)))
-        if operation in _AUTHORITY_FREE_INVOKES:
+        if operation in {"undo.step.begin", "undo.step.end"}:
             return self._undo_step_operation(operation, args)
+        if operation == "application.message":
+            return self._application_message(args)
+        if operation == "browser.preview.start":
+            return self._browser_preview_start(args)
+        if operation == "browser.preview.stop":
+            return self._browser_preview_stop(args)
         if operation in {"song.undo", "song.redo"}:
             return self._song_undo(operation, args)
         if operation == "data.get":
@@ -3472,6 +3495,12 @@ class LiveObjectMapper:
             return self._wavetable_set(args)
         if operation == "wavetable.modulation.set":
             return self._wavetable_modulation_set(args)
+        if operation == "plugin.parameter-names":
+            return self._plugin_parameter_names(args)
+        if operation == "device.banks.read":
+            return self._device_banks_read(args)
+        if operation == "clip.time-convert":
+            return self._clip_time_convert(args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
@@ -8104,6 +8133,96 @@ class LiveObjectMapper:
             if not isinstance(restored, (int, float)) or isinstance(restored, bool) or not _same_number(restored, prior): raise ValueError("modulation change failed and exact rollback failed") from error
             raise
         return {"changed": True, "revision": self.refs.touch(str(args["ref"])), "targetIndex": target, "value": max(-1.0, min(1.0, float(observed))), "prior": max(-1.0, min(1.0, float(prior)))}
+
+    def _device_at(self, reference: Any) -> Any:
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:"): raise ValueError("device reference is stale or invalid")
+        return self.refs.get(reference)
+
+    def _plugin_parameter_names(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Every parameter a plug-in has, configured or not (Live's get_parameter_names), from begin
+        to end as Live takes them (end -1: to the last). total counts them when all were asked for."""
+        begin, end = args.get("begin", 0), args.get("end", -1)
+        if set(args) - {"ref", "begin", "end"} or not isinstance(begin, int) or isinstance(begin, bool) or begin < 0 or not isinstance(end, int) or isinstance(end, bool) or end < -1 or (end != -1 and end < begin): raise ValueError("plug-in parameter name arguments are invalid")
+        reader = getattr(self._device_at(args.get("ref")), "get_parameter_names", None)
+        if not callable(reader): raise ValueError("only a plug-in lists all its parameter names")
+        names = [str(name)[:1024] for name in self._items(reader(begin, end))]
+        if len(names) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("ask for the names in ranges: there are too many for one answer")
+        return {"names": names, "total": len(names) if begin == 0 and end == -1 else None}
+
+    def _device_banks_read(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A Max for Live device's parameter banks (Live's get_bank_count/name/parameters): each bank's
+        name and its parameters' indices (-1 for an empty slot)."""
+        if set(args) - {"ref"}: raise ValueError("device bank arguments are invalid")
+        device = self._device_at(args.get("ref"))
+        count, name, parameters = (getattr(device, member, None) for member in ("get_bank_count", "get_bank_name", "get_bank_parameters"))
+        if not all(callable(member) for member in (count, name, parameters)): raise ValueError("only a Max for Live device lists its banks")
+        total = count()
+        if not isinstance(total, int) or isinstance(total, bool) or not 0 <= total <= MAX_WIRE_ARRAY_LENGTH: raise ValueError("the device's bank count is unreadable")
+        banks = []
+        for index in range(total):
+            indices = [int(value) for value in self._items(parameters(index)) if isinstance(value, int) and not isinstance(value, bool)]
+            banks.append({"name": str(name(index))[:256], "parameters": [max(-1, value) for value in indices]})
+        return {"banks": banks}
+
+    def _clip_time_convert(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A time in an audio clip's sample as beats, sample frames and seconds (Live's
+        beat_to_sample_time, sample_to_beat_time and seconds_to_sample_time); null where Live can't
+        convert it (an unwarped clip's sample has no beat time)."""
+        source, value, reference = args.get("from"), args.get("value"), args.get("ref")
+        if set(args) - {"ref", "from", "value"} or source not in {"beats", "samples", "seconds"} or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)): raise ValueError("time conversion arguments are invalid")
+        if not isinstance(reference, str) or reference.split(":")[1:2] not in (["clip"], ["arrangement_clip"]) or not reference.startswith(f"{self.refs.epoch}:"): raise ValueError("clip reference is stale or invalid")
+        clip = self.refs.get(reference)
+        if self._read_attr(clip, "is_audio_clip") is not True: raise ValueError("only an audio clip converts between beats and its sample's time")
+        def convert(method_name: str, argument: float) -> float | None:
+            method = getattr(clip, method_name, None)
+            if not callable(method): return None
+            try: result = method(float(argument))
+            except Exception: return None
+            return float(result) if isinstance(result, (int, float)) and not isinstance(result, bool) and math.isfinite(float(result)) else None
+        rate = self._read_attr(clip, "sample_rate"); rate = float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(float(rate)) and rate > 0 else None
+        if source == "beats":
+            beats, samples = float(value), convert("beat_to_sample_time", value); seconds = samples / rate if samples is not None and rate else None
+        elif source == "samples":
+            samples, beats = float(value), convert("sample_to_beat_time", value); seconds = samples / rate if rate else None
+        else:
+            seconds, samples = float(value), convert("seconds_to_sample_time", value); beats = convert("sample_to_beat_time", samples) if samples is not None else None
+        return {"beats": beats, "samples": samples, "seconds": seconds}
+
+    def _application_message(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A message from Kumi in Live: shown in passing (Application.show_on_the_fly_message), or,
+        modal, as Application.show_message shows it. Needs no mutation authority: the Set is untouched."""
+        text, modal = args.get("text"), args.get("modal", False)
+        if set(args) - {"text", "modal"} or not isinstance(text, str) or not 1 <= len(text) <= 1024 or not isinstance(modal, bool): raise ValueError("message arguments are invalid")
+        method = getattr(self._application(), "show_message" if modal else "show_on_the_fly_message", None)
+        if not callable(method): raise ValueError(("modal" if modal else "passing") + " messages are unavailable on this Live shape")
+        method(text)
+        return {"shown": True}
+
+    def _browser_preview_start(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Play a browser item's preview as a click in Live's browser does (Browser.preview_item): the
+        item found by its id, named and identified as when it was found. The previewId names this
+        preview for browser.preview.stop."""
+        if set(args) - {"itemId", "expectedName", "expectedItemIdentity"}: raise ValueError("browser preview arguments are invalid")
+        item, metadata = self._browser_find(args.get("itemId"))
+        if args.get("expectedName") != metadata["name"] or not isinstance(args.get("expectedItemIdentity"), str) or not hmac.compare_digest(metadata["objectIdentity"], args["expectedItemIdentity"]): raise ValueError("browser item identity changed since it was found")
+        preview = getattr(self._browser(), "preview_item", None)
+        if not callable(preview): raise ValueError("browser previews are unavailable on this Live shape")
+        preview(item)
+        self._browser_preview = f"preview_{secrets.token_urlsafe(24)}"
+        return {"previewId": self._browser_preview, "started": True}
+
+    def _browser_preview_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Stop the preview browser.preview.start began (Browser.stop_preview), named by its
+        previewId: an earlier preview's id doesn't stop a later one."""
+        preview_id = args.get("previewId")
+        if set(args) - {"previewId"} or not isinstance(preview_id, str): raise ValueError("browser preview arguments are invalid")
+        current = getattr(self, "_browser_preview", None)
+        if current is None or not hmac.compare_digest(current, preview_id): raise ValueError("that preview isn't playing any more")
+        stop = getattr(self._browser(), "stop_preview", None)
+        if not callable(stop): raise ValueError("browser previews are unavailable on this Live shape")
+        stop()
+        self._browser_preview = None
+        return {"stopped": True}
 
     def _slot_state_fields(self, slot: Any) -> dict[str, Any]:
         def optional_bool(name: str) -> bool | None:
