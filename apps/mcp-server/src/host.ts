@@ -5486,24 +5486,31 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Device state is uncertain; perform fresh discovery before retrying."); }
   }
 
+  /** What track.view.set and track.select-instrument are fenced on, from the track row's view (the Remote Script's _track_view_state_revision). */
+  private trackViewState(track: JsonObject): { collapsed: unknown; deviceInsertMode: unknown; showChains: unknown } {
+    const view = track.view as JsonObject | undefined;
+    return { collapsed: view?.isCollapsed ?? null, deviceInsertMode: view?.deviceInsertMode ?? null, showChains: view?.isShowingChains ?? null };
+  }
+
   private async liveTrackViewPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["ref", "collapsed", "deviceInsertMode", "selectInstrument"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
-    if (params.collapsed === undefined && params.deviceInsertMode === undefined && params.selectInstrument !== true) return error(id, -32602, "at least one view field or selectInstrument is required");
+    if (!isObject(params) || !hasOnly(params, ["ref", "collapsed", "deviceInsertMode", "showChains", "selectInstrument"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
+    if (params.collapsed === undefined && params.deviceInsertMode === undefined && params.showChains === undefined && params.selectInstrument !== true) return error(id, -32602, "at least one view field or selectInstrument is required");
     try {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
-      const viewState = { collapsed: (track.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track.view as JsonObject | undefined)?.deviceInsertMode ?? null };
+      const viewState = this.trackViewState(track);
       const stateRevision = createHash("sha256").update(canonicalMutationIdentity(viewState)).digest("hex");
       const proposed: Record<string, unknown> = {};
       if (params.collapsed !== undefined) { if (typeof params.collapsed !== "boolean") return error(id, -32602, "collapsed must be boolean"); proposed.collapsed = params.collapsed; }
       if (params.deviceInsertMode !== undefined) { if (!Number.isInteger(params.deviceInsertMode) || (params.deviceInsertMode as number) < 0 || (params.deviceInsertMode as number) > 8) return error(id, -32602, "deviceInsertMode is invalid"); proposed.deviceInsertMode = params.deviceInsertMode; }
+      if (params.showChains !== undefined) { if (typeof params.showChains !== "boolean") return error(id, -32602, "showChains must be boolean"); proposed.showChains = params.showChains; }
       if (Object.keys(proposed).length > 0 && !(status.operations ?? []).includes("track.view.set")) throw new Error("track view editing is unavailable");
       if (params.selectInstrument === true && !(status.operations ?? []).includes("track.select-instrument")) throw new Error("instrument selection is unavailable");
       const payload: Record<string, unknown> = { ref: params.ref, ...proposed, selectInstrument: params.selectInstrument === true, expectedObjectIdentity: track.objectIdentity, expectedStateRevision: stateRevision };
-      const prior = { collapsed: viewState.collapsed, deviceInsertMode: viewState.deviceInsertMode };
+      const prior = { collapsed: viewState.collapsed, deviceInsertMode: viewState.deviceInsertMode, showChains: viewState.showChains };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: track.objectIdentity, viewState });
       const transaction: ClipLifecycleTransaction = { id: `trackview_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "track-view", fence, clipRef: params.ref as LiveRef, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "track view");
@@ -5526,19 +5533,19 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
-        const viewState = { collapsed: (track?.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track?.view as JsonObject | undefined)?.deviceInsertMode ?? null };
+        const viewState = track ? this.trackViewState(track) : undefined;
         if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, viewState }) !== transaction.fence) return this.transactionError(id, "track identity or view state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
-      const hasViewEdits = transaction.payload.collapsed !== undefined || transaction.payload.deviceInsertMode !== undefined;
+      const hasViewEdits = transaction.payload.collapsed !== undefined || transaction.payload.deviceInsertMode !== undefined || transaction.payload.showChains !== undefined;
       if (hasViewEdits) {
-        const args = { ref: transaction.payload.ref, ...(transaction.payload.collapsed !== undefined ? { collapsed: transaction.payload.collapsed } : {}), ...(transaction.payload.deviceInsertMode !== undefined ? { deviceInsertMode: transaction.payload.deviceInsertMode } : {}), expectedObjectIdentity: transaction.payload.expectedObjectIdentity, expectedStateRevision: transaction.payload.expectedStateRevision };
+        const args = { ref: transaction.payload.ref, ...(transaction.payload.collapsed !== undefined ? { collapsed: transaction.payload.collapsed } : {}), ...(transaction.payload.deviceInsertMode !== undefined ? { deviceInsertMode: transaction.payload.deviceInsertMode } : {}), ...(transaction.payload.showChains !== undefined ? { showChains: transaction.payload.showChains } : {}), expectedObjectIdentity: transaction.payload.expectedObjectIdentity, expectedStateRevision: transaction.payload.expectedStateRevision };
         const result = await adapter.invokeAsync({ operation: "track.view.set", args }, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("track view change was not confirmed");
       }
       if (transaction.payload.selectInstrument === true) {
         const freshSnapshot = await this.viewForAsync(context, [transaction.payload.ref]);
         const freshTrack = (freshSnapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
-        const freshState = { collapsed: (freshTrack?.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (freshTrack?.view as JsonObject | undefined)?.deviceInsertMode ?? null };
+        const freshState = freshTrack ? this.trackViewState(freshTrack) : { collapsed: null, deviceInsertMode: null, showChains: null };
         const freshRevision = createHash("sha256").update(canonicalMutationIdentity(freshState)).digest("hex");
         const result = await adapter.invokeAsync({ operation: "track.select-instrument", args: { ref: transaction.payload.ref, expectedObjectIdentity: freshTrack?.objectIdentity, expectedStateRevision: freshRevision } }, context) as { done?: unknown };
         if (result.done !== true) throw new Error("instrument selection was not confirmed");
@@ -5546,7 +5553,8 @@ export class McpHost {
       if (hasViewEdits) { const verified = ((await this.viewForAsync(context, [transaction.payload.ref])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const view = verified?.view as JsonObject | undefined;
         if (transaction.payload.collapsed !== undefined && view?.isCollapsed !== transaction.payload.collapsed) throw new Error("track view postcondition was not confirmed");
-        if (transaction.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== transaction.payload.deviceInsertMode) throw new Error("track view postcondition was not confirmed"); }
+        if (transaction.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== transaction.payload.deviceInsertMode) throw new Error("track view postcondition was not confirmed");
+        if (transaction.payload.showChains !== undefined && view?.isShowingChains !== transaction.payload.showChains) throw new Error("track view postcondition was not confirmed"); }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: false });
@@ -5610,7 +5618,7 @@ export class McpHost {
 
   private songSettingsFields(song: JsonObject): Record<string, unknown> {
     const quantizationValue = (entry: unknown): unknown => (entry as { value?: unknown } | null | undefined)?.value ?? null;
-    return { signatureNumerator: song.signatureNumerator ?? null, signatureDenominator: song.signatureDenominator ?? null, swingAmount: song.swingAmount ?? null, clipTriggerQuantization: quantizationValue(song.clipTriggerQuantization), midiRecordingQuantization: quantizationValue(song.midiRecordingQuantization) };
+    return { selectOnLaunch: song.selectOnLaunch ?? null, signatureNumerator: song.signatureNumerator ?? null, signatureDenominator: song.signatureDenominator ?? null, swingAmount: song.swingAmount ?? null, clipTriggerQuantization: quantizationValue(song.clipTriggerQuantization), midiRecordingQuantization: quantizationValue(song.midiRecordingQuantization) };
   }
 
   private songSettingsRevision(song: JsonObject): string {
@@ -5618,7 +5626,7 @@ export class McpHost {
   }
 
   private async liveSongSettingsPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"] as const;
+    const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization", "selectOnLaunch"] as const;
     if (!isObject(params) || !hasOnly(params, [...fields])) return error(id, -32602, "song settings arguments are invalid");
     const proposed: Record<string, unknown> = {};
     for (const field of fields) {
@@ -5627,6 +5635,7 @@ export class McpHost {
       if (field === "signatureNumerator" || field === "signatureDenominator") { if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 99) return error(id, -32602, `${field} is out of bounds`); }
       else if (field === "swingAmount") { if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) return error(id, -32602, "swingAmount is out of bounds"); }
       else if (field === "clipTriggerQuantization") { if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 13) return error(id, -32602, "clipTriggerQuantization is out of bounds"); }
+      else if (field === "selectOnLaunch") { if (typeof value !== "boolean") return error(id, -32602, "selectOnLaunch must be boolean"); }
       else if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 8) return error(id, -32602, "midiRecordingQuantization is out of bounds");
       proposed[field] = value;
     }
@@ -5667,7 +5676,7 @@ export class McpHost {
       const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const snapshot = await this.viewAsync(context, [], ["set"]);
       if (snapshot.set.ref !== transaction.payload.setRef || snapshot.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed since preview");
-      const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"];
+      const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization", "selectOnLaunch"];
       if (!reconciliation) { const song = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject;
         const settings = this.songSettingsFields(song);
         if (JSON.stringify({ state: fields.map((field) => settings[field]) }) !== transaction.fence) return this.transactionError(id, "song settings changed since preview; preview again"); }
@@ -6684,7 +6693,8 @@ export class McpHost {
   }
 
   private static readonly SPECIALIZED_FAMILY_FIELDS: Record<string, string[]> = {
-    drift: ["pitchBendRange", "voiceCount", "voiceMode"],
+    // Drift's settings and its modulation matrix's twelve slots (their choices are the device row's mod*List names).
+    drift: ["pitchBendRange", "voiceCount", "voiceMode", "modFilterSource1", "modFilterSource2", "modLfoSource", "modPitchSource1", "modPitchSource2", "modShapeSource", "modSource1", "modSource2", "modSource3", "modTarget1", "modTarget2", "modTarget3"],
     "drum-cell": ["gain"],
     eq8: ["editMode", "globalMode", "oversample", "selectedBand"],
     "hybrid-reverb": ["irCategory", "irFile", "attack", "decay", "size"],
@@ -6694,6 +6704,7 @@ export class McpHost {
 
   private static readonly SPECIALIZED_FIELD_BOUNDS: Record<string, [number, number, boolean]> = {
     pitchBendRange: [1, 96, true], voiceCount: [1, 64, true], voiceMode: [0, 8, true],
+    ...Object.fromEntries(["modFilterSource1", "modFilterSource2", "modLfoSource", "modPitchSource1", "modPitchSource2", "modShapeSource", "modSource1", "modSource2", "modSource3", "modTarget1", "modTarget2", "modTarget3"].map((field) => [field, [0, 1000, true] as [number, number, boolean]])),
     gain: [-70, 24, false],
     editMode: [0, 4, true], globalMode: [0, 4, true], selectedBand: [0, 8, true],
     attack: [0, 10000, false], decay: [0, 100000, false], size: [0, 10000, false], time: [0, 100000, false],
@@ -8318,7 +8329,7 @@ export class McpHost {
       if (trackview.state === "undone" && trackview.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: trackview.id, state: "undone", idempotent: true });
       const reconciliation = trackview.state === "uncertain" && trackview.undoKey === params.idempotencyKey;
       if ((trackview.state !== "applied" && !reconciliation) || !trackview.prior) return this.transactionError(id, "Only an applied or exact-key uncertain track-view transaction can be undone");
-      if (trackview.payload.collapsed === undefined && trackview.payload.deviceInsertMode === undefined) return this.transactionError(id, "Instrument selection is momentary and not undoable");
+      if (trackview.payload.collapsed === undefined && trackview.payload.deviceInsertMode === undefined && trackview.payload.showChains === undefined) return this.transactionError(id, "Instrument selection is momentary and not undoable");
       try {
         this.beginUndoRecovery(trackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
@@ -8326,13 +8337,15 @@ export class McpHost {
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is unavailable");
         if (!reconciliation) { const view = track.view as JsonObject | undefined;
           if (trackview.payload.collapsed !== undefined && view?.isCollapsed !== trackview.payload.collapsed) return this.transactionError(id, "track view changed after apply; undo refused");
-          if (trackview.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== trackview.payload.deviceInsertMode) return this.transactionError(id, "track view changed after apply; undo refused"); }
-        const prior = trackview.prior as { collapsed: boolean | null; deviceInsertMode: number | null };
-        const stateRevision = createHash("sha256").update(canonicalMutationIdentity({ collapsed: (track.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track.view as JsonObject | undefined)?.deviceInsertMode ?? null })).digest("hex");
+          if (trackview.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== trackview.payload.deviceInsertMode) return this.transactionError(id, "track view changed after apply; undo refused");
+          if (trackview.payload.showChains !== undefined && view?.isShowingChains !== trackview.payload.showChains) return this.transactionError(id, "track view changed after apply; undo refused"); }
+        const prior = trackview.prior as { collapsed: boolean | null; deviceInsertMode: number | null; showChains?: boolean | null };
+        const stateRevision = createHash("sha256").update(canonicalMutationIdentity(this.trackViewState(track))).digest("hex");
         trackview.state = "undoing";
         const args: Record<string, unknown> = { ref: trackview.payload.ref, expectedObjectIdentity: track.objectIdentity, expectedStateRevision: stateRevision };
         if (trackview.payload.collapsed !== undefined && typeof prior.collapsed === "boolean") args.collapsed = prior.collapsed;
         if (trackview.payload.deviceInsertMode !== undefined && typeof prior.deviceInsertMode === "number") args.deviceInsertMode = prior.deviceInsertMode;
+        if (trackview.payload.showChains !== undefined && typeof prior.showChains === "boolean") args.showChains = prior.showChains;
         const result = await this.invokeUndoRecovery(trackview, adapter, "track.view.set", args, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("track view restoration was not confirmed");
         trackview.state = "undone"; return this.successText(id, { transactionId: trackview.id, state: "undone", idempotent: false });

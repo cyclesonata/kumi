@@ -992,8 +992,8 @@ const toolDescriptors = [
   },
   {
     name: "live_song_settings_preview",
-    description: "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
-    inputSchema: { type: "object", properties: { signatureNumerator: { type: "integer", minimum: 1, maximum: 99 }, signatureDenominator: { type: "integer", minimum: 1, maximum: 99 }, swingAmount: { type: "number", minimum: 0, maximum: 1 }, clipTriggerQuantization: { type: "integer", minimum: 0, maximum: 13 }, midiRecordingQuantization: { type: "integer", minimum: 0, maximum: 8 } }, additionalProperties: false },
+    description: "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization, and whether launching a clip or scene selects it) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
+    inputSchema: { type: "object", properties: { signatureNumerator: { type: "integer", minimum: 1, maximum: 99 }, signatureDenominator: { type: "integer", minimum: 1, maximum: 99 }, swingAmount: { type: "number", minimum: 0, maximum: 1 }, clipTriggerQuantization: { type: "integer", minimum: 0, maximum: 13 }, midiRecordingQuantization: { type: "integer", minimum: 0, maximum: 8 }, selectOnLaunch: { type: "boolean" } }, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1040,8 +1040,8 @@ const toolDescriptors = [
   },
   {
     name: "live_track_view_preview",
-    description: "Read-only preflight for track view state (collapsed, device insert mode) and selecting the track's instrument in Live's device view.",
-    inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 256 }, collapsed: { type: "boolean" }, deviceInsertMode: { type: "integer", minimum: 0, maximum: 8 }, selectInstrument: { type: "boolean" } }, required: ["ref"], additionalProperties: false },
+    description: "Read-only preflight for track view state (collapsed, device insert mode, whether its racks show their chains) and selecting the track's instrument in Live's device view.",
+    inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 256 }, collapsed: { type: "boolean" }, deviceInsertMode: { type: "integer", minimum: 0, maximum: 8 }, showChains: { type: "boolean" }, selectInstrument: { type: "boolean" } }, required: ["ref"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1216,8 +1216,8 @@ const toolDescriptors = [
   },
   {
     name: "live_device_specialized_preview",
-    description: "Read-only preflight for specialized device families: Drift, Drum Cell, Eq8, Hybrid Reverb, Meld, and plug-ins (presets and editor state).",
-    inputSchema: { type: "object", properties: { family: { type: "string", enum: ["drift", "drum-cell", "eq8", "hybrid-reverb", "meld", "plugin"] }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, pitchBendRange: { type: "integer", minimum: 1, maximum: 96 }, voiceCount: { type: "integer", minimum: 1, maximum: 64 }, voiceMode: { type: "integer", minimum: 0, maximum: 8 }, gain: { type: "number", minimum: -70, maximum: 24 }, editMode: { type: "integer", minimum: 0, maximum: 4 }, globalMode: { type: "integer", minimum: 0, maximum: 4 }, oversampling: { type: "boolean" }, selectedBand: { type: "integer", minimum: 0, maximum: 8 }, irCategory: { type: "string", minLength: 1, maxLength: 128 }, irFile: { type: "string", minLength: 1, maxLength: 256 }, attack: { type: "number", minimum: 0 }, decay: { type: "number", minimum: 0 }, size: { type: "number", minimum: 0 }, time: { type: "number", minimum: 0 }, engine: { type: "integer", minimum: 0, maximum: 4 }, unison: { type: "integer", minimum: 1, maximum: 16 }, monoPoly: { type: "boolean" }, polyphony: { type: "integer", minimum: 1, maximum: 64 }, presetIndex: { type: "integer", minimum: 0, maximum: 1024 }, isEditorOpen: { type: "boolean" } }, required: ["family", "deviceRef"], additionalProperties: false },
+    description: "Read-only preflight for specialized device families: Drift (including its modulation matrix: each slot's source or target index, from the device row's drift mod*List names), Drum Cell, Eq8, Hybrid Reverb, Meld, and plug-ins (presets and editor state).",
+    inputSchema: { type: "object", properties: { family: { type: "string", enum: ["drift", "drum-cell", "eq8", "hybrid-reverb", "meld", "plugin"] }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, pitchBendRange: { type: "integer", minimum: 1, maximum: 96 }, voiceCount: { type: "integer", minimum: 1, maximum: 64 }, voiceMode: { type: "integer", minimum: 0, maximum: 8 }, ...Object.fromEntries(["modFilterSource1", "modFilterSource2", "modLfoSource", "modPitchSource1", "modPitchSource2", "modShapeSource", "modSource1", "modSource2", "modSource3", "modTarget1", "modTarget2", "modTarget3"].map((field) => [field, { type: "integer", minimum: 0, maximum: 1000 }])), gain: { type: "number", minimum: -70, maximum: 24 }, editMode: { type: "integer", minimum: 0, maximum: 4 }, globalMode: { type: "integer", minimum: 0, maximum: 4 }, oversampling: { type: "boolean" }, selectedBand: { type: "integer", minimum: 0, maximum: 8 }, irCategory: { type: "string", minLength: 1, maxLength: 128 }, irFile: { type: "string", minLength: 1, maxLength: 256 }, attack: { type: "number", minimum: 0 }, decay: { type: "number", minimum: 0 }, size: { type: "number", minimum: 0 }, time: { type: "number", minimum: 0 }, engine: { type: "integer", minimum: 0, maximum: 4 }, unison: { type: "integer", minimum: 1, maximum: 16 }, monoPoly: { type: "boolean" }, polyphony: { type: "integer", minimum: 1, maximum: 64 }, presetIndex: { type: "integer", minimum: 0, maximum: 1024 }, isEditorOpen: { type: "boolean" } }, required: ["family", "deviceRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
