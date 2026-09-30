@@ -400,6 +400,32 @@ function onsetStrength(frames: number[][]): Float64Array {
   return smooth;
 }
 
+/**
+ * Where notes start, for transcribing: the level every `hop` samples, and a start wherever it rises 6 dB or
+ * more within ~25 ms (from where the last note had decayed to), within 45 dB of the loudest, at least 40 ms
+ * after the last. A repeated note is found as well as a new one; a note at the very start too.
+ */
+function noteStarts(mono: Float32Array, sampleRate: number, hop: number): number[] {
+  const level: number[] = [];
+  for (let from = 0; from < mono.length; from += hop) {
+    let sum = 0; const to = Math.min(mono.length, from + hop);
+    for (let index = from; index < to; index++) sum += mono[index]! * mono[index]!;
+    level.push(10 * Math.log10(sum / Math.max(1, to - from) + 1e-12));
+  }
+  const loudest = Math.max(...level);
+  const back = Math.max(1, Math.round(0.025 * sampleRate / hop)); const gap = Math.round(0.04 * sampleRate / hop);
+  // How far the level climbed from its lowest in the last ~25 ms (from silence, for the very first).
+  const rise = level.map((value, index) => { const before = level.slice(Math.max(0, index - back), index); return value - (before.length ? Math.min(...before) : -120); });
+  const starts: number[] = []; let last = -gap;
+  for (let index = 0; index < level.length; index++) {
+    if (rise[index]! < 6 || level[index]! < loudest - 45 || index - last < gap) continue;
+    // The steepest point of the rise, a little after its start: the local maximum of the rise.
+    if (rise[index]! < (rise[index + 1] ?? -Infinity)) continue;
+    starts.push(index); last = index;
+  }
+  return starts;
+}
+
 /** The onsets' places in a strength curve: peaks over the threshold, at least ~50 ms apart. */
 function onsetPeaks(strength: Float64Array): number[] {
   if (strength.length < 3) return [];
@@ -418,8 +444,8 @@ function onsetPeaks(strength: Float64Array): number[] {
  * single sound's, over its first 150 ms), how hard it starts against the loudest, and how long until it
  * falls 18 dB or the next one starts. A hit without a clear pitch has none. Monophonic: the strongest line.
  */
-export function transcribe(mono: Float32Array, sampleRate: number, strength: Float64Array): HeardNote[] {
-  const hop = 512; const peaks = onsetPeaks(strength);
+export function transcribe(mono: Float32Array, sampleRate: number, _strength?: Float64Array): HeardNote[] {
+  const hop = 256; const peaks = noteStarts(mono, sampleRate, hop);
   const rms = (from: number, length: number) => { let sum = 0; const to = Math.min(mono.length, from + length); for (let index = from; index < to; index++) sum += mono[index]! ** 2; return Math.sqrt(sum / Math.max(1, to - from)); };
   const found = peaks.map((peak, index) => {
     const start = Math.max(0, peak * hop - hop);

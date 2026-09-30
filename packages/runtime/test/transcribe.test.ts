@@ -42,3 +42,14 @@ test("transcribed notes reach the model as rows in beats at the Set's tempo, to 
   assert.deepEqual(rows.mostPlayed, [{ midi: 60, count: 2 }]);
   assert.match(String(rows.unit), /beats at 120 BPM/);
 });
+
+test("a dense line of 16ths at varied velocities is transcribed note for note, a note at the very start too", async () => {
+  // 120 BPM 16ths (0.125 s apart), velocities from loud to soft, some steps skipped.
+  const steps = [0, 1, 2, 4, 5, 7, 8, 9, 11, 12, 13, 15];
+  const played: [number, number, number][] = steps.map((step, index) => [step * 0.125, [62, 65, 69, 62, 70, 67][index % 6]!, [0.5, 0.2, 0.35, 0.15, 0.45, 0.25][index % 6]!]);
+  const analysis = await analyzeFile(wav("transcribe-dense.wav", notes(played, 2.3)), { focus: "mix", transcribe: true });
+  const heard = analysis.notes!;
+  const found = played.filter(([time]) => heard.some((note) => Math.abs(note.time - time) < 0.03)).length;
+  assert.ok(found >= played.length - 1, `found ${found} of ${played.length}: ${JSON.stringify(heard.map((note) => [note.time, note.midi]))}`);
+  assert.ok(heard.length <= played.length + 1, "no ghost notes");
+});
