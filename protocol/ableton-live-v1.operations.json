@@ -8756,6 +8756,24 @@
       "minLength": 1,
       "maxLength": 256
      },
+     "alsoTrackRefs": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 256
+      }
+     },
+     "alsoTrackIdentities": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 256
+      }
+     },
      "outputSafety": {
       "type": "object",
       "properties": {
@@ -8843,6 +8861,24 @@
       ],
       "minLength": 1,
       "maxLength": 256
+     },
+     "alsoTrackRefs": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 256
+      }
+     },
+     "alsoTrackIdentities": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 256
+      }
      },
      "outputSafety": {
       "type": "object",
