@@ -44,11 +44,11 @@ For a **completed successful run at the intended exact commit**, use new empty
 download directories (GitHub CLI access required):
 
 ```sh
-gh run view "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run view "$RUN_ID" --repo user1303836/kumi \
   --json headSha,status,conclusion,url
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --name exact-local-candidate --dir "$CANDIDATE_DIR"
-gh run download "$RUN_ID" --repo user1303836/ableton-mcp-beyond \
+gh run download "$RUN_ID" --repo user1303836/kumi \
   --pattern 'candidate-verification-*' --dir "$EVIDENCE_DIR"
 ```
 

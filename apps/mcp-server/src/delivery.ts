@@ -1,6 +1,6 @@
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, versions } from "node:process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -208,7 +208,23 @@ export function secureWindowsDirectory(path: string): void {
   }
 }
 
-export function configForBridge(entrypoint: string, bridge: BridgeConfig["bridge"], nodeCommand = process.execPath, configPath?: string, validateDiagnosticsDestination = true): BridgeConfig {
+/**
+ * The Node command written into MCP client configuration. `process.execPath` resolves symlinks,
+ * which on Homebrew yields a versioned Cellar path that disappears on the next `brew upgrade node`;
+ * prefer an absolute PATH entry (e.g. /opt/homebrew/bin/node) that is currently the same binary.
+ */
+export function stableNodeCommand(env: NodeJS.ProcessEnv = process.env, execPath = process.execPath): string {
+  let running: string;
+  try { running = realpathSync(execPath); } catch { return execPath; }
+  for (const directory of (env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
+    const candidate = join(directory, platform === "win32" ? "node.exe" : "node");
+    try { if (realpathSync(candidate) === running) return candidate; } catch { /* not on this PATH entry */ }
+  }
+  return execPath;
+}
+
+export function configForBridge(entrypoint: string, bridge: BridgeConfig["bridge"], nodeCommand = stableNodeCommand(), configPath?: string, validateDiagnosticsDestination = true): BridgeConfig {
   if (Object.keys(bridge).some((key) => !["host", "port", "secretFile", "timeoutMs", "realtimePort", "diagnostics"].includes(key))) throw new Error("unsupported bridge configuration fields");
   if (!isAbsolute(entrypoint)) throw new Error("entrypoint must be an absolute path");
   if (!Number.isInteger(bridge.port) || bridge.port < 1 || bridge.port > 65_535) throw new Error("bridge port must be between 1 and 65535");
@@ -277,7 +293,7 @@ function parseBridgeConfig(value: unknown): BridgeConfig {
   return config;
 }
 
-export function configForEntrypoint(entrypoint: string, nodeCommand = process.execPath): ServerConfig {
+export function configForEntrypoint(entrypoint: string, nodeCommand = stableNodeCommand()): ServerConfig {
   if (!isAbsolute(entrypoint)) throw new Error("entrypoint must be an absolute path");
   if (typeof nodeCommand !== "string" || nodeCommand.length === 0) throw new Error("node command must be a non-empty string");
   return { version: 1, server: { command: nodeCommand, args: [entrypoint] } };

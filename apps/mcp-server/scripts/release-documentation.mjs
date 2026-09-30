@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, isAbsolute, posix, relative, resolve } from "node:path";
 
 export const releaseDocumentation = [
-  ["README.md", "README.md"],
+  ["apps/mcp-server/README.md", "README.md"],
   ["docs/en/USER_GUIDE.md", "USER_GUIDE.md"],
   ["docs/en/USER_JOURNEYS.md", "USER_JOURNEYS.md"],
   ["docs/en/OPERATIONS.md", "OPERATIONS.md"],
@@ -19,8 +19,8 @@ export const releaseDocumentation = [
   ["docs/en/CAPABILITY_MATRIX.md", "CAPABILITY_MATRIX.md"],
 ];
 
-const REPOSITORY_WEB = "https://github.com/user1303836/ableton-mcp-beyond";
-const REPOSITORY_RAW = "https://raw.githubusercontent.com/user1303836/ableton-mcp-beyond";
+const REPOSITORY_WEB = "https://github.com/user1303836/kumi";
+const REPOSITORY_RAW = "https://raw.githubusercontent.com/user1303836/kumi";
 const mappedDocuments = new Map(releaseDocumentation);
 
 function splitTarget(target) {

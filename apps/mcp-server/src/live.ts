@@ -121,7 +121,9 @@ export interface DrumPad { ref: LiveRef; parentRef: LiveRef; index: number; name
 export interface Device { ref: LiveRef; parentRef?: LiveRef; name: string; kind: "instrument" | "audio-effect" | "midi-effect" | "plugin" | "rack" | "device"; parameters: Parameter[]; objectIdentity?: string; enabled?: boolean; className?: string; canHaveChains?: boolean | null; canHaveDrumPads?: boolean | null; chains?: DeviceChain[]; drumPads?: DrumPad[]; macros?: { ref: LiveRef; objectIdentity?: string; name: string; value: unknown }[]; variationCount?: number; chainSelector?: unknown; view?: { isCollapsed?: boolean | null }; latencySamples?: number | null; latencyMs?: number | null; parameterBank?: number | null; comparison?: { capability?: boolean | null; activeSide?: number | null }; returnChains?: LiveRef[]; visibleMacroCount?: number | null; drift?: { modSources?: string[] | null; modTargets?: string[] | null; pitchBendRange?: number | null; voiceCount?: number | null; voiceMode?: number | null; voiceCountList?: string[] | null; voiceModeList?: string[] | null }; eq8?: { editMode?: number | null; globalMode?: number | null; oversample?: boolean | null; selectedBand?: number | null }; hybridReverb?: { irCategory?: string | null; irFile?: string | null; irCategoryList?: string[] | null; irFileList?: string[] | null; attack?: number | null; decay?: number | null; size?: number | null }; meld?: { engine?: number | null; unison?: number | null; monoPoly?: boolean | null; polyphony?: number | null }; drumCell?: { gain?: number | null }; looper?: { overdubAfterRecord?: boolean | null; recordLengthIndex?: number | null; loopLength?: number | null; tempo?: number | null; state?: number | null }; plugin?: { presets?: string[] | null; selectedPresetIndex?: number | null; isEditorOpen?: boolean | null }; maxDevice?: { audioIns?: string[] | null; audioOuts?: string[] | null; midiIns?: string[] | null; midiOuts?: string[] | null }; selectedVariationIndex?: number | null; macroMapped?: boolean[] | null; rackView?: { selectedChainRef?: LiveRef | null; selectedPadIndex?: number | null; padScrollPosition?: number | null; showChainDevices?: boolean | null }; }
 export interface Clip { ref: LiveRef; objectIdentity?: string; name: string; kind: "midi" | "audio"; start: number; length: number; notes: Note[]; notesRevision?: string; warp: boolean; takes: string[]; automation: AutomationPoint[]; envelopes?: Record<string, AutomationPoint[]>; isAudio?: boolean | null; gain?: number | null; pitchCoarse?: number | null; pitchFine?: number | null; warpMode?: number | null; warping?: boolean | null; fadeInLength?: number | null; fadeOutLength?: number | null; availableAudioFields?: string[]; loopStart?: number | null; loopEnd?: number | null; filePath?: string | null; muted?: boolean | null; colorIndex?: number | null; looping?: boolean | null; isTakeLaneClip?: boolean | null; groove?: { ref: LiveRef; name: string } | null; hasGroove?: boolean | null; launchMode?: number | null; launchQuantization?: number | null; legato?: boolean | null; playingPosition?: number | null; isPlaying?: boolean | null; isTriggered?: boolean | null; isRecording?: boolean | null; ramMode?: boolean | null; signatureNumerator?: number | null; signatureDenominator?: number | null; velocityAmount?: number | null; willRecordOnStart?: boolean | null; fireButtonState?: boolean | null; endTime?: number | null; availableWarpModes?: number[] | null; sampleLength?: number | null; warpMarkers?: Array<{ beatTime: number; sampleTime: number }> | null; clipView?: { gridQuantization?: number | null; gridIsTriplet?: boolean | null }; }
 export interface RoutingState { inputType: string | null; inputSubRouting: string | null; outputType: string | null; outputSubRouting: string | null; availableInputTypes: number; availableInputChannels: number; availableOutputTypes: number; availableOutputChannels: number; }
-export interface MixerState { volume: number | null; pan: number | null; cueVolume: number | null; mute: boolean | null; solo: boolean | null; sends: (number | null)[]; volumeRef: LiveRef | null; volumeIdentity?: string | null; panRef: LiveRef | null; panIdentity?: string | null; cueRef: LiveRef | null; cueIdentity?: string | null; sendRefs: LiveRef[]; sendIdentities?: string[]; mixerIdentity?: string; trackActivator?: boolean; crossfader?: number; panningLeft?: number; panningRight?: number; trackActivatorRef?: LiveRef | null; crossfaderRef?: LiveRef | null; crossfadeAssign?: number | null; panningMode?: number | null; panningLeftRef?: LiveRef | null; panningRightRef?: LiveRef | null; songTempoRef?: LiveRef | null; }
+export interface MixerState { volume: number | null; pan: number | null; cueVolume: number | null; mute: boolean | null; solo: boolean | null; sends: (number | null)[];
+  /** Live's own text for each value ("-3.2 dB", "25L"), when the adapter provides it. */
+  volumeDisplay?: string | null; panDisplay?: string | null; cueVolumeDisplay?: string | null; sendDisplays?: (string | null)[]; volumeRef: LiveRef | null; volumeIdentity?: string | null; panRef: LiveRef | null; panIdentity?: string | null; cueRef: LiveRef | null; cueIdentity?: string | null; sendRefs: LiveRef[]; sendIdentities?: string[]; mixerIdentity?: string; trackActivator?: boolean; crossfader?: number; panningLeft?: number; panningRight?: number; trackActivatorRef?: LiveRef | null; crossfaderRef?: LiveRef | null; crossfadeAssign?: number | null; panningMode?: number | null; panningLeftRef?: LiveRef | null; panningRightRef?: LiveRef | null; songTempoRef?: LiveRef | null; }
 export interface ClipSlot { ref: LiveRef; parentRef: LiveRef; objectIdentity?: string; sceneIndex: number; clipRef?: LiveRef | null; empty: boolean; colorIndex?: number | null; controlsOtherClips?: boolean | null; hasStopButton?: boolean | null; isGroupSlot?: boolean | null; playingStatus?: number | null; willRecordOnStart?: boolean | null; fireButtonState?: boolean | null; }
 export interface Track { ref: LiveRef; objectIdentity?: string; name: string; kind: "audio" | "midi" | "group" | "return" | "main" | "master" | "regular"; volume: number; pan: number; mute: boolean; solo: boolean; armed: boolean | null; monitoringState?: LiveMonitoringState; playingSlotIndex?: number | null; firedSlotIndex?: number | null; clips: Clip[]; clipSlots?: ClipSlot[]; mixer?: MixerState; routing?: RoutingState; devices: Device[]; sends: number[]; input?: string; output?: string; takeLanes?: TakeLane[]; groupTrackRef?: LiveRef | null; isVisible?: boolean | null; isSelected?: boolean | null; isFrozen?: boolean | null; foldState?: boolean | null; implicitArm?: boolean | null; backToArranger?: boolean | null; mutedViaSolo?: boolean | null; colorIndex?: number | null; color?: number | null; inputMeterLeft?: number | null; inputMeterRight?: number | null; inputMeterLevel?: number | null; outputMeterLeft?: number | null; outputMeterRight?: number | null; outputMeterLevel?: number | null; performanceImpact?: number | null; view?: { selectedDeviceRef?: LiveRef | null; deviceInsertMode?: number | null; isCollapsed?: boolean | null }; }
 export interface TakeLane { ref: LiveRef; objectIdentity?: string; parentRef?: LiveRef; trackRef?: LiveRef; name: string; index: number; clips: Clip[]; }
@@ -148,7 +150,7 @@ export type LiveOperation =
   | "arrangement.clip.create" | "arrangement.clip.delete" | "arrangement.clip.move" | "arrangement.audio-clip.create" | "arrangement.automation.read" | "arrangement.automation.create" | "arrangement.automation.delete" | "arrangement.automation.point.insert" | "arrangement.automation.point.delete"
   | "audio.capture.cleanup" | "audio.capture.emergency-stop" | "audio.capture.inspect" | "audio.capture.start" | "audio.capture.status" | "audio.capture.stop" | "audio.clip.set" | "audio.warp-marker.read" | "audio.warp-marker.add" | "audio.warp-marker.move" | "audio.warp-marker.delete" | "audio.take-lane.read" | "audio.comp.read"
   | "automation.envelope.clear" | "automation.envelope.create" | "automation.envelope.delete" | "automation.envelope.read" | "automation.point.delete" | "automation.point.insert"
-  | "browser.inspect" | "browser.load" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
+  | "browser.inspect" | "browser.load" | "ownership.settle" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "device.parameters.set" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
   | "application.dialog" | "clip.view.set" | "device.bank.set" | "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "looper.action" | "looper.set" | "meld.set" | "plugin.set" | "simpler.replace-sample" | "device.comparison.save-to-slot" | "device.delete" | "device.enable" | "device.insert" | "device.move" | "device.parameter.set" | "device.rename" | "device.view.set" | "observe.poll" | "observe.subscribe" | "observe.unsubscribe" | "parameter.re-enable-automation" | "selection.set" | "song.view.set"
   | "chain-mixer.set" | "compressor.sidechain.set" | "device-io.set" | "locator.add" | "locator.delete" | "locator.jump" | "locator.jump-to" | "locator.rename" | "mixer.extended.set" | "mixer.set" | "note.add" | "note.add-batch" | "note.delete" | "note.duplicate" | "note.quantize" | "note.read-by-id" | "note.read-selected" | "note.update"
   | "project.bounce" | "project.collect" | "project.export" | "project.new" | "project.open" | "project.save" | "project.save-as"
@@ -178,6 +180,12 @@ export interface AsyncLiveAdapter extends LiveAdapter {
   close(): Promise<void>;
 }
 
+/** A mutation the bridge refused before dispatching it to Live (at its authority preflight or
+ * prepare, or for lacking cleanup ownership): nothing in Live changed. */
+export class LiveMutationNotDispatchedError extends Error {
+  public constructor(message: string) { super(message); this.name = "LiveMutationNotDispatchedError"; }
+}
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const ref = (kind: LiveObjectKind, id: string): LiveRef => `${kind}:${id}`;
 const simulatorCanonical = (value: unknown): string => {
@@ -187,6 +195,8 @@ const simulatorCanonical = (value: unknown): string => {
   throw new Error("unsupported simulator authority value");
 };
 const simulatorRevision = (value: unknown): string => createHash("sha256").update(simulatorCanonical(value)).digest("hex");
+/** A created clip's fingerprint, as the host and the Remote Script take it: its content, not its playback state. */
+const clipRevision = (row: unknown): string => simulatorRevision(withoutPlaybackState(row));
 
 function createSimulatorState(): LiveSnapshot {
   const initialNotes: Note[] = [{ pitch: 36, start: 0, duration: 0.25, velocity: 110, channel: 1, id: 1, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 }];
@@ -212,7 +222,39 @@ function createSimulatorState(): LiveSnapshot {
   };
 }
 
-export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
+// Selection, arm, meters, playback status and view change without anyone editing a track; fingerprints
+// of created tracks ignore them so undo and cleanup are not refused for nothing. Mirrors the Remote Script.
+const VOLATILE_TRACK_FIELDS = new Set(["armed", "implicitArm", "isSelected", "isVisible", "foldState", "view", "playingSlotIndex", "firedSlotIndex", "backToArranger", "mutedViaSolo", "performanceImpact", "inputMeterLeft", "inputMeterRight", "inputMeterLevel", "outputMeterLeft", "outputMeterRight", "outputMeterLevel"]);
+const VOLATILE_SLOT_FIELDS = new Set(["playingStatus", "willRecordOnStart", "fireButtonState"]);
+/** How many routing choices a track offers depends on the other tracks (a new MIDI track is a new MIDI source), not on the track. */
+const VOLATILE_ROUTING_FIELDS = new Set(["availableInputTypes", "availableInputChannels", "availableOutputTypes", "availableOutputChannels"]);
+/** A clip's playback state moves while the Set plays (its position every tick): content fingerprints
+ * of clips, and of the tracks and scenes that hold them, leave it out, so edits and undo work while the
+ * song plays. Mirrors _VOLATILE_CLIP_FIELDS in the Remote Script, which fingerprints the same way. */
+const VOLATILE_CLIP_FIELDS = new Set(["playingPosition", "isPlaying", "isTriggered", "fireButtonState", "willRecordOnStart"]);
+export function withoutPlaybackState<T>(value: T, depth = 0): T {
+  if (depth > 64) return value;
+  if (Array.isArray(value)) return value.map((item) => withoutPlaybackState(item, depth + 1)) as unknown as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !VOLATILE_CLIP_FIELDS.has(key)).map(([key, item]) => [key, withoutPlaybackState(item, depth + 1)])) as T;
+}
+export function ownedTrackFingerprintRow(track: Track): Record<string, unknown> {
+  const keep = (row: object, volatile: Set<string>) => Object.fromEntries(Object.entries(row).filter(([key]) => !volatile.has(key)));
+  const row = keep(track, VOLATILE_TRACK_FIELDS);
+  if (track.routing && typeof track.routing === "object") row.routing = keep(track.routing, VOLATILE_ROUTING_FIELDS);
+  return withoutPlaybackState({ ...row, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null).map((slot) => keep(slot, VOLATILE_SLOT_FIELDS)) });
+}
+
+/** A device row for ownership checks: parameter edit counters and a rack's view (UI selection) are not content. */
+export function ownedDeviceFingerprintRow(row: unknown): unknown {
+  if (Array.isArray(row)) return row.map(ownedDeviceFingerprintRow);
+  if (row === null || typeof row !== "object") return row;
+  return Object.fromEntries(Object.entries(row)
+    .filter(([key]) => key !== "revision" && !(key === "view" && "canHaveChains" in row))
+    .map(([key, value]) => [key, ownedDeviceFingerprintRow(value)]));
+}
+
+export const SIMULATOR_OPERATIONS = ["status", "snapshot", "discover", "get", "reconnect", "session.playback", "transport.set", "tempo.set", "session.audition-launch", "session.audition-stop", "session.emergency-stop", "session.clip-launch", "session.clip-stop", "clip.create", "clip.delete", "track.create", "track.delete", "track.rename", "track.create-return", "track.delete-return", "track.duplicate", "scene.duplicate", "track.view.set", "track.select-instrument", "track.set", "scene.create", "scene.delete", "scene.rename", "scene.set", "scene.fire-selected", "clip.rename", "device.rename", "locator.rename", "scene.capture", "note.add", "note.add-batch", "note.update", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "song.read", "song.set", "song.time-convert", "transport.action", "session.capture-midi", "device.parameter.set", "clip.duplicate", "clip.move", "clip.set", "clip.action", "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "session.audio-clip.create", "take-lane.create", "take-lane.rename", "take-lane.clip.create", "take-lane.audio-clip.create", "audio.take-lane.read", "audio.comp.read", "arrangement.automation.read", "tuning.read", "tuning.set", "groove.read", "groove.set", "groove.edit", "chain.set", "drum-pad.set", "drum-pad.delete-all-chains", "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "rack.set", "rack.action", "rack.view.set", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add", "audio.warp-marker.move", "audio.warp-marker.delete", "mixer.set", "mixer.extended.set", "chain-mixer.set", "device-io.set", "compressor.sidechain.set", "automation.envelope.read", "automation.envelope.create", "automation.envelope.delete", "automation.envelope.clear", "automation.point.insert", "automation.point.delete", "device.insert", "device.delete", "device.enable", "device.move", "device.bank.set", "parameter.re-enable-automation", "device.comparison.save-to-slot", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action", "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "observe.subscribe", "observe.poll", "observe.unsubscribe", "selection.set", "song.view.set", "clip.view.set", "device.view.set", "application.dialog", "browser.search", "browser.inspect", "browser.load", "ownership.settle", "browser.roots", "routing.set", "recording.session", "recording.arrangement", "performance.read", "view.set", "view.control"] as const;
 
 export class DeterministicLiveSimulator implements LiveAdapter {
   private state = createSimulatorState();
@@ -222,7 +264,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
 
   private structureCreatedFingerprint(kind: "track" | "scene", reference: LiveRef): string {
     const snapshot = this.snapshot();
-    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = { ...track, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null) }; const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return simulatorRevision({ track: ownedTrack, arrangementClips }); }
+    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = ownedTrackFingerprintRow(track); const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return simulatorRevision({ track: ownedTrack, arrangementClips }); }
     const scene = snapshot.scenes.find((row) => row.ref === reference); if (!scene) throw new Error("created scene fingerprint is unavailable"); const sceneRow = scene as unknown as Record<string, unknown>; const sceneIdentity = { ref: scene.ref, parentRef: sceneRow.parentRef ?? null, objectIdentity: scene.objectIdentity ?? null, name: scene.name, triggerable: sceneRow.triggerable ?? null };
     const contents = snapshot.tracks.map((track) => { const slot = track.clipSlots?.find((row) => row.sceneIndex === scene.index); const clip = slot?.clipRef ? track.clips.find((row) => row.ref === slot.clipRef) : undefined; const slotRow = slot as unknown as Record<string, unknown> | undefined; const ownedSlot = slot ? { ref: slot.ref, parentRef: slot.parentRef ?? null, trackRef: slotRow?.trackRef ?? null, objectIdentity: slot.objectIdentity ?? null, clipRef: slot.clipRef ?? null, empty: slot.empty } : null; return { trackRef: track.ref, trackIdentity: track.objectIdentity ?? null, slot: ownedSlot, clip: clip ?? null }; });
     return simulatorRevision({ scene: sceneIdentity, contents });
@@ -299,7 +341,14 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     const recordingAuthority = (): void => {
       if (typeof args.expectedSessionRecord !== "boolean" || typeof args.expectedArrangementRecord !== "boolean" || args.expectedSessionRecord !== this.state.playback.transport.sessionRecord || args.expectedArrangementRecord !== this.state.playback.transport.arrangementRecord) throw new Error("recording state changed since preview");
       if (!args.outputSafety || typeof args.outputSafety !== "object" || (args.outputSafety as { safe?: unknown }).safe !== true || !["string"].includes(typeof (args.outputSafety as { provenance?: unknown }).provenance) || ["", "unknown", "simulator"].includes(String((args.outputSafety as { provenance?: unknown }).provenance))) throw new Error("authoritative output safety is required");
-      if (args.action === "start") { const destination = this.findTrack(objectRef("destinationTrackRef")); const armed = this.state.tracks.filter((track) => track.armed === true); if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || armed.length !== 1 || armed[0] !== destination) throw new Error("recording destination identity must be the only armed track"); }
+      if (args.action === "start") {
+        const destination = this.findTrack(objectRef("destinationTrackRef")); const armed = this.state.tracks.filter((track) => track.armed === true);
+        // Tracks recorded alongside: each armed, and together with the destination exactly the armed ones.
+        const alsoRefs = Array.isArray(args.alsoTrackRefs) ? args.alsoTrackRefs as LiveRef[] : []; const alsoIdentities = Array.isArray(args.alsoTrackIdentities) ? args.alsoTrackIdentities : [];
+        const also = alsoRefs.map((ref) => this.findTrack(ref));
+        if (also.some((track, index) => !track || track.objectIdentity !== alsoIdentities[index] || track.armed !== true)) throw new Error("a track recorded alongside changed identity or is not armed");
+        if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || armed.length !== 1 + also.length || !armed.every((track) => track === destination || also.includes(track))) throw new Error(also.length ? "recording tracks must be exactly the armed ones" : "recording destination identity must be the only armed track");
+      }
       else if (args.destinationTrackRef !== null || args.destinationTrackIdentity !== null) throw new Error("recording stop destination authority must be null");
     };
     switch (operation) {
@@ -377,7 +426,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const slot = { ref: ref("clip-slot", `${track.ref}:${sceneIndex}`), parentRef: track.ref, objectIdentity: `sim-object:clip-slot:${this.sequence}`, sceneIndex, clipRef: clip.ref, empty: false };
         track.clipSlots = [...(track.clipSlots ?? []), slot];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } });
-        return { captured: true, clips: [clip.ref], clipIdentities: [{ ref: clip.ref, objectIdentity: clip.objectIdentity, createdFingerprint: simulatorRevision(clip) }] };
+        return { captured: true, clips: [clip.ref], clipIdentities: [{ ref: clip.ref, objectIdentity: clip.objectIdentity, createdFingerprint: clipRevision(clip) }] };
       }
       case "scene.capture": {
         if (args.expectedStateRevision !== captureAuthorityRevision()) throw new Error("Session state changed since capture preview");
@@ -460,7 +509,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (!slot || !scene || args.expectedTrackIdentity !== track.objectIdentity || args.expectedSlotRef !== slot.ref || args.expectedSlotIdentity !== slot.objectIdentity || args.expectedSceneRef !== scene.ref || args.expectedSceneIdentity !== scene.objectIdentity || slot.clipRef) throw new Error("clip creation target identity changed since preview");
         const clipIdentity = `simulator:clip:clip-${track.clips.length + 1}-${this.sequence + 1}`;
         const clip: Clip = { ref: ref("clip", `clip-${track.clips.length + 1}-${this.sequence + 1}`), objectIdentity: clipIdentity, name: typeof args.name === "string" && args.name.length > 0 ? args.name : "New Clip", kind, start, length, notes: [], notesRevision: simulatorRevision([]), warp: false, takes: [], automation: [], isAudio: kind === "audio", gain: kind === "audio" ? 1 : null, pitchCoarse: kind === "audio" ? 0 : null, pitchFine: kind === "audio" ? 0 : null, warpMode: kind === "audio" ? 0 : null, loopStart: kind === "audio" ? start : null, loopEnd: kind === "audio" ? start + length : null, warping: kind === "audio" ? true : null, fadeInLength: kind === "audio" ? 0 : null, fadeOutLength: kind === "audio" ? 0 : null, availableAudioFields: kind === "audio" ? ["gain", "pitchCoarse", "pitchFine", "warpMode", "warping", "fadeInLength", "fadeOutLength", "loopStart", "loopEnd"] : [] };
-        track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false; this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } }); return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, createdFingerprint: simulatorRevision(clip) };
+        track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false; this.emit({ type: "object", ref: track.ref, payload: { operation, clip: structuredClone(clip) } }); return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, createdFingerprint: clipRevision(clip) };
       }
       case "clip.delete": {
         const clipRef = objectRef("ref");
@@ -541,7 +590,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           const device: Device = { ref: ref("device", `${found.chain.ref}:${found.chain.devices.length}`), parentRef: found.chain.ref, name, kind: name.toLowerCase().includes("rack") ? "rack" : "device", className: name, parameters: [], objectIdentity: `simulator:device:${this.sequence + 1}:${found.chain.ref}:${found.chain.devices.length}`, enabled: true };
           found.chain.devices.push(device);
           this.emit({ type: "object", ref: found.chain.ref, payload: { operation, device } });
-          return { ref: device.ref, objectIdentity: device.objectIdentity, name, index: found.chain.devices.length - 1, createdFingerprint: simulatorRevision(device) };
+          return { ref: device.ref, objectIdentity: device.objectIdentity, name, index: found.chain.devices.length - 1, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)) };
         }
         const track = this.findTrack(objectRef("trackRef"));
         if (!track || args.expectedTrackIdentity !== track.objectIdentity || simulatorCanonical(args.expectedSiblings) !== simulatorCanonical(track.devices.map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity })))) throw new Error("device insertion target changed since preview");
@@ -549,18 +598,26 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const index = args.index === undefined || args.index === null ? -1 : args.index;
         if (!Number.isInteger(index) || (index as number) < -1 || (index as number) > 256) throw new RangeError("device index is invalid");
         const device: Device = { ref: ref("device", `${track.ref}:${track.devices.length}`), parentRef: track.ref, name, kind: name.toLowerCase().includes("rack") ? "rack" : "device", className: name, parameters: [], objectIdentity: `simulator:device:${this.sequence + 1}:${track.ref}:${track.devices.length}`, enabled: true, canHaveChains: name.toLowerCase().includes("rack"), canHaveDrumPads: name.toLowerCase().includes("drum rack") };
-        if (device.canHaveDrumPads) device.drumPads = Array.from({ length: 16 }, (_, padIndex) => ({ ref: ref("drum_pad", `${device.ref}:${padIndex}`), parentRef: device.ref, index: padIndex, name: `Pad ${padIndex + 1}`, mute: false, chains: [] }));
+        if (device.canHaveDrumPads) device.drumPads = Array.from({ length: 16 }, (_, padIndex) => ({ ref: ref("drum_pad", `${device.ref}:${padIndex}`), parentRef: device.ref, index: padIndex, name: `Pad ${padIndex + 1}`, mute: false, chains: [], note: 36 + padIndex, solo: false, objectIdentity: `${device.objectIdentity}:pad:${padIndex}` }));
         const position = (index as number) < 0 || (index as number) > track.devices.length ? track.devices.length : index as number;
         device.ref = ref("device", `${track.ref}:${position}`);
+        // Like Live, a new Simpler can take its sample in the same step.
+        if (typeof args.samplePath === "string") (device as Device & { samplePath?: string }).samplePath = args.samplePath;
         track.devices.splice(position, 0, device);
         this.emit({ type: "object", ref: track.ref, payload: { operation, device } });
-        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(device) };
+        return { ref: device.ref, objectIdentity: device.objectIdentity, name: device.name, index: position, createdFingerprint: simulatorRevision(ownedDeviceFingerprintRow(device)), ...(typeof args.samplePath === "string" ? { samplePath: args.samplePath } : {}) };
       }
       case "device.delete": {
         const deviceRef = objectRef("ref"); const expectedIdentity = stringArg("expectedObjectIdentity"); const expectedOwnerRef = objectRef("expectedOwnerRef"); const expectedOwnerIdentity = stringArg("expectedOwnerIdentity");
         for (const track of this.state.tracks) {
-          const index = track.devices.findIndex((device) => device.ref === deviceRef && device.objectIdentity === expectedIdentity && device.parentRef === expectedOwnerRef && track.objectIdentity === expectedOwnerIdentity && args.expectedTrackRef === track.ref && args.expectedTrackIdentity === track.objectIdentity);
-          if (index >= 0) { requireDeviceSiblings(track.devices); track.devices.splice(index, 1); this.emit({ type: "object", ref: track.ref, payload: { operation, ref: deviceRef } }); return { deleted: deviceRef }; }
+          if (args.expectedTrackRef !== track.ref || args.expectedTrackIdentity !== track.objectIdentity) continue;
+          // The device's owner: the track, or a chain of a rack on it at any depth.
+          const owners: Array<{ ref: LiveRef; objectIdentity?: string; devices: Device[] }> = [{ ref: track.ref, objectIdentity: track.objectIdentity, devices: track.devices }];
+          for (let at = 0; at < owners.length && at < 4096; at++) for (const device of owners[at]!.devices) for (const chain of device.chains ?? []) owners.push({ ref: chain.ref, objectIdentity: chain.objectIdentity, devices: chain.devices });
+          for (const owner of owners) {
+            const index = owner.devices.findIndex((device) => device.ref === deviceRef && device.objectIdentity === expectedIdentity && device.parentRef === expectedOwnerRef && owner.ref === expectedOwnerRef && owner.objectIdentity === expectedOwnerIdentity);
+            if (index >= 0) { requireDeviceSiblings(owner.devices); owner.devices.splice(index, 1); this.emit({ type: "object", ref: owner.ref, payload: { operation, ref: deviceRef } }); return { deleted: deviceRef }; }
+          }
         }
         throw new Error("unknown device reference");
       }
@@ -633,12 +690,28 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
       case "browser.inspect": {
         const itemId = stringArg("itemId"); const item = this.browserCatalog().find((candidate) => candidate.id === itemId);
+        // Like Live's Browser once it has indexed the User Library: files there are items.
+        if (!item && itemId.startsWith("user_library/")) return { id: itemId, objectIdentity: `simulator:browser:${itemId}`, name: itemId.split("/").at(-1)!, category: "user_library", path: itemId, isDevice: false };
         if (!item) throw new Error("browser item is not present"); return structuredClone(item);
+      }
+      case "ownership.settle": {
+        // The simulator's devices are whole when made; the settled state is the one named.
+        const device = this.findDevice(objectRef("ref"));
+        if (!device || device.objectIdentity !== args.expectedObjectIdentity || typeof args.expectedFingerprint !== "string") throw new Error("ownership settle identity changed");
+        return { settled: true, fingerprint: args.expectedFingerprint };
       }
       case "browser.load": {
         const itemId = stringArg("itemId"); const item = this.browserCatalog().find((candidate) => candidate.id === itemId);
         if (!item || !item.isDevice || item.name !== args.expectedName || item.objectIdentity !== args.expectedItemIdentity) throw new Error("browser item identity is not an exact loadable device");
         const name = item.name; const track = this.findTrack(objectRef("trackRef"));
+        if (args.chainRef !== undefined && args.chainRef !== null) {
+          // Into a rack's chain: the chain's devices are the siblings, and its identity is checked too.
+          const found = this.findChain(args.chainRef as LiveRef);
+          if (!track || !found || args.expectedTrackIdentity !== track.objectIdentity || args.expectedChainIdentity !== found.chain.objectIdentity) throw new Error("browser target chain changed since preview");
+          if (item.category === "instruments" && found.chain.devices.some((device) => device.kind === "instrument")) throw new Error("this chain already has an instrument, which Live would replace; add another chain for it");
+          const inserted = this.invoke({ operation: "device.insert", args: { trackRef: track.ref, chainRef: found.chain.ref, deviceName: name, expectedTrackIdentity: track.objectIdentity, expectedSiblings: args.expectedSiblings } }) as { ref: LiveRef; objectIdentity: string; createdFingerprint?: string };
+          return { loaded: true, deviceRef: inserted.ref, deviceObjectIdentity: inserted.objectIdentity, createdFingerprint: inserted.createdFingerprint };
+        }
         if (!track || args.expectedTrackIdentity !== track.objectIdentity || simulatorCanonical(args.expectedSiblings) !== simulatorCanonical(track.devices.map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity })))) throw new Error("browser target track or devices changed since preview");
         const inserted = this.invoke({ operation: "device.insert", args: { trackRef: track.ref, deviceName: name, expectedTrackIdentity: track.objectIdentity, expectedSiblings: args.expectedSiblings } }) as { ref: LiveRef; objectIdentity: string };
         return { loaded: true, deviceRef: inserted.ref, deviceObjectIdentity: inserted.objectIdentity, createdFingerprint: (inserted as { createdFingerprint?: string }).createdFingerprint };
@@ -647,7 +720,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const track = this.findTrack(objectRef("ref"));
         if (!track || args.expectedObjectIdentity !== track.objectIdentity) throw new Error("routing track identity changed since preview");
         if (args.expectedStateRevision !== routingStateRevision(track)) throw new Error("routing state changed since preview");
-        if (args.inputType !== undefined) track.routing = { ...(track.routing ?? {}), inputType: args.inputType as string | null } as RoutingState;
+        // As in Live, No Input has no sub-routing.
+        if (args.inputType !== undefined) track.routing = { ...(track.routing ?? {}), inputType: args.inputType as string | null, ...(args.inputType === "No Input" ? { inputSubRouting: null } : {}) } as RoutingState;
         if (args.inputSubRouting !== undefined) track.routing = { ...(track.routing ?? {}), inputSubRouting: args.inputSubRouting as string | null } as RoutingState;
         if (args.outputType !== undefined) track.routing = { ...(track.routing ?? {}), outputType: args.outputType as string | null } as RoutingState;
         if (args.outputSubRouting !== undefined) track.routing = { ...(track.routing ?? {}), outputSubRouting: args.outputSubRouting as string | null } as RoutingState;
@@ -776,7 +850,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           const clip: Clip = { ...structuredClone(found.clip), ref: ref("arrangement-clip", `${found.track.ref}:${args.arrangementPosition}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, start: args.arrangementPosition };
           this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: found.track.ref }];
           this.emit({ type: "object", ref: found.track.ref, payload: { operation, clip } });
-          return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+          return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
         }
         if (args.expectedTargetCollectionRevision !== null) throw new Error("Session duplication cannot carry Arrangement collection authority");
         const targetTrack = this.findTrack(objectRef("targetTrackRef"));
@@ -795,7 +869,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
           found.track.clips = found.track.clips.filter((candidate) => candidate !== found.clip); sourceSlot.clipRef = null; sourceSlot.empty = true;
         }
         this.emit({ type: "object", ref: targetTrack.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: simulatorRevision(clip) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, createdFingerprint: clipRevision(clip) };
       }
       case "arrangement.clip.create": {
         const track = this.findTrack(objectRef("trackRef"));
@@ -805,7 +879,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("arrangement-clip", `${track.ref}:${position}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, name, kind: "midi", start: position, length, notes: [], notesRevision: simulatorRevision([]), warp: false, takes: [], automation: [] };
         this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: track.ref }];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name, start: position, length, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name, start: position, length, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
       }
       case "arrangement.clip.delete": {
         const clipRef = objectRef("ref");
@@ -824,7 +898,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         if (typeof position !== "number" || !Number.isFinite(position) || position < 0) throw new RangeError("position is invalid");
         item.clip.start = position;
         this.emit({ type: "object", ref: clipRef, payload: { operation } });
-        return { ref: clipRef, objectIdentity: item.clip.objectIdentity, start: position, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clipRef)) };
+        return { ref: clipRef, objectIdentity: item.clip.objectIdentity, start: position, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clipRef)) };
       }
       case "arrangement.audio-clip.create": {
         const track = this.findTrack(objectRef("trackRef"));
@@ -837,7 +911,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("arrangement-clip", `${track.ref}:${position}`), objectIdentity: `simulator:arrangement-clip:${this.sequence + 1}`, name: clipName, kind: "audio", start: position, length: 4, notes: [], notesRevision: simulatorRevision([]), warp: true, takes: [], automation: [], filePath, isAudio: true, muted: false };
         this.state.arrangementClips = [...(this.state.arrangementClips ?? []), { clip, trackRef: track.ref }];
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length: clip.length, filePath, createdFingerprint: simulatorRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length: clip.length, filePath, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
       }
       case "clip.set": {
         const clip = this.findClip(objectRef("ref"));
@@ -931,17 +1005,17 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("clip", `${track.ref}:${sceneIndex}`), objectIdentity: `simulator:clip:${this.sequence + 1}`, name: (name as string | undefined) ?? filePath.split("/").pop() ?? "Audio Clip", kind: "audio", start: (sceneIndex as number) * 4, length: 4, notes: [], notesRevision: simulatorRevision([]), warp: true, takes: [], automation: [], isAudio: true, filePath, muted: false, warpMarkers: [{ beatTime: 1, sampleTime: 44100 }] };
         track.clips.push(clip); slot.clipRef = clip.ref; slot.empty = false;
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
-        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, filePath, createdFingerprint: simulatorRevision(clip) };
+        return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, length: clip.length, filePath, createdFingerprint: clipRevision(clip) };
       }
       case "clip.action": {
         const clip = this.findClip(objectRef("ref"));
         if (clip.objectIdentity !== args.expectedObjectIdentity) throw new Error("clip identity changed since preview");
         const clipAuthorityRevision = clip.ref.startsWith("arrangement-clip:") ? arrangementAuthorityRevision(clip.ref) : simulatorRevision(this.sessionClipAuthority(clip.ref));
         if (args.expectedAuthorityRevision !== clipAuthorityRevision) throw new Error("clip hierarchy changed since preview");
-        const clipStateRevision = simulatorRevision({ isPlaying: clip.isPlaying ?? null, playingPosition: clip.playingPosition ?? null, length: clip.length ?? null, loopStart: clip.loopStart ?? null, loopEnd: clip.loopEnd ?? null });
+        const clipStateRevision = simulatorRevision({ isPlaying: clip.isPlaying ?? null, length: clip.length ?? null, loopStart: clip.loopStart ?? null, loopEnd: clip.loopEnd ?? null });
         if (args.expectedStateRevision !== clipStateRevision) throw new Error("clip state changed since preview");
         const action = args.action;
-        if (["crop", "duplicate-loop", "duplicate-region"].includes(action as string) && args.expectedContentFingerprint !== simulatorRevision(clip)) throw new Error("clip content changed since preview");
+        if (["crop", "duplicate-loop", "duplicate-region"].includes(action as string) && args.expectedContentFingerprint !== simulatorRevision(withoutPlaybackState(clip))) throw new Error("clip content changed since preview");
         if (action === "crop") { clip.length = (clip.loopEnd ?? clip.length) - (clip.loopStart ?? 0); }
         else if (action === "duplicate-loop") { clip.length = clip.length + ((clip.loopEnd ?? clip.length) - (clip.loopStart ?? 0)); }
         else if (action === "duplicate-region") {
@@ -1070,7 +1144,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const clip: Clip = { ref: ref("take-lane-clip", `${found.lane.ref}:${position}`), objectIdentity: `simulator:take-lane-clip:${this.sequence + 1}`, name: clipName, kind: audio ? "audio" : "midi", start: position, length, notes: [], notesRevision: simulatorRevision([]), warp: audio, takes: [], automation: [], isAudio: audio, ...(audio ? { filePath } : {}), muted: false, isTakeLaneClip: true };
         found.lane.clips.push(clip);
         this.emit({ type: "object", ref: found.lane.ref, payload: { operation, clip } });
-        const result: Record<string, unknown> = { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length, createdFingerprint: simulatorRevision(clip) };
+        const result: Record<string, unknown> = { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length, createdFingerprint: clipRevision(clip) };
         if (audio) result.filePath = filePath;
         return result;
       }
@@ -1212,6 +1286,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (action === "stop") { transport.playing = false; this.state.set.playing = false; }
         else if (action === "force-link-beat-time") { if (typeof args.beatTime !== "number" || !Number.isFinite(args.beatTime)) throw new RangeError("beatTime is required for force-link-beat-time"); transport.position = args.beatTime; this.state.set.position = args.beatTime; }
         else if (action === "stop-all-clips") { for (const track of this.state.tracks) { track.playingSlotIndex = null; track.firedSlotIndex = null; } transport.playing = false; this.state.set.playing = false; }
+        else if (action === "back-to-arrangement") { for (const track of this.state.tracks) track.backToArranger = false; if (this.state.song) this.state.song.backToArranger = false; }
         else if (action === "scrub") { if (typeof args.beatTime !== "number" || !Number.isFinite(args.beatTime)) throw new RangeError("beatTime distance is required for scrub"); transport.position = (transport.position ?? 0) + args.beatTime; }
         else if (!["tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record"].includes(action as string)) throw new RangeError("transport action is invalid");
         this.state.playback.revision = `${this.epoch}:transport:${++this.sequence}`;
@@ -1545,6 +1620,21 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         this.emit({ type: "object", ref: pad.ref, payload: { operation } });
         return { changed: true, revision: ++this.sequence };
       }
+      case "drum-pad.load-sample": return this.loadDrumPadSample(args, operation);
+      case "drum-pad.load-samples": {
+        // In order; when one fails, the pads loaded before it are cleared again, as the Remote Script does.
+        const pads = args.pads;
+        if (!Array.isArray(pads) || pads.length < 1 || pads.length > 16) throw new Error("drum pad authority is invalid");
+        const loaded: Array<{ ref: LiveRef }> = [];
+        for (const [index, item] of pads.entries()) {
+          try { loaded.push(this.loadDrumPadSample(item as Record<string, unknown>, operation)); }
+          catch (error) {
+            for (const done of loaded.reverse()) { const found = this.findDrumPad(done.ref); if (found) found.pad.chains = []; }
+            throw new Error(`drum pad ${index + 1} of ${pads.length}: ${error instanceof Error ? error.message : "load failed"}`);
+          }
+        }
+        return { pads: loaded };
+      }
       case "drum-pad.delete-all-chains": {
         const found = this.findDrumPad(objectRef("ref"));
         if (!found) throw new Error("drum pad reference is stale or invalid");
@@ -1568,7 +1658,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         return { changed: true, revision: ++this.sequence };
       }
       case "rack.action": {
-        const device = this.state.tracks.flatMap((track) => track.devices).find((candidate) => candidate.ref === objectRef("ref"));
+        const device = this.findDevice(objectRef("ref"));
         if (!device || device.canHaveChains !== true) throw new Error("rack actions require a rack device");
         if (device.objectIdentity !== args.expectedObjectIdentity) throw new Error("rack identity changed since preview");
         const state = { visibleMacroCount: device.visibleMacroCount ?? null, selectedVariationIndex: device.selectedVariationIndex ?? null, variationCount: device.variationCount ?? null, macros: (device.macros ?? []).map((macro) => macro.objectIdentity), chains: (device.chains ?? []).map((chain) => chain.objectIdentity), drumPads: (device.drumPads ?? []).map((pad) => pad.objectIdentity) };
@@ -1588,7 +1678,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (action === "delete-variation") { device.variationCount = Math.max(0, (device.variationCount ?? 0) - 1); }
         else throw new RangeError("rack action is invalid");
         this.emit({ type: "object", ref: device.ref, payload: { operation } });
-        return { done: true, revision: ++this.sequence };
+        const inserted = action === "insert-chain" ? (device.chains ?? []).at(-1) : undefined;
+        return { done: true, revision: ++this.sequence, ...(inserted ? { chainRef: inserted.ref, chainObjectIdentity: inserted.objectIdentity } : {}) };
       }
       case "rack.view.set": {
         const device = this.state.tracks.flatMap((track) => track.devices).find((candidate) => candidate.ref === objectRef("ref"));
@@ -1826,15 +1917,23 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         return { deleted: ids.length };
       }
       case "device.parameter.set": {
-        const target = this.find(objectRef("ref")) as Parameter; const requested = args.value;
-        if (!target || typeof requested !== "number" || !Number.isFinite(requested) || requested < target.min || requested > target.max) throw new RangeError("parameter value is outside numeric bounds");
-        const currentAuthority = this.parameterAuthority(target.ref); const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, siblings: args.expectedSiblings };
-        if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
-        if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
-        const quantization = target.quantization ?? 0;
-        if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
-        if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");
-        this.set(target.ref, "value", requested); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
+        const target = this.checkedParameter(args);
+        // Live keeps parameter values as 32-bit floats: 0.3 comes back as 0.29999998.
+        this.set(target.ref, "value", Math.fround(args.value as number)); return { changed: true, ref: target.ref, property: "value", value: target.value, revision: target.revision ?? 1 };
+      }
+      case "device.parameters.set": {
+        // Every one checked first, then set in order; if one fails, the ones before it go back, as the Remote Script does.
+        const items = args.parameters;
+        if (!Array.isArray(items) || items.length < 1 || items.length > 64) throw new Error("parameter authority is invalid");
+        const shared = { expectedOwnerRef: args.expectedOwnerRef, expectedOwnerIdentity: args.expectedOwnerIdentity, expectedTrackRef: args.expectedTrackRef, expectedTrackIdentity: args.expectedTrackIdentity, expectedSiblings: args.expectedSiblings };
+        const targets = (items as Record<string, unknown>[]).map((item) => this.checkedParameter({ ...shared, ...item }));
+        if (new Set(targets.map((target) => target.ref)).size !== targets.length) throw new Error("parameter changes name the same parameter twice");
+        const priors: Array<[Parameter, number]> = [];
+        for (const [index, target] of targets.entries()) {
+          try { const prior = target.value; this.set(target.ref, "value", Math.fround((items[index] as Record<string, unknown>).value as number)); priors.push([target, prior]); }
+          catch (error) { for (const [parameter, value] of priors.reverse()) this.set(parameter.ref, "value", value); throw new Error(`parameter ${index + 1} of ${items.length}: ${error instanceof Error ? error.message : "change failed"}`); }
+        }
+        return { parameters: targets.map((target) => ({ ref: target.ref, value: target.value, revision: target.revision ?? 1 })) };
       }
       case "routing.set": {
         const track = this.findTrack(objectRef("ref"));
@@ -1844,7 +1943,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         this.emit({ type: "object", ref: track.ref, payload: { operation, input: track.input, output: track.output } }); return structuredClone(track);
       }
       case "browser.roots": {
-        const searchable = new Set(["instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"]);
+        const searchable = new Set(["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips", "sounds", "samples", "user_library", "user_folders", "current_project"]);
         const roots = ["instruments", "sounds", "samples", "user_library", "current_project", "legacy_libraries", "tunings"].map((name) => ({ name, binding: "unofficial-internal", searchable: searchable.has(name) }));
         const state = { roots, previewAvailable: false, bindingEvidence: "shape-probed on the connected build (Live simulator); undocumented Remote Script internals, version-specific" };
         return { ...state, revision: simulatorRevision(state) };
@@ -1875,7 +1974,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   reconnect(): LiveStatus { this.epoch += 1; this.state.playback.epoch = this.epoch; this.state.playback.revision = `${this.epoch}:reconnected`; this.emit({ type: "state", payload: { epoch: this.epoch, snapshot: this.snapshot() } }); return this.status(); }
   async snapshotAsync(): Promise<LiveSnapshot> { return this.snapshot(); }
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.state.tracks.flatMap((track) => track.devices) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
+    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
     return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
@@ -1936,12 +2035,33 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     { id: "instruments/Drum Rack", objectIdentity: "simulator:browser:instruments/Drum Rack", name: "Drum Rack", category: "instruments", path: "instruments/Drum Rack", isDevice: true },
     { id: "instruments/Analog", objectIdentity: "simulator:browser:instruments/Analog", name: "Analog", category: "instruments", path: "instruments/Analog", isDevice: true },
     { id: "instruments/Collision", objectIdentity: "simulator:browser:instruments/Collision", name: "Collision", category: "instruments", path: "instruments/Collision", isDevice: true },
+    { id: "instruments/Instrument Rack", objectIdentity: "simulator:browser:instruments/Instrument Rack", name: "Instrument Rack", category: "instruments", path: "instruments/Instrument Rack", isDevice: true },
+    { id: "audio_effects/Audio Effect Rack", objectIdentity: "simulator:browser:audio_effects/Audio Effect Rack", name: "Audio Effect Rack", category: "audio_effects", path: "audio_effects/Audio Effect Rack", isDevice: true },
     { id: "audio_effects/Utility", objectIdentity: "simulator:browser:audio_effects/Utility", name: "Utility", category: "audio_effects", path: "audio_effects/Utility", isDevice: true },
     { id: "audio_effects/Echo", objectIdentity: "simulator:browser:audio_effects/Echo", name: "Echo", category: "audio_effects", path: "audio_effects/Echo", isDevice: true },
     { id: "midi_effects/Arpeggiator", objectIdentity: "simulator:browser:midi_effects/Arpeggiator", name: "Arpeggiator", category: "midi_effects", path: "midi_effects/Arpeggiator", isDevice: true },
     { id: "drums/Kick Core", objectIdentity: "simulator:browser:drums/Kick Core", name: "Kick Core", category: "drums", path: "drums/Kick Core", isDevice: false },
   ]; }
   private findClipWithTrack(objectRef: LiveRef): { track: Track; clip: Clip } | undefined { for (const track of this.state.tracks) { const clip = track.clips.find((item) => item.ref === objectRef); if (clip) return { track, clip }; } return undefined; }
+  /** Every device in the Set, as Live's discovery lists them: each track's, then those in racks' chains. */
+  private allDevices(): Device[] {
+    const all: Device[] = [];
+    const visit = (devices: Device[], depth: number): void => { for (const device of devices) { all.push(device); if (depth < 8) for (const chain of device.chains ?? []) visit(chain.devices, depth + 1); } };
+    for (const track of this.state.tracks) visit(track.devices, 0);
+    return all;
+  }
+
+  /** A device anywhere: on a track, or in a rack's chain at any depth. */
+  private findDevice(reference: LiveRef): Device | undefined {
+    const pending = this.state.tracks.flatMap((track) => track.devices);
+    for (let at = 0; at < pending.length && at < 16_384; at++) {
+      const device = pending[at]!;
+      if (device.ref === reference) return device;
+      for (const chain of device.chains ?? []) pending.push(...chain.devices);
+    }
+    return undefined;
+  }
+
   private find(objectRef: LiveRef): Track | Clip | Device | Parameter | undefined { for (const track of this.state.tracks) { if (track.ref === objectRef) return track; const clip = track.clips.find((item) => item.ref === objectRef); if (clip) return clip; for (const lane of track.takeLanes ?? []) { const laneClip = lane.clips.find((item) => item.ref === objectRef); if (laneClip) return laneClip; } for (const device of track.devices) { if (device.ref === objectRef) return device; const parameter = device.parameters.find((item) => item.ref === objectRef); if (parameter) return parameter; } } return undefined; }
   private observeSequence = 0;
   private observeSubscriptions?: Map<string, { topics: Array<{ kind: string; ref?: string; revision: string }>; minIntervalMs: number; sequence: number; lastPollMs: number }>;
@@ -2023,6 +2143,42 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
     }
     return undefined;
+  }
+
+  /** device.parameter.set's checks for one parameter: the parameter they pass for. */
+  private checkedParameter(args: Record<string, unknown>): Parameter {
+    const reference = args.ref; const requested = args.value;
+    if (typeof reference !== "string" || !reference || reference.length > 256) throw new TypeError("ref must be a non-empty string");
+    const target = this.find(reference as LiveRef) as Parameter;
+    if (!target || typeof requested !== "number" || !Number.isFinite(requested) || requested < target.min || requested > target.max) throw new RangeError("parameter value is outside numeric bounds");
+    const currentAuthority = this.parameterAuthority(target.ref); const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, siblings: args.expectedSiblings };
+    if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
+    if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
+    const quantization = target.quantization ?? 0;
+    if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
+    if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");
+    return target;
+  }
+
+  /** Like Live: a chain with a Simpler holding the sample, on an empty pad. */
+  private loadDrumPadSample(args: Record<string, unknown>, operation: string) {
+    const reference = args.ref; const drumSampler = args.instrument === "Drum Sampler";
+    // A Drum Sampler comes from the preset the host wrote; a Simpler takes the staged sample itself.
+    const samplePath = drumSampler ? args.presetItemId : args.samplePath;
+    if (typeof reference !== "string" || !reference || reference.length > 256) throw new TypeError("ref must be a non-empty string");
+    if (typeof samplePath !== "string" || !samplePath || samplePath.length > 1024) throw new TypeError(drumSampler ? "presetItemId must be a non-empty string" : "samplePath must be a non-empty string");
+    const found = this.findDrumPad(reference as LiveRef);
+    if (!found) throw new Error("drum pad reference is stale or invalid");
+    const pad = found.pad;
+    if (pad.objectIdentity !== args.expectedObjectIdentity) throw new Error("drum pad identity changed since preview");
+    if (pad.chains.length) throw new Error("drum pad already has a sound; choose an empty pad");
+    const chainRef = ref("chain", `${pad.ref}:0`);
+    const chain = { ref: chainRef, parentRef: pad.ref, name: typeof args.name === "string" ? args.name : "Simpler", objectIdentity: `simulator:chain:${++this.sequence}`, devices: [] } as unknown as DeviceChain;
+    const device = { ref: ref("device", `${chainRef}:0`), parentRef: chainRef, name: drumSampler ? (typeof args.name === "string" ? args.name : "Drum Sampler") : "Simpler", kind: "instrument", className: drumSampler ? "DrumCell" : "OriginalSimpler", parameters: [], objectIdentity: `simulator:device:${++this.sequence}`, enabled: true, samplePath } as unknown as Device;
+    (chain as unknown as { devices: Device[] }).devices.push(device);
+    pad.chains.push(chain);
+    this.emit({ type: "object", ref: pad.ref, payload: { operation } });
+    return { ref: pad.ref, objectIdentity: pad.objectIdentity, chainIdentity: (chain as unknown as { objectIdentity: string }).objectIdentity, deviceIdentity: device.objectIdentity!, samplePath, route: drumSampler ? "preset" : "chain", tried: [] };
   }
 
   private findDrumPad(reference: LiveRef): { device: Device; pad: DrumPad } | undefined {

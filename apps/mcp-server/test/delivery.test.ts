@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { BRIDGE_DIAGNOSTICS_MAX_BYTES, NODE_ENGINE_RANGE, SUPPORTED_NODE_MAJORS, configForBridge, configForEntrypoint, diagnostics, generateSecret, installRemoteScript, isSupportedPlatform, migrateConfig, readAnyConfig, readConfig, readSecretFile, secureWindowsDirectory, supportedNodeMajor, unsupportedNodeMessage, writeBridgeReference, writeConfig, writeSecretFile } from "../src/delivery.js";
+import { BRIDGE_DIAGNOSTICS_MAX_BYTES, NODE_ENGINE_RANGE, SUPPORTED_NODE_MAJORS, configForBridge, configForEntrypoint, stableNodeCommand, diagnostics, generateSecret, installRemoteScript, isSupportedPlatform, migrateConfig, readAnyConfig, readConfig, readSecretFile, secureWindowsDirectory, supportedNodeMajor, unsupportedNodeMessage, writeBridgeReference, writeConfig, writeSecretFile } from "../src/delivery.js";
 import { npmExecutable } from "../src/platform.js";
 
 test("writes a versioned config and replaces it only with explicit force", () => {
@@ -238,4 +238,15 @@ test("diagnostic evidence cannot promote an authenticated fake bridge to real Li
   assert.match(source, /provenance === \"real-live\"/);
   assert.match(source, /adapterOperations: operations/);
   assert.match(source, /session-playback/);
+});
+
+test("client configuration names Node by a stable PATH entry, not a versioned install path", { skip: process.platform === "win32" }, () => {
+  const bin = mkdtempSync(join(tmpdir(), "ableton-mcp-stable-node-"));
+  symlinkSync(process.execPath, join(bin, "node"));
+  assert.equal(stableNodeCommand({ PATH: ["relative/bin", "/nonexistent-ableton-mcp", bin].join(":") }), join(bin, "node"));
+  assert.equal(stableNodeCommand({ PATH: "/nonexistent-ableton-mcp" }), process.execPath);
+  const other = mkdtempSync(join(tmpdir(), "ableton-mcp-other-node-"));
+  writeFileSync(join(other, "node"), "#!/bin/sh\n"); chmodSync(join(other, "node"), 0o755);
+  assert.equal(stableNodeCommand({ PATH: other }), process.execPath, "a different Node on PATH is never chosen");
+  assert.equal(configForEntrypoint("/abs/cli.js").server.command, stableNodeCommand());
 });

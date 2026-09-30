@@ -1,27 +1,32 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import {
-  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, liveCapabilitiesForOperations,
+  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, liveCapabilitiesForOperations,
   type AsyncLiveAdapter, type LiveDiscoveryKind, type LiveDiscoveryRequest, type LiveDiscoveryResult,
   type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus,
 } from "../live.js";
 import { LOOPBACK_PROTOCOL_VERSION, type RemoteBridgeRequest, type LoopbackResponse } from "../loopback.js";
 import { validateLiveOperationRequest, validateLiveOperationResult } from "../registry.js";
 
-const MAX_FRAME_BYTES = 1_048_576;
+const MAX_FRAME_BYTES = 4 * 1_048_576;
 const MAX_PENDING = 64;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
 const EVENT_TYPES = new Set(["transport", "object", "reset"]);
-export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect"]);
+// Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
+export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into
 // results) and later cleanup deletes can present them.
 const TRANSACTION_CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"]);
 const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"]);
+// Deletions of an existing object the producer previewed and confirmed (never an undo or a cleanup):
+// they carry explicitDeletion instead of a creating transaction's ownership token, and the Remote
+// Script checks the exact identity fences in their arguments. Mirrors _EXPLICIT_DELETIONS there.
+const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return"]);
 function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation); }
 const KIND_TO_WIRE: Readonly<Record<LiveDiscoveryKind, string>> = {
   set: "set", track: "track", "return-track": "return_track", "main-track": "main_track", scene: "scene",
@@ -42,7 +47,8 @@ type Pending = {
 type Hello = LoopbackResponse & { id: "hello"; result: { protocol: string; registryHash: string; maxDeadlineMs: number } };
 
 function canonical(value: unknown, depth = 0): string {
-  if (depth > 16) throw new Error("wire payload is too deeply nested");
+  // As deep as the Remote Script allows (racks nested in racks' chains): both ends sign the same text.
+  if (depth > 64) throw new Error("wire payload is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "string") { if (value.length > 16_384) throw new Error("wire string is too large"); return JSON.stringify(value); }
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("wire number is not finite"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
@@ -51,6 +57,27 @@ function canonical(value: unknown, depth = 0): string {
   throw new Error("unsupported wire value");
 }
 function mac(secret: string, value: unknown): string { const encoded = canonical(value); if (Buffer.byteLength(encoded) > MAX_FRAME_BYTES) throw new Error("wire payload is too large"); return createHmac("sha256", secret).update(encoded).digest("base64url"); }
+/**
+ * The Remote Script sends a loaded Drum Rack's chains in full once, on the rack, and each pad names
+ * its chains (`listedOnRack`). Pads point at the rack's rows again, the very same objects, so every
+ * reader sees a pad's devices as before while the wire carries them once.
+ */
+export function expandPadChains(value: unknown, depth = 0): void {
+  if (depth > 48 || !value || typeof value !== "object") return;
+  if (Array.isArray(value)) { for (const item of value) expandPadChains(item, depth + 1); return; }
+  const row = value as Record<string, unknown>;
+  for (const child of Object.values(row)) expandPadChains(child, depth + 1);
+  if (!Array.isArray(row.drumPads)) return;
+  const chains = new Map<unknown, unknown>((Array.isArray(row.chains) ? row.chains : []).filter((chain): chain is Record<string, unknown> => !!chain && typeof chain === "object").map((chain) => [chain.objectIdentity, chain]));
+  for (const pad of row.drumPads) {
+    if (!pad || typeof pad !== "object" || !Array.isArray((pad as { chains?: unknown }).chains)) continue;
+    const named = pad as { chains: unknown[] };
+    named.chains = named.chains.map((chain) => {
+      if (!chain || typeof chain !== "object" || (chain as { listedOnRack?: unknown }).listedOnRack !== true) return chain;
+      return chains.get((chain as { objectIdentity?: unknown }).objectIdentity) ?? { ...(chain as object), devices: [] };
+    });
+  }
+}
 function validEndpoint(endpoint: Endpoint): void {
   if ((endpoint.host !== "127.0.0.1" && endpoint.host !== "::1") || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65_535 || endpoint.secret.length < 32) throw new Error("remote script endpoint must use exact loopback address 127.0.0.1 or ::1 with a strong secret");
 }
@@ -125,7 +152,7 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   invoke(): never { throw new Error("remote adapter is asynchronous; use invokeAsync"); }
   subscribe(listener: (event: LiveEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   reconnect(): LiveStatus { throw new Error("remote adapter is asynchronous; use reconnectAsync"); }
-  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)) as Promise<LiveSnapshot>; }
+  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return snapshot; }) as Promise<LiveSnapshot>; }
   async discoverAsync(request: LiveDiscoveryRequest, context?: LiveOperationContext): Promise<LiveDiscoveryResult> {
     await this.ensureConnectedAsync(context);
     const wireKind = KIND_TO_WIRE[request.kind];
@@ -139,13 +166,28 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (request.cursor !== undefined) args.cursor = request.cursor;
     const operationId = request.kind === "session-playback" ? "session.playback" : "discover";
     const result = await this.requestAsync({ method: "discover", args }, operationId, context) as Record<string, unknown>;
+    expandPadChains(result);
     if (request.kind === "session-playback") return { epoch: result.epoch as number, items: [result], truncated: false, revision: result.revision as string, kind: request.kind };
     const translated = WIRE_TO_KIND.get(String(result.kind));
     if (!translated || translated !== request.kind) throw new Error("remote discovery returned an unexpected kind");
     return { ...(result as unknown as LiveDiscoveryResult), kind: translated };
   }
-  getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "get", ref }, "get", context)); }
+  getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "get", ref }, "get", context)).then((row) => { expandPadChains(row); return row; }); }
+  /** Live applies playhead moves on its next tick; operations that need the playhead somewhere answer
+   * "retry shortly" after moving it. Retry those (full authority chain each time) a few ticks later. */
   async invokeAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.invokeOnceAsync(invocation, context); }
+      catch (error) {
+        const retry = error instanceof Error && error.message.endsWith("retry shortly") && attempt < 10 && !context?.signal?.aborted
+          && (context?.deadlineMs === undefined || context.deadlineMs - Date.now() > 250);
+        if (!retry) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    }
+  }
+
+  private async invokeOnceAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown> {
     await this.ensureConnectedAsync(context);
     if (!this.cached.operations?.includes(invocation.operation)) throw new Error(`remote operation is not negotiated: ${invocation.operation}`);
     if (invocation.operation === "subscribe") {
@@ -154,14 +196,22 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
       return result;
     }
     if (!mutationAuthorityRequired(invocation.operation)) { const result = await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args }, invocation.operation, context); if (String(invocation.operation) === "session.reconnect") this.cleanupOwnership.clear(); return result; }
-    const argsDigest = createHash("sha256").update(canonical(invocation.args)).digest("hex");
+    // Arguments the wire or the registry refuses are refused here, before any authority is minted
+    // or anything reaches Live (an undefined field, a value outside the registry's bounds).
+    let argsDigest: string;
+    try { argsDigest = createHash("sha256").update(canonical(invocation.args)).digest("hex"); validateLiveOperationRequest(invocation.operation, invocation.args); }
+    catch (error) { throw new LiveMutationNotDispatchedError(error instanceof Error ? error.message : "remote mutation arguments are invalid"); }
     const baseIdempotencyKey = context?.idempotencyKey ?? randomBytes(18).toString("base64url");
     const transactionScope = context?.transactionId ?? randomBytes(18).toString("base64url");
     if (baseIdempotencyKey.length < 8 || baseIdempotencyKey.length > 128 || transactionScope.length < 8 || transactionScope.length > 128) throw new Error("remote mutation idempotency authority is invalid");
     const ownedCount = [...this.cleanupOwnership.values()].reduce((count, rows) => count + rows.size, 0); const reserve = invocation.operation === "session.capture-midi" ? 256 : 1;
     if (TRANSACTION_CREATIONS.has(invocation.operation) && ownedCount + reserve > 4096) throw new Error("remote cleanup ownership ledger is full");
-    const reference = typeof invocation.args.ref === "string" ? invocation.args.ref : undefined; let ownershipToken = TRANSACTION_DELETIONS.has(invocation.operation) && reference ? this.cleanupOwnership.get(transactionScope)?.get(reference) : undefined; let consumedMoveOwnership: { transactionId: string; reference: string } | undefined;
-    if (TRANSACTION_DELETIONS.has(invocation.operation) && !ownershipToken) throw new Error("remote destructive cleanup lacks transaction-owned authority");
+    // A deletion, or settling a device just made, carries the creating transaction's ownership token;
+    // an explicit deletion of an existing object carries its exact identity fences instead.
+    const explicitDeletion = EXPLICIT_DELETIONS.has(invocation.operation) && invocation.args.explicitDeletion === true;
+    const owned = (TRANSACTION_DELETIONS.has(invocation.operation) && !explicitDeletion) || invocation.operation === "ownership.settle";
+    const reference = typeof invocation.args.ref === "string" ? invocation.args.ref : undefined; let ownershipToken = owned && reference ? this.cleanupOwnership.get(transactionScope)?.get(reference) : undefined; let consumedMoveOwnership: { transactionId: string; reference: string } | undefined;
+    if (owned && !ownershipToken) throw new LiveMutationNotDispatchedError("remote destructive cleanup lacks transaction-owned authority");
     if ((invocation.operation === "clip.move" || invocation.operation === "arrangement.clip.move") && reference) {
       const matches = [...this.cleanupOwnership.entries()].filter(([, rows]) => rows.has(reference));
       if (matches.length > 1) throw new Error("remote transaction-owned move authority is ambiguous");
@@ -169,10 +219,15 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     }
     const ownershipFields = ownershipToken ? { ownershipToken } : {};
     const bridgeIdempotencyKey = createHash("sha256").update(`${transactionScope}\0${baseIdempotencyKey}\0${invocation.operation}\0${argsDigest}`).digest("base64url");
-    const preflight = await this.requestAsync({ method: "preflight", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, ...ownershipFields }, "authority.preflight", context) as { preflightToken?: unknown; confirmation?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
-    if (typeof preflight.preflightToken !== "string" || typeof preflight.confirmation !== "string" || preflight.operation !== invocation.operation || typeof preflight.argsDigest !== "string" || typeof preflight.expiresAt !== "number" || preflight.expiresAt <= Date.now()) throw new Error("remote mutation authority preflight failed");
-    const prepared = await this.requestAsync({ method: "prepare", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, preflightToken: preflight.preflightToken, confirmation: preflight.confirmation, idempotencyKey: bridgeIdempotencyKey, ...ownershipFields }, "authority.prepare", context) as { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
-    if (typeof prepared.authorityToken !== "string" || prepared.operation !== invocation.operation || prepared.argsDigest !== preflight.argsDigest || typeof prepared.expiresAt !== "number" || prepared.expiresAt <= Date.now()) throw new Error("remote mutation authority preparation failed");
+    // Preflight and prepare only mint authority in the bridge: whatever goes wrong there, nothing
+    // was dispatched to Live, which callers (undo above all) may report as a plain refusal.
+    let prepared: { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+    try {
+      const preflight = await this.requestAsync({ method: "preflight", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, ...ownershipFields }, "authority.preflight", context) as { preflightToken?: unknown; confirmation?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+      if (typeof preflight.preflightToken !== "string" || typeof preflight.confirmation !== "string" || preflight.operation !== invocation.operation || typeof preflight.argsDigest !== "string" || typeof preflight.expiresAt !== "number" || preflight.expiresAt <= Date.now()) throw new Error("remote mutation authority preflight failed");
+      prepared = await this.requestAsync({ method: "prepare", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, preflightToken: preflight.preflightToken, confirmation: preflight.confirmation, idempotencyKey: bridgeIdempotencyKey, ...ownershipFields }, "authority.prepare", context) as { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+      if (typeof prepared.authorityToken !== "string" || prepared.operation !== invocation.operation || prepared.argsDigest !== preflight.argsDigest || typeof prepared.expiresAt !== "number" || prepared.expiresAt <= Date.now()) throw new Error("remote mutation authority preparation failed");
+    } catch (error) { throw new LiveMutationNotDispatchedError(error instanceof Error ? error.message : "remote mutation authority failed"); }
     let wireResult: unknown;
     try { wireResult = await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args, authorityToken: prepared.authorityToken, transactionId: transactionScope, ...ownershipFields }, invocation.operation, context); }
     catch (error) {

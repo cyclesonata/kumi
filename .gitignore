@@ -22,3 +22,10 @@ apps/mcp-server/*.tgz
 __pycache__/
 *.pyc
 /.pi/
+
+# Kumi workspace generated output
+/node_modules/
+/apps/kumi/node_modules/
+/apps/kumi/dist/
+/packages/runtime/node_modules/
+/packages/runtime/dist/

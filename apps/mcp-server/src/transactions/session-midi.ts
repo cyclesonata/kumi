@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { AsyncLiveAdapter, LiveAdapter, LiveOperationContext, LiveRef, LiveSnapshot, Note, LiveStatus } from "../live.js";
+import { withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveOperationContext, type LiveRef, type LiveSnapshot, type Note, type LiveStatus } from "../live.js";
 
 export const SESSION_MIDI_TRANSACTION_TTL_MS = 30_000;
 export const MAX_SESSION_MIDI_NOTES = 512;
@@ -10,7 +10,8 @@ export interface SessionMidiRecord extends SessionMidiPreview { state: "previewe
 
 function clone<T>(value: T): T { return structuredClone(value); }
 function canonical(value: unknown): string { if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; const row = value as Record<string, unknown>; return `{${Object.keys(row).sort().map((key) => `${JSON.stringify(key)}:${canonical(row[key])}`).join(",")}}`; }
-function fingerprint(value: unknown): string { return createHash("sha256").update(canonical(value)).digest("hex"); }
+// A clip's content, not where its playback is: the Remote Script fingerprints clips the same way.
+function fingerprint(value: unknown): string { return createHash("sha256").update(canonical(withoutPlaybackState(value))).digest("hex"); }
 function clipBaseFingerprint(value: unknown): string { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MIDI clip base state is unavailable"); const base = structuredClone(value) as Record<string, unknown>; delete base.notes; delete base.notesRevision; return fingerprint(base); }
 function targetAuthority(snapshot: LiveSnapshot, trackRef: LiveRef, sceneIndex: number): SessionMidiPreview["target"] {
   const track = snapshot.tracks.find((item) => item.ref === trackRef);
@@ -48,7 +49,8 @@ function validateRequest(value: unknown): asserts value is SessionMidiRequest {
   const request = value as Partial<SessionMidiRequest>;
   const sceneIndex = request.sceneIndex;
   if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 1023 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
-  request.notes.forEach((note) => validateNote(note, request.length as number));
+  // Most producers never think about MIDI channels; default to channel 1.
+  for (const note of request.notes) { note.channel ??= 1; validateNote(note, request.length as number); }
 }
 
 export class SessionMidiTransactionManager {
@@ -144,7 +146,7 @@ export class SessionMidiTransactionManager {
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (/uncertain|disconnect|timeout|cancellation/i.test(message)) { record.state = "uncertain"; record.recoveryMode = "apply"; throw cause; }
-      if (clipRef) { try { record.clipRef = clipRef; record.recoveryMode = "compensate"; await this.compensateApplyAsync(record, adapter, context); record.state = "undone"; } catch { record.state = "uncertain"; record.recoveryMode = "compensate"; throw new Error("MIDI apply failed and compensation failed; retry the exact key to reconcile cleanup"); } }
+      if (clipRef) { try { record.clipRef = clipRef; record.recoveryMode = "compensate"; await this.compensateApplyAsync(record, adapter, context); record.state = "undone"; } catch (compensation) { record.state = "uncertain"; record.recoveryMode = "compensate"; throw new Error(`MIDI apply failed (${message.slice(0, 120)}) and compensation failed (${(compensation instanceof Error ? compensation.message : String(compensation)).slice(0, 80)}); retry the exact key to reconcile cleanup`); } }
       else record.state = "undone";
       throw cause;
     }

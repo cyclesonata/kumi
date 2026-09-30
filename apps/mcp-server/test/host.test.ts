@@ -3,16 +3,26 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { McpHost, PROTOCOL_VERSION, serve } from "../src/host.js";
-import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
+import { liveResources } from "./helpers/drum-sampler.js";
+import { DeterministicLiveSimulator, LIVE_CAPABILITIES, LIVE_REGISTRY_OPERATIONS, ownedDeviceFingerprintRow, ownedTrackFingerprintRow, type LiveAdapter, type LiveInvocation, type LiveRef } from "../src/live.js";
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
 const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
 function ready(host: McpHost): void { host.handle(initialize); host.handle(initialized); }
+
+test("a created track's ownership fingerprint ignores routing choices other tracks add", () => {
+  const track = new DeterministicLiveSimulator().snapshot().tracks[0]!;
+  const more = { ...track, routing: { ...track.routing!, availableInputTypes: (track.routing!.availableInputTypes ?? 0) + 1, availableOutputTypes: (track.routing!.availableOutputTypes ?? 0) + 1 } };
+  assert.deepEqual(ownedTrackFingerprintRow(more), ownedTrackFingerprintRow(track));
+  const rerouted = { ...track, routing: { ...track.routing!, inputType: "Resampling" } };
+  assert.notDeepEqual(ownedTrackFingerprintRow(rerouted), ownedTrackFingerprintRow(track), "choosing another input still counts");
+});
 
 test("requires initialization and exposes only executable, policy-allowed tools", () => {
   const host = new McpHost();
@@ -56,7 +66,7 @@ test("requires initialization and exposes only executable, policy-allowed tools"
   assert.deepEqual(structure.inputSchema.properties.tracks.items.required, ["name", "kind"]);
   assert.deepEqual(structure.inputSchema.properties.scenes.items.required, ["name"]);
   const midi = simulatorTools.find((tool: { name: string }) => tool.name === "live_midi_clip_preview");
-  assert.deepEqual(midi.inputSchema.properties.notes.items.required, ["pitch", "start", "duration", "velocity", "channel"]);
+  assert.deepEqual(midi.inputSchema.properties.notes.items.required, ["pitch", "start", "duration", "velocity"], "channel defaults to 1");
   const semanticExport = simulatorTools.find((tool: { name: string }) => tool.name === "live_project_snapshot_export");
   assert.deepEqual(Object.keys(semanticExport.inputSchema.properties), ["profile", "limit", "cursor"]);
   const semanticDiff = simulatorTools.find((tool: { name: string }) => tool.name === "live_project_snapshot_diff");
@@ -343,12 +353,29 @@ test("previews, applies idempotently, verifies, and guardedly undoes a device pa
   assert.equal((applied as any).result.isError, false);
   assert.equal(appliedValue.value, 0.75);
   assert.equal(appliedValue.idempotent, false);
+  assert.equal((appliedValue as { displayValue?: string }).displayValue, "0.75", "Live's own text for the new value");
   assert.ok(appliedValue.revision > proposed.parameter.revision);
   const repeated = host.handle({ jsonrpc: "2.0", id: 202, method: "tools/call", params: { name: "live_device_parameter_apply", arguments: { transactionId: proposed.transactionId, confirmation: proposed.confirmation, idempotencyKey: "parameter-apply-1" } } });
   assert.equal(JSON.parse((repeated as any).result.content[0].text).idempotent, true);
+  assert.equal(JSON.parse((repeated as any).result.content[0].text).displayValue, "0.75");
   const undone = host.handle({ jsonrpc: "2.0", id: 203, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: proposed.transactionId, confirmation: "undo", idempotencyKey: "parameter-undo-1" } } });
   assert.equal((undone as any).result.isError, false);
   assert.equal(JSON.parse((undone as any).result.content[0].text).value, before.value);
+});
+
+test("a device parameter Live rounds to a 32-bit float is still confirmed and undone", () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const before = simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!;
+  const preview = host.handle({ jsonrpc: "2.0", id: 250, method: "tools/call", params: { name: "live_device_parameter_preview", arguments: { deviceRef: "device:utility-1", parameterRef: "parameter:gain-1", value: 0.3 } } });
+  const proposed = JSON.parse((preview as any).result.content[0].text) as { transactionId: string; confirmation: string };
+  const applied = host.handle({ jsonrpc: "2.0", id: 251, method: "tools/call", params: { name: "live_device_parameter_apply", arguments: { transactionId: proposed.transactionId, confirmation: proposed.confirmation, idempotencyKey: "parameter-float32" } } });
+  assert.equal((applied as any).result.isError, false, (applied as any).result.content[0].text);
+  assert.equal(simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!.value, Math.fround(0.3), "Live keeps 0.29999998");
+  const undone = host.handle({ jsonrpc: "2.0", id: 252, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: proposed.transactionId, confirmation: "undo", idempotencyKey: "parameter-float32-undo" } } });
+  assert.equal((undone as any).result.isError, false, (undone as any).result.content[0].text);
+  assert.equal(simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!.value, Math.fround(before.value));
 });
 
 test("refuses device parameter changes for invalid token, stale revision, epoch changes, and bounds", () => {
@@ -429,6 +456,44 @@ test("previews, applies, verifies, and undoes a purpose-specific rename", async 
   assert.equal(applied.name, "Renamed Track"); assert.equal((simulator.get("track:track-1") as any).name, "Renamed Track");
   const undone = JSON.parse(((await call(4, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "rename-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone"); assert.equal((simulator.get("track:track-1") as any).name, "Drums");
+});
+
+test("undo of a created track ignores selection, auto-arm, meters and view changes Live makes on its own", () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = (id: number, name: string, args: unknown) => JSON.parse((host.handle({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result.content[0].text);
+  const preview = call(90, "live_session_structure_preview", { tracks: [{ name: "Kumi Test", kind: "midi" }], scenes: [] });
+  const applied = call(91, "live_session_structure_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "volatile-apply" });
+  const track = (simulator as any).state.tracks.find((item: { ref: string }) => item.ref === applied.created[0].ref);
+  Object.assign(track, { armed: true, isSelected: true, implicitArm: true, outputMeterLevel: 0.42, view: { selectedDeviceRef: null, isCollapsed: true } });
+  const undone = call(92, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "volatile-undo" });
+  assert.equal(undone.state, "undone");
+  assert.deepEqual(simulator.snapshot().tracks.map((item) => item.name), ["Drums"]);
+});
+
+test("return-track rename expects Live's letter prefix whether or not the caller includes it", async () => {
+  const simulator = new DeterministicLiveSimulator(); const state = (simulator as any).state;
+  state.tracks.push({ ...structuredClone(state.tracks[0]), ref: "track:return-a", objectIdentity: "simulator:track:return-a", name: "A-Reverb", kind: "return", clips: [], devices: [] });
+  // Like Live: a return track shows its letter and prepends it to whatever name it is given.
+  const original = simulator.invokeAsync.bind(simulator);
+  simulator.invokeAsync = async (invocation) => {
+    const result = await original(invocation);
+    if (invocation.operation !== "track.rename" || invocation.args.ref !== "track:return-a") return result;
+    const track = state.tracks.find((item: { ref: string }) => item.ref === "track:return-a"); track.name = `A-${String(invocation.args.name).replace(/^A-/, "")}`;
+    return { renamed: "track:return-a", name: track.name };
+  };
+  const host = new McpHost(simulator); ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  for (const [id, requested] of [[20, "Hall"], [30, "A-Plate"]] as const) {
+    const preview = JSON.parse(((await call(id, "live_object_rename_preview", { kind: "track", ref: "track:return-a", name: requested })) as any).result.content[0].text);
+    const expected = requested.startsWith("A-") ? requested : `A-${requested}`;
+    assert.equal(preview.proposedName, expected);
+    const applied = JSON.parse(((await call(id + 1, "live_object_rename_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `return-rename-${id}` })) as any).result.content[0].text);
+    assert.equal(applied.state, "applied"); assert.equal(applied.name, expected);
+    const undone = JSON.parse(((await call(id + 2, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: `return-undo-${id}` })) as any).result.content[0].text);
+    assert.equal(undone.state, "undone"); assert.equal((simulator.get("track:return-a") as any).name, "A-Reverb");
+  }
+  const unchanged = await call(40, "live_object_rename_preview", { kind: "track", ref: "track:return-a", name: "Reverb" });
+  assert.equal((unchanged as any).result.isError, true, "renaming to the current displayed name is a no-op");
 });
 
 test("take-lane rename apply and undo round-trip through the canonical operation id", async () => {
@@ -1044,7 +1109,7 @@ test("serve flushes the exit acknowledgement before terminating and ignores a no
   assert.deepEqual(notifiedRecords.map((record) => record.id), [1]);
 });
 
-test("transport preview applies with a revision fence and guardedly undoes", async () => {
+test("transport preview applies with a revision fence and undoes what still reads as it left it", async () => {
   const { adapter, state: fixtureState } = auditionFixture();
   const host = new McpHost(adapter);
   ready(host);
@@ -1075,14 +1140,22 @@ test("transport preview applies with a revision fence and guardedly undoes", asy
 
   const conflictPreview = JSON.parse(((await host.handleAsync({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "live_transport_preview", arguments: { metronome: true } } })) as any).result.content[0].text);
   await host.handleAsync({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "live_transport_apply", arguments: { transactionId: conflictPreview.transactionId, confirmation: "apply", idempotencyKey: "transport-conflict-apply" } } });
-  // Even an ABA edit that returns the touched field to the proposed value has
-  // a new authoritative revision and must not be mistaken for our post-state.
+  // A field changed since, by hand, keeps the change as it is.
   fixtureState.playback.transport.metronome = false;
-  fixtureState.playback.transport.metronome = true;
-  fixtureState.playback.revision = "external-transport-aba-edit";
+  fixtureState.playback.revision = "external-transport-edit";
   const refused = await host.handleAsync({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: conflictPreview.transactionId, confirmation: "undo", idempotencyKey: "transport-conflict-undo" } } });
   assert.equal((refused as any).result.isError, true);
-  assert.equal(fixtureState.playback.transport.metronome, true);
+  assert.equal(fixtureState.playback.transport.metronome, false);
+
+  // Playing since (a new playback revision, the playhead elsewhere) doesn't stop the undo: setting a loop,
+  // listening, then taking it back is the usual order.
+  const loopPreview = JSON.parse(((await host.handleAsync({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "live_transport_preview", arguments: { position: 16, loopEnabled: true } } })) as any).result.content[0].text);
+  await host.handleAsync({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "live_transport_apply", arguments: { transactionId: loopPreview.transactionId, confirmation: "apply", idempotencyKey: "transport-loop-apply" } } });
+  fixtureState.playback.transport.position = 40; fixtureState.playback.revision = "played-and-stopped";
+  const loopUndone = await host.handleAsync({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "live_undo", arguments: { transactionId: loopPreview.transactionId, confirmation: "undo", idempotencyKey: "transport-loop-undo" } } });
+  assert.equal((loopUndone as any).result.isError, false, JSON.stringify(loopUndone));
+  assert.equal(fixtureState.playback.transport.loop.enabled, false);
+  assert.equal(fixtureState.playback.transport.position, 0);
 });
 
 test("clip launch previews, applies with one dispatch, verifies, and stops through the owning track", async () => {
@@ -1460,7 +1533,7 @@ test("browser search returns stable identities and browser load verifies onto th
   ready(host);
   const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
   const search = JSON.parse(((await call(2, "live_browser_search", { category: "instruments", query: "rack" })) as any).result.content[0].text);
-  assert.equal(search.items.length, 1);
+  assert.equal(search.items.length, 2); // Drum Rack first, then Instrument Rack
   assert.equal(search.items[0].id, "instruments/Drum Rack");
   const empty = JSON.parse(((await call(3, "live_browser_search", { query: "nonexistent-xyz" })) as any).result.content[0].text);
   assert.equal(empty.items.length, 0);
@@ -1483,6 +1556,146 @@ test("browser search returns stable identities and browser load verifies onto th
   assert.equal(replay.idempotent, true);
   const undone = JSON.parse(((await call(8, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "load-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone"); assert.equal((simulator as any).state.tracks[0].devices.filter((item: any) => item.name === "Drum Rack").length, 0);
+});
+
+test("Browser-load undo still removes a device whose parameter was tweaked and reverted or whose rack view changed", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const racks = () => ((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Drum Rack");
+  // Like a real Live device, the loaded rack has a parameter from the moment it exists.
+  const invoke = simulator.invoke.bind(simulator);
+  simulator.invoke = (invocation) => {
+    const result = invoke(invocation) as any;
+    if (invocation.operation === "device.insert") {
+      const rack = racks().find((device) => device.ref === result.ref);
+      rack.parameters.push({ ref: "parameter:rack-macro", objectIdentity: "simulator:parameter:rack-macro", parentRef: rack.ref, name: "Macro 1", value: 0.5, min: 0, max: 1, automatable: true, quantization: 0, enabled: true, displayValue: "0.5", revision: 1 });
+      result.createdFingerprint = (host as any).captureObjectFingerprint(ownedDeviceFingerprintRow(structuredClone(rack)));
+    }
+    return result;
+  };
+  const load = async (id: number) => {
+    const preview = body(await call(id, "live_browser_load_preview", { itemId: "instruments/Drum Rack", trackRef: "track:track-1" }));
+    assert.equal(body(await call(id + 1, "live_browser_load_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `load-${id}` })).state, "applied");
+    return preview.transactionId as string;
+  };
+  const loaded = await load(9100); const rack = racks()[0];
+  const tweak = body(await call(9102, "live_device_parameter_preview", { deviceRef: rack.ref, parameterRef: "parameter:rack-macro", value: 0.25 }));
+  const tweaked = await call(9103, "live_device_parameter_apply", { transactionId: tweak.transactionId, confirmation: tweak.confirmation, idempotencyKey: "tweak-apply-key" });
+  assert.equal(tweaked.isError, false); assert.equal(body(tweaked).displayValue, "0.25", "Live's own text for the new value");
+  assert.equal(body(await call(9104, "live_undo", { transactionId: tweak.transactionId, confirmation: "undo", idempotencyKey: "tweak-undo-key" })).state, "undone");
+  assert.equal(rack.parameters[0].value, 0.5); assert.notEqual(rack.parameters[0].revision, 1, "the edit counter moved");
+  rack.view = { selectedChainRef: null, selectedPadIndex: 3, padScrollPosition: 0, showChainDevices: true };
+  assert.equal(body(await call(9105, "live_undo", { transactionId: loaded, confirmation: "undo", idempotencyKey: "load-undo-key" })).state, "undone");
+  assert.equal(racks().length, 0);
+
+  const edited = await load(9110); racks()[0].name = "Renamed by hand";
+  const refused = await call(9112, "live_undo", { transactionId: edited, confirmation: "undo", idempotencyKey: "edited-undo-key" });
+  assert.equal(refused.isError, true); assert.match(refused.content[0].text, /modified after creation/);
+  assert.equal(((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Renamed by hand").length, 1, "the edited device is kept");
+});
+
+test("Browser items load into a rack's chains, a nested rack too, and undo takes each out", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const invoke = simulator.invoke.bind(simulator);
+  simulator.invoke = (invocation) => {
+    const result = invoke(invocation) as any;
+    if (invocation.operation === "device.insert") { const { device } = (host as any).deviceRow(simulator.snapshot(), result.ref); result.createdFingerprint = (host as any).captureObjectFingerprint(ownedDeviceFingerprintRow(structuredClone(device))); }
+    return result;
+  };
+  const load = async (id: number, args: unknown) => {
+    const preview = body(await call(id, "live_browser_load_preview", args));
+    const applied = body(await call(id + 1, "live_browser_load_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `chain-load-${id}` }));
+    assert.equal(applied.state, "applied"); return { preview, applied };
+  };
+  const track = () => (simulator as any).state.tracks[0];
+  const rack = await load(9400, { itemId: "instruments/Instrument Rack", trackRef: "track:track-1" }); const devicesBefore = track().devices.length;
+  const rackRow = track().devices.find((device: any) => device.ref === rack.applied.deviceRef);
+  const operator = { ref: "device:chain-a:0", objectIdentity: "simulator:device:chain-a:0", parentRef: "chain:a", name: "Operator", kind: "instrument", className: "Operator", parameters: [], enabled: true };
+  rackRow.chains = [{ ref: "chain:a", objectIdentity: "simulator:chain:a", name: "Keys", devices: [operator] }, { ref: "chain:b", objectIdentity: "simulator:chain:b", name: "Pad", devices: [] }];
+  // After the chain's last device (in series), with only the chain named: its track is found.
+  const echo = await load(9410, { itemId: "audio_effects/Echo", chainRef: "chain:a" });
+  assert.equal(echo.preview.trackRef, "track:track-1"); assert.equal(echo.preview.chainName, "Keys"); assert.equal(echo.preview.rackName, "Instrument Rack");
+  assert.deepEqual(rackRow.chains[0].devices.map((device: any) => device.name), ["Operator", "Echo"]);
+  // Into the empty chain (in parallel), a rack inside the rack.
+  const nested = await load(9420, { itemId: "audio_effects/Audio Effect Rack", chainRef: "chain:b", trackRef: "track:track-1" });
+  assert.deepEqual(rackRow.chains[1].devices.map((device: any) => device.name), ["Audio Effect Rack"]);
+  assert.equal(track().devices.length, devicesBefore, "nothing new on the track itself");
+  // A chain on another track, and a chain whose devices changed since the preview, are refused.
+  const wrongTrack = await call(9430, "live_browser_load_preview", { itemId: "audio_effects/Echo", chainRef: "chain:a", trackRef: "track:track-2" });
+  assert.equal(wrongTrack.isError, true);
+  const stale = body(await call(9432, "live_browser_load_preview", { itemId: "audio_effects/Utility", chainRef: "chain:a" }));
+  rackRow.chains[0].devices.push({ ref: "device:chain-a:9", objectIdentity: "simulator:device:chain-a:9", parentRef: "chain:a", name: "Hand-added", kind: "device", className: "Utility", parameters: [], enabled: true });
+  const refused = await call(9433, "live_browser_load_apply", { transactionId: stale.transactionId, confirmation: "apply", idempotencyKey: "chain-load-stale" });
+  assert.equal(refused.isError, true); assert.match(refused.content[0].text, /changed since preview/);
+  rackRow.chains[0].devices.pop();
+  for (const [id, loaded] of [[9440, nested], [9442, echo]] as const) { const undone = await call(id, "live_undo", { transactionId: loaded.preview.transactionId, confirmation: "undo", idempotencyKey: `chain-undo-${id}` }); assert.equal(body(undone).state, "undone", undone.content[0].text); }
+  assert.deepEqual(rackRow.chains.map((chain: any) => chain.devices.map((device: any) => device.name)), [["Operator"], []]);
+});
+
+test("a rack's new chain comes back for the next step, and an added or removed macro undoes", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const change = async (id: number, family: string, args: unknown) => {
+    const preview = body(await call(id, `live_${family}_preview`, args));
+    const applied = body(await call(id + 1, `live_${family}_apply`, { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: `rack-${id}` }));
+    return { preview, applied };
+  };
+  const loaded = await change(9500, "browser_load", { itemId: "instruments/Instrument Rack", trackRef: "track:track-1" });
+  const rack = (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === loaded.applied.deviceRef);
+  rack.visibleMacroCount = 8;
+  const chain = await change(9510, "rack", { action: "insert-chain", rackRef: rack.ref });
+  assert.equal(chain.applied.chainRef, rack.chains[0].ref);
+  assert.equal(chain.preview.impact, "momentary-rack-action-no-undo", "Live has no way to take a chain away again");
+  const echo = await change(9520, "browser_load", { itemId: "audio_effects/Echo", chainRef: chain.applied.chainRef });
+  assert.equal(echo.applied.state, "applied"); assert.deepEqual(rack.chains[0].devices.map((device: any) => device.name), ["Echo"]);
+  const added = await change(9530, "rack", { action: "add-macro", rackRef: rack.ref });
+  assert.equal(added.preview.impact, "edits-rack"); assert.equal(added.applied.visibleMacroCount, 9);
+  assert.equal(body(await call(9532, "live_undo", { transactionId: added.preview.transactionId, confirmation: "undo", idempotencyKey: "macro-undo-1" })).state, "undone");
+  assert.equal(rack.visibleMacroCount, 8);
+  const removed = await change(9540, "rack", { action: "remove-macro", rackRef: rack.ref });
+  assert.equal(rack.visibleMacroCount, 7);
+  rack.visibleMacroCount = 6; // the producer removed another since
+  const refused = await call(9542, "live_undo", { transactionId: removed.preview.transactionId, confirmation: "undo", idempotencyKey: "macro-undo-2" });
+  assert.equal(refused.isError, true); assert.match(refused.content[0].text, /changed after apply/);
+});
+
+test("a Browser-loaded device that settles after the load (Max for Live) records its settled state and still undoes", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const settles: any[] = []; const invoke = simulator.invoke.bind(simulator);
+  simulator.invoke = (invocation) => {
+    const result = invoke(invocation) as any;
+    // Live's answer describes the device before Max for Live built it.
+    if (invocation.operation === "browser.load") result.createdFingerprint = "0".repeat(64);
+    if (invocation.operation === "ownership.settle") settles.push(invocation.args);
+    return result;
+  };
+  const preview = body(await call(9600, "live_browser_load_preview", { itemId: "audio_effects/Echo", trackRef: "track:track-1" }));
+  const applied = body(await call(9601, "live_browser_load_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "settling-load" }));
+  assert.equal(applied.state, "applied");
+  const { device } = (host as any).deviceRow(simulator.snapshot(), applied.deviceRef);
+  assert.deepEqual(settles, [{ ref: applied.deviceRef, expectedObjectIdentity: device.objectIdentity, expectedFingerprint: (host as any).captureObjectFingerprint(ownedDeviceFingerprintRow(device)) }]);
+  assert.equal(body(await call(9602, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "settling-undo" })).state, "undone");
+});
+
+test("a parameter Live keeps in whole numbers takes the nearest one, and undo puts the old value back", async () => {
+  const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
+  const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
+  const body = (result: any) => JSON.parse(result.content[0].text);
+  const gain = () => (simulator as any).state.tracks[0].devices[0].parameters[0];
+  const invoke = simulator.invoke.bind(simulator);
+  simulator.invoke = (invocation) => { const result = invoke(invocation) as any; if (invocation.operation === "device.parameter.set") gain().value = Math.round(gain().value); return result; };
+  const device = (simulator as any).state.tracks[0].devices[0]; gain().value = 0;
+  const preview = body(await call(9700, "live_device_parameter_preview", { deviceRef: device.ref, parameterRef: gain().ref, value: 0.75 }));
+  const applied = await call(9701, "live_device_parameter_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "whole-number-apply" });
+  assert.equal(applied.isError, false, applied.content[0].text); assert.equal(body(applied).value, 1, "Live's value");
+  assert.equal(body(await call(9702, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "whole-number-undo" })).state, "undone");
+  assert.equal(gain().value, 0);
 });
 
 test("a lost Browser-load acknowledgement reconciles with the exact key and retains safe undo", async () => {
@@ -1623,6 +1836,217 @@ test("device insert, enable, move, and transaction-owned cleanup use exact fenci
   const enableUndone = JSON.parse(((await call(82, "live_undo", { transactionId: enable.transactionId, confirmation: "undo", idempotencyKey: "dev-enable-undo" })) as any).result.content[0].text); assert.equal(enableUndone.state, "undone");
   const insertUndone = JSON.parse(((await call(83, "live_undo", { transactionId: insert.transactionId, confirmation: "undo", idempotencyKey: "dev-insert-undo" })) as any).result.content[0].text); assert.equal(insertUndone.state, "undone");
   assert.equal((simulator as any).state.tracks[0].devices.some((d: any) => d.name === "Echo"), false);
+});
+
+test("a new Simpler can arrive with its sample in one change, named as the file is, and undo takes both", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const dir = mkdtempSync(join(tmpdir(), "simpler-samples-"));
+  const samplePath = join(dir, "Kick 01.wav");
+  writeFileSync(samplePath, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from("fake-audio-bytes")]));
+  const refused = await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Echo", filePath: samplePath, allowedRoot: dir });
+  assert.equal((refused as any).error.code, -32602, "a sample goes only with a new Simpler");
+  const preview = JSON.parse(((await call(2, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Simpler", filePath: samplePath, allowedRoot: dir })) as any).result.content[0].text);
+  assert.equal(preview.sample.path, realpathSync(samplePath));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.samplePath as string;
+  assert.equal(basename(staged), "Kick 01.wav", "Live shows the sample by its own name");
+  assert.ok(staged.startsWith(realpathSync(managed)));
+  const applied = JSON.parse(((await call(3, "live_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "simpler-with-sample" })) as any).result.content[0].text);
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.samplePath, staged);
+  const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === applied.result.ref);
+  assert.equal(device.name, "Simpler"); assert.equal(device.samplePath, staged);
+  writeFileSync(`${staged}.asd`, "Live's analysis of the sample");
+  const undone = JSON.parse(((await call(4, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "simpler-with-sample-undo" })) as any).result.content[0].text);
+  assert.equal(undone.state, "undone");
+  assert.equal((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === applied.result.ref), false, "the Simpler goes, with its sample");
+  assert.equal(existsSync(staged), false); assert.equal(readdirSync((host as any).importStagingDir).length, 0, "and so does the staged copy, with Live's analysis file and its folder");
+});
+
+test("a sample goes onto an empty Drum Rack pad as a new Simpler, and undo clears the pad again", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const dir = mkdtempSync(join(tmpdir(), "pad-samples-"));
+  const samplePath = join(dir, "Snare 808.wav");
+  writeFileSync(samplePath, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from("fake-audio-bytes")]));
+  const rackPreview = JSON.parse(((await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" })) as any).result.content[0].text);
+  const rack = JSON.parse(((await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "drum-rack" })) as any).result.content[0].text).result;
+  const preview = JSON.parse(((await call(13, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: samplePath, allowedRoot: dir })) as any).result.content[0].text);
+  assert.equal(preview.note, 38); assert.equal(preview.sample.path, realpathSync(samplePath));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.samplePath as string;
+  assert.equal(basename(staged), "Snare 808.wav");
+  const applied = JSON.parse(((await call(14, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "pad-sample" })) as any).result.content[0].text);
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.samplePath, staged);
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  const pad = pads().find((item: any) => item.note === 38);
+  assert.equal(pad.chains.length, 1); assert.equal(pad.chains[0].name, "Snare 808"); assert.equal(pad.chains[0].devices[0].samplePath, staged);
+  const occupied = await call(15, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: samplePath, allowedRoot: dir });
+  assert.match(JSON.parse((occupied as any).result.content[0].text).reason, /already has a sound/);
+  const hidden = await call(16, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 90, filePath: samplePath, allowedRoot: dir });
+  assert.match(JSON.parse((hidden as any).result.content[0].text).reason, /visible pads/);
+  const undone = JSON.parse(((await call(17, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "pad-sample-undo" })) as any).result.content[0].text);
+  assert.equal(undone.state, "undone");
+  assert.equal(pads().find((item: any) => item.note === 38).chains.length, 0, "the pad is empty again");
+  assert.equal(existsSync(staged), false);
+  const other = pads().find((item: any) => item.note === 36);
+  assert.equal(other.chains.length, 0, "no other pad changed");
+});
+
+test("a Drum Rack inside another rack has its pads found for apply and undo, as preview finds them", () => {
+  const host = new McpHost(new DeterministicLiveSimulator());
+  const pad = { ref: "drum_pad:inner-38", objectIdentity: "live:pad:38", note: 38, chains: [] };
+  const drums = { ref: "device:drums", objectIdentity: "live:drums", name: "Drum Rack", drumPads: [pad], chains: [] };
+  const snapshot = { tracks: [{ ref: "track:1", objectIdentity: "live:track:1", devices: [{ ref: "device:outer", objectIdentity: "live:outer", name: "Instrument Rack", chains: [{ ref: "chain:1", objectIdentity: "live:chain:1", devices: [drums] }] }] }] };
+  assert.equal((host as any).drumRackPad(snapshot, "device:drums", 38), pad);
+  assert.equal((host as any).drumPadRow(snapshot, "drum_pad:inner-38"), pad);
+  assert.throws(() => (host as any).drumPadRow(snapshot, "drum_pad:gone"), /not authoritative/);
+});
+
+test("several parameters of one device change as one transaction: one Live request, one undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const device = (simulator as any).state.tracks[0].devices[0];
+  device.parameters.push(
+    { ref: "parameter:width-1", objectIdentity: "simulator:parameter:width-1", name: "Width", value: 1, min: 0, max: 4, automatable: true, quantization: 0, enabled: true, revision: 1 },
+    { ref: "parameter:mono-1", objectIdentity: "simulator:parameter:mono-1", name: "Bass Mono", value: 0, min: 0, max: 1, automatable: true, quantization: 1, enabled: true, revision: 1 });
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const invokes: string[] = [];
+  const invoke = simulator.invoke.bind(simulator);
+  (simulator as any).invoke = (invocation: any) => { invokes.push(invocation.operation); return invoke(invocation); };
+  const values = [{ parameterRef: "parameter:gain-1", value: 0.25 }, { parameterRef: "parameter:width-1", value: 2 }, { parameterRef: "parameter:mono-1", value: 1 }];
+  assert.equal(((await call(11, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], values[0]] })) as any).error.code, -32602, "one value per parameter");
+  assert.match(text(await call(12, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], { parameterRef: "parameter:mono-1", value: 0.5 }] })).reason, /Bass Mono.*takes whole numbers from 0 to 1/);
+  const preview = text(await call(13, "live_device_parameter_preview", { deviceRef: "device:utility-1", values }));
+  assert.deepEqual(preview.parameters.map((row: any) => [row.name, row.currentValue, row.proposedValue]), [["Gain", 0.5, 0.25], ["Width", 1, 2], ["Bass Mono", 0, 1]]);
+  const applied = text(await call(14, "live_device_parameter_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "three-parameters" }));
+  assert.equal(applied.state, "applied", JSON.stringify(applied)); assert.equal(applied.parameters.length, 3);
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.25, 2, 1]);
+  assert.deepEqual(invokes.filter((operation) => operation.startsWith("device.")), ["device.parameters.set"], "one Live request for the three");
+  const undone = text(await call(15, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "three-parameters-undo" }));
+  assert.equal(undone.state, "undone", JSON.stringify(undone));
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.5, 1, 0], "one undo restores them all");
+  const again = text(await call(16, "live_device_parameter_preview", { deviceRef: "device:utility-1", values }));
+  device.parameters[1].value = 3; device.parameters[1].revision = (device.parameters[1].revision ?? 1) + 1;
+  const refused = text(await call(17, "live_device_parameter_apply", { transactionId: again.transactionId, confirmation: again.confirmation, idempotencyKey: "changed-meanwhile" }));
+  assert.match(refused.reason ?? refused.message ?? JSON.stringify(refused), /changed after preview/);
+  assert.deepEqual(device.parameters.map((parameter: any) => parameter.value), [0.5, 3, 0], "nothing changes when one moved since the preview");
+});
+
+test("samples go into Drum Samplers on pads through presets Live's Browser loads, which go once loaded", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const library = mkdtempSync(join(tmpdir(), "user-library-"));
+  const host = new McpHost(simulator, { importStagingDir: managed, userLibraryDir: library, liveResourcesDir: liveResources() });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const dir = mkdtempSync(join(tmpdir(), "drum-sampler-samples-"));
+  const files = ["Kick 01.wav", "Snare 808.wav"].map((name) => { const path = join(dir, name); writeFileSync(path, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from(`fake-audio-${name}`)])); return path; });
+  const rackPreview = text(await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" }));
+  const rack = text(await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "ds-drum-rack" })).result;
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  assert.equal(((await call(13, "live_drum_pad_preview", { action: "set", padRef: "drum_pad:x", solo: true, instrument: "Drum Sampler" })) as any).error.code, -32602, "an instrument goes only with loading samples");
+  const preview = text(await call(14, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, instrument: "Drum Sampler", pads: files.map((filePath, index) => ({ note: 36 + index, filePath, allowedRoot: dir })) }));
+  const payload = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.pads as any[];
+  assert.deepEqual(payload.map((pad) => pad.presetItemId.replace(/ [0-9a-f]{8}\.adv$/, " ….adv")), ["user_library/Kumi/Kick 01 ….adv", "user_library/Kumi/Snare 808 ….adv"]);
+  for (const pad of payload) {
+    assert.ok(existsSync(pad.presetPath), "the preset waits in the User Library's Kumi folder");
+    assert.ok(gunzipSync(readFileSync(pad.presetPath)).toString("utf8").includes(`<Path Value="${pad.samplePath}" />`), "holding the staged copy");
+  }
+  const applied = text(await call(15, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "ds-pads-apply" }));
+  assert.equal(applied.state, "applied", JSON.stringify(applied));
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains[0].devices[0].className), ["DrumCell", "DrumCell"]);
+  for (const pad of payload) assert.equal(existsSync(pad.presetPath), false, "loaded, the preset goes");
+  assert.deepEqual(readdirSync(join(library, "Kumi")), [], "the Kumi folder stays, empty, for Live's Browser to keep watching");
+  for (const pad of payload) assert.ok(existsSync(pad.samplePath), "the staged sample stays: the Drum Sampler plays it");
+  const undone = text(await call(16, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "ds-pads-undo" }));
+  assert.equal(undone.state, "undone");
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0]);
+  const single = text(await call(17, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 38, filePath: files[0], allowedRoot: dir, instrument: "Drum Sampler" }));
+  const singlePayload = (host as any).clipLifecycleTransactions.get(single.transactionId).payload;
+  assert.equal(singlePayload.instrument, "Drum Sampler"); assert.ok(existsSync(singlePayload.presetPath));
+  (host as any).clipLifecycleTransactions.delete(single.transactionId);
+  assert.equal(existsSync(singlePayload.presetPath), false, "a preview that's never applied lets its preset go when it expires");
+});
+
+test("devices can be listed Set-wide in pages, for an overview; parameters still need their device", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const devices = await call(11, "live_discover", { kind: "device", fields: ["ref", "parentRef", "name"], limit: 100 }) as any;
+  assert.equal(devices.result.isError, false, JSON.stringify(devices));
+  const items = JSON.parse(devices.result.content[0].text).items as Array<{ parentRef: string }>;
+  assert.ok(items.length > 0 && items.every((item) => item.parentRef.startsWith("track:")), "every track's devices");
+  assert.equal(((await call(12, "live_discover", { kind: "parameter", limit: 100 })) as any).error.code, -32602);
+});
+
+test("samples go onto several empty pads as one change: one transaction, all or none, one undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const managed = mkdtempSync(join(tmpdir(), "managed-staging-"));
+  const host = new McpHost(simulator, { importStagingDir: managed });
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const text = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const dir = mkdtempSync(join(tmpdir(), "kit-samples-"));
+  const files = ["Kick 01.wav", "Snare 808.wav", "Hat Closed.wav"].map((name) => {
+    const path = join(dir, name);
+    writeFileSync(path, Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from(`fake-audio-${name}`)]));
+    return path;
+  });
+  const rackPreview = text(await call(11, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Drum Rack" }));
+  const rack = text(await call(12, "live_device_apply", { transactionId: rackPreview.transactionId, confirmation: "apply", idempotencyKey: "kit-rack" })).result;
+  const pads = () => (simulator as any).state.tracks[0].devices.find((device: any) => device.ref === rack.ref).drumPads;
+  const kit = files.map((filePath, index) => ({ note: 36 + index, filePath, allowedRoot: dir }));
+  assert.equal(((await call(13, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: [kit[0], { ...kit[1], note: 36 }] })) as any).error.code, -32602, "one sample per pad");
+  assert.equal(((await call(14, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, note: 36, pads: kit })) as any).error.code, -32602, "a batch names its pads, nothing else");
+  assert.equal(((await call(15, "live_drum_pad_preview", { action: "load-sample", deviceRef: rack.ref, note: 36, filePath: files[0], allowedRoot: dir, pads: kit })) as any).error.code, -32602);
+  const invokes: string[] = [];
+  const invoke = simulator.invoke.bind(simulator);
+  (simulator as any).invoke = (invocation: any) => { invokes.push(invocation.operation); return invoke(invocation); };
+  const preview = text(await call(16, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: kit }));
+  assert.deepEqual(preview.pads.map((pad: any) => [pad.note, pad.sample.path]), files.map((path, index) => [36 + index, realpathSync(path)]));
+  const staged = (host as any).clipLifecycleTransactions.get(preview.transactionId).payload.pads.map((pad: any) => pad.samplePath) as string[];
+  assert.deepEqual(staged.map((path) => basename(path)), ["Kick 01.wav", "Snare 808.wav", "Hat Closed.wav"]);
+  const applied = text(await call(17, "live_drum_pad_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "kit-pads" }));
+  assert.equal(applied.state, "applied"); assert.equal(applied.result.pads.length, 3);
+  assert.deepEqual(invokes.filter((operation) => operation.startsWith("drum-pad.")), ["drum-pad.load-samples"], "one Live request for the three pads");
+  assert.deepEqual([36, 37, 38].map((note) => pads().find((item: any) => item.note === note).chains[0]?.name), ["Kick 01", "Snare 808", "Hat Closed"]);
+  const again = text(await call(18, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: [{ ...kit[2], note: 39 }, kit[0]] }));
+  assert.match(again.reason, /drum pad C1 already has a sound/);
+  assert.equal(readdirSync(managed).length, 3, "a refused batch leaves no staged copies behind");
+  const undone = text(await call(19, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "kit-pads-undo" }));
+  assert.equal(undone.state, "undone");
+  assert.deepEqual([36, 37, 38].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0, 0], "one undo clears every pad");
+  for (const path of staged) assert.equal(existsSync(path), false);
+  // When Live fails on a pad part-way, none stays loaded.
+  const partial = text(await call(20, "live_drum_pad_preview", { action: "load-samples", deviceRef: rack.ref, pads: kit.slice(0, 2) }));
+  const load = (simulator as any).loadDrumPadSample.bind(simulator); let loads = 0;
+  (simulator as any).loadDrumPadSample = (args: unknown, operation: string) => { if (++loads === 2) throw new Error("the sample did not load"); return load(args, operation); };
+  const failed = text(await call(21, "live_drum_pad_apply", { transactionId: partial.transactionId, confirmation: "apply", idempotencyKey: "kit-partial" }));
+  assert.match(failed.reason, /^drum pad 2 of 2: the sample did not load/);
+  assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0], "the first pad was cleared again");
+});
+
+test("an inserted device someone changed afterwards isn't removed by undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const insert = JSON.parse(((await call(2, "live_device_preview", { action: "insert", trackRef: "track:track-1", deviceName: "Echo" })) as any).result.content[0].text);
+  const inserted = JSON.parse(((await call(3, "live_device_apply", { transactionId: insert.transactionId, confirmation: "apply", idempotencyKey: "echo-insert" })) as any).result.content[0].text);
+  const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === inserted.result.ref);
+  device.name = "Echo (tweaked)";
+  const undo = await call(4, "live_undo", { transactionId: insert.transactionId, confirmation: "undo", idempotencyKey: "echo-undo" });
+  assert.equal((undo as any).result.isError, true);
+  assert.ok((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === inserted.result.ref), "the changed device stays");
 });
 
 test("chain rows retain the true owning rack through track siblings and drum pads", () => {
@@ -1776,8 +2200,14 @@ test("realtime control requires real provenance and arms exact bounded channels 
   }));
   const withinCumulativeBudget = await call(20, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:budget:2:0"], outputSafety: evidence });
   assert.equal((withinCumulativeBudget as any).result.isError, false);
+  // Only the device holding the parameter costs its parameters: the Set's other devices pass for one each.
+  const pastOtherDevices = await call(1021, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:budget:4:0"], outputSafety: evidence });
+  assert.equal((pastOtherDevices as any).result.isError, false);
+  const budgetDevices = (simulator as any).state.tracks[0].devices;
+  (simulator as any).state.tracks[0].devices = [...Array.from({ length: 16_400 }, (_, deviceIndex) => ({ ref: `device:crowd:${deviceIndex}`, objectIdentity: `simulator:device:crowd:${deviceIndex}`, macros: [], chains: [], drumPads: [], parameters: [] })), ...budgetDevices];
   const cumulativeOversize = await call(21, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:budget:4:0"], outputSafety: evidence });
   assert.equal((cumulativeOversize as any).result.isError, true);
+  (simulator as any).state.tracks[0].devices = budgetDevices;
   const aliasedIdentity = "simulator:parameter:rack:macro-0";
   (simulator as any).state.tracks[0].devices = [{ ref: "device:rack", objectIdentity: "simulator:device:rack", chains: [], drumPads: [], parameters: [{ ref: "parameter:rack:0", objectIdentity: aliasedIdentity, value: 0.5 }], macros: [{ ref: "parameter:rack:macro:0", objectIdentity: aliasedIdentity, value: 0.5 }] }];
   const aliasPreview = JSON.parse(((await call(22, "live_realtime_arm_preview", { channels: ["udp-json"], parameterRefs: ["parameter:rack:macro:0"], outputSafety: evidence })) as any).result.content[0].text);
@@ -1792,6 +2222,36 @@ test("realtime control requires real provenance and arms exact bounded channels 
   assert.equal(armCalls, 2);
 });
 
+test("one recording takes several armed tracks when they're named: exactly those and the destination armed", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const host = new McpHost(simulator);
+  ready(host);
+  const call = (id: number, name: string, args: unknown) => host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const body = (response: unknown) => JSON.parse((response as any).result.content[0].text);
+  const structure = simulator.snapshot(); const expectedStructureRevision = createHash("sha256").update(JSON.stringify({ tracks: structure.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: structure.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex");
+  simulator.invoke({ operation: "track.create", args: { name: "Render B", kind: "audio", index: 1, expectedStructureRevision } });
+  const tracks = (simulator as any).state.tracks; tracks[0].armed = true; tracks[1].armed = true;
+  const safety = { safe: true, provenance: "operator-confirmed" };
+  const alone = await call(101, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, outputSafety: safety });
+  assert.equal(body(alone).reason, "recording start requires the exact destination to be the only armed track");
+  const repeated = await call(102, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[0].ref], outputSafety: safety });
+  assert.equal((repeated as any).error?.code, -32602, "the destination can't be named twice");
+  const preview = body(await call(103, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
+  assert.equal(preview.impact, "starts-recording");
+  const applied = body(await call(104, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-both" }));
+  assert.equal(applied.state, "applied");
+  assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
+  const stop = body(await call(105, "live_recording_preview", { action: "stop", lane: "arrangement", intent: "stop", outputSafety: safety }));
+  await call(106, "live_recording_apply", { transactionId: stop.transactionId, confirmation: "apply", idempotencyKey: "rec-both-stop" });
+  // A third track armed since the preview: refused, nothing recorded.
+  const again = body(await call(107, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
+  simulator.invoke({ operation: "track.create", args: { name: "Late", kind: "audio", index: 2, expectedStructureRevision: createHash("sha256").update(JSON.stringify({ tracks: simulator.snapshot().tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: simulator.snapshot().scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex") } });
+  (simulator as any).state.tracks[2].armed = true;
+  const raced = await call(108, "live_recording_apply", { transactionId: again.transactionId, confirmation: "apply", idempotencyKey: "rec-raced" });
+  assert.equal((raced as any).result.isError, true);
+  assert.equal((simulator as any).state.playback.transport.arrangementRecord, false);
+});
+
 test("recording preview gates intent, destination, and recording state", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
@@ -1803,11 +2263,15 @@ test("recording preview gates intent, destination, and recording state", async (
   assert.equal((missingDestination as any).result.isError, true);
   const unarmed = await call(3, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
   assert.equal((unarmed as any).result.isError, true);
+  // The refusal says why, so the client can fix it.
+  assert.match(JSON.parse((unarmed as any).result.content[0].text).reason, /^destination track is not armed for recording/);
   (simulator as any).state.tracks[0].armed = true;
   const structure = simulator.snapshot(); const expectedStructureRevision = createHash("sha256").update(JSON.stringify({ tracks: structure.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: structure.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex");
   simulator.invoke({ operation: "track.create", args: { name: "Other Armed", kind: "audio", index: 1, expectedStructureRevision } }); (simulator as any).state.tracks[1].armed = true;
   const multipleArmed = await call(21, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
-  assert.equal((multipleArmed as any).result.isError, true); (simulator as any).state.tracks[1].armed = false;
+  assert.equal((multipleArmed as any).result.isError, true);
+  assert.equal(JSON.parse((multipleArmed as any).result.content[0].text).reason, "recording start requires the exact destination to be the only armed track");
+  (simulator as any).state.tracks[1].armed = false;
   let preview = JSON.parse(((await call(4, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
   (simulator as any).state.tracks[1].armed = true;
   const racedArm = await call(22, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-raced-arm" });
@@ -2170,6 +2634,10 @@ test("track color is readable on rows and writable with exact undo", async () =>
   assert.equal(preview.prior.colorIndex, 4); assert.equal(preview.proposed.colorIndex, 12); assert.equal(preview.impact, "edits-track-properties");
   const applied = JSON.parse(((await call(4, "live_track_properties_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "track-set-1" })) as any).result.content[0].text);
   assert.equal(applied.state, "applied");
+  assert.equal(typeof applied.color, "number", "the colour Live shows now");
+  assert.equal(applied.color, (simulator as any).state.tracks[0].color);
+  const replayed = JSON.parse(((await call(41, "live_track_properties_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "track-set-1" })) as any).result.content[0].text);
+  assert.equal(replayed.idempotent, true); assert.equal(replayed.color, applied.color, "a replay reports the same colour");
   assert.equal((simulator as any).state.tracks[0].colorIndex, 12);
   const undone = JSON.parse(((await call(5, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "track-set-undo" })) as any).result.content[0].text);
   assert.equal(undone.state, "undone");
@@ -2280,6 +2748,11 @@ test("song state reads, time conversion, transport actions, and exact cue jumps"
   await call(9, "live_transport_action_apply", { transactionId: linkPreview.transactionId, confirmation: "apply", idempotencyKey: "action-link-1" });
   assert.equal((simulator as any).state.playback.transport.position, 8);
   assert.equal(((await call(10, "live_transport_action_preview", { action: "force-link-beat-time" })) as any).error.code, -32602);
+  // Back to Arrangement: tracks that followed their Session clips play the Arrangement again.
+  (simulator as any).state.tracks[0].backToArranger = true;
+  const backPreview = JSON.parse(((await call(40, "live_transport_action_preview", { action: "back-to-arrangement" })) as any).result.content[0].text);
+  const back = JSON.parse(((await call(41, "live_transport_action_apply", { transactionId: backPreview.transactionId, confirmation: "apply", idempotencyKey: "action-back-1" })) as any).result.content[0].text);
+  assert.equal(back.state, "applied"); assert.equal((simulator as any).state.tracks[0].backToArranger, false);
   (simulator as any).state.playback.transport.position = 0; (simulator as any).state.set.position = 0;
   (simulator as any).state.arrangement.locators.push({ ref: "locator:locator-2", objectIdentity: "simulator:locator:locator-2", name: "B", position: 16 });
   const jumpPreview = JSON.parse(((await call(11, "live_locator_jump_preview", { ref: "locator:locator-2" })) as any).result.content[0].text);
@@ -2523,7 +2996,9 @@ test("device banks, automation re-enable, comparison save, chain insert, and cro
   const insertPreview = JSON.parse(((await call(14, "live_device_advanced_preview", { action: "insert-chain", trackRef: "track:track-1", chainRef: "chain:rack-1:0", deviceName: "Utility" })) as any).result.content[0].text);
   const inserted = JSON.parse(((await call(15, "live_device_advanced_apply", { transactionId: insertPreview.transactionId, confirmation: "apply", idempotencyKey: "insert-key-1" })) as any).result.content[0].text);
   assert.equal(inserted.state, "applied"); assert.equal((simulator as any).state.tracks[0].devices[0].chains[0].devices.length, 1);
-  assert.equal(((await call(16, "live_undo", { transactionId: insertPreview.transactionId, confirmation: "undo", idempotencyKey: "insert-undo-1" })) as any).result.isError, true);
+  // A device inserted into a chain undoes like one loaded there: that device goes.
+  assert.equal(JSON.parse(((await call(16, "live_undo", { transactionId: insertPreview.transactionId, confirmation: "undo", idempotencyKey: "insert-undo-1" })) as any).result.content[0].text).state, "undone");
+  assert.equal((simulator as any).state.tracks[0].devices[0].chains[0].devices.length, 0);
   assert.equal(((await call(17, "live_device_advanced_preview", { action: "set-bank", ref: "device:utility-1", bank: 99 })) as any).error.code, -32602);
   assert.equal(((await call(18, "live_device_advanced_preview", { action: "set-bank", ref: "device:utility-1", bank: 1 })) as any).error.code, -32602);
 });
@@ -2578,7 +3053,10 @@ test("chain color and flags, drum pads, rack properties/actions, and rack view",
   const insertPreview = JSON.parse(((await call(17, "live_rack_preview", { action: "insert-chain", rackRef: "device:utility-1" })) as any).result.content[0].text);
   const inserted = JSON.parse(((await call(18, "live_rack_apply", { transactionId: insertPreview.transactionId, confirmation: "apply", idempotencyKey: "rack-ins-1" })) as any).result.content[0].text);
   assert.equal(inserted.state, "applied"); assert.equal(device.chains.length, 2);
-  assert.equal(((await call(19, "live_undo", { transactionId: addPreview.transactionId, confirmation: "undo", idempotencyKey: "rack-add-undo" })) as any).result.isError, true);
+  // A macro added comes off again (the chain added since doesn't matter to it); a chain has no undo.
+  assert.equal(JSON.parse(((await call(19, "live_undo", { transactionId: addPreview.transactionId, confirmation: "undo", idempotencyKey: "rack-add-undo" })) as any).result.content[0].text).state, "undone");
+  assert.equal(device.visibleMacroCount, 8);
+  assert.equal(((await call(1019, "live_undo", { transactionId: insertPreview.transactionId, confirmation: "undo", idempotencyKey: "rack-ins-undo" })) as any).result.isError, true);
   const viewPreview = JSON.parse(((await call(20, "live_rack_view_preview", { rackRef: "device:utility-1", padScrollPosition: 4, showChainDevices: false })) as any).result.content[0].text);
   const viewApplied = JSON.parse(((await call(21, "live_rack_view_apply", { transactionId: viewPreview.transactionId, confirmation: "apply", idempotencyKey: "rackview-1" })) as any).result.content[0].text);
   assert.equal(viewApplied.state, "applied");

@@ -1,99 +1,69 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" width="100" alt="Ableton MCP Beyond 标志" />
+  <img src="docs/assets/kumi-logo.svg" alt="kumi" width="300">
 </p>
 
-<h1 align="center">Ableton MCP Beyond</h1>
-
 <p align="center">
-  以安全为先的 Ableton Live 12 MCP 控制 ——<br/>
-  156 个按能力协商的工具、经认证的本地回环桥接,以及基于标准的音频分析。
+  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a>
 </p>
 
+**为 Ableton Live 打造、会学习你工作方式的录音室搭档。** 用平常的话告诉 Kumi 你想要什么，它就在你的工程里动手完成，从繁琐的杂活，到你根本没时间琢磨的事情：照着 YouTube 教程重建一个声音、把你的混音与参考曲对比、编写你描述的 Max for Live 设备，或者改造你指着的那个机架。每项修改都有各自的撤销，不会有任何事在你背后发生；它还会记住你保留下来的技巧，所以每次使用都更贴合你。
+
 <p align="center">
-  <a href="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT 许可证" /></a>
-  <a href="apps/mcp-server/package.json"><img src="https://img.shields.io/badge/node-22%20%7C%2024-339933?style=flat-square" alt="Node 22 | 24" /></a>
-  <a href="docs/zh-CN/USER_GUIDE.md"><img src="https://img.shields.io/badge/MCP-2026--07--28%20%2B%20legacy-blue?style=flat-square" alt="MCP 2026-07-28 与旧版 2025-11-25" /></a>
-  <a href="docs/en/SUPPORT_MATRIX.md"><img src="https://img.shields.io/badge/Ableton%20Live-12-555555?style=flat-square" alt="Ableton Live 12" /></a>
+  <img src="docs/assets/kumi-screenshot.png" alt="Kumi 根据视频教程重建 Drift 贝斯：记录每一步的对话、显示新轨道设备链的 FOCUS，以及每项修改都可撤销的 HISTORY" width="760">
 </p>
 
----
+## 它能做什么
 
-**一个绝不臆测、也绝不毁掉您工程(Set)的 MCP 宿主。**
+- **修改工程里几乎任何东西：** 速度、音阶与律动；调音台、路由与侧链；轨道、场景与片段；音符与 MIDI 变换；设备、机架及其参数。每项修改都可单独撤销。
+- **聆听：** 混音、采样或它自己弹出的音频的响度、音色平衡、声像宽度、速度与调性，以及你的混音与参考曲的差别。
+- **观看教程：** 观看 YouTube 或本地文件中的视频，并在新轨道上搭建出教程里做的内容。
+- **播放、录音与重采样**，在你要求时进行。
+- **制作 Max for Live 设备：** 按你的描述制作设备，并放到你的轨道上。
+- **显示你在哪里：** FOCUS 跟随你在 Live 中触碰的对象，显示为设备树、钢琴卷帘，或 Session、Arrangement 视图的条带。点击某个设备即可指向它：“这个 Saturator 太刺耳了”。
+- **记住：** 关于你和每个工程的笔记、从你保留的声音中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
+- **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。
+- **用你的模型：** 使用 ChatGPT 登录，或使用 OpenAI、Anthropic、OpenCode 的 API 密钥。
 
-- **深度 Live 控制** —— 走带、Session 与 Arrangement、剪辑、MIDI 音符、混音器、自动化、路由、录音、工程、订阅。
-- **设备精通** —— 递归发现 rack/chain/pad/macro,受护栏约束的参数编辑,Browser 搜索与加载。
-- **音频智能** —— ITU-R BS.1770-5 / EBU R128 响度、经验证的真峰值、参考曲目混音对比。无需 Live 即可使用。
-- **知情同意的音频捕获** —— 重采样单个剪辑、内部分析、删除所有痕迹。内置看门狗与紧急停止。
-- **实时控制** —— 令牌隔离的 UDP/OSC/XY 通道,写入经校验,并配有独立的紧急停止。
-- **引导式旅程** —— `plan_user_journey` 将“做一段 lo-fi 节拍”变成有序、可确认、感知当前能力的计划。
+## 开始使用
 
-## 快速上手
-
-需要 Node.js 22 或 24，推荐 Node 24 LTS。Node 25 已终止维护，不再支持；Node 26 尚未验证。桥接需要 Ableton Live 12;宿主、测试与演示无需 Live 即可运行。
-
-```sh
-cd apps/mcp-server
-npm ci && npm run build
-npm run demo      # 真实的 MCP 会话,无需 Live
-npm test          # 完整测试套件
-```
-
-将您的 MCP 客户端指向服务器;如需控制 Live,请配置桥接并安装 Remote Script:
+需要 **Node.js 22 或 24**（[nodejs.org](https://nodejs.org)）和 Ableton Live 12。
 
 ```sh
-npm run setup -- --output /abs/path/client-config.json
-npm run setup -- --output /abs/path/bridge-config.json \
-  --bridge-host 127.0.0.1 --bridge-port 9000 \
-  --secret-file /abs/path/bridge.secret
-node dist/src/install-remote-script.js --destination '/abs/.../Remote Scripts/AbletonMcpBridge' --dry-run
+npm run setup                        # 安装并构建，约一分钟
+npm run kumi -- login openai-codex   # 使用 ChatGPT 登录（或设置 API 密钥）
+npm run kumi -- bridge               # 在 Live 关闭时：把 Kumi 连接到 Live
+npm run kumi                         # 在你的工程旁打开 Kumi
 ```
 
-bridge 示例要求已有仅所有者可访问的 secret；`--dry-run` **不会安装**。已验证候选请使用 [DELIVERY.md](docs/zh-CN/DELIVERY.md) 的 plan / apply / activate 流程，包括手动重启 Live 和选择 Control Surface，再检查 `npm run diagnostics -- --config /abs/path/bridge-config.json` 的内容。退出码 0 不等于真实 Live 就绪。单一引导 onboarding (#66) 仍未完成。
-完整教程:[docs/zh-CN/USER_GUIDE.md](docs/zh-CN/USER_GUIDE.md)。
+首次使用时，请在 Live 的 **Settings → Link, Tempo & MIDI** 中将 **AbletonMcpBridge** 选为控制界面（Control Surface）。之后 Kumi 会自己找到 Live。
 
-## 安全模型
+遇到问题？`npm run kumi -- doctor` 会检查所有环节并告诉你该运行什么。`npm run kumi -- report` 把出错的情况整理成一个可以发给我们的文件，`npm run kumi -- update` 让 Kumi 和桥接保持最新。
 
-每项变更都遵循 **发现 → 预览 → 确认 → 应用 → 验证 → 撤销** 的流程。幂等键、epoch 隔离与执行账本,使丢失的确认也能安全地对账;任意删除一律被拒绝。未经显式桥接配置,服务器处于故障关闭状态 —— 无法读取或改动 Live。参见 [docs/zh-CN/LIVE_SAFETY.md](docs/zh-CN/LIVE_SAFETY.md)。
+在 Kumi 中输入 `/` 查看命令。Esc 停止 Kumi 正在做的事，`/stop` 停止 Live。
 
-部署的信任边界是由所有者控制的本地 OS 账户和 MCP 客户端审批策略。服务器内的确认并不能证明人类通过独立于模型的渠道给予了同意。请勿自动批准发声、录音、路由、捕获或实时工具。
+[完整指南（英文）](docs/en/KUMI_POC.md) · [命令与界面（英文）](docs/en/KUMI_TUI.md) · [更新日志（英文）](CHANGELOG.md)
 
-## Toolkit 方向
+## 当前状态
 
-保留 MCP，推进结构化观察 → 选择 → 受保护执行 → 独立验证。模型是可选客户端：Jev 式类型化选择不等于视觉或同意，无限制桌面代理也不继承 MCP 安全性。紧凑 task discovery、共享权限的 GUI 导出试点与保留 bounce 都是后续工作，**不是已交付集成**。参见[扩展边界与评估门槛](docs/zh-CN/EXTENSION_SURFACES.md)。
+Kumi 1.0 已在 macOS 上的 Ableton Live 12.4（测试版）中测试；Windows 支持正在测试中。接下来将支持 Renoise 和 Reaper。
 
-## 兼容性
+## 开发
 
-| 平台 | 状态 |
-|---|---|
-| Node.js 22 / 24 | 支持的契约;必须取得当前精确 SHA 的完整矩阵成功结果 |
-| macOS + Live 12 | 在 12.4.5b8 beta 上的历史真实 Live 证据([证据](docs/evidence/));发布前需对精确候选重新运行验证 |
-| Windows 宿主 | 已配置 CI 契约;仍需当前精确 SHA 的结果;Windows 11 + Live 尚未认证 |
-| Linux / Live 11 或更早 | 不支持 |
+```sh
+npm run typecheck
+npm test          # 无需 Live 或登录
+```
 
-能力在连接时协商确定,您的代理始终清楚当前 Live 安装能做什么。完整矩阵:[docs/zh-CN/SUPPORT_MATRIX.md](docs/zh-CN/SUPPORT_MATRIX.md) · [docs/zh-CN/EXTENSION_SURFACES.md](docs/zh-CN/EXTENSION_SURFACES.md)。
-
-## 文档
-
-
-| 文档 | 内容 |
-|---|---|
-| [USER_GUIDE](docs/zh-CN/USER_GUIDE.md) | 工具列表、变更工作流、资源与提示词 |
-| [LIVE_SAFETY](docs/zh-CN/LIVE_SAFETY.md) | 真实 Live 的安全边界 |
-| [OPERATIONS](docs/zh-CN/OPERATIONS.md) / [RECOVERY](docs/zh-CN/RECOVERY.md) | 运行监督、故障处理、不确定状态恢复 |
-| [AUDIO_INTELLIGENCE](docs/zh-CN/AUDIO_INTELLIGENCE.md) | DSP 标准、捕获同意、隐私限制 |
-| [USER_JOURNEYS](docs/zh-CN/USER_JOURNEYS.md) | 五个引导式创作工作流 |
-| [REALTIME_CONTROL](docs/zh-CN/REALTIME_CONTROL.md) | 已布防的 UDP/OSC/XY 控制平面 |
-| [CAPABILITY_MATRIX](docs/zh-CN/CAPABILITY_MATRIX.md) | 代理能力速览,以及按域划分的能力与证据细节 |
-| [EXTENSION_SURFACES](docs/zh-CN/EXTENSION_SURFACES.md) | Max/Link/Push/Connection Kit 评估与未暴露 UI 功能的处置 |
-| [DELIVERY](docs/zh-CN/DELIVERY.md) | 打包产物的安装、升级、回滚与卸载 |
-| [DISTRIBUTION_POLICY](docs/zh-CN/DISTRIBUTION_POLICY.md) | 本地 MIT 产物、必需检查与紧急流程 |
-| [IMPLEMENTATION_STATUS](docs/zh-CN/IMPLEMENTATION_STATUS.md) | 已验证内容与当前限制 |
+`apps/kumi` 是终端应用；`packages/runtime` 包含 Kumi 的代理核心、模型提供方、记忆、音频分析以及与 Live 的集成。Kumi 通过本地桥接（`apps/mcp-server` 及其 Remote Script）与 Live 通信，该桥接也可由其他 MCP 客户端单独使用（[桥接指南（英文）](apps/mcp-server/README.md)）。
 
 ## 许可证
 
-基于 [MIT 许可证](LICENSE.md)开源。软件包的 `private: true` 与本地、未发布、未签名、未公证的交付渠道仅用于防止意外发布,不会改变 MIT 权利。Ableton Live 是 Ableton AG 的商标;MIT 不授予 Ableton 商标权,也不表示关联、认可、签名或认证。
+[MIT](LICENSE.md)。Ableton Live 是 Ableton AG 的商标；Kumi 与 Ableton 没有关联，也未获其认可。

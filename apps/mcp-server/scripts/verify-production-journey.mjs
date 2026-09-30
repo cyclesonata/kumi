@@ -483,6 +483,15 @@ def apply_control(command):
             song.is_playing = False; song.tracks[1].playing_slot_index = -1; song.tracks[1].fired_slot_index = -1
     else: raise RuntimeError("unknown control command")
 
+# The bridge serves its sockets on Live's main thread (update_display) and runs requests
+# inline there; count those requests as well as queued callbacks for pauseDrainAfterNext.
+dispatched = {"count": 0}
+_dispatch_with_holder = bridge._dispatch_with_holder
+def _counted_dispatch(method, request, holder):
+    try: return _dispatch_with_holder(method, request, holder)
+    finally: dispatched["count"] += 1
+bridge._dispatch_with_holder = _counted_dispatch
+
 try:
     pause_after = {"callbacks": 0, "seconds": 0.0}
     while True:
@@ -498,7 +507,9 @@ try:
                 ack_temporary = ack_path.with_name(ack_path.name + ".tmp")
                 ack_temporary.write_text(json.dumps({"error": str(error)}), encoding="utf-8")
                 os.replace(ack_temporary, ack_path)
-        drained = bridge.queue.drain()
+        before = dispatched["count"]
+        # One Control Surface tick, as Live's update_display runs it.
+        bridge._pump(); drained = bridge.queue.drain() + dispatched["count"] - before; bridge.mapper.capture_tick()
         if pause_after["callbacks"] > 0:
             pause_after["callbacks"] -= drained
             if pause_after["callbacks"] <= 0 and drained > 0:
@@ -882,13 +893,13 @@ class EnvelopeEvent:
     assert((await playback(client)).transport.playing === false, "changed-revision apply mutated playback");
   });
 
-  await step("a timed-out queued callback is fenced and cannot mutate later", async () => {
+  await step("a request that waits past its deadline is refused and cannot mutate later", async () => {
     const preview = (await textOf(client, "live_session_audition_preview", previewArgs)).parsed;
-    // After the pre-dispatch snapshot drains, pause the main-thread drain beyond
-    // the 5s operation deadline so the queued launch callback is cancelled
-    // before it can ever run on the Live thread.
-    await control({ command: "pauseDrainAfterNext", callbacks: 1, seconds: 6 });
-    const timedOut = await textOf(client, "live_session_audition_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "journey-timeout" }, 20_000);
+    // The bridge serves requests on Live's main thread. After the pre-dispatch snapshot,
+    // hold that thread past the apply's 15s deadline: the host gives up, and when the
+    // thread returns the launch request has expired and is refused, so it can never run.
+    await control({ command: "pauseDrainAfterNext", callbacks: 1, seconds: 17 });
+    const timedOut = await textOf(client, "live_session_audition_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "journey-timeout" }, 25_000);
     assert(timedOut.isError === true, "timed-out apply did not surface an error");
     // The CLI's adapter destroyed its socket on timeout; restart the host and
     // prove through fresh discovery that the fenced callback never mutated Live.
@@ -1124,7 +1135,7 @@ class EnvelopeEvent:
     journeyProgress("create-beat-or-song", "arrange-edit", "awaiting_confirmation", { operations: ["arrangement.clip.move", "arrangement.clip.create", "transaction-owned-undo"], mechanism: "fixed-apply-per-preview", retainedArrangementRef: arrangementClips[0].ref });
     journeyProgress("create-beat-or-song", "arrange-edit", "applying", { retainedArrangementRef: arrangementClips[0].ref, idempotencyKeysPresent: true });
     const moved = (await textOf(client, "live_clip_move_apply", { transactionId: movePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-arr-move" })).parsed;
-    assert(moved.state === "applied", "arrangement move failed");
+    assert(moved.state === "applied", `arrangement move failed: ${JSON.stringify(moved).slice(0, 400)}`);
     assert((await textOf(client, "live_discover", { kind: "arrangement-clip", parent: freshTracks[0].ref })).parsed.items[0].start === 16, "arrangement move did not land");
     // Create + transaction-owned cleanup (arbitrary destructive deletion is unavailable).
     const createPreview = (await textOf(client, "live_arrangement_clip_preview", { action: "create", trackRef: freshTracks[0].ref, position: 24, length: 4, name: "Journey Arranged" })).parsed;

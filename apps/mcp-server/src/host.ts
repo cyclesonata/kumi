@@ -1,7 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 import { createHash, randomBytes } from "node:crypto";
-import { realpathSync, statSync, createReadStream, constants as fsConstants, chmodSync, closeSync, fsyncSync, linkSync, openSync, renameSync, unlinkSync, lstatSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, extname, isAbsolute, join as joinPath, resolve } from "node:path";
+import { realpathSync, statSync, createReadStream, constants as fsConstants, chmodSync, closeSync, fsyncSync, linkSync, openSync, renameSync, rmdirSync, unlinkSync, lstatSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join as joinPath, resolve } from "node:path";
 import { sep } from "node:path";
 import { homedir } from "node:os";
 import { AnalysisRunner, type EncodedAnalysisSource } from "./analysis-runner.js";
@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, UnavailableLiveAdapter, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane } from "./live.js";
+import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -17,6 +17,7 @@ import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
 import { BatchTransactionManager, BATCH_OPERATION_POLICY_TOOLS, type BatchOperationKind } from "./transactions/batch.js";
+import { defaultUserLibrary, drumSamplerPreset, findDrumSamplerTemplate, liveResourceFolders, type DrumSamplerTemplate } from "./drum-sampler-preset.js";
 import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
 import { SqliteReader } from "./sqlite-reader.js";
 import { LIBRARY_KINDS, LIBRARY_SEARCH_SCHEMA, LibraryUnavailable, SUPPORTED_FILES_SCHEMA_VERSIONS, SUPPORTED_PLUGINS_SCHEMA_VERSIONS, assertSupportedFilesSchema, assertSupportedPluginsSchema, queryLibraryFiles, queryLibraryPlugins, queryLibraryTagVocabulary, type LibraryQuery } from "./library-search.js";
@@ -71,6 +72,19 @@ interface SessionStructureTransaction {
   recoveryMode?: "apply" | "compensate";
   expiresAt: number; state: "previewed" | "applying" | "applied" | "undoing" | "uncertain" | "undone"; applyKey?: string; undoKey?: string;
 }
+/** Several parameters of one device changed as one transaction: one apply, one undo. */
+interface DeviceParametersTransaction {
+  id: string;
+  confirmation: string;
+  epoch: number;
+  deviceRef: LiveRef;
+  parameters: Array<{ ref: LiveRef; authority: JsonObject; priorValue: number; proposedValue: number; priorRevision: number; appliedRevision?: number; appliedDisplay?: string }>;
+  expiresAt: number;
+  state: "previewed" | "applying" | "applied" | "uncertain" | "undoing" | "undone";
+  applyKey?: string;
+  undoKey?: string;
+}
+
 interface DeviceParameterTransaction {
   id: string;
   epoch: number;
@@ -79,6 +93,8 @@ interface DeviceParameterTransaction {
   authority: JsonObject;
   priorValue: number;
   proposedValue: number;
+  /** Live's own text for the applied value, from the verifying read. */
+  appliedDisplay?: string;
   confirmation: string;
   priorRevision: number;
   appliedRevision?: number;
@@ -205,11 +221,18 @@ interface ClipLifecycleTransaction {
   state: "previewed" | "applying" | "applied" | "undoing" | "undone" | "uncertain";
   created?: Record<string, unknown>;
   inflight?: Promise<Record<string, unknown>>;
+  /** A track-properties apply's verified colour (0xRRGGBB), repeated on an idempotent replay. */
+  appliedColor?: number;
 }
 
 const REQUEST_ID_MAX_LENGTH = 128;
 const SERVER_VERSION = PACKAGE_VERSION;
 const TRANSACTION_TTL_MS = 30_000;
+/** Pads one load-samples change fills: a Drum Rack shows 16 at a time. */
+const MAX_DRUM_PAD_LOADS = 16;
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+/** A pad's note as Live labels it: 36 is C1. */
+const noteLabel = (note: number): string => `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 2}`;
 const MAX_TRANSACTIONS = 256;
 const AUDITION_TTL_MS = 30_000;
 // Real-Live snapshot reads take seconds on populated sets, and launch/stop
@@ -235,7 +258,9 @@ const BROWSER_SEARCH_CANDIDATE_LIMIT = 100;
 const BROWSER_SEARCH_CACHE_TTL_MS = 60_000;
 const BROWSER_SEARCH_CACHE_MAX_ENTRIES = 16;
 const BROWSER_SEARCH_MAX_TOKENS = 8;
-const MAX_AUDITION_TRANSACTIONS = 64;
+// Applied transactions keep their undo until released or undone: room for a long session's changes (a
+// search renders hundreds of times; its own steps are released as it goes, see live_transaction_release).
+const MAX_AUDITION_TRANSACTIONS = 512;
 const MONITORABLE_TRACK_KINDS = new Set(["regular", "audio", "midi"]);
 
 const resources = [
@@ -313,7 +338,7 @@ function isDiscoveryFilter(value: unknown): value is Record<string, string | num
 function isIdempotencyKey(value: unknown): value is string { return typeof value === "string" && value.length >= 8 && value.length <= 128; }
 
 function canonicalMutationIdentity(value: unknown, depth = 0): string {
-  if (depth > 16) throw new Error("mutation authority is too deeply nested");
+  if (depth > 64) throw new Error("mutation authority is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("mutation authority contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
   if (typeof value === "string") { if (value.length > 16_384) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
@@ -376,6 +401,77 @@ class BoundedTransactionMap<T extends { expiresAt: number; state: string }> exte
   }
 }
 
+/** Live keeps mixer and device values as 32-bit floats (a written 0.6 reads back as 0.6000000238),
+ * so numeric postconditions compare within float32 precision; everything else must match exactly. */
+/**
+ * A parameter Live keeps in whole numbers without marking it stepped (a scale's root note, a MIDI
+ * controller's 0-127) takes the nearest one: that value, when it's what Live did; otherwise undefined.
+ */
+function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { min?: unknown; max?: unknown }): number | undefined {
+  return typeof observed === "number" && Number.isInteger(observed) && Number.isInteger(parameter.min) && Number.isInteger(parameter.max) && Math.abs(observed - proposed) <= 0.5 + 1e-9 ? observed : undefined;
+}
+
+/** An adapter failure as a tool may show it: bounded bridge and host messages, anything else generic.
+ * "request failed: ..." carries the Remote Script's bounded validation message or exception type. */
+/**
+ * What a refusal says to the client. Known reasons pass; so does the host's own sentence saying why it
+ * refused ("recording start requires the exact destination to be the only armed track"), so the
+ * client can fix the cause. Anything else (a runtime error, a message with a path or a stack) is
+ * masked as "adapter request failed".
+ */
+function adapterReason(raw: string): string {
+  const known = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter )/i.test(raw) && raw.length <= 240;
+  const hostSentence = raw.length <= 240 && /^(?:[a-z]|Live )/.test(raw) && !/[\r\n]/.test(raw) && !/(?:^|[\s'"(=])(?:\/[^\s/'"]+){2,}|[A-Za-z]:\\|\bat \S+ \(|node:internal/.test(raw);
+  return known || hostSentence ? raw : "adapter request failed";
+}
+
+/** The Remote Script refused before anything changed in Live (a position past the end of the Set):
+ * a definite answer, so the change didn't happen rather than being uncertain. */
+function nothingChanged(cause: unknown): boolean {
+  return cause instanceof Error && /^request failed: .*; nothing changed\b/.test(cause.message);
+}
+
+/** Live reads a switched-off scene tempo or time signature as -1 (outside what can be written): such a
+ * prior is restored by switching it off again, not by writing -1. Undefined when it can't be exact. */
+function sceneRestoreFields(prior: Record<string, unknown>): Record<string, unknown> | undefined {
+  const within = (value: unknown, min: number, max: number): boolean => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  const restore: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(prior)) {
+    if (value === null) return undefined;
+    if (field === "tempo" && !within(value, 20, 999)) { if (prior.tempoEnabled === true) return undefined; restore.tempoEnabled = false; }
+    else if ((field === "signatureNumerator" || field === "signatureDenominator") && !(Number.isInteger(value) && within(value, 1, 99))) { if (prior.timeSignatureEnabled === true) return undefined; restore.timeSignatureEnabled = false; }
+    else restore[field] = value;
+  }
+  return restore;
+}
+
+/** Whether a scene reads back as its prior state; a switched-off tempo or signature only has to be off. */
+function sceneFieldRestored(restored: Record<string, unknown>, field: string, value: unknown, prior: Record<string, unknown>): boolean {
+  const off = (field === "tempo" && (typeof value !== "number" || value < 20)) || ((field === "signatureNumerator" || field === "signatureDenominator") && (typeof value !== "number" || value < 1));
+  if (off) return restored[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] === false && prior[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] !== true;
+  return sameLiveValue(restored[field], value);
+}
+
+function sameLiveValue(observed: unknown, expected: unknown): boolean {
+  if (typeof observed === "number" && typeof expected === "number") return Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
+  if (Array.isArray(observed) && Array.isArray(expected)) return observed.length === expected.length && observed.every((value, index) => sameLiveValue(value, expected[index]));
+  return JSON.stringify(observed) === JSON.stringify(expected);
+}
+
+/**
+ * Why a value between a stepped parameter's steps is refused, with the steps it takes: a switch or
+ * a waveform choice takes the number of one of its items (0 is the first).
+ */
+function steppedValueMessage(parameter: { name?: unknown; min: number; max: number; quantization?: number; valueItems?: unknown }): string {
+  const name = `parameter “${String(parameter.name ?? "").slice(0, 64)}”`;
+  const items = Array.isArray(parameter.valueItems) ? parameter.valueItems.filter((item): item is string => typeof item === "string") : [];
+  if (parameter.quantization === 1 && items.length) {
+    const listed = items.slice(0, 12).map((item, index) => `${parameter.min + index} ${item.slice(0, 32)}`).join(", ");
+    return `${name} takes one of its steps: ${listed}${items.length > 12 ? ", …" : ""}`;
+  }
+  return parameter.quantization === 1 ? `${name} takes whole numbers from ${parameter.min} to ${parameter.max}` : `${name} takes steps of ${parameter.quantization} from ${parameter.min} to ${parameter.max}`;
+}
+
 export class McpHost {
   private initialized = false;
   private initializedNotification = false;
@@ -391,6 +487,7 @@ export class McpHost {
   private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>();
   private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>();
   private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>();
+  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>();
   private readonly midiTransactions: SessionMidiTransactionManager;
   private readonly batchTransactions: BatchTransactionManager;
   private readonly deviceStateTransactions: DeviceStateTransactionManager;
@@ -401,15 +498,21 @@ export class McpHost {
   private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
   private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
+    if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
+    if (value.kind === "drum-pad" && Array.isArray(value.payload?.pads)) for (const pad of value.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
+    if (value.kind === "drum-pad") this.releaseDrumSamplerPresets(value);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
-  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
+  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; priorState?: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
+  /** Undos the bridge refused before dispatching anything to Live, by transaction: live_undo reports
+   * them as refusals and the change stays applied, instead of leaving it uncertain. */
+  private readonly undoRefusals = new Map<string, { record: object; message: string }>();
   private recoveryFinalizationInFlight = false;
   private activeAsyncOperations = 0;
   private toolPolicy: ToolPolicySpec;
   private toolListFingerprint: string | undefined;
 
-  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string } = {}) {
+  public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string; userLibraryDir?: string; liveResourcesDir?: string } = {}) {
     this.midiTransactions = new SessionMidiTransactionManager(adapter);
     this.batchTransactions = new BatchTransactionManager(adapter, (kinds) => {
       for (const kind of kinds) {
@@ -420,6 +523,8 @@ export class McpHost {
     this.deviceStateTransactions = new DeviceStateTransactionManager(adapter);
     this.toolPolicy = options.toolPolicy === undefined ? DEFAULT_TOOL_POLICY : parseToolPolicySpec(options.toolPolicy);
     this.importStagingDirOption = options.importStagingDir;
+    this.userLibraryDirOption = options.userLibraryDir;
+    this.liveResourcesDirOption = options.liveResourcesDir;
   }
 
   /** The effective deployment tool policy (profile plus explicit overrides). */
@@ -515,7 +620,7 @@ export class McpHost {
     if (!isObject(input) || input.method !== "tools/call" || !isObject(input.params) || typeof input.params.name !== "string") return this.handleCore(input, modern);
     const name = input.params.name;
     const toolArguments = input.params.arguments;
-    if (!["live_status", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_snapshot", "live_discover", "live_device_parameter_preview", "live_device_parameter_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_realtime_arm_preview", "live_realtime_arm_apply", "live_realtime_disarm", "live_realtime_stats", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"].includes(name)) return this.handleCore(input, modern);
+    if (!["live_status", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_snapshot", "live_discover", "live_device_parameter_preview", "live_device_parameter_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_transaction_release", "live_recovery_finalize", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_realtime_arm_preview", "live_realtime_arm_apply", "live_realtime_disarm", "live_realtime_stats", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"].includes(name)) return this.handleCore(input, modern);
     // Reuse the synchronous validator and request bookkeeping, then execute the
     // adapter operation asynchronously. Invalid requests never reach Live.
     const id = this.requestId(input.id);
@@ -695,6 +800,7 @@ export class McpHost {
       if (name === "live_tempo_preview") return await this.liveTempoPreviewAsync(id, toolArguments);
       if (name === "live_tempo_apply") return await this.liveTempoApplyAsync(id, toolArguments, signal);
       if (name === "live_recovery_finalize") return await this.liveRecoveryFinalizeAsync(id, toolArguments);
+      if (name === "live_transaction_release") return this.liveTransactionRelease(id, toolArguments);
       const result = await this.liveUndoAsync(id, toolArguments, signal);
       return signal?.aborted ? null : result;
       };
@@ -1204,7 +1310,7 @@ export class McpHost {
   }
 
   private sessionStructureCreatedFingerprint(snapshot: LiveSnapshot, kind: "track" | "scene", reference: LiveRef): string {
-    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = { ...track, clipSlots: (track.clipSlots ?? []).filter((slot) => slot.empty !== true || slot.clipRef != null) }; const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return this.captureObjectFingerprint({ track: ownedTrack, arrangementClips }); }
+    if (kind === "track") { const track = snapshot.tracks.find((row) => row.ref === reference); if (!track) throw new Error("created track fingerprint is unavailable"); const ownedTrack = ownedTrackFingerprintRow(track); const arrangementClips = (snapshot.arrangement.clips ?? []).filter((clip) => clip.trackRef === reference || clip.parentRef === reference); return this.captureObjectFingerprint({ track: ownedTrack, arrangementClips }); }
     const scene = snapshot.scenes.find((row) => row.ref === reference); if (!scene) throw new Error("created scene fingerprint is unavailable"); const sceneRow = scene as unknown as JsonObject; const sceneIdentity = { ref: scene.ref, parentRef: sceneRow.parentRef ?? null, objectIdentity: scene.objectIdentity ?? null, name: scene.name, triggerable: sceneRow.triggerable ?? null };
     const contents = snapshot.tracks.map((track) => { const slot = track.clipSlots?.find((row) => row.sceneIndex === scene.index); const clip = slot?.clipRef ? track.clips.find((row) => row.ref === slot.clipRef) : undefined; const slotRow = slot as unknown as JsonObject | undefined; const ownedSlot = slot ? { ref: slot.ref, parentRef: slot.parentRef ?? null, trackRef: slotRow?.trackRef ?? null, objectIdentity: slot.objectIdentity ?? null, clipRef: slot.clipRef ?? null, empty: slot.empty } : null; return { trackRef: track.ref, trackIdentity: track.objectIdentity ?? null, slot: ownedSlot, clip: clip ?? null }; });
     return this.captureObjectFingerprint({ scene: sceneIdentity, contents });
@@ -1216,7 +1322,8 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.structure"); const snapshot = await this.asyncAdapter().snapshotAsync();
       const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      if ([...proposed.tracks, ...proposed.scenes].some((item) => existingNames.has(item.name))) throw new Error("track or scene name already exists");
+      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
+      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -1309,13 +1416,17 @@ export class McpHost {
       const status = this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
       if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
       const adapter = this.asyncAdapter(); const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
-      if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to regular Set tracks");
+      if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
       const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       if (!current || current.ref !== params.ref || !isNonEmptyString(current.objectIdentity, 256) || typeof current.name !== "string") throw new Error("rename target lacks exact authoritative object identity");
-      if (current.name === params.name) throw new Error("rename would not change the target");
-      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name: params.name, expectedAuthorityRevision: this.renameAuthorityRevision(snapshot, params.kind as string, params.ref as LiveRef) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      // Live shows return tracks with their letter ("A-Reverb") and prepends it to any name it is given,
+      // so the name to expect afterwards carries that prefix whether or not the caller included it.
+      const prefix = params.kind === "track" && snapshot.tracks.find((track) => track.ref === params.ref)?.kind === "return" ? /^[A-Z]-/.exec(current.name)?.[0] ?? "" : "";
+      const name = prefix && !(params.name as string).startsWith(prefix) ? `${prefix}${params.name as string}` : params.name as string;
+      if (current.name === name) throw new Error("rename would not change the target");
+      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name, expectedAuthorityRevision: this.renameAuthorityRevision(snapshot, params.kind as string, params.ref as LiveRef) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "rename");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { kind: params.kind, ref: params.ref, objectIdentity: current.objectIdentity, currentName: current.name }, proposedName: params.name, impact: "renames-one-live-object", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { kind: params.kind, ref: params.ref, objectIdentity: current.objectIdentity, currentName: current.name }, proposedName: name, impact: "renames-one-live-object", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Rename preview failed without mutation; rediscover the exact target."); }
   }
 
@@ -1353,7 +1464,7 @@ export class McpHost {
 
   private async liveDiscoverAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const kinds = ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] as const;
-    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "device", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 32 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
+    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 32 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
     return this.successText(id, await this.asyncAdapter().discoverAsync({ kind: params.kind as import("./live.js").LiveDiscoveryKind, parent: params.parent as string | undefined, filter: params.filter as Record<string, unknown> | undefined, fields: params.fields as string[] | undefined, budget: (params.budget as number | undefined) ?? 1000, limit: (params.limit as number | undefined) ?? 50, cursor: params.cursor as string | undefined }));
   }
 
@@ -1635,17 +1746,29 @@ export class McpHost {
     } catch (cause) { return this.adapterToolError(id, cause, "Transport preview requires fresh authoritative playback state."); }
   }
 
-  private async confirmTransportPosition(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, proposed: number): Promise<void> {
-    // Live applies playhead moves asynchronously; accept the position once it
-    // lands within tolerance, allowing bounded drift while the transport plays.
-    while (Date.now() < context.deadlineMs - 250) {
+  /** Whether fresh transport state shows a transport field as given: the playhead within tolerance
+   * (with bounded drift while playing), loop bounds within float precision, switches exactly. */
+  private static transportFieldIs(transport: LiveSnapshot["playback"]["transport"], field: string, value: number | boolean): boolean {
+    if (field === "position") {
+      const current = transport.position;
+      if (typeof current !== "number" || typeof value !== "number") return false;
+      return transport.playing === true ? current >= value - 0.26 && current <= value + 2.5 : Math.abs(current - value) <= 0.26;
+    }
+    const observed = field === "loopEnabled" ? transport.loop.enabled : field === "loopStart" ? transport.loop.start : field === "loopLength" ? transport.loop.length : (transport as unknown as JsonObject)[field];
+    return typeof value === "number" ? sameLiveValue(observed, value) : observed === value;
+  }
+
+  /** Live applies transport writes on its next tick (the playhead always; the loop and metronome on
+   * current builds), so the bridge accepts them as pending. Confirm every written field in fresh
+   * playback state, and return that state, whose revision is the one the change left. */
+  private async confirmTransportFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, fields: Record<string, number | boolean>): Promise<LiveSnapshot> {
+    while (true) {
       const after = await adapter.snapshotAsync(context);
-      const current = after.playback.transport.position;
-      const playing = after.playback.transport.playing === true;
-      if (typeof current === "number" && (playing ? (current >= proposed - 0.26 && current <= proposed + 2.5) : Math.abs(current - proposed) <= 0.26)) return;
+      if (Object.entries(fields).every(([field, value]) => McpHost.transportFieldIs(after.playback.transport, field, value))) return after;
+      if (Date.now() >= context.deadlineMs - 250) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error("transport position was not confirmed by fresh playback state");
+    throw new Error("transport change was not confirmed by fresh playback state");
   }
 
   private async liveTransportApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -1666,22 +1789,29 @@ export class McpHost {
       if (!reconciliation && (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity || snapshot.playback.revision !== transaction.playbackRevision)) return this.transactionError(id, "transport Set identity or state changed since preview; preview again");
       const result = await adapter.invokeAsync({ operation: "transport.set", args: { ...transaction.proposed, expectedRevision: transaction.playbackRevision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity } }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true || typeof result.revision !== "string") throw new Error("transport change was not confirmed");
-      if (typeof transaction.proposed.position === "number") await this.confirmTransportPosition(adapter, context, transaction.proposed.position);
-      transaction.appliedRevision = result.revision;
+      const confirmed = await this.confirmTransportFields(adapter, context, transaction.proposed);
+      // The revision of the state the change left, once Live applied it (undo checks nothing changed since).
+      transaction.appliedRevision = confirmed.playback.revision;
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
-    } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport state is uncertain; perform fresh discovery before retrying."); }
+    } catch (cause) {
+      if (nothingChanged(cause)) { transaction.state = "undone"; return this.adapterToolError(id, cause, "Nothing changed in Live."); }
+      transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport state is uncertain; perform fresh discovery before retrying.");
+    }
   }
 
   private async liveTransportUndoAsync(id: RequestId, transaction: TransportTransaction, params: Record<string, unknown>, signal?: AbortSignal): Promise<JsonObject> {
     if (transaction.state === "undone" && transaction.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "undone", idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.undoKey === params.idempotencyKey;
     if (transaction.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain transport transaction can be undone");
+    // A refusal before anything reaches Live leaves the change applied, with no recovery plan: a retry with a
+    // new key starts over instead of reconciling one that never ran.
+    const refuse = (message: string) => { this.undoRecoveryPlans.delete(transaction); return this.transactionError(id, message); };
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string);
       const status = this.requireConnected("transport");
-      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+      if (status.epoch !== transaction.epoch) return refuse("Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
@@ -1697,17 +1827,21 @@ export class McpHost {
         if (field === "punchIn" && typeof prior.punchIn === "boolean") restore.punchIn = prior.punchIn;
         if (field === "punchOut" && typeof prior.punchOut === "boolean") restore.punchOut = prior.punchOut;
       }
-      if (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity) return this.transactionError(id, "transport Set identity changed after apply; undo refused");
-      if (!reconciliation && (transaction.appliedRevision === undefined || snapshot.playback.revision !== transaction.appliedRevision)) return this.transactionError(id, "transport state revision changed after apply; undo refused");
+      if (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity) return refuse("transport Set identity changed after apply; undo refused");
+      // Playing, stopping and recording since change the playback revision and move the playhead, so undo
+      // puts the change back as long as each field it changed still reads as it left it; the playhead only
+      // while stopped, since moving it while playing would be heard.
       const current = snapshot.playback.transport;
+      if (!reconciliation && current.playing === true) delete restore.position;
+      if (!reconciliation && Object.keys(restore).length === 0) return refuse("transport undo refused while playing: only the playhead changed; stop playback first");
       if (reconciliation) {
-        for (const [field, restored] of Object.entries(restore)) { const observed = field === "loopEnabled" ? current.loop.enabled : field === "loopStart" ? current.loop.start : field === "loopLength" ? current.loop.length : (current as unknown as JsonObject)[field]; if (field === "position" ? (typeof observed !== "number" || typeof restored !== "number" || Math.abs(observed - restored) > 0.26) : observed !== restored) throw new Error("transport undo replay did not restore the exact prior state"); }
+        await this.confirmTransportFields(adapter, context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
       } else {
-        for (const [field, proposed] of Object.entries(transaction.proposed)) { const observed = field === "loopEnabled" ? current.loop.enabled : field === "loopStart" ? current.loop.start : field === "loopLength" ? current.loop.length : (current as unknown as JsonObject)[field]; if (field === "position" ? (typeof observed !== "number" || typeof proposed !== "number" || Math.abs(observed - proposed) > 0.26) : observed !== proposed) return this.transactionError(id, "transport field changed after apply; undo refused"); }
+        for (const [field, proposed] of Object.entries(transaction.proposed)) if (field !== "position" && !McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return refuse("transport field changed after apply; undo refused");
         const result = await this.invokeUndoRecovery(transaction, adapter, "transport.set", { ...restore, expectedRevision: snapshot.playback.revision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("transport undo was not confirmed");
       }
-      if (typeof restore.position === "number") await this.confirmTransportPosition(adapter, context, restore.position);
+      await this.confirmTransportFields(adapter, context, restore);
       transaction.undoKey = params.idempotencyKey as string;
       transaction.state = "undone";
       return this.successText(id, { transactionId: transaction.id, state: "undone", restored: restore, idempotent: false });
@@ -1982,14 +2116,38 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "routing.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("routing change was not confirmed");
-      const after = await adapter.snapshotAsync(context); const appliedTrack = (after.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef);
-      if (!appliedTrack || appliedTrack.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("routing target identity changed after apply");
-      const observedRouting = { inputType: (appliedTrack.routing as JsonObject).inputType, inputSubRouting: (appliedTrack.routing as JsonObject).inputSubRouting, outputType: (appliedTrack.routing as JsonObject).outputType, outputSubRouting: (appliedTrack.routing as JsonObject).outputSubRouting, arm: appliedTrack.armed, monitoring: appliedTrack.monitoringState }; for (const key of Object.keys(transaction.prior ?? {})) if (observedRouting[key as keyof typeof observedRouting] !== transaction.payload[key]) throw new Error("routing postcondition was not confirmed");
-      transaction.created = { inputType: (appliedTrack.routing as JsonObject).inputType, inputSubRouting: (appliedTrack.routing as JsonObject).inputSubRouting, outputType: (appliedTrack.routing as JsonObject).outputType, outputSubRouting: (appliedTrack.routing as JsonObject).outputSubRouting, arm: appliedTrack.armed, monitoring: appliedTrack.monitoringState };
+      const expected = Object.fromEntries(Object.keys(transaction.prior ?? {}).map((key) => [key, transaction.payload[key]]));
+      const appliedTrack = await this.confirmRoutingFields(adapter, context, transaction.clipRef as LiveRef, transaction.payload.expectedObjectIdentity as string, expected, "routing postcondition was not confirmed");
+      transaction.created = this.observedRouting(appliedTrack);
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Routing state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  /** Routing fields as they can be written back: a sub-routing Live reads as none (No Input has none)
+   * isn't written; Live leaves it empty when the type is put back. */
+  private static writableRouting(prior: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(prior).filter(([field, value]) => !(value === null && /SubRouting$/.test(field))));
+  }
+
+  private observedRouting(track: JsonObject): Record<string, unknown> {
+    const routing = (isObject(track.routing) ? track.routing : {}) as JsonObject;
+    return { inputType: routing.inputType, inputSubRouting: routing.inputSubRouting, outputType: routing.outputType, outputSubRouting: routing.outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
+  }
+
+  /** Live arms a track and switches its monitoring on its next tick on current builds, so the bridge
+   * accepts those writes as pending: confirm the routing fields in fresh state, and return that track. */
+  private async confirmRoutingFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, trackRef: LiveRef, identity: string, expected: Record<string, unknown>, failure: string): Promise<JsonObject> {
+    while (true) {
+      const track = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackRef);
+      if (!track || track.objectIdentity !== identity) throw new Error("routing target identity changed after apply");
+      const observed = this.observedRouting(track);
+      if (Object.entries(expected).every(([key, value]) => observed[key] === value)) return track;
+      if (Date.now() >= context.deadlineMs - 250) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(failure);
   }
 
   private eventEmitter: ((value: string) => Promise<void>) | undefined;
@@ -2269,7 +2427,8 @@ export class McpHost {
   }
 
   private async liveRecordingPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["action", "lane", "intent", "destinationTrackRef", "outputSafety"]) || (params.action !== "start" && params.action !== "stop") || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
+    if (!isObject(params) || !hasOnly(params, ["action", "lane", "intent", "destinationTrackRef", "alsoTrackRefs", "outputSafety"]) || (params.action !== "start" && params.action !== "stop")
+      || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 7 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
     try {
       this.validateOutputSafety(params.outputSafety);
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
@@ -2280,6 +2439,8 @@ export class McpHost {
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       let destinationTrackIdentity: string | null = null;
+      // Tracks recorded alongside the destination, each armed too (renders of several sources at once).
+      const also: { ref: string; identity: string }[] = [];
       if (params.action === "start") {
         const alreadyRecording = params.lane === "session" ? transport.sessionRecord === true : transport.arrangementRecord === true;
         if (alreadyRecording) throw new Error(`${params.lane} recording is already active`);
@@ -2288,11 +2449,18 @@ export class McpHost {
         if (!destination || !isNonEmptyString(destination.objectIdentity, 256)) throw new Error("destination track identity is not authoritative");
         destinationTrackIdentity = destination.objectIdentity;
         if (destination.armed !== true) throw new Error("destination track is not armed for recording; arm it through live_routing_preview first");
-        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => item.ref !== params.destinationTrackRef && item.armed === true);
-        if (additionallyArmed.length > 0) throw new Error("recording start requires the exact destination to be the only armed track");
+        for (const ref of (params.alsoTrackRefs ?? []) as string[]) {
+          const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === ref);
+          if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("a track recorded alongside is not authoritative");
+          if (track.armed !== true) throw new Error("a track recorded alongside is not armed; arm it through live_routing_preview first");
+          also.push({ ref, identity: track.objectIdentity });
+        }
+        const recorded = new Set([params.destinationTrackRef, ...also.map((item) => item.ref)]);
+        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => !recorded.has(item.ref as string) && item.armed === true);
+        if (additionallyArmed.length > 0) throw new Error(also.length ? "recording start requires exactly the named tracks to be armed" : "recording start requires the exact destination to be the only armed track");
       }
       const fence = JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing });
-      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "recording");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, lane: params.lane, intent: params.intent, prior: transaction.prior, impact: params.action === "start" ? "starts-recording" : "stops-recording", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Recording preview refused; obtain fresh authoritative state and explicit output-safety evidence."); }
@@ -2318,7 +2486,10 @@ export class McpHost {
       if (!reconciliation && transaction.payload.action === "start") {
         const destinationRef = transaction.payload.destinationTrackRef;
         const armed = (snapshot.tracks as unknown as JsonObject[]).filter((track) => track.armed === true);
-        if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || armed.length !== 1 || armed[0]?.ref !== destinationRef || armed[0]?.objectIdentity !== transaction.payload.destinationTrackIdentity) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
+        const also = (transaction.payload.also ?? []) as { ref: string; identity: string }[];
+        const expected = [{ ref: destinationRef, identity: transaction.payload.destinationTrackIdentity }, ...also];
+        const same = armed.length === expected.length && expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
+        if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || !same) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
       }
       const operation = transaction.payload.lane === "session" ? "recording.session" : "recording.arrangement";
       const prior = transaction.prior as Record<string, unknown>;
@@ -2329,6 +2500,7 @@ export class McpHost {
         expectedArrangementRecord: prior.arrangementRecord,
         destinationTrackRef: transaction.payload.destinationTrackRef ?? null,
         destinationTrackIdentity: transaction.payload.destinationTrackIdentity ?? null,
+        ...(transaction.payload.also ? { alsoTrackRefs: (transaction.payload.also as { ref: string }[]).map((item) => item.ref), alsoTrackIdentities: (transaction.payload.also as { identity: string }[]).map((item) => item.identity) } : {}),
         outputSafety: transaction.payload.outputSafety,
       } }, context) as { recording?: unknown };
       const expected = transaction.payload.action === "start";
@@ -2354,6 +2526,9 @@ export class McpHost {
   }
 
   private realtimeParameterTargets(snapshot: LiveSnapshot, references: string[]): JsonObject[] {
+    // Only a track or device that holds a requested parameter costs its parameters: the rest of a
+    // real Set (a loaded Drum Rack is hundreds of parameters) is passed by for one unit each.
+    const wanted = new Set(references);
     const available = new Map<string, JsonObject>();
     const add = (reference: string, value: unknown, details: JsonObject, authority: JsonObject): void => {
       available.set(reference, { ref: reference, value: typeof value === "number" && Number.isFinite(value) ? value : null, ...details, authority });
@@ -2361,12 +2536,12 @@ export class McpHost {
     let authorityBudget = 0;
     let exhausted = false;
     const consumeAuthority = (amount: number): boolean => {
-      if (authorityBudget + amount > 1024) { exhausted = true; return false; }
+      if (authorityBudget + amount > 16_384) { exhausted = true; return false; }
       authorityBudget += amount;
       return true;
     };
     for (const track of snapshot.tracks as unknown as JsonObject[]) {
-      if (exhausted) break;
+      if (exhausted || [...wanted].every((reference) => available.has(reference))) break;
       const trackRef = typeof track.ref === "string" ? track.ref : undefined;
       const trackIdentity = typeof track.objectIdentity === "string" ? track.objectIdentity : undefined;
       const mixer = isObject(track.mixer) ? track.mixer : undefined;
@@ -2386,9 +2561,10 @@ export class McpHost {
           if (typeof ref !== "string" || typeof sendIdentities[index] !== "string") { complete = false; return; }
           mixerRows.push({ ref, objectIdentity: sendIdentities[index], value: sends[index], kind: "mixer-send", sendIndex: index });
         });
-        if (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length)) { exhausted = true; break; }
+        const holdsMixer = mixerRows.some((row) => wanted.has(row.ref));
+        if (holdsMixer && (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
         const siblings = mixerRows.map(({ ref, objectIdentity }) => ({ ref, objectIdentity }));
-        for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
+        if (holdsMixer) for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
       }
       const visitDevices = (candidate: unknown): void => {
         if (exhausted) return;
@@ -2399,10 +2575,11 @@ export class McpHost {
           const deviceIdentity = typeof device.objectIdentity === "string" ? device.objectIdentity : undefined;
           const rawParameters = Array.isArray(device.parameters) ? device.parameters : [];
           const rawMacros = Array.isArray(device.macros) ? device.macros : [];
+          const holds = [...rawParameters, ...rawMacros].some((row) => isObject(row) && typeof row.ref === "string" && wanted.has(row.ref));
           const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= 256;
-          if (!rowsComplete) { exhausted = true; return; }
+          if (holds && !rowsComplete) { exhausted = true; return; }
           const parameters = rawParameters as JsonObject[];
-          const rows = [...parameters, ...rawMacros as JsonObject[]];
+          const rows = holds ? [...parameters, ...rawMacros as JsonObject[]] : [];
           if (!consumeAuthority(rows.length)) return;
           const siblingRows = rows.map((row) => typeof row.ref === "string" && typeof row.objectIdentity === "string" ? { ref: row.ref, objectIdentity: row.objectIdentity } : undefined);
           const siblings = siblingRows.every((row) => row !== undefined) ? siblingRows as Array<{ ref: string; objectIdentity: string }> : undefined;
@@ -2566,6 +2743,40 @@ export class McpHost {
     return JSON.stringify({ ref: row.device.ref, objectIdentity: row.device.objectIdentity, track: row.track.ref, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, enabled: row.device.enabled ?? null });
   }
 
+  /**
+   * Where a device sits, by name, for a picture of it: its neighbours in order and its place among
+   * them, and when it's in a rack's chain, the rack's chains side by side.
+   */
+  private devicePlacement(snapshot: LiveSnapshot, located: ReturnType<McpHost["deviceRow"]>): JsonObject {
+    const names = (devices: unknown) => (Array.isArray(devices) ? devices : []).filter(isObject).slice(0, 16).map((device) => String(device.name ?? "").slice(0, 64));
+    const index = located.siblings.findIndex((sibling) => sibling.ref === located.device.ref);
+    if (located.ownerRef === located.track.ref) return { owner: "track", devices: names(located.track.devices), index };
+    try {
+      const { device: rack, chain } = this.chainOnTrack(snapshot, located.ownerRef as LiveRef);
+      const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
+      return { owner: "chain", rack: String(rack.name ?? "").slice(0, 64), chain: chains.findIndex((candidate) => candidate.ref === chain.ref), index,
+        chains: chains.slice(0, 8).map((candidate) => ({ name: String(candidate.name ?? "").slice(0, 64), devices: names(candidate.devices) })) };
+    } catch { return { owner: "chain", devices: [], index }; }
+  }
+
+  /** A chain's device authority, for loading into it: the track, the chain, and the chain's devices in order. */
+  private chainDeviceAuthority(track: JsonObject, chain: JsonObject): { expectedTrackIdentity: string; chainRef: string; expectedChainIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
+    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? []) || ((chain.devices as unknown[] | undefined) ?? []).length > 256) throw new Error("chain device authority is incomplete");
+    const siblings = ((chain.devices as unknown[] | undefined) ?? []).map((device) => {
+      if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
+      return { ref: device.ref, objectIdentity: device.objectIdentity };
+    });
+    return { expectedTrackIdentity: track.objectIdentity, chainRef: chain.ref, expectedChainIdentity: chain.objectIdentity, expectedSiblings: siblings };
+  }
+
+  /** A chain anywhere in a track's devices (a rack's, a nested rack's, a drum pad's), with its track and rack. */
+  private chainOnTrack(snapshot: LiveSnapshot, chainRef: LiveRef): { track: JsonObject; device: JsonObject; chain: JsonObject } {
+    for (const track of snapshot.tracks as unknown as JsonObject[]) {
+      try { return { track, ...this.chainRow({ ...snapshot, tracks: [track] } as unknown as LiveSnapshot, chainRef) }; } catch { continue; }
+    }
+    throw new Error("chain reference is not authoritative");
+  }
+
   private trackDeviceAuthority(track: JsonObject): { expectedTrackIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
     if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices) || track.devices.length > 256) throw new Error("track device authority is incomplete");
     const siblings = (track.devices as unknown[]).map((device) => {
@@ -2579,10 +2790,11 @@ export class McpHost {
     const snapshot = await adapter.snapshotAsync(context); let located: ReturnType<McpHost["deviceRow"]>;
     try { located = this.deviceRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
     if (located.device.objectIdentity !== objectIdentity) throw new Error("owned device identity changed before cleanup");
-    if (expectedFingerprint && this.captureObjectFingerprint(located.device) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
+    if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
-    try { this.deviceRow(await adapter.snapshotAsync(context), reference); } catch { return; }
+    // Gone, or another device slid into its place: either way this one isn't there any more.
+    try { if (this.deviceRow(await adapter.snapshotAsync(context), reference).device.objectIdentity !== objectIdentity) return; } catch { return; }
     throw new Error("owned device cleanup was not confirmed");
   }
 
@@ -2615,7 +2827,7 @@ export class McpHost {
   }
 
   private async liveBrowserSearchAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const categories = ["instruments", "audio_effects", "midi_effects", "drums", "plugins", "packs", "max_for_live", "clips"];
+    const categories = ["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"];
     if (!isObject(params) || !hasOnly(params, ["category", "query", "limit", "matchMode", "refresh"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.matchMode !== undefined && params.matchMode !== "ranked" && params.matchMode !== "substring") || (params.refresh !== undefined && typeof params.refresh !== "boolean")) return error(id, -32602, "category, query, limit, matchMode, and refresh are invalid");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
@@ -3115,7 +3327,7 @@ export class McpHost {
   }
 
   private async liveBrowserLoadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef"]) || !isNonEmptyString(params.itemId, 256) || !isNonEmptyString(params.trackRef, 256)) return error(id, -32602, "itemId and trackRef are required");
+    if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef", "chainRef"]) || !isNonEmptyString(params.itemId, 256) || (params.trackRef === undefined && params.chainRef === undefined) || (params.trackRef !== undefined && !isNonEmptyString(params.trackRef, 256)) || (params.chainRef !== undefined && !isNonEmptyString(params.chainRef, 256))) return error(id, -32602, "itemId and a trackRef or chainRef are required");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -3124,13 +3336,17 @@ export class McpHost {
       const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
       if (item.id !== params.itemId || item.isDevice !== true || typeof item.name !== "string" || !isNonEmptyString(item.objectIdentity, 256)) throw new Error("browser item lacks exact track-loadable identity");
       const snapshot = await adapter.snapshotAsync();
-      const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.trackRef);
+      // Into a rack's chain: the chain's track is the one checked, and the chain's devices are the siblings.
+      const target = params.chainRef !== undefined ? this.chainOnTrack(snapshot, params.chainRef as LiveRef) : undefined;
+      if (target && params.trackRef !== undefined && target.track.ref !== params.trackRef) throw new Error("browser target chain isn't on that track");
+      const trackRef = (target?.track.ref ?? params.trackRef) as LiveRef;
+      const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === trackRef);
       if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind))) throw new Error("browser loading is limited to regular Set tracks");
-      const authority = this.trackDeviceAuthority(track);
-      const fence = JSON.stringify({ track: params.trackRef, ...authority });
-      const transaction: ClipLifecycleTransaction = { id: `browserload_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "browser-load", fence, clipRef: params.trackRef as LiveRef, payload: { itemId: params.itemId, trackRef: params.trackRef, expectedName: item.name, expectedItemIdentity: item.objectIdentity, ...authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const authority = target ? this.chainDeviceAuthority(track, target.chain) : this.trackDeviceAuthority(track);
+      const fence = JSON.stringify({ track: trackRef, ...authority });
+      const transaction: ClipLifecycleTransaction = { id: `browserload_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "browser-load", fence, clipRef: trackRef, payload: { itemId: params.itemId, trackRef, expectedName: item.name, expectedItemIdentity: item.objectIdentity, ...authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "browser load");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, item: { id: item.id, name: item.name, path: item.path, category: item.category, isDevice: true }, trackRef: params.trackRef, impact: "loads-browser-device", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, item: { id: item.id, name: item.name, path: item.path, category: item.category, isDevice: true }, trackRef, ...(target ? { chainRef: target.chain.ref as string, chainName: typeof target.chain.name === "string" ? target.chain.name : null, rackName: typeof target.device.name === "string" ? target.device.name : null } : {}), impact: "loads-browser-device", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Browser-load preview requires fresh authoritative state."); }
   }
 
@@ -3149,23 +3365,47 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
-        if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
+        let current: string | undefined;
+        try { current = track ? JSON.stringify({ track: transaction.payload.trackRef, ...(typeof transaction.payload.chainRef === "string" ? this.chainDeviceAuthority(track, this.chainOnTrack(snapshot, transaction.payload.chainRef as LiveRef).chain) : this.trackDeviceAuthority(track)) }) : undefined; } catch { current = undefined; }
+        if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || current !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "browser.load", args: transaction.payload }, context) as { loaded?: unknown; deviceRef?: unknown; deviceObjectIdentity?: unknown; createdFingerprint?: unknown };
       if (result.loaded !== true || !isNonEmptyString(result.deviceRef, 256) || !isNonEmptyString(result.deviceObjectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("browser load did not return exact created device identity");
-      const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
-      if (this.captureObjectFingerprint(createdDevice.device) !== result.createdFingerprint) throw new Error("browser-loaded device creation fingerprint was not confirmed");
-      transaction.created = { deviceRef: result.deviceRef, objectIdentity: result.deviceObjectIdentity, fingerprint: result.createdFingerprint };
+      const loadedSnapshot = await adapter.snapshotAsync(context);
+      const createdDevice = this.deviceRow(loadedSnapshot, result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
+      if (typeof transaction.payload.chainRef === "string" && createdDevice.ownerRef !== transaction.payload.chainRef) throw new Error("browser-loaded device is not in the requested chain");
+      let fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device));
+      if (fingerprint !== result.createdFingerprint) {
+        // A Max for Live device builds itself after the load returns: the same device (its identity is
+        // checked each time) once it holds still, two reads alike, is the one undo will look for.
+        let previous = fingerprint; let settled = false;
+        for (let attempt = 0; attempt < 12 && !settled; attempt++) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+          const again = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef);
+          if (again.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
+          fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(again.device));
+          settled = fingerprint === previous; previous = fingerprint;
+        }
+        if (!settled) throw new Error("browser-loaded device creation fingerprint was not confirmed");
+        // The Remote Script keeps its own record of the device as made: the settled state too, or undo would be refused.
+        if ((status.operations ?? []).includes("ownership.settle")) {
+          const recorded = await adapter.invokeAsync({ operation: "ownership.settle", args: { ref: result.deviceRef, expectedObjectIdentity: result.deviceObjectIdentity, expectedFingerprint: fingerprint } }, context) as { settled?: unknown; fingerprint?: unknown };
+          if (recorded.settled !== true || recorded.fingerprint !== fingerprint) throw new Error("browser-loaded device settled state was not recorded");
+        }
+      }
+      transaction.created = { deviceRef: result.deviceRef, objectIdentity: result.deviceObjectIdentity, fingerprint };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", deviceRef: transaction.created.deviceRef, idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", deviceRef: transaction.created.deviceRef, placement: this.devicePlacement(loadedSnapshot, createdDevice), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Browser load is uncertain; perform fresh discovery before retrying."); }
   }
 
   private async liveDevicePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (isObject(params) && params.action === "delete") return this.transactionError(id, "Arbitrary device deletion is unavailable; use live_undo only for an exact transaction-created device");
     const actions = ["insert", "enable", "move"] as const;
-    if (!isObject(params) || !hasOnly(params, ["action", "trackRef", "deviceName", "deviceRef", "index", "enabled"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action insert/enable/move is required; arbitrary device deletion is unavailable");
+    if (!isObject(params) || !hasOnly(params, ["action", "trackRef", "deviceName", "deviceRef", "index", "enabled", "filePath", "allowedRoot"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action insert/enable/move is required; arbitrary device deletion is unavailable");
+    if ((params.filePath !== undefined || params.allowedRoot !== undefined) && (params.action !== "insert" || params.deviceName !== "Simpler")) return error(id, -32602, "a sample file goes only with inserting a Simpler");
+    let stagingPath: string | undefined;
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
@@ -3182,6 +3422,12 @@ export class McpHost {
         payload.trackRef = params.trackRef; payload.deviceName = params.deviceName; Object.assign(payload, authority);
         if (params.index !== undefined) payload.index = params.index;
         fence = JSON.stringify({ track: params.trackRef, ...authority });
+        // The same file authority and verified copy as an audio import or a Simpler's sample swap.
+        if (params.filePath !== undefined || params.allowedRoot !== undefined) {
+          const file = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
+          stagingPath = await this.stageVerifiedImportFile(file.canonicalPath, file);
+          payload.samplePath = stagingPath; prior = { file };
+        }
       } else {
         if (!isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "deviceRef is required");
         const operation = params.action === "enable" ? "device.enable" : "device.move";
@@ -3197,8 +3443,10 @@ export class McpHost {
       }
       const transaction: ClipLifecycleTransaction = { id: `device_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "device", fence, clipRef: (params.deviceRef ?? params.trackRef) as LiveRef, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "device");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, payload, impact: `device-${params.action}`, confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Device preview requires fresh authoritative state."); }
+      stagingPath = undefined;
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, payload, impact: `device-${params.action}`, confirmation: "apply", expiresAt: transaction.expiresAt,
+        ...(prior?.file ? { sample: { path: (prior.file as { canonicalPath: string }).canonicalPath, size: (prior.file as { size: number }).size } } : {}) });
+    } catch (cause) { this.releaseStagedImportFile(stagingPath); return this.adapterToolError(id, cause, "Device preview requires fresh authoritative state."); }
   }
 
   private async liveDeviceApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -3218,7 +3466,12 @@ export class McpHost {
       const action = transaction.payload.action as string;
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context);
         if (action === "insert") { const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
-          if (!track || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again");
+          if (!track || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
+          if (typeof transaction.payload.samplePath === "string") {
+            const file = (transaction.prior as { file?: { size: number; sha256: string } } | undefined)?.file;
+            if (!file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
+            await this.verifyStagedImportFile(transaction.payload.samplePath, file);
+          }
         } else { const located = this.deviceRow(snapshot, transaction.payload.ref as LiveRef); if (this.deviceFence(located) !== transaction.fence) return this.transactionError(id, "device state changed since preview; preview again"); }
       }
       const operation = action === "insert" ? "device.insert" : action === "enable" ? "device.enable" : "device.move";
@@ -3229,7 +3482,7 @@ export class McpHost {
       if ((action === "insert" || action === "move") && (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || (action === "insert" && !isNonEmptyString(result.createdFingerprint, 64)))) throw new Error(`device ${action} did not return exact identity`);
       if (action === "move" && result.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("device move returned a different object identity");
       transaction.created = result;
-      if (action === "insert") { const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(createdDevice.device) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
+      if (action === "insert") { const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
@@ -3277,11 +3530,24 @@ export class McpHost {
       if (proposed.pan !== undefined && mixer.panRef === null) throw new Error("pan is unavailable on this track");
       const prior: Record<string, unknown> = {};
       for (const field of Object.keys(proposed)) prior[field] = structuredClone(mixer[field] ?? null);
+      const priorDisplay = this.mixerDisplays(mixer, Object.keys(proposed));
       const fence = JSON.stringify({ ref: params.trackRef, objectIdentity: target.track.objectIdentity, mixer });
       const transaction: ClipLifecycleTransaction = { id: `mixer_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "mixer-set", fence, clipRef: params.trackRef as LiveRef, payload: { ref: params.trackRef, ...proposed, ...this.mixerAuthority(target) }, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "mixer");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, trackRef: params.trackRef, prior, proposed, impact: "edits-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, trackRef: params.trackRef, prior, ...(priorDisplay ? { priorDisplay } : {}), proposed, impact: "edits-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Mixer preview requires fresh authoritative state."); }
+  }
+
+  /** Live's own text for the given mixer fields, when the adapter reports it. */
+  private mixerDisplays(mixer: JsonObject, fields: readonly string[]): Record<string, unknown> | undefined {
+    const source: Record<string, unknown> = { volume: mixer.volumeDisplay, pan: mixer.panDisplay, cueVolume: mixer.cueVolumeDisplay, sends: mixer.sendDisplays };
+    const display: Record<string, unknown> = {};
+    for (const field of fields) {
+      const value = source[field];
+      if (typeof value === "string" && value.length <= 32) display[field] = value;
+      else if (Array.isArray(value) && value.length <= 64 && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
+    }
+    return Object.keys(display).length ? display : undefined;
   }
 
   private async liveMixerApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -3303,10 +3569,11 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("mixer change was not confirmed");
-      const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && JSON.stringify(verified.mixer[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
+      const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      const display = this.mixerDisplays(verified.mixer, Object.keys(transaction.prior ?? {}));
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(display ? { display } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Mixer state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -3586,6 +3853,57 @@ export class McpHost {
   }
   private importStagingDir: string | undefined;
   private readonly importStagingDirOption: string | undefined;
+  private readonly userLibraryDirOption: string | undefined;
+  private readonly liveResourcesDirOption: string | undefined;
+  private drumSamplerTemplate: DrumSamplerTemplate | undefined;
+
+  /** Where Drum Sampler presets wait for Live's Browser: a Kumi folder in the User Library. */
+  private drumSamplerPresetRoot(): string {
+    const library = this.userLibraryDirOption ?? process.env.ABLETON_MCP_USER_LIBRARY ?? defaultUserLibrary();
+    if (!isAbsolute(library) || !existsSync(library)) throw new Error("drum pad loading into Drum Sampler needs Live's User Library, which wasn't found; use Simpler");
+    return joinPath(realpathSync(library), "Kumi");
+  }
+
+  /** A Drum Sampler preset holding the staged sample, where Live's Browser sees it. */
+  private writeDrumSamplerPreset(stagingPath: string, name: string): { presetPath: string; presetItemId: string } {
+    this.drumSamplerTemplate ??= findDrumSamplerTemplate(this.liveResourcesDirOption ? [this.liveResourcesDirOption] : liveResourceFolders());
+    if (!this.drumSamplerTemplate) throw new Error("drum pad loading into Drum Sampler needs Live 12's Drum Sampler, which wasn't found; use Simpler");
+    // One folder that stays: Live's Browser notices new files in a folder it watches sooner than new folders.
+    const root = this.drumSamplerPresetRoot();
+    mkdirSync(root, { recursive: true, mode: 0o755 });
+    const file = `${name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").trim().slice(0, 100) || "Sample"} ${randomBytes(4).toString("hex")}.adv`;
+    const stats = statSync(stagingPath);
+    writeFileSync(joinPath(root, file), drumSamplerPreset(this.drumSamplerTemplate, { path: stagingPath, size: stats.size, modifiedSeconds: stats.mtimeMs / 1000 }), { flag: "wx", mode: 0o644 });
+    return { presetPath: joinPath(root, file), presetItemId: `user_library/Kumi/${file}` };
+  }
+
+  /** A preset has done its job once Live loaded it (or never will): it goes, with its folder. */
+  private releaseDrumSamplerPreset(presetPath: unknown): void {
+    if (typeof presetPath !== "string") return;
+    try {
+      const root = this.drumSamplerPresetRoot();
+      if (dirname(presetPath) !== root) return;
+      unlinkSync(presetPath);
+    } catch { /* best-effort cleanup */ }
+  }
+
+  /** Waits, briefly, until Live's Browser sees each new preset; Live indexes the User Library on its own time. */
+  private async awaitBrowserItems(itemIds: string[]): Promise<void> {
+    const adapter = this.asyncAdapter(); const deadline = Date.now() + 8_000;
+    for (const itemId of itemIds) {
+      for (;;) {
+        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); break; }
+        catch (cause) { if (Date.now() > deadline) throw new Error("drum pad loading into Drum Sampler timed out waiting for Live's Browser to see the preset; try again or use Simpler", { cause }); }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  }
+
+  /** What the Remote Script gets for one pad: the staged sample for Simpler, the preset for Drum Sampler. */
+  private drumPadLoadArgs(pad: Record<string, unknown>): Record<string, unknown> {
+    const { ref, expectedObjectIdentity, name } = pad;
+    return pad.instrument === "Drum Sampler" ? { ref, expectedObjectIdentity, instrument: "Drum Sampler", presetItemId: pad.presetItemId, name } : { ref, expectedObjectIdentity, samplePath: pad.samplePath, name };
+  }
 
   /** Re-verify the authorized source through one no-follow descriptor (identity
       and size checked before and after a byte-bounded read), then copy the
@@ -3615,8 +3933,12 @@ export class McpHost {
       const after = await source.stat();
       if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) throw new Error("audio file changed since preview");
       if (hash.digest("hex") !== expected.sha256) throw new Error("audio file changed since preview");
-      const stagingPath = joinPath(this.importStagingRoot(), `${randomBytes(12).toString("base64url")}${extname(canonicalPath).toLowerCase()}`);
-      const staging = await open(stagingPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o444);
+      // Each staged copy keeps the original file's name, in a folder of its own: Live shows a
+      // sample by its file name ("Kick 01"), and collecting a Set keeps that name too.
+      const folder = joinPath(this.importStagingRoot(), randomBytes(12).toString("base64url"));
+      mkdirSync(folder, { mode: 0o700 });
+      const stagingPath = joinPath(folder, basename(canonicalPath));
+      const staging = await open(stagingPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o444).catch((cause: unknown) => { try { rmdirSync(folder); } catch { /* best effort */ } throw cause; });
       try {
         const copyHash = createHash("sha256");
         for await (const chunk of source.createReadStream({ autoClose: false, start: 0 })) {
@@ -3648,11 +3970,29 @@ export class McpHost {
 
   private releaseStagedImportFile(stagingPath: unknown): void {
     if (typeof stagingPath !== "string" || this.importStagingDir === undefined) return;
-    try { if (stagingPath.startsWith(this.importStagingDir + sep)) { chmodSync(stagingPath, 0o600); unlinkSync(stagingPath); } } catch { /* best-effort staging cleanup */ }
+    try {
+      if (stagingPath.startsWith(this.importStagingDir + sep)) {
+        chmodSync(stagingPath, 0o600); unlinkSync(stagingPath);
+        const folder = dirname(stagingPath);
+        if (folder !== this.importStagingDir && folder.startsWith(this.importStagingDir + sep)) {
+          // Live leaves its analysis file (.asd) beside a sample it loaded; the folder is the copy's own.
+          try { unlinkSync(`${stagingPath}.asd`); } catch { /* none written */ }
+          rmdirSync(folder);
+        }
+      }
+    } catch { /* best-effort staging cleanup */ }
   }
 
   private releaseStagedImportFor(transaction: ClipLifecycleTransaction | undefined): void {
     if (transaction && (transaction.kind === "session-audio-create" || transaction.kind === "simpler")) this.releaseStagedImportFile(transaction.payload?.filePath);
+    if (transaction?.kind === "device" || transaction?.kind === "drum-pad") this.releaseStagedImportFile(transaction.payload?.samplePath);
+    if (transaction?.kind === "drum-pad" && Array.isArray(transaction.payload?.pads)) for (const pad of transaction.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
+    if (transaction?.kind === "drum-pad") this.releaseDrumSamplerPresets(transaction);
+  }
+
+  private releaseDrumSamplerPresets(transaction: ClipLifecycleTransaction): void {
+    this.releaseDrumSamplerPreset(transaction.payload?.presetPath);
+    if (Array.isArray(transaction.payload?.pads)) for (const pad of transaction.payload.pads as unknown[]) if (isObject(pad)) this.releaseDrumSamplerPreset(pad.presetPath);
   }
 
   private clipAuthorityDigest(snapshot: LiveSnapshot, clipRef: LiveRef): string {
@@ -3891,7 +4231,8 @@ export class McpHost {
       const contentActions = ["crop", "duplicate-loop", "duplicate-region"];
       const authority = this.clipPropertiesMutationAuthority(snapshot, params.clipRef as LiveRef);
       payload.expectedObjectIdentity = authority.expectedObjectIdentity; payload.expectedAuthorityRevision = authority.expectedAuthorityRevision;
-      const state = { isPlaying: row.clip.isPlaying ?? null, playingPosition: row.clip.playingPosition ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
+      // Not the playing position: it moves every tick while the clip plays, the only time it can be moved.
+      const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
       payload.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex");
       if (contentActions.includes(params.action as string)) payload.expectedContentFingerprint = this.captureObjectFingerprint(row.clip);
       const prior = { length: row.clip.length, playingPosition: row.clip.playingPosition ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
@@ -3917,7 +4258,7 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
-        const state = { isPlaying: row.clip.isPlaying ?? null, playingPosition: row.clip.playingPosition ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
+        const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
         const contentFingerprint = ["crop", "duplicate-loop", "duplicate-region"].includes(transaction.payload.action as string) ? this.captureObjectFingerprint(row.clip) : null;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, state, contentFingerprint }) !== transaction.fence) return this.transactionError(id, "clip identity, state, or content changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -4047,7 +4388,7 @@ export class McpHost {
       if (isObject(item)) { const keys = Object.keys(item); if (keys.length > 256) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
-    return createHash("sha256").update(canonical(value, 0)).digest("hex");
+    return createHash("sha256").update(canonical(withoutPlaybackState(value), 0)).digest("hex");
   }
 
   /** Digest of the full clip content the snapshot exposes as mutable: name,
@@ -4461,7 +4802,7 @@ export class McpHost {
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown>;
       if (params.action === "set-amount") {
-        if (typeof params.grooveAmount !== "number" || !Number.isFinite(params.grooveAmount) || params.grooveAmount < 0 || params.grooveAmount > 1.3) return error(id, -32602, "grooveAmount must be 0-1.3");
+        if (typeof params.grooveAmount !== "number" || !Number.isFinite(params.grooveAmount) || params.grooveAmount < 0 || params.grooveAmount > 1.3125) return error(id, -32602, "grooveAmount must be 0-1.3125");
         payload = { action: params.action, setRef: snapshot.set.ref, grooveAmount: params.grooveAmount, expectedObjectIdentity: snapshot.set.objectIdentity, expectedRevision: read.revision };
         prior = { grooveAmount: read.grooveAmount ?? null };
       } else {
@@ -4476,7 +4817,8 @@ export class McpHost {
           if (value === undefined) continue;
           if (field === "name" && !isNonEmptyString(value, 256)) return error(id, -32602, "name is invalid");
           if (field === "base" && (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 16)) return error(id, -32602, "base is invalid");
-          if (field !== "name" && field !== "base" && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)) return error(id, -32602, `${field} must be 0-1`);
+          // As Live's Groove Pool shows them: percentages, velocity from -100 to 100.
+          if (field !== "name" && field !== "base" && (typeof value !== "number" || !Number.isFinite(value) || value < (field === "velocityAmount" ? -100 : 0) || value > 100)) return error(id, -32602, field === "velocityAmount" ? "velocityAmount must be -100-100" : `${field} must be 0-100`);
           proposed[field] = value;
         }
         payload = { action: params.action, ref: params.grooveRef, ...proposed, expectedObjectIdentity: groove.objectIdentity, expectedRevision: read.revision };
@@ -4517,11 +4859,11 @@ export class McpHost {
       const snapshot = await adapter.snapshotAsync(context);
       const verified = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>>; revision?: unknown };
       if (action === "set-amount") {
-        if (verified.grooveAmount !== transaction.payload.grooveAmount) throw new Error("groove amount postcondition was not confirmed");
+        if (!sameLiveValue(verified.grooveAmount, transaction.payload.grooveAmount)) throw new Error("groove amount postcondition was not confirmed");
       } else {
         const groove = (verified.grooves ?? []).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!groove) throw new Error("edited groove disappeared after apply");
-        for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (transaction.payload[field] !== undefined && JSON.stringify(groove[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("groove postcondition was not confirmed");
+        for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (transaction.payload[field] !== undefined && !sameLiveValue(groove[field], transaction.payload[field])) throw new Error("groove postcondition was not confirmed");
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -4562,6 +4904,10 @@ export class McpHost {
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
       const prior: Record<string, unknown> = {};
       for (const field of Object.keys(proposed)) prior[field] = scene[field] ?? null;
+      // Live reads a switched-off scene tempo or time signature as -1, which can't be written back:
+      // undo restores those by switching them off again, so the switch belongs to the prior state.
+      if ("tempo" in proposed && !("tempoEnabled" in prior)) prior.tempoEnabled = scene.tempoEnabled ?? null;
+      if (("signatureNumerator" in proposed || "signatureDenominator" in proposed) && !("timeSignatureEnabled" in prior)) prior.timeSignatureEnabled = scene.timeSignatureEnabled ?? null;
       const payload: Record<string, unknown> = { ref: params.ref, ...proposed, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: scene.objectIdentity, state: fields.map((field) => scene[field] ?? null) });
       const transaction: ClipLifecycleTransaction = { id: `sceneset_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "scene-set", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -4608,6 +4954,10 @@ export class McpHost {
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
+      // An empty scene (Live's Scene.is_empty) plays nothing: launching it only stops what's playing, so there'd be no launch to confirm.
+      if (scene.isEmpty === true) {
+        return this.adapterToolError(id, new Error("that scene has no clips to play, so launching it would only stop what's playing"), "Nothing was launched. Put clips in the scene first, or launch another.");
+      }
       const fireState = { isTriggered: scene.isTriggered ?? null, playing: snapshot.playback.transport.playing };
       const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(fireState)).digest("hex") };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: scene.objectIdentity, fireState });
@@ -4642,7 +4992,8 @@ export class McpHost {
       // Accept the queued flag or durable playing evidence over a bounded
       // window before declaring the outcome uncertain.
       let confirmed = false;
-      for (let attempt = 0; attempt < 4 && !confirmed; attempt += 1) {
+      // Live applies the launch on its next tick (about 100 ms), after the bridge has answered.
+      for (let attempt = 0; attempt < 8 && !confirmed; attempt += 1) {
         if (attempt > 0) await this.waitFor(200);
         const verified = await adapter.snapshotAsync(context);
         const scene = (verified.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
@@ -4692,7 +5043,7 @@ export class McpHost {
   }
 
   private async liveTransportActionPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const actions = ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips"] as const;
+    const actions = ["start", "continue", "stop", "play-selection", "scrub", "tap-tempo", "nudge-up", "nudge-down", "re-enable-automation", "trigger-session-record", "force-link-beat-time", "stop-all-clips", "back-to-arrangement"] as const;
     const audible = ["start", "continue", "play-selection", "scrub", "trigger-session-record", "force-link-beat-time"];
     if (!isObject(params) || !hasOnly(params, ["action", "beatTime"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     if ((params.action === "force-link-beat-time" || params.action === "scrub") && (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime))) return error(id, -32602, `beatTime is required for ${params.action === "scrub" ? "the scrub distance" : "force-link-beat-time"}`);
@@ -4755,7 +5106,9 @@ export class McpHost {
         if (params.action === "delete-return") {
           const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref && candidate.kind === "return");
           if (!track || !isNonEmptyString(track.objectIdentity, 256)) return this.transactionError(id, "return-track reference is unknown");
-          payload = { action: params.action, ref: params.ref, expectedObjectIdentity: track.objectIdentity, expectedStructureRevision: structureRevision };
+          // An explicit deletion of an existing return track: no creating transaction owns it, so the
+          // bridge holds it to these exact identity fences instead of an ownership token.
+          payload = { action: params.action, ref: params.ref, expectedObjectIdentity: track.objectIdentity, expectedStructureRevision: structureRevision, explicitDeletion: true };
         } else if (params.action === "duplicate-track") {
           const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref && !["return", "main", "master"].includes(candidate.kind as string));
           if (!track || !isNonEmptyString(track.objectIdentity, 256)) return this.transactionError(id, "track reference is unknown or not a regular track");
@@ -4819,7 +5172,9 @@ export class McpHost {
       if (!(status.operations ?? []).includes("device.delete")) throw new Error("device deletion is unavailable");
       const snapshot = await this.asyncAdapter().snapshotAsync();
       const row = this.deviceRow(snapshot, params.ref as LiveRef);
-      const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity };
+      // An explicit deletion of an existing device (never a cleanup): the bridge holds it to these exact
+      // identity, owner, sibling and track fences instead of a creating transaction's ownership token.
+      const payload: Record<string, unknown> = { ref: params.ref, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, explicitDeletion: true };
       const fence = JSON.stringify({ ref: params.ref, objectIdentity: row.device.objectIdentity, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, trackRef: row.track.ref, trackIdentity: row.track.objectIdentity });
       const transaction: ClipLifecycleTransaction = { id: `devdel_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "device-delete", fence, payload, prior: { name: row.device.name }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "device delete");
@@ -4949,7 +5304,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
     if (!transaction || transaction.kind !== "track-set" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Unknown or expired track-properties transaction");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", ...(transaction.appliedColor === undefined ? {} : { color: transaction.appliedColor }), idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.undoKey === undefined && transaction.applyKey === params.idempotencyKey;
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
@@ -4969,7 +5324,10 @@ export class McpHost {
       if ((verified as unknown as JsonObject).colorIndex !== transaction.payload.colorIndex) throw new Error("track properties postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      // The colour Live shows now, for a picture of the change; the palette index alone doesn't say.
+      const color = (verified as unknown as JsonObject).color;
+      if (typeof color === "number") transaction.appliedColor = color;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(transaction.appliedColor === undefined ? {} : { color: transaction.appliedColor }), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Track properties state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -5042,7 +5400,8 @@ export class McpHost {
       const after = await adapter.snapshotAsync(context);
       if (after.set.ref !== transaction.payload.setRef || after.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply");
       const verified = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
-      for (const field of fields) if (transaction.payload[field] !== undefined && verified[field] !== transaction.payload[field]) throw new Error("song settings postcondition was not confirmed");
+      // Swing is a 32-bit float in Live: numeric settings compare within its precision.
+      for (const field of fields) if (transaction.payload[field] !== undefined && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("song settings postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -5381,7 +5740,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "mixer.extended.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("extended mixer change was not confirmed");
       const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef)?.mixer as JsonObject | undefined;
-      for (const field of ["trackActivator", "crossfader", "crossfadeAssign", "panningMode", "panningLeft", "panningRight"]) if (transaction.payload[field] !== undefined && verified?.[field] !== transaction.payload[field]) throw new Error("extended mixer postcondition was not confirmed");
+      for (const field of ["trackActivator", "crossfader", "crossfadeAssign", "panningMode", "panningLeft", "panningRight"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("extended mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -5417,7 +5776,7 @@ export class McpHost {
       const fence = JSON.stringify({ ref: params.chainRef, objectIdentity: found.chain.objectIdentity, mixerIdentity: mixer.mixerIdentity, sends: mixer.sends ?? [] });
       const transaction: ClipLifecycleTransaction = { id: `chainmix_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "chain-mixer", fence, clipRef: params.chainRef as LiveRef, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "chain mixer");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, chainRef: params.chainRef, prior, proposed, impact: "edits-chain-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, chainRef: params.chainRef, chainName: typeof found.chain.name === "string" ? found.chain.name : null, rackName: typeof found.device.name === "string" ? found.device.name : null, prior, proposed, impact: "edits-chain-mixer", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Chain-mixer preview requires fresh authoritative state."); }
   }
 
@@ -5442,7 +5801,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "chain-mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("chain mixer change was not confirmed");
       const verified = this.chainRow(await adapter.snapshotAsync(context), transaction.clipRef!).chain.mixer as JsonObject | undefined;
-      for (const field of ["volume", "pan", "sends", "chainActivator"]) if (transaction.payload[field] !== undefined && JSON.stringify(verified?.[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("chain mixer postcondition was not confirmed");
+      for (const field of ["volume", "pan", "sends", "chainActivator"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("chain mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -5577,7 +5936,6 @@ export class McpHost {
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
         const found = this.chainRow(snapshot, params.chainRef as LiveRef);
         const siblings = ((found.chain.devices as unknown[]) ?? []).filter(isObject).map((device) => ({ ref: device.ref, objectIdentity: device.objectIdentity }));
-        if (siblings.length > 0) return this.transactionError(id, "chain insertion requires an empty chain so cleanup cannot affect siblings");
         payload = { action: params.action, trackRef: params.trackRef, chainRef: params.chainRef, deviceName: params.deviceName, ...(params.index !== undefined ? { index: params.index } : {}), expectedTrackIdentity: track.objectIdentity, expectedSiblings: siblings };
         prior = { siblings };
         impact = "creates-chain-device-cleanup-guarded";
@@ -5598,7 +5956,8 @@ export class McpHost {
         const targetDevices = ((target.devices as unknown[]) ?? []);
         if ((params.index as number) > targetDevices.length) return error(id, -32602, "index exceeds the exact target sibling collection");
         payload = { action: params.action, ref: params.ref, index: params.index, ...(params.targetTrackRef !== undefined ? { targetTrackRef: params.targetTrackRef } : { targetChainRef: params.targetChainRef }), expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity, priorOwnerRef: row.ownerRef, priorIndex: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
-        prior = { ownerRef: row.ownerRef, index: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
+        // Where the device came from: its owner (a track or a rack chain) by reference and identity, and its place there.
+        prior = { ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, ownerKind: row.ownerRef === row.track.ref ? "track" : "chain", index: Math.max(0, row.siblings.findIndex((sibling) => sibling.ref === params.ref)) };
         impact = "moves-device-cross-target";
       }
       const fence = JSON.stringify({ action: params.action, payload });
@@ -5706,14 +6065,23 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Chain state is uncertain; perform fresh discovery before retrying."); }
   }
 
+  /** A Drum Rack pad by reference, at any depth: preview finds nested racks (drumRackPad), so apply and undo must too. */
   private drumPadRow(snapshot: LiveSnapshot, padRef: LiveRef): JsonObject {
+    const visit = (devices: unknown, depth: number): JsonObject | undefined => {
+      if (!Array.isArray(devices) || depth > 16) return undefined;
+      for (const device of devices.filter(isObject)) {
+        const pads = ((device.drumPads as unknown[]) ?? []).filter(isObject);
+        const pad = pads.find((candidate) => candidate.ref === padRef);
+        if (pad) return pad;
+        for (const chain of [...((device.chains as unknown[]) ?? []), ...pads.flatMap((item) => (item.chains as unknown[]) ?? [])].filter(isObject)) { const found = visit(chain.devices, depth + 1); if (found) return found; }
+      }
+      return undefined;
+    };
     for (const track of snapshot.tracks as unknown as JsonObject[]) {
-      for (const device of ((track.devices as unknown[]) ?? []).filter(isObject)) {
-        const pad = ((device.drumPads as unknown[]) ?? []).filter(isObject).find((candidate) => candidate.ref === padRef);
-        if (pad) {
-          if (!isNonEmptyString(pad.objectIdentity, 256)) throw new Error("drum pad identity is unavailable");
-          return pad;
-        }
+      const pad = visit(track.devices, 0);
+      if (pad) {
+        if (!isNonEmptyString(pad.objectIdentity, 256)) throw new Error("drum pad identity is unavailable");
+        return pad;
       }
     }
     throw new Error("drum pad reference is not authoritative");
@@ -5724,13 +6092,22 @@ export class McpHost {
   }
 
   private async liveDrumPadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo"]) || !isNonEmptyString(params.padRef, 256)) return error(id, -32602, "action and padRef are required");
-    if (params.action !== "set" && params.action !== "delete-all-chains") return error(id, -32602, "action must be set or delete-all-chains");
+    if (!isObject(params) || !hasOnly(params, ["action", "padRef", "note", "solo", "deviceRef", "filePath", "allowedRoot", "pads", "instrument"])) return error(id, -32602, "action and padRef are required");
+    if (params.instrument !== undefined && params.instrument !== "Simpler" && params.instrument !== "Drum Sampler") return error(id, -32602, "instrument must be Simpler or Drum Sampler");
+    if (params.instrument !== undefined && params.action !== "load-sample" && params.action !== "load-samples") return error(id, -32602, "an instrument goes only with loading samples");
+    if (params.action === "load-samples") return this.liveDrumPadLoadSamplesPreviewAsync(id, params);
+    if (params.action !== "set" && params.action !== "delete-all-chains" && params.action !== "load-sample") return error(id, -32602, "action must be set, delete-all-chains, load-sample or load-samples");
+    if (params.pads !== undefined) return error(id, -32602, "pads go only with load-samples");
+    // Loading a sample names the Drum Rack and the pad's note; the other actions name the pad.
+    const loading = params.action === "load-sample";
+    if (loading ? !isNonEmptyString(params.deviceRef, 256) || !Number.isInteger(params.note) || (params.note as number) < 0 || (params.note as number) > 127 : !isNonEmptyString(params.padRef, 256)) return error(id, -32602, loading ? "deviceRef and note (0-127) are required to load a sample" : "action and padRef are required");
+    if (!loading && (params.deviceRef !== undefined || params.filePath !== undefined || params.allowedRoot !== undefined)) return error(id, -32602, "deviceRef and a sample file go only with load-sample");
+    let stagingPath: string | undefined;
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const snapshot = await this.asyncAdapter().snapshotAsync();
-      const pad = this.drumPadRow(snapshot, params.padRef as LiveRef);
+      const pad = loading ? this.drumRackPad(snapshot, params.deviceRef as LiveRef, params.note as number) : this.drumPadRow(snapshot, params.padRef as LiveRef);
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown> = {};
       if (params.action === "set") {
@@ -5742,17 +6119,87 @@ export class McpHost {
         const state = { note: pad.note ?? null, solo: pad.solo ?? null };
         prior = { ...state };
         payload = { action: params.action, ref: params.padRef, ...proposed, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
+      } else if (loading) {
+        if (!(status.operations ?? []).includes("drum-pad.load-sample")) throw new Error("drum pad sample loading is unavailable");
+        if (((pad.chains as unknown[]) ?? []).length) throw new Error("drum pad already has a sound; choose an empty pad");
+        // The same file authority and verified copy as an audio import.
+        const file = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
+        stagingPath = await this.stageVerifiedImportFile(file.canonicalPath, file);
+        prior = { file, chainCount: 0 };
+        const name = basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256);
+        payload = { action: params.action, ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath: stagingPath, name };
+        if (params.instrument === "Drum Sampler") {
+          const preset = this.writeDrumSamplerPreset(stagingPath, name);
+          payload = { ...payload, instrument: "Drum Sampler", ...preset };
+          try { await this.awaitBrowserItems([preset.presetItemId]); } catch (cause) { this.releaseDrumSamplerPreset(preset.presetPath); throw cause; }
+        }
       } else {
         if (!(status.operations ?? []).includes("drum-pad.delete-all-chains")) throw new Error("delete-all-chains is unavailable");
         const chains = ((pad.chains as unknown[]) ?? []).filter(isObject).map((chain) => chain.objectIdentity);
         prior = { chainCount: chains.length };
         payload = { action: params.action, ref: params.padRef, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(chains)).digest("hex") };
       }
-      const fence = JSON.stringify({ action: params.action, ref: params.padRef, objectIdentity: pad.objectIdentity, payload });
+      const fence = JSON.stringify({ action: params.action, ref: pad.ref, objectIdentity: pad.objectIdentity, payload });
       const transaction: ClipLifecycleTransaction = { id: `drumpad_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "drum-pad", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "drum pad");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, padRef: params.padRef, prior, impact: params.action === "set" ? "edits-drum-pad" : "deletes-all-pad-chains-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state."); }
+      stagingPath = undefined;
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, padRef: pad.ref, note: pad.note ?? null, ...(loading ? { sample: { path: (prior.file as { canonicalPath: string }).canonicalPath } } : { prior }), impact: params.action === "set" ? "edits-drum-pad" : loading ? "loads-a-sample-onto-an-empty-drum-pad" : "deletes-all-pad-chains-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) { this.releaseStagedImportFile(stagingPath); return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state."); }
+  }
+
+  /**
+   * Samples onto several empty pads of one Drum Rack as one change: one preview, one apply that
+   * loads them all in one Remote Script request (all or none), and one undo that clears them.
+   */
+  private async liveDrumPadLoadSamplesPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
+    const requested = params.pads;
+    if (!isNonEmptyString(params.deviceRef, 256) || !Array.isArray(requested) || requested.length < 1 || requested.length > MAX_DRUM_PAD_LOADS || ["padRef", "note", "solo", "filePath", "allowedRoot"].some((key) => params[key] !== undefined)) return error(id, -32602, `load-samples takes the rack's deviceRef and 1 to ${MAX_DRUM_PAD_LOADS} pads`);
+    if (!requested.every((item) => isObject(item) && hasOnly(item, ["note", "filePath", "allowedRoot", "instrument"]) && (item.instrument === undefined || item.instrument === "Simpler" || item.instrument === "Drum Sampler") && (params.instrument === undefined || item.instrument === undefined) && Number.isInteger(item.note) && (item.note as number) >= 0 && (item.note as number) <= 127)) return error(id, -32602, "each pad needs its note (0-127), a sample file and its allowedRoot");
+    const notes = (requested as JsonObject[]).map((item) => item.note as number);
+    if (new Set(notes).size !== notes.length) return error(id, -32602, "each pad takes one sample");
+    const staged: string[] = []; const presets: string[] = [];
+    try {
+      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
+      if (!(status.operations ?? []).includes("drum-pad.load-samples")) throw new Error("drum pad sample loading is unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const pads: Array<Record<string, unknown>> = []; const files: Array<Record<string, unknown>> = [];
+      for (const item of requested as JsonObject[]) {
+        const pad = this.drumRackPad(snapshot, params.deviceRef as LiveRef, item.note as number);
+        if (((pad.chains as unknown[]) ?? []).length) throw new Error(`drum pad ${noteLabel(item.note as number)} already has a sound; choose an empty pad`);
+        // The same file authority and verified copy as an audio import, per sample.
+        const file = await this.audioImportFileAuthority(item.filePath, item.allowedRoot);
+        const samplePath = await this.stageVerifiedImportFile(file.canonicalPath, file); staged.push(samplePath);
+        const name = basename(file.canonicalPath, extname(file.canonicalPath)).slice(0, 256);
+        // Drum Sampler takes its sample through a preset the Browser loads (see drum-sampler-preset.ts).
+        const preset = (item.instrument ?? params.instrument) === "Drum Sampler" ? this.writeDrumSamplerPreset(samplePath, name) : undefined;
+        if (preset) presets.push(preset.presetPath);
+        pads.push({ ref: pad.ref, expectedObjectIdentity: pad.objectIdentity, samplePath, name, ...(preset ? { instrument: "Drum Sampler", ...preset } : {}) });
+        files.push({ ...file, note: item.note });
+      }
+      const waiting = pads.filter((pad) => typeof pad.presetItemId === "string").map((pad) => pad.presetItemId as string);
+      if (waiting.length) await this.awaitBrowserItems(waiting);
+      const payload = { action: "load-samples", deviceRef: params.deviceRef, pads };
+      const fence = JSON.stringify({ action: "load-samples", ref: params.deviceRef, payload });
+      const transaction: ClipLifecycleTransaction = { id: `drumpad_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "drum-pad", fence, payload, prior: { files }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "drum pad");
+      staged.length = 0; presets.length = 0;
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: "load-samples", deviceRef: params.deviceRef, pads: pads.map((pad, index) => ({ padRef: pad.ref, note: files[index]!.note, sample: { path: files[index]!.canonicalPath } })), impact: "loads-samples-onto-empty-drum-pads", confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) {
+      for (const path of staged) this.releaseStagedImportFile(path);
+      for (const path of presets) this.releaseDrumSamplerPreset(path);
+      return this.adapterToolError(id, cause, "Drum-pad preview requires fresh authoritative state.");
+    }
+  }
+
+  /** The visible pad of a Drum Rack that plays `note` (C1–D#2, 36–51, on a new rack). */
+  private drumRackPad(snapshot: LiveSnapshot, deviceRef: LiveRef, note: number): JsonObject {
+    const { device } = this.deviceRow(snapshot, deviceRef);
+    const pads = (device as unknown as { drumPads?: JsonObject[] }).drumPads ?? [];
+    if (!pads.length) throw new Error("drum pad loading needs a Drum Rack");
+    const pad = pads.find((item) => item.note === note);
+    if (!pad || !isNonEmptyString(pad.ref, 256)) throw new Error(`drum pad note ${note} isn't among the rack's visible pads`);
+    return pad;
   }
 
   private async liveDrumPadApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -5770,9 +6217,47 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
+      if (action === "load-sample" && !reconciliation) {
+        const current = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        if (current.objectIdentity !== transaction.payload.expectedObjectIdentity || ((current.chains as unknown[]) ?? []).length !== 0) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "drum pad changed since preview; preview again"); }
+        const file = (transaction.prior as { file?: { size: number; sha256: string } } | undefined)?.file;
+        if (!file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
+        await this.verifyStagedImportFile(transaction.payload.samplePath as string, file);
+      }
+      const batch = action === "load-samples" ? transaction.payload.pads as Array<Record<string, unknown>> : [];
+      if (action === "load-samples" && !reconciliation) {
+        const snapshot = await adapter.snapshotAsync(context);
+        for (const pad of batch) {
+          const current = this.drumPadRow(snapshot, pad.ref as LiveRef);
+          if (current.objectIdentity !== pad.expectedObjectIdentity || ((current.chains as unknown[]) ?? []).length !== 0) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "a drum pad changed since preview; preview again"); }
+        }
+        const files = (transaction.prior as { files?: Array<{ size: number; sha256: string }> } | undefined)?.files;
+        if (!files || files.length !== batch.length) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
+        for (const [index, pad] of batch.entries()) await this.verifyStagedImportFile(pad.samplePath as string, files[index]!);
+      }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
-      if (action === "set") {
+      if (action === "load-samples") {
+        const result = await adapter.invokeAsync({ operation: "drum-pad.load-samples", args: { pads: batch.map((pad) => this.drumPadLoadArgs(pad)) } }, context) as { pads?: unknown };
+        const loaded = Array.isArray(result.pads) ? result.pads.filter(isObject) : [];
+        if (loaded.length !== batch.length || loaded.some((item, index) => item.ref !== batch[index]!.ref || !isNonEmptyString(item.chainIdentity, 256) || !isNonEmptyString(item.deviceIdentity, 256))) throw new Error("drum pad sample loads did not return exact identities");
+        const verified = await adapter.snapshotAsync(context);
+        for (const [index, item] of loaded.entries()) {
+          const chains = (this.drumPadRow(verified, batch[index]!.ref as LiveRef).chains as JsonObject[] | undefined) ?? [];
+          if (chains.length !== 1 || chains[0]!.objectIdentity !== item.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
+        }
+        transaction.created = { pads: loaded };
+        // Loaded: the Drum Sampler presets have done their job.
+        this.releaseDrumSamplerPresets(transaction);
+      } else if (action === "load-sample") {
+        const result = await adapter.invokeAsync({ operation: "drum-pad.load-sample", args: this.drumPadLoadArgs(transaction.payload) }, context) as JsonObject;
+        if (!isNonEmptyString(result.chainIdentity, 256) || !isNonEmptyString(result.deviceIdentity, 256)) throw new Error("drum pad sample load did not return exact identities");
+        const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const chains = (verified.chains as JsonObject[] | undefined) ?? [];
+        if (chains.length !== 1 || chains[0]!.objectIdentity !== result.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
+        transaction.created = result;
+        this.releaseDrumSamplerPresets(transaction);
+      } else if (action === "set") {
         const result = await adapter.invokeAsync({ operation: "drum-pad.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("drum pad change was not confirmed");
         const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
@@ -5785,7 +6270,7 @@ export class McpHost {
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", ...(transaction.created ? { result: transaction.created } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Drum-pad state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -5813,12 +6298,13 @@ export class McpHost {
         if (!(status.operations ?? []).includes("rack.action")) throw new Error("rack actions are unavailable");
         if (["remove-macro", "recall-variation", "delete-variation"].includes(params.action as string) && params.index !== undefined) return error(id, -32602, "remove-macro, recall-variation, and delete-variation take no index in the public LOM");
         if (params.action === "copy-pad" && (!Number.isInteger(params.sourceIndex) || !Number.isInteger(params.targetIndex) || (params.sourceIndex as number) < 0 || (params.targetIndex as number) < 0)) return error(id, -32602, "sourceIndex and targetIndex are required");
+        if (params.action === "add-macro" || params.action === "remove-macro") prior = { visibleMacroCount: row.device.visibleMacroCount ?? null };
         payload = { action: params.action, ref: params.rackRef, ...(params.index !== undefined ? { index: params.index } : {}), ...(params.sourceIndex !== undefined ? { sourceIndex: params.sourceIndex } : {}), ...(params.targetIndex !== undefined ? { targetIndex: params.targetIndex } : {}), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: stateRevision };
       }
       const fence = JSON.stringify({ action: params.action, ref: params.rackRef, objectIdentity: row.device.objectIdentity, stateRevision });
       const transaction: ClipLifecycleTransaction = { id: `rack_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rack", fence, payload, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "rack");
-      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, rackRef: params.rackRef, prior, impact: params.action === "set" ? "edits-rack" : "momentary-rack-action-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, rackRef: params.rackRef, rackName: typeof row.device.name === "string" ? row.device.name : null, prior, impact: params.action === "set" || params.action === "add-macro" || params.action === "remove-macro" ? "edits-rack" : "momentary-rack-action-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Rack preview requires fresh authoritative state."); }
   }
 
@@ -5841,19 +6327,28 @@ export class McpHost {
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = action === "set" ? Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action")) : Object.fromEntries(Object.entries(transaction.payload));
-      let result: { changed?: unknown; done?: unknown; revision?: unknown };
+      let result: { changed?: unknown; done?: unknown; revision?: unknown; chainRef?: unknown };
       if (action === "set") {
         result = await adapter.invokeAsync({ operation: "rack.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("rack change was not confirmed");
         const verified = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device;
         if (transaction.payload.selectedVariationIndex !== undefined && verified.selectedVariationIndex !== transaction.payload.selectedVariationIndex) throw new Error("rack postcondition was not confirmed");
       } else {
-        result = await adapter.invokeAsync({ operation: "rack.action", args }, context) as { done?: unknown; revision?: unknown };
+        result = await adapter.invokeAsync({ operation: "rack.action", args }, context) as { done?: unknown; revision?: unknown; chainRef?: unknown };
         if (result.done !== true) throw new Error("rack action was not confirmed");
+        // What undo checks is still so: the macro count this left.
+        if (action === "add-macro" || action === "remove-macro") transaction.created = { visibleMacroCount: this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device.visibleMacroCount ?? null };
+        if (action === "insert-chain" && isNonEmptyString(result.chainRef, 256)) {
+          transaction.created = { chainRef: result.chainRef };
+          try {
+            const rack = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device; const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
+            transaction.created.placement = { owner: "rack", rack: String(rack.name ?? "").slice(0, 64), chain: chains.findIndex((chain) => chain.ref === result.chainRef), chains: chains.slice(0, 8).map((chain) => ({ name: String(chain.name ?? "").slice(0, 64), devices: (Array.isArray(chain.devices) ? chain.devices : []).filter(isObject).slice(0, 16).map((device) => String(device.name ?? "").slice(0, 64)) })) };
+          } catch { /* the chain is there either way; only the picture is missing */ }
+        }
       }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, ...(isNonEmptyString((result as { chainRef?: unknown }).chainRef, 256) ? { chainRef: (result as { chainRef: string }).chainRef } : {}), ...(transaction.created && isObject(transaction.created.placement) ? { placement: transaction.created.placement } : {}), ...(transaction.created && "visibleMacroCount" in transaction.created ? { visibleMacroCount: transaction.created.visibleMacroCount } : {}), idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Rack state is uncertain; perform fresh discovery before retrying."); }
   }
 
@@ -6596,7 +7091,7 @@ export class McpHost {
       const value = params[field];
       if (value === undefined) continue;
       if (field === "warping") { if (typeof value !== "boolean") return error(id, -32602, "warping must be boolean"); proposed[field] = value; continue; }
-      if (typeof value !== "number" || !Number.isFinite(value) || (field === "gain" && value < 0) || (field === "pitchCoarse" && Math.abs(value) > 48) || (field === "pitchFine" && Math.abs(value) > 50) || (["loopStart", "loopEnd", "fadeInLength", "fadeOutLength"].includes(field) && value < 0) || (field === "warpMode" && (!Number.isInteger(value) || value < 0 || value > 16))) return error(id, -32602, `${field} is out of bounds`);
+      if (typeof value !== "number" || !Number.isFinite(value) || (field === "gain" && value < 0) || (field === "pitchCoarse" && (Math.abs(value) > 48 || !Number.isInteger(value))) || (field === "pitchFine" && Math.abs(value) > 50) || (["loopStart", "loopEnd", "fadeInLength", "fadeOutLength"].includes(field) && value < 0) || (field === "warpMode" && (!Number.isInteger(value) || value < 0 || value > 16))) return error(id, -32602, `${field} is out of bounds`);
       proposed[field] = value;
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one audio clip field is required");
@@ -6639,7 +7134,8 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "audio.clip.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("audio clip change was not confirmed");
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && verified[field] !== transaction.payload[field]) throw new Error("audio clip postcondition was not confirmed");
+      // Live keeps gain and the rest as 32-bit floats: numbers compare within that precision.
+      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("audio clip postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -6788,8 +7284,10 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Note-edit undo is uncertain; perform fresh discovery."); }
   }
 
-  private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(value)).digest("hex"); }
+  /** Content fingerprint of a snapshot row: a clip's playback state is not content (see withoutPlaybackState). */
+  private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(withoutPlaybackState(value))).digest("hex"); }
 
+  /** What a MIDI or scene capture is fenced on; the Remote Script's _capture_authority_revision computes the same. */
   private captureAuthorityRevision(snapshot: LiveSnapshot): string {
     const authority = { tracks: snapshot.tracks.map((track) => ({ ref: track.ref, objectIdentity: track.objectIdentity, clips: track.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity, notesRevision: clip.notesRevision })) })), scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, objectIdentity: scene.objectIdentity, index: scene.index })), playbackRevision: snapshot.playback.revision };
     return createHash("sha256").update(canonicalMutationIdentity(authority)).digest("hex");
@@ -6800,7 +7298,8 @@ export class McpHost {
       structure: this.structureRevision(snapshot),
       tracks: snapshot.tracks.map((track) => ({ ref: track.ref, kind: track.kind, clips: track.clips.map((clip) => ({ ref: clip.ref, name: clip.name, length: clip.length, notes: clip.notes })) })),
       scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, name: scene.name, index: scene.index })),
-      playback: { revision: snapshot.playback.revision, firedTargets: snapshot.playback.firedTargets, playingTargets: snapshot.playback.playingTargets, transport: snapshot.playback.transport },
+      // Not the playhead: it moves while Live plays, and capturing what plays is the point.
+      playback: { revision: snapshot.playback.revision, firedTargets: snapshot.playback.firedTargets, playingTargets: snapshot.playback.playingTargets, transport: { ...snapshot.playback.transport, position: null } },
     });
   }
 
@@ -6884,6 +7383,7 @@ export class McpHost {
   }
 
   private async liveDeviceParameterPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
+    if (isObject(params) && params.values !== undefined) return this.liveDeviceParametersPreviewAsync(id, params);
     if (!this.validateDeviceParameterPreview(params)) return error(id, -32602, "deviceRef, parameterRef, and finite value are required");
     try {
       const status = this.requireConnected("device.parameter.write");
@@ -6894,19 +7394,101 @@ export class McpHost {
       if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
       const quantization = target.parameter.quantization ?? 0;
       if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error("parameter value does not match authoritative quantization");
+      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover an enabled published numeric parameter and retry."); }
   }
 
+  /**
+   * Several parameters of one device as one change: one snapshot before and one after, one Live
+   * request that sets them all or none, and one undo that restores them all.
+   */
+  private async liveDeviceParametersPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
+    const values = params.values;
+    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > 64 || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 64 values, each a parameterRef and a finite value, are required");
+    const requested = values as Array<{ parameterRef: string; value: number }>;
+    if (new Set(requested.map((item) => item.parameterRef)).size !== requested.length) return error(id, -32602, "each parameter takes one value");
+    try {
+      const status = this.requireConnected("device.parameter.write");
+      if (!(status.operations ?? []).includes("device.parameters.set")) throw new Error("parameter changes on several parameters at once are unavailable");
+      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const parameters: DeviceParametersTransaction["parameters"] = []; const shown: JsonObject[] = [];
+      let device: ReturnType<McpHost["parameterTarget"]> | undefined;
+      for (const item of requested) {
+        const target = this.parameterTarget(snapshot, params.deviceRef as string, item.parameterRef);
+        const authority = this.parameterAuthority(snapshot, target.parameter.ref);
+        if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
+        const quantization = target.parameter.quantization ?? 0;
+        if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
+        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+        // One device: the same owner, track and sibling parameters for every one.
+        if (parameters.length && JSON.stringify({ ...authority, ref: null, parameterIdentity: null }) !== JSON.stringify({ ...parameters[0]!.authority, ref: null, parameterIdentity: null })) throw new Error("parameter changes must all be on one device");
+        device ??= target;
+        parameters.push({ ref: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: item.value, priorRevision: this.parameterRevision(target.parameter) });
+        shown.push({ ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: item.value, min: target.parameter.min, max: target.parameter.max, ...(typeof target.parameter.displayValue === "string" ? { displayValue: target.parameter.displayValue } : {}) });
+      }
+      const transaction: DeviceParametersTransaction = { id: `parameters_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: device!.device.ref, parameters, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.deviceParametersTransactions.set(transaction.id, transaction);
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: device!.device.ref, name: device!.device.name, kind: device!.device.kind, trackRef: device!.trackRef, enabled: device!.device.enabled !== false }, parameters: shown, confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
+    } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover enabled published numeric parameters of one device and retry."); }
+  }
+
+  private parametersMutationArgs(transaction: DeviceParametersTransaction, values: (parameter: DeviceParametersTransaction["parameters"][number], index: number) => { value: number; revision: number }): JsonObject {
+    const shared = transaction.parameters[0]!.authority;
+    return { expectedOwnerRef: shared.ownerRef, expectedOwnerIdentity: shared.ownerIdentity, expectedTrackRef: shared.trackRef, expectedTrackIdentity: shared.trackIdentity, expectedSiblings: structuredClone(shared.siblings),
+      parameters: transaction.parameters.map((parameter, index) => { const next = values(parameter, index); return { ref: parameter.ref, value: next.value, expectedRevision: next.revision, expectedObjectIdentity: parameter.authority.parameterIdentity }; }) };
+  }
+
+  private async liveDeviceParametersApplyAsync(id: RequestId, params: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
+    const transaction = this.deviceParametersTransactions.get(params.transactionId as string);
+    if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
+    if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
+    const shown = () => transaction.parameters.map((parameter) => ({ ref: parameter.ref, value: parameter.proposedValue, ...(parameter.appliedDisplay === undefined ? {} : { displayValue: parameter.appliedDisplay }), revision: parameter.appliedRevision }));
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", parameters: shown(), epoch: transaction.epoch, idempotent: true });
+    const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
+    if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
+    if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
+    try {
+      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = this.requireConnected("device.parameter.write");
+      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) {
+        const current = await adapter.snapshotAsync(context);
+        for (const parameter of transaction.parameters) {
+          const target = this.parameterTarget(current, transaction.deviceRef, parameter.ref).parameter;
+          if (this.parameterRevision(target) !== parameter.priorRevision || target.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(current, parameter.ref)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after preview; preview again");
+        }
+      }
+      transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
+      await adapter.invokeAsync({ operation: "device.parameters.set", args: this.parametersMutationArgs(transaction, (parameter) => ({ value: parameter.proposedValue, revision: parameter.priorRevision })) }, context);
+      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      for (const parameter of transaction.parameters) {
+        const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, parameter.ref).parameter;
+        const kept = sameLiveValue(verified.value, parameter.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, parameter.proposedValue, verified);
+        if (kept !== undefined) parameter.proposedValue = kept;
+        if (!sameLiveValue(verified.value, parameter.proposedValue) || this.parameterRevision(verified) <= parameter.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the parameter changes"); }
+        parameter.appliedRevision = this.parameterRevision(verified);
+        if (typeof verified.displayValue === "string") parameter.appliedDisplay = verified.displayValue;
+      }
+      transaction.state = "applied";
+      return this.successText(id, { transactionId: transaction.id, state: "applied", parameters: shown(), epoch: transaction.epoch, idempotent: false });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (transaction.state === "applying") { transaction.state = /cancelled before dispatch/.test(message) ? "previewed" : "uncertain"; if (transaction.state === "previewed") delete transaction.applyKey; }
+      return this.adapterToolError(id, cause, "Device-parameter apply may be uncertain; perform fresh authoritative discovery and do not retry blindly.");
+    }
+  }
+
   private async liveDeviceParameterApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validDeviceParameterApply(params)) return error(id, -32602, "transactionId, confirmation token, and idempotencyKey are required");
+    if (String(params.transactionId).startsWith("parameters_")) return this.liveDeviceParametersApplyAsync(id, params, signal);
     const transaction = this.deviceParameterTransactions.get(params.transactionId as string);
     if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
     if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, revision: transaction.appliedRevision, idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
@@ -6923,9 +7505,12 @@ export class McpHost {
       await adapter.invokeAsync({ operation: "device.parameter.set", args: this.parameterMutationArgs(transaction, transaction.proposedValue, currentRevision) }, context);
       const verifiedSnapshot = await adapter.snapshotAsync(context);
       const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
-      if (verified.value !== transaction.proposedValue || this.parameterRevision(verified) <= currentRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
+      const kept = sameLiveValue(verified.value, transaction.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, transaction.proposedValue, verified);
+      if (kept !== undefined) transaction.proposedValue = kept;
+      if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= currentRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
+      if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (transaction.state === "applying") { transaction.state = /cancelled before dispatch/.test(message) ? "previewed" : "uncertain"; if (transaction.state === "previewed") delete transaction.applyKey; }
@@ -7007,7 +7592,7 @@ export class McpHost {
           step.result = result; if (!created.some((item) => item.ref === result!.ref)) created.push({ ...result, fingerprint: result.createdFingerprint }); transaction.created = created; currentSnapshot = await adapter.snapshotAsync(context); const owned = created.find((item) => item.ref === result!.ref)!; const row = currentSnapshot.arrangement.locators.find((item) => item.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.captureObjectFingerprint(row) !== owned.fingerprint) throw new Error("created locator changed after atomic creation"); if (result.name !== proposed.name || result.position !== proposed.position) throw new Error("Live did not confirm exact created locator state");
         }
       } catch (cause) {
-        if (dispatchAmbiguous) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
+        if (dispatchAmbiguous && !nothingChanged(cause)) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
         transaction.created = created;
         try { await this.compensateArrangementAsync(transaction, adapter, context); transaction.state = "undone"; }
         catch { transaction.state = "uncertain"; transaction.recoveryMode = "compensate"; throw new Error("Arrangement apply compensation failed; retry the exact key to reconcile cleanup"); }
@@ -7019,6 +7604,8 @@ export class McpHost {
       return this.successText(id, { transactionId: transaction.id, state: "applied", locators: created, epoch: transaction.epoch, idempotent: false });
     } catch (cause) {
       if (transaction.state === "applying") transaction.state = "uncertain";
+      // Refused, and anything it had added removed again: nothing changed.
+      if (transaction.state === "undone") return this.adapterToolError(id, cause, "Nothing changed in Live.");
       return this.adapterToolError(id, cause, "Arrangement apply uncertain; read authoritative locators before retrying.");
     }
   }
@@ -7064,8 +7651,15 @@ export class McpHost {
     const state = (record as { state?: string }).state; const reconciliation = state === "uncertain";
     let plan = this.undoRecoveryPlans.get(record);
     if (plan && plan.idempotencyKey !== idempotencyKey) throw new Error("uncertain undo requires the exact original idempotency key");
-    if (!plan) { plan = { idempotencyKey, steps: [] }; this.undoRecoveryPlans.set(record, plan); }
+    if (!plan) { plan = { idempotencyKey, priorState: state, steps: [] }; this.undoRecoveryPlans.set(record, plan); }
     return { reconciliation, steps: plan.steps };
+  }
+
+  /** An applied change's undo that the bridge refused before its first step reached Live (e.g. for
+   * lacking ownership of an object later changes moved): noted for live_undo to report as a refusal. */
+  private noteUndoRefusal(record: object, cause: unknown, context: LiveOperationContext): void {
+    const plan = this.undoRecoveryPlans.get(record);
+    if ((cause instanceof LiveMutationNotDispatchedError || nothingChanged(cause)) && plan?.priorState === "applied" && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: (cause as Error).message });
   }
 
   private async replayUndoRecovery(record: object, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
@@ -7076,9 +7670,10 @@ export class McpHost {
   private async invokeUndoRecovery(record: object, adapter: AsyncLiveAdapter, operation: LiveInvocation["operation"], args: Record<string, unknown>, context: LiveOperationContext): Promise<unknown> {
     const plan = this.undoRecoveryPlans.get(record); if (!plan) throw new Error("undo recovery plan was not initialized");
     const existing = plan.steps.find((step) => step.operation === operation && canonicalMutationIdentity(step.args) === canonicalMutationIdentity(args));
-    if (existing) { if (!existing.completed) { existing.result = await adapter.invokeAsync({ operation: existing.operation, args: existing.args }, context); existing.completed = true; } return existing.result; }
+    if (existing) { if (!existing.completed) { try { existing.result = await adapter.invokeAsync({ operation: existing.operation, args: existing.args }, context); } catch (cause) { this.noteUndoRefusal(record, cause, context); throw cause; } existing.completed = true; } return existing.result; }
     const step = { operation, args: structuredClone(args), completed: false, result: undefined as unknown }; plan.steps.push(step);
-    step.result = await adapter.invokeAsync({ operation, args: step.args }, context); step.completed = true; return step.result;
+    try { step.result = await adapter.invokeAsync({ operation, args: step.args }, context); } catch (cause) { this.noteUndoRefusal(record, cause, context); throw cause; }
+    step.completed = true; return step.result;
   }
 
   private async liveRecoveryFinalizeAsync(id: RequestId, params: unknown): Promise<JsonObject> {
@@ -7088,7 +7683,7 @@ export class McpHost {
     if (this.activeAsyncOperations > 0 || IN_FLIGHT_TRANSACTION_IDS.size > 0) return this.recoveryFinalizeError(id, "Another asynchronous operation, mutation, or reconciliation is in flight; global safety finalization refused.");
     this.recoveryFinalizationInFlight = true; IN_FLIGHT_TRANSACTION_IDS.add(transactionId);
     try {
-      const maps = [this.transactions, this.arrangementTransactions, this.sessionStructureTransactions, this.deviceParameterTransactions, this.auditionTransactions, this.transportTransactions, this.clipLaunchTransactions, this.noteEditTransactions, this.clipLifecycleTransactions, this.audioCaptureTransactions] as unknown as Array<Map<string, { state: string; kind?: string; epoch: number }>>;
+      const maps = [this.transactions, this.arrangementTransactions, this.sessionStructureTransactions, this.deviceParameterTransactions, this.deviceParametersTransactions, this.auditionTransactions, this.transportTransactions, this.clipLaunchTransactions, this.noteEditTransactions, this.clipLifecycleTransactions, this.audioCaptureTransactions] as unknown as Array<Map<string, { state: string; kind?: string; epoch: number }>>;
       const owner = maps.find((candidate) => candidate.has(transactionId)); const midiFinalizable = !owner && this.midiTransactions.isFinalizable(transactionId);
       const batchFinalizable = !owner && !midiFinalizable && this.batchTransactions.isFinalizable(transactionId);
       const deviceStateFinalizable = !owner && !midiFinalizable && !batchFinalizable && this.deviceStateTransactions.isFinalizable(transactionId);
@@ -7120,6 +7715,19 @@ export class McpHost {
   }
 
   private async liveUndoAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
+    const transactionId = isObject(params) && typeof params.transactionId === "string" ? params.transactionId : undefined;
+    if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
+    const result = await this.liveUndoDispatchAsync(id, params, signal);
+    const refusal = transactionId === undefined ? undefined : this.undoRefusals.get(transactionId);
+    if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
+    const record = refusal?.record as { state?: string } | undefined;
+    if (!refusal || record?.state !== "uncertain") return result;
+    // Nothing reached Live: the change stays applied, and a later undo starts over.
+    record.state = "applied"; this.undoRecoveryPlans.delete(refusal.record);
+    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo refused before anything changed in Live: ${adapterReason(refusal.message)}`, remediation: "Nothing changed in Live, and the change is still in place. Later changes may have moved or replaced what it made, so its undo can no longer be proven; change it by hand if needed." }) }], isError: true });
+  }
+
+  private async liveUndoDispatchAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validTransactionParams(params, "undo")) return error(id, -32602, "transactionId, confirmation=undo, and idempotencyKey are required");
     const undoOwnerTool = this.transactionOwnerTool(String(params.transactionId));
     if (undoOwnerTool !== undefined && !this.policyAllowsTool(undoOwnerTool)) return this.transactionError(id, "The current deployment policy no longer allows this transaction's tool domain; reconcile manually or restore the policy before undo.");
@@ -7342,13 +7950,16 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === sceneset.payload.ref);
         if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(sceneset.payload)) { if (["ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"].includes(field)) continue; if (scene[field] !== value) return this.transactionError(id, "scene changed after apply; undo refused"); } }
+        if (scene.objectIdentity !== sceneset.payload.expectedObjectIdentity) return this.transactionError(id, "scene identity changed after apply; undo refused");
+        if (!reconciliation) { for (const [field, value] of Object.entries(sceneset.payload)) { if (["ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(scene[field], value)) return this.transactionError(id, "scene changed after apply; undo refused"); } }
+        const prior = sceneset.prior as Record<string, unknown>; const restore = sceneRestoreFields(prior);
+        if (!restore) return this.transactionError(id, "the scene's prior state can't be written back exactly; undo refused");
         sceneset.state = "undoing";
-        const result = await this.invokeUndoRecovery(sceneset, adapter, "scene.set", { ref: sceneset.payload.ref, ...(sceneset.prior as Record<string, unknown>), expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) }, context) as JsonObject;
+        const result = await this.invokeUndoRecovery(sceneset, adapter, "scene.set", { ref: sceneset.payload.ref, ...restore, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("scene restoration was not confirmed");
-        const restored = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === sceneset.payload.ref);
+        const restored = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === sceneset.payload.ref) as unknown as JsonObject | undefined;
         if (!restored) throw new Error("scene disappeared after undo");
-        for (const [field, value] of Object.entries(sceneset.prior)) if ((restored as unknown as JsonObject)[field] !== value) throw new Error("scene exact prior state was not restored");
+        for (const [field, value] of Object.entries(prior)) { if (!sceneFieldRestored(restored, field, value, prior)) throw new Error("scene exact prior state was not restored"); }
         sceneset.state = "undone"; return this.successText(id, { transactionId: sceneset.id, state: "undone", idempotent: false });
       } catch (cause) { sceneset.state = "uncertain"; return this.adapterToolError(id, cause, "Scene undo is uncertain; perform fresh discovery."); }
     }
@@ -7385,14 +7996,14 @@ export class McpHost {
         const snapshot = await adapter.snapshotAsync(context);
         if (snapshot.set.ref !== songset.payload.setRef || snapshot.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply; undo refused");
         const rawSong = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject; const song = this.songSettingsFields(rawSong);
-        if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (song[field] !== value) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(song[field], value)) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
         songset.state = "undoing";
         const result = await this.invokeUndoRecovery(songset, adapter, "song.set", { ...(songset.prior as Record<string, unknown>), setRef: songset.payload.setRef, expectedObjectIdentity: songset.payload.expectedObjectIdentity, expectedStateRevision: this.songSettingsRevision(rawSong) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("song settings restoration was not confirmed");
         const after = await adapter.snapshotAsync(context);
         if (after.set.ref !== songset.payload.setRef || after.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after undo");
         const restored = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
-        for (const [field, value] of Object.entries(songset.prior)) if (restored[field] !== value) throw new Error("song settings exact prior state was not restored");
+        for (const [field, value] of Object.entries(songset.prior)) if (!sameLiveValue(restored[field], value)) throw new Error("song settings exact prior state was not restored");
         songset.state = "undone"; return this.successText(id, { transactionId: songset.id, state: "undone", idempotent: false });
       } catch (cause) { songset.state = "uncertain"; return this.adapterToolError(id, cause, "Song-settings undo is uncertain; perform fresh discovery."); }
     }
@@ -7527,7 +8138,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
         if (!track || !mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("extended mixer authority is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (mixer[field] !== value) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
         const state = { crossfadeAssign: mixer.crossfadeAssign ?? null, panningMode: mixer.panningMode ?? null };
         mixerext.state = "undoing";
         const priorFields = Object.fromEntries(Object.entries(mixerext.prior as Record<string, unknown>).filter(([, value]) => value !== null));
@@ -7547,7 +8158,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
         if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer authority is unavailable");
-        if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (JSON.stringify(mixer[field]) !== JSON.stringify(value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
+        if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
         chainmix.state = "undoing";
         const chainPriorFields = Object.fromEntries(Object.entries(chainmix.prior as Record<string, unknown>).filter(([, value]) => value !== null));
         const result = await this.invokeUndoRecovery(chainmix, adapter, "chain-mixer.set", { ref: chainmix.clipRef, ...chainPriorFields, expectedObjectIdentity: found.chain.objectIdentity, expectedMixerIdentity: mixer.mixerIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity({ sends: mixer.sends ?? [] })).digest("hex") }, context) as { changed?: unknown };
@@ -7583,8 +8194,18 @@ export class McpHost {
       const devadv = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!devadv || devadv.kind !== "device-advanced") return this.transactionError(id, "Unknown or expired device-advanced transaction");
       if (["re-enable-automation", "save-comparison", "set-bank"].includes(devadv.payload.action as string)) return this.transactionError(id, "Momentary device actions and control-surface bank selection are not undoable");
-      if (devadv.payload.action === "insert-chain") return this.transactionError(id, "Chain device deletion is not exposed by the public LOM; undo is unavailable for this transaction");
       if (devadv.state === "undone" && devadv.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: true });
+      if (devadv.payload.action === "insert-chain") {
+        // A device inserted into a chain goes as a Browser-loaded one does: that device, as it was made, and nothing else.
+        const reconciling = devadv.state === "uncertain" && devadv.undoKey === params.idempotencyKey; const made = devadv.created as Record<string, unknown> | undefined;
+        if ((devadv.state !== "applied" && !reconciling) || !made || !isNonEmptyString(made.ref as string, 256) || !isNonEmptyString(made.objectIdentity as string, 256)) return this.transactionError(id, "Chain insertion lacks exact created device identity");
+        try {
+          this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
+          await this.deleteOwnedDeviceAsync(adapter, made.ref as LiveRef, made.objectIdentity as string, context, typeof made.createdFingerprint === "string" ? made.createdFingerprint : undefined, devadv, reconciling);
+          devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
+        } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Chain-insertion undo is uncertain; inspect the exact created device."); }
+      }
       const reconciliation = devadv.state === "uncertain" && devadv.undoKey === params.idempotencyKey;
       if ((devadv.state !== "applied" && !reconciliation) || !devadv.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-advanced transaction can be undone");
       try {
@@ -7594,13 +8215,17 @@ export class McpHost {
         const created = devadv.created as Record<string, unknown> | undefined;
         if (!created || !isNonEmptyString(created.ref as string, 256) || !isNonEmptyString(created.objectIdentity as string, 256)) return this.transactionError(id, "device move lacks exact applied identity");
         const row = this.deviceRow(snapshot, created.ref as LiveRef);
-          const prior = devadv.prior as { ownerRef: LiveRef; index: number };
-          const targetRef = devadv.payload.targetTrackRef !== undefined ? devadv.payload.targetTrackRef : devadv.payload.targetChainRef;
-          const target = devadv.payload.targetTrackRef !== undefined ? (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === prior.ownerRef) : this.chainRow(snapshot, prior.ownerRef).chain;
-          if (!target || !isNonEmptyString(target.objectIdentity, 256)) throw new Error("move-back target identity is unavailable");
+          if (row.device.objectIdentity !== created.objectIdentity) return this.transactionError(id, "the moved device changed after apply; undo refused");
+          const prior = devadv.prior as { ownerRef: LiveRef; ownerIdentity?: string; ownerKind?: "track" | "chain"; index: number };
+          // Back to where it came from, by that owner's kind (a track or a rack chain, whatever the move's
+          // target was) and identity: positional references can point elsewhere after later changes.
+          const ownerKind = prior.ownerKind ?? (devadv.payload.expectedOwnerRef === devadv.payload.expectedTrackRef ? "track" : "chain");
+          let target: JsonObject | undefined;
+          try { target = ownerKind === "track" ? (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === prior.ownerRef) : this.chainRow(snapshot, prior.ownerRef).chain; } catch { target = undefined; }
+          if (!target || !isNonEmptyString(target.objectIdentity, 256) || target.objectIdentity !== (prior.ownerIdentity ?? devadv.payload.expectedOwnerIdentity)) return this.transactionError(id, "the device's original track or chain changed after apply; undo refused");
           devadv.state = "undoing";
-          const result = await this.invokeUndoRecovery(devadv, adapter, "device.move", { ref: created.ref, index: prior.index, targetTrackRef: devadv.payload.targetTrackRef !== undefined ? prior.ownerRef : undefined, targetChainRef: devadv.payload.targetTrackRef === undefined ? prior.ownerRef : undefined, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity }, context) as Record<string, unknown>;
-          if (result.index !== prior.index) throw new Error("device move-back was not confirmed");
+          const result = await this.invokeUndoRecovery(devadv, adapter, "device.move", { ref: created.ref, index: prior.index, ...(ownerKind === "track" ? { targetTrackRef: prior.ownerRef } : { targetChainRef: prior.ownerRef }), expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings, expectedTrackRef: row.track.ref, expectedTrackIdentity: row.track.objectIdentity, expectedTargetIdentity: target.objectIdentity }, context) as Record<string, unknown>;
+          if (result.index !== prior.index || result.objectIdentity !== created.objectIdentity) throw new Error("device move-back was not confirmed");
         devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
       } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Device-advanced undo is uncertain; perform fresh discovery."); }
     }
@@ -7632,7 +8257,38 @@ export class McpHost {
       try {
         this.beginUndoRecovery(drumpad, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== drumpad.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const pad = this.drumPadRow(snapshot, drumpad.payload.ref as LiveRef);
+        const snapshot = await adapter.snapshotAsync(context);
+        if (drumpad.payload.action === "load-samples") {
+          // Each pad back to empty, last loaded first; only while each still holds just what the change put there.
+          const batch = drumpad.payload.pads as Array<Record<string, unknown>>;
+          const created = ((drumpad.created as { pads?: Array<{ chainIdentity?: string; deviceIdentity?: string }> } | undefined)?.pads) ?? [];
+          const rows = batch.map((item) => this.drumPadRow(snapshot, item.ref as LiveRef));
+          if (!reconciliation) for (const [index, row] of rows.entries()) {
+            const chains = (row.chains as JsonObject[] | undefined) ?? []; const devices = (chains[0]?.devices as JsonObject[] | undefined) ?? [];
+            if (chains.length !== 1 || chains[0]!.objectIdentity !== created[index]?.chainIdentity || devices.length !== 1 || devices[0]!.objectIdentity !== created[index]?.deviceIdentity) return this.transactionError(id, "a drum pad changed after its sample loaded; undo refused");
+          }
+          drumpad.state = "undoing";
+          for (const [index, row] of [...rows.entries()].reverse()) {
+            const chains = (row.chains as JsonObject[] | undefined) ?? [];
+            if (reconciliation && chains.length === 0) continue;
+            const cleared = await this.invokeUndoRecovery(drumpad, adapter, "drum-pad.delete-all-chains", { ref: batch[index]!.ref, expectedObjectIdentity: row.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(chains.map((chain) => chain.objectIdentity))).digest("hex") }, context) as { deleted?: unknown };
+            if (typeof cleared.deleted !== "number") throw new Error("drum pad clearing was not confirmed");
+          }
+          this.releaseStagedImportFor(drumpad);
+          drumpad.state = "undone"; return this.successText(id, { transactionId: drumpad.id, state: "undone", idempotent: false });
+        }
+        const pad = this.drumPadRow(snapshot, drumpad.payload.ref as LiveRef);
+        if (drumpad.payload.action === "load-sample") {
+          const created = drumpad.created as { chainIdentity?: string; deviceIdentity?: string } | undefined;
+          const chains = (pad.chains as JsonObject[] | undefined) ?? [];
+          const devices = (chains[0]?.devices as JsonObject[] | undefined) ?? [];
+          if (!reconciliation && (chains.length !== 1 || chains[0]!.objectIdentity !== created?.chainIdentity || devices.length !== 1 || devices[0]!.objectIdentity !== created?.deviceIdentity)) return this.transactionError(id, "drum pad changed after the sample loaded; undo refused");
+          drumpad.state = "undoing";
+          const cleared = await this.invokeUndoRecovery(drumpad, adapter, "drum-pad.delete-all-chains", { ref: drumpad.payload.ref, expectedObjectIdentity: pad.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(chains.map((chain) => chain.objectIdentity))).digest("hex") }, context) as { deleted?: unknown };
+          if (typeof cleared.deleted !== "number") throw new Error("drum pad clearing was not confirmed");
+          this.releaseStagedImportFor(drumpad);
+          drumpad.state = "undone"; return this.successText(id, { transactionId: drumpad.id, state: "undone", idempotent: false });
+        }
         if (!reconciliation) { if (drumpad.payload.solo !== undefined && pad.solo !== drumpad.payload.solo) return this.transactionError(id, "drum pad changed after apply; undo refused"); }
         const state = { note: pad.note ?? null, solo: pad.solo ?? null };
         drumpad.state = "undoing";
@@ -7668,7 +8324,8 @@ export class McpHost {
     if (!transaction && String(params.transactionId).startsWith("rack_")) {
       const rack = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!rack || rack.kind !== "rack") return this.transactionError(id, "Unknown or expired rack transaction");
-      if (rack.payload.action !== "set") return this.transactionError(id, "Rack actions are momentary or structural and not undoable");
+      const macroAction = rack.payload.action === "add-macro" || rack.payload.action === "remove-macro";
+      if (rack.payload.action !== "set" && !macroAction) return this.transactionError(id, "Rack actions are momentary or structural and not undoable");
       if (rack.state === "undone" && rack.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: rack.id, state: "undone", idempotent: true });
       const reconciliation = rack.state === "uncertain" && rack.undoKey === params.idempotencyKey;
       if ((rack.state !== "applied" && !reconciliation) || !rack.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack transaction can be undone");
@@ -7677,6 +8334,15 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
         const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
         if (!reconciliation) { if (rack.payload.selectedVariationIndex !== undefined && row.device.selectedVariationIndex !== rack.payload.selectedVariationIndex) return this.transactionError(id, "rack changed after apply; undo refused"); }
+        if (macroAction) {
+          const left = (rack.created as { visibleMacroCount?: unknown } | undefined)?.visibleMacroCount; const prior = (rack.prior as { visibleMacroCount?: unknown }).visibleMacroCount;
+          if (typeof left !== "number" || typeof prior !== "number" || row.device.visibleMacroCount !== left) return this.transactionError(id, "rack macros changed after apply; undo refused");
+          rack.state = "undoing";
+          const opposite = rack.payload.action === "add-macro" ? "remove-macro" : "add-macro";
+          const done = await this.invokeUndoRecovery(rack, adapter, "rack.action", { ref: rack.payload.ref, action: opposite, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: this.rackStateRevision(row.device) }, context) as { done?: unknown };
+          if (done.done !== true || this.deviceRow(await adapter.snapshotAsync(context), rack.payload.ref as LiveRef).device.visibleMacroCount !== prior) throw new Error("rack macro restoration was not confirmed");
+          rack.state = "undone"; return this.successText(id, { transactionId: rack.id, state: "undone", idempotent: false });
+        }
         rack.state = "undoing";
         const result = await this.invokeUndoRecovery(rack, adapter, "rack.set", { ref: rack.payload.ref, ...(rack.prior as Record<string, unknown>), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: this.rackStateRevision(row.device) }, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("rack restoration was not confirmed");
@@ -7760,11 +8426,11 @@ export class McpHost {
         const action = groove.payload.action as string;
         if (!reconciliation) {
           const current = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>> };
-          if (action === "set-amount") { if (current.grooveAmount !== groove.payload.grooveAmount) return this.transactionError(id, "groove amount changed after apply; undo refused"); }
+          if (action === "set-amount") { if (!sameLiveValue(current.grooveAmount, groove.payload.grooveAmount)) return this.transactionError(id, "groove amount changed after apply; undo refused"); }
           else {
             const row = (current.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref);
             if (!row) return this.transactionError(id, "edited groove disappeared after apply");
-            for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (groove.payload[field] !== undefined && JSON.stringify(row[field]) !== JSON.stringify(groove.payload[field])) return this.transactionError(id, "groove changed after apply; undo refused");
+            for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (groove.payload[field] !== undefined && !sameLiveValue(row[field], groove.payload[field])) return this.transactionError(id, "groove changed after apply; undo refused");
           }
         }
         const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown };
@@ -7782,8 +8448,8 @@ export class McpHost {
           if (result.changed !== true) throw new Error("groove restoration was not confirmed");
         }
         const verified = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>> };
-        if (action === "set-amount") { if (verified.grooveAmount !== (groove.prior as { grooveAmount: number | null }).grooveAmount) throw new Error("groove amount undo did not restore the exact prior value"); }
-        else { const row = (verified.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref); if (!row) throw new Error("edited groove disappeared after undo"); for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (JSON.stringify(row[field]) !== JSON.stringify((groove.prior as Record<string, unknown>)[field])) throw new Error("groove undo did not restore the exact prior fields"); }
+        if (action === "set-amount") { if (!sameLiveValue(verified.grooveAmount, (groove.prior as { grooveAmount: number | null }).grooveAmount)) throw new Error("groove amount undo did not restore the exact prior value"); }
+        else { const row = (verified.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref); if (!row) throw new Error("edited groove disappeared after undo"); for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (!sameLiveValue(row[field], (groove.prior as Record<string, unknown>)[field])) throw new Error("groove undo did not restore the exact prior fields"); }
         groove.state = "undone"; return this.successText(id, { transactionId: groove.id, state: "undone", idempotent: false });
       } catch (cause) { groove.state = "uncertain"; return this.adapterToolError(id, cause, "Groove undo is uncertain; perform fresh discovery."); }
     }
@@ -7840,9 +8506,9 @@ export class McpHost {
       try {
         this.beginUndoRecovery(audio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, audio.clipRef);
-        const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && row.clip[field] !== value) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
+        const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && !sameLiveValue(row.clip[field], value)) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
         if (!reconciliation) { audio.state = "undoing"; const result = await this.invokeUndoRecovery(audio, adapter, "audio.clip.set", { ref: audio.clipRef, ...audio.prior, ...this.audioClipMutationAuthority(snapshot, audio.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Audio clip restoration was not confirmed"); }
-        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (restoredRow.clip[field] !== value) throw new Error("Audio clip exact prior state was not restored");
+        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
         audio.state = "undone"; return this.successText(id, { transactionId: audio.id, state: "undone", restored: audio.prior, idempotent: false });
       } catch (cause) { audio.state = "uncertain"; return this.adapterToolError(id, cause, "Audio-clip undo is uncertain; inspect the exact clip."); }
     }
@@ -7871,7 +8537,8 @@ export class McpHost {
         device.state = "undoing";
         if (action === "insert") {
           if (!isNonEmptyString(device.created?.ref, 256) || !isNonEmptyString(device.created?.objectIdentity, 256)) throw new Error("inserted device identity is unavailable");
-          await this.deleteOwnedDeviceAsync(adapter, device.created.ref as LiveRef, device.created.objectIdentity as string, context, device.created.fingerprint as string, device, reconciliation);
+          await this.deleteOwnedDeviceAsync(adapter, device.created.ref as LiveRef, device.created.objectIdentity as string, context, device.created.createdFingerprint as string, device, reconciliation);
+          this.releaseStagedImportFor(device);
         } else {
           const reference = (action === "move" ? device.created?.ref : device.payload.ref) as LiveRef; const located = this.deviceRow(await adapter.snapshotAsync(context), reference);
           if (reconciliation) { if (action === "enable" && located.device.enabled !== device.prior?.enabled) throw new Error("device-enable undo replay did not restore prior state"); if (action === "move" && located.siblings.findIndex((sibling) => sibling.ref === reference) !== device.prior?.index) throw new Error("device-move undo replay did not restore prior location"); }
@@ -7893,12 +8560,15 @@ export class McpHost {
       if ((routing.state !== "applied" && !reconciliation) || !routing.clipRef || !routing.prior) return this.transactionError(id, "Only an applied or exact-key uncertain routing transaction can be undone");
       try {
         this.beginUndoRecovery(routing, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== routing.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === routing.clipRef);
-        if (!track || track.objectIdentity !== routing.payload.expectedObjectIdentity) return this.transactionError(id, "routing track identity changed after apply; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await adapter.snapshotAsync(context);
+        // The track by identity: its positional reference changes when tracks are added or removed before it.
+        const matches = (snapshot.tracks as unknown as JsonObject[]).filter((candidate) => candidate.objectIdentity === routing.payload.expectedObjectIdentity); const track = matches.length === 1 ? matches[0] : undefined;
+        if (!track || !isNonEmptyString(track.ref, 256)) return this.transactionError(id, "routing track identity changed after apply; undo refused");
+        const trackRef = track.ref as LiveRef;
         const current = { inputType: (track.routing as JsonObject).inputType, inputSubRouting: (track.routing as JsonObject).inputSubRouting, outputType: (track.routing as JsonObject).outputType, outputSubRouting: (track.routing as JsonObject).outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
         const expected = reconciliation ? routing.prior : routing.created; for (const key of Object.keys(routing.prior)) if (current[key as keyof typeof current] !== expected?.[key]) return this.transactionError(id, reconciliation ? "routing undo replay did not restore prior state" : "routing changed after apply; undo refused");
-        if (!reconciliation) { const restore: JsonObject = { ref: routing.clipRef, ...routing.prior, expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, routing.clipRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
-        const afterTrack = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === routing.clipRef); if (!afterTrack) throw new Error("routing track disappeared after undo"); const afterRouting = afterTrack.routing as JsonObject; for (const [key, value] of Object.entries(routing.prior)) { const observed = key === "arm" ? afterTrack.armed : key === "monitoring" ? afterTrack.monitoringState : afterRouting[key]; if (observed !== value) throw new Error("routing exact prior state was not restored"); } routing.state = "undone";
+        if (!reconciliation) { const restore: JsonObject = { ref: trackRef, ...McpHost.writableRouting(routing.prior), expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, trackRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
+        await this.confirmRoutingFields(adapter, context, trackRef, routing.payload.expectedObjectIdentity as string, routing.prior, "routing exact prior state was not restored"); routing.state = "undone";
         return this.successText(id, { transactionId: routing.id, state: "undone", restored: routing.prior, idempotent: false });
       } catch (cause) { routing.state = "uncertain"; return this.adapterToolError(id, cause, "Routing undo is uncertain; inspect routing and feedback state."); }
     }
@@ -7937,7 +8607,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
         let currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
-        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
+        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
         if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
         currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
@@ -7996,10 +8666,17 @@ export class McpHost {
       const status = this.requireConnected("session.structure"); if (status.epoch !== structure.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
       try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await adapter.snapshotAsync(context());
-        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
-        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await adapter.snapshotAsync(context()); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; if (this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity }, context()); }
+        // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
+        const discard = params.discard === true;
+        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !(discard && item.kind === "track") && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
+        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await adapter.snapshotAsync(context()); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
+if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
         const after = await adapter.snapshotAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
-      catch (cause) { structure.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure undo is uncertain; inspect authoritative tracks and scenes."); }
+      catch (cause) {
+        // Refused because what it made has changed since: nothing was touched, so it stays applied (a later undo, with discard, can still go).
+        if (structure.state === "applied" && cause instanceof Error && /was modified after apply/.test(cause.message)) { this.undoRecoveryPlans.delete(structure); return this.adapterToolError(id, cause, "Session-structure undo refused; nothing changed."); }
+        structure.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure undo is uncertain; inspect authoritative tracks and scenes.");
+      }
       structure.state = "undone";
       return this.successText(id, { transactionId: structure.id, state: "undone", restored: { tracks: structure.priorTracks, scenes: structure.priorScenes }, idempotent: false });
     }
@@ -8020,6 +8697,32 @@ export class McpHost {
         return this.successText(id, { transactionId: arrangement.id, state: "undone", restored: arrangement.prior, idempotent: false });
       } catch (cause) { return this.adapterToolError(id, cause, "Arrangement undo refused; inspect authoritative locators."); }
     }
+    if (!transaction && String(params.transactionId).startsWith("parameters_")) {
+      const batch = this.deviceParametersTransactions.get(params.transactionId as string);
+      const reconciliation = batch?.state === "uncertain" && batch.undoKey === params.idempotencyKey;
+      if (batch?.state === "undone" && batch.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: batch.id, state: "undone", idempotent: true });
+      if (!batch || (batch.state !== "applied" && !reconciliation) || batch.parameters.some((parameter) => parameter.appliedRevision === undefined)) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
+      try {
+        this.beginUndoRecovery(batch, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== batch.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
+        const currentSnapshot = await adapter.snapshotAsync(context);
+        const currents = batch.parameters.map((parameter) => this.parameterTarget(currentSnapshot, batch.deviceRef, parameter.ref).parameter);
+        const unchanged = (index: number) => JSON.stringify(this.parameterAuthority(currentSnapshot, batch.parameters[index]!.ref)) === JSON.stringify(batch.parameters[index]!.authority);
+        if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
+        else {
+          if (currents.some((current, index) => !sameLiveValue(current.value, batch.parameters[index]!.proposedValue) || this.parameterRevision(current) !== batch.parameters[index]!.appliedRevision || !unchanged(index))) return this.transactionError(id, "A device parameter changed after apply; undo refused");
+          batch.state = "undoing";
+          await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
+        }
+        const restoredSnapshot = await adapter.snapshotAsync(context);
+        for (const parameter of batch.parameters) {
+          const restored = this.parameterTarget(restoredSnapshot, batch.deviceRef, parameter.ref).parameter;
+          if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { batch.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
+        }
+        batch.state = "undone";
+        return this.successText(id, { transactionId: batch.id, state: "undone", idempotent: false });
+      } catch (cause) { if (batch.state === "undoing" || batch.state === "uncertain") batch.state = "uncertain"; return this.adapterToolError(id, cause, "Device-parameter undo is uncertain; inspect authoritative parameter state."); }
+    }
     if (!transaction && String(params.transactionId).startsWith("parameter_")) {
       const parameter = this.deviceParameterTransactions.get(params.transactionId as string);
       const reconciliation = parameter?.state === "uncertain" && parameter.undoKey === params.idempotencyKey;
@@ -8029,7 +8732,7 @@ export class McpHost {
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await adapter.snapshotAsync(context); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (reconciliation) { if (current.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) throw new Error("device-parameter undo replay did not restore exact prior state"); }
-        else { if (current.value !== parameter.proposedValue || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
+        else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
         const restoredSnapshot = await adapter.snapshotAsync(context); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         parameter.state = "undone";
@@ -8166,7 +8869,7 @@ export class McpHost {
     this.noteToolListChanged();
     if (!this.toolCallable(params.name)) return this.toolGateError(id, params.name);
     if (this.recoveryFinalizationInFlight && !["server_status", "capabilities", "plan_user_journey", "live_status", "live_snapshot", "live_discover", "live_project_snapshot_export", "live_project_snapshot_diff"].includes(params.name)) return this.adapterToolError(id, new Error("recovery finalization safety barrier is in progress"), "Wait for terminal recovery finalization before any synchronous mutation.");
-    const argumentTools = new Set(["plan_user_journey", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_discover", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_device_parameter_preview", "live_device_parameter_apply", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_recovery_finalize", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"]);
+    const argumentTools = new Set(["plan_user_journey", "audio_analyze", "audio_compare_reference", "audio_diagnose_live_context", "live_audio_capture_preview", "live_audio_capture_apply", "live_audio_capture_status", "live_audio_capture_emergency_stop", "live_discover", "live_session_audition_preview", "live_session_audition_apply", "live_session_audition_stop", "live_session_emergency_stop", "live_transport_preview", "live_transport_apply", "live_clip_launch_preview", "live_clip_launch_apply", "live_clip_launch_stop", "live_capture_midi_preview", "live_capture_midi_apply", "live_scene_capture_preview", "live_scene_capture_apply", "live_note_update_preview", "live_note_update_apply", "live_note_delete_preview", "live_note_delete_apply", "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_arrangement_clip_preview", "live_arrangement_clip_apply", "live_clip_move_preview", "live_clip_move_apply", "live_audio_clip_preview", "live_audio_clip_apply", "live_mixer_preview", "live_mixer_apply", "live_automation_preview", "live_automation_apply", "live_browser_search", "live_browser_load_preview", "live_browser_load_apply", "live_device_preview", "live_device_apply", "live_routing_preview", "live_routing_apply", "live_recording_preview", "live_recording_apply", "live_subscribe", "live_unsubscribe", "live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff", "als_read", "als_lint", "als_diff", "live_project_backup_preview", "live_project_backup_apply", "live_device_parameter_preview", "live_device_parameter_apply", "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_midi_clip_preview", "live_midi_clip_apply", "live_midi_transform_preview", "live_midi_transform_apply", "live_arrangement_section_preview", "live_arrangement_section_apply", "live_tempo_preview", "live_tempo_apply", "live_undo", "live_transaction_release", "live_recovery_finalize", "live_view_preview", "live_view_apply", "live_locator_jump_preview", "live_locator_jump_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_import_preview", "live_audio_import_apply", "live_warp_marker_preview", "live_warp_marker_apply", "live_clip_action_preview", "live_clip_action_apply", "live_note_edit_preview", "live_note_edit_apply", "live_note_read", "live_key_estimate", "live_tuning_preview", "live_tuning_apply", "live_groove_preview", "live_groove_apply", "live_scene_preview", "live_scene_apply", "live_scene_fire_preview", "live_scene_fire_apply", "live_song_state", "live_song_settings_preview", "live_song_settings_apply", "live_transport_action_preview", "live_transport_action_apply", "live_track_structure_preview", "live_track_structure_apply", "live_device_delete_preview", "live_device_delete_apply", "live_track_view_preview", "live_track_view_apply", "live_track_properties_preview", "live_track_properties_apply", "live_selection_preview", "live_selection_apply", "live_clip_view_preview", "live_clip_view_apply", "live_device_view_preview", "live_device_view_apply", "live_performance_read", "live_mixer_extended_preview", "live_mixer_extended_apply", "live_chain_mixer_preview", "live_chain_mixer_apply", "live_device_io_preview", "live_device_io_apply", "live_device_advanced_preview", "live_device_advanced_apply", "live_chain_preview", "live_chain_apply", "live_drum_pad_preview", "live_drum_pad_apply", "live_rack_preview", "live_rack_apply", "live_rack_view_preview", "live_rack_view_apply", "live_device_specialized_preview", "live_device_specialized_apply", "live_looper_preview", "live_looper_apply", "live_simpler_preview", "live_simpler_apply", "live_observe_subscribe", "live_observe_poll", "live_observe_unsubscribe", "live_browser_roots", "live_browser_inspect", "live_arrangement_automation_read", "live_take_lane_read", "live_comp_read", "live_warp_marker_read", "live_application_dialog_preview", "live_application_dialog_apply", "live_batch_preview", "live_batch_apply", "live_device_state_save", "live_device_state_recall_preview", "live_device_state_recall_apply", "live_library_search"]);
     if (!argumentTools.has(params.name) && params.arguments !== undefined && Object.keys(params.arguments as JsonObject).length !== 0) {
       return error(id, -32602, "Tool arguments must be an empty object");
     }
@@ -8204,6 +8907,7 @@ export class McpHost {
     if (params.name === "live_tempo_preview") return this.liveTempoPreview(id, params.arguments);
     if (params.name === "live_tempo_apply") return this.liveTempoApply(id, params.arguments);
     if (params.name === "live_undo") return this.liveUndo(id, params.arguments);
+    if (params.name === "live_transaction_release") return this.liveTransactionRelease(id, params.arguments);
     return error(id, -32601, "Tool not found");
   }
 
@@ -8296,7 +9000,7 @@ export class McpHost {
       const revision = this.parameterRevision(target.parameter); const quantization = target.parameter.quantization ?? 0;
       if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
       if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error("parameter value does not match authoritative quantization");
+      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -8308,7 +9012,7 @@ export class McpHost {
     const transaction = this.deviceParameterTransactions.get(params.transactionId as string);
     if (!transaction) return this.transactionError(id, "Unknown or expired device-parameter transaction");
     if (params.confirmation !== transaction.confirmation) return this.transactionError(id, "Device-parameter confirmation token is invalid");
-    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, revision: transaction.appliedRevision, idempotent: true });
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", value: transaction.proposedValue, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, idempotent: true });
     if (transaction.state === "uncertain") return this.transactionError(id, "Device-parameter state is uncertain; perform fresh discovery before retrying");
     if (transaction.state !== "previewed" || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
@@ -8317,9 +9021,10 @@ export class McpHost {
       if (this.parameterRevision(target.parameter) !== transaction.priorRevision || target.parameter.value !== transaction.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) return this.transactionError(id, "Device parameter identity or value changed since preview");
       this.adapter.invoke({ operation: "device.parameter.set", args: this.parameterMutationArgs(transaction, transaction.proposedValue, transaction.priorRevision) });
       const verifiedSnapshot = this.adapter.snapshot(); const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
-      if (verified.value !== transaction.proposedValue || this.parameterRevision(verified) <= transaction.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
+      if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= transaction.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
+      if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
+      return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
     } catch (cause) { return this.adapterToolError(id, cause, "Device-parameter apply may be uncertain; perform fresh authoritative discovery and do not retry blindly."); }
   }
 
@@ -8329,7 +9034,8 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.structure"); const snapshot = this.adapter.snapshot();
       const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      if ([...proposed.tracks, ...proposed.scenes].some((item) => existingNames.has(item.name))) throw new Error("track or scene name already exists");
+      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
+      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -8452,6 +9158,29 @@ export class McpHost {
     } catch (cause) { return this.adapterToolError(id, cause, "Tempo apply failed; inspect Live state before retrying."); }
   }
 
+  /**
+   * The client gives up the undo of applied transactions it will never undo (a render's own mixer and
+   * transport steps, a search's knob settings), so they stop holding capacity. Only applied ones not in
+   * flight are released; what isn't known (expired, undone) is simply gone already.
+   */
+  private liveTransactionRelease(id: RequestId, params: unknown): JsonObject {
+    if (!isObject(params) || !hasOnly(params, ["transactionIds"]) || !Array.isArray(params.transactionIds) || params.transactionIds.length < 1 || params.transactionIds.length > 64
+      || !params.transactionIds.every((value) => isNonEmptyString(value, 128))) return error(id, -32602, "transactionIds (1 to 64) are required");
+    let released = 0; const kept: string[] = [];
+    for (const transactionId of params.transactionIds as string[]) {
+      // Batches keep their own records.
+      if (transactionId.startsWith("batch_")) { if (!IN_FLIGHT_TRANSACTION_IDS.has(transactionId) && this.batchTransactions.release(transactionId)) released++; else kept.push(transactionId); continue; }
+      for (const holder of Object.values(this)) {
+        if (!(holder instanceof Map) || !holder.has(transactionId)) continue;
+        const transaction = holder.get(transactionId) as { state?: unknown } | undefined;
+        if (transaction?.state === "applied" && !IN_FLIGHT_TRANSACTION_IDS.has(transactionId)) { holder.delete(transactionId); released++; }
+        else kept.push(transactionId);
+        break;
+      }
+    }
+    return this.successText(id, { released, ...(kept.length ? { kept } : {}) });
+  }
+
   private liveUndo(id: RequestId, params: unknown): JsonObject {
     if (!this.validTransactionParams(params, "undo")) return error(id, -32602, "transactionId, confirmation=undo, and idempotencyKey are required");
     const transaction = this.transactions.get(params.transactionId as string);
@@ -8463,7 +9192,7 @@ export class McpHost {
       try {
         const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const currentSnapshot = this.adapter.snapshot(); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
-        if (current.value !== parameter.proposedValue || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused");
+        if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused");
         this.adapter.invoke({ operation: "device.parameter.set", args: this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision) });
         const restoredSnapshot = this.adapter.snapshot(); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (restored.value !== parameter.priorValue || this.parameterRevision(restored) <= parameter.appliedRevision || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
@@ -8546,7 +9275,9 @@ export class McpHost {
   }
 
   private validTransactionParams(params: unknown, confirmation: "apply" | "undo"): params is JsonObject {
-    return isObject(params) && hasOnly(params, ["transactionId", "confirmation", "idempotencyKey"]) && isNonEmptyString(params.transactionId, 128) && params.confirmation === confirmation && isIdempotencyKey(params.idempotencyKey);
+    // An undo may say discard: a client's own scratch track (a render it recorded) goes even though it changed.
+    return isObject(params) && hasOnly(params, confirmation === "undo" ? ["transactionId", "confirmation", "idempotencyKey", "discard"] : ["transactionId", "confirmation", "idempotencyKey"])
+      && (params.discard === undefined || typeof params.discard === "boolean") && isNonEmptyString(params.transactionId, 128) && params.confirmation === confirmation && isIdempotencyKey(params.idempotencyKey);
   }
 
   private newTransactionId(): string { return `tempo_${randomBytes(18).toString("base64url")}`; }
@@ -8554,12 +9285,11 @@ export class McpHost {
     const now = Date.now();
     for (const [id, transaction] of this.transactions) if ((transaction.state === "previewed" && transaction.expiresAt <= now) || (transaction.state === "previewed" && this.transactions.size > MAX_TRANSACTIONS)) this.transactions.delete(id);
   }
-  private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Request a fresh tempo preview and confirm the exact transaction." }) }], isError: true }); }
+  private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Preview the change again, then apply the new transaction." }) }], isError: true }); }
   private recoveryFinalizeError(id: RequestId, reason: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence." }) }], isError: true }); }
   private successText(id: RequestId, value: unknown): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify(value) }], isError: false }); }
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
-    const raw = cause instanceof Error ? cause.message : "adapter request failed";
-    const reason = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request)/i.test(raw) && raw.length <= 160 ? raw : "adapter request failed";
+    const reason = adapterReason(cause instanceof Error ? cause.message : "adapter request failed");
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
   }
 

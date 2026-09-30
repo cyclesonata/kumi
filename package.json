@@ -1,0 +1,20 @@
+{
+  "name": "kumi",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "workspaces": ["apps/kumi", "packages/runtime"],
+  "engines": { "node": ">=22 <23 || >=24 <25" },
+  "scripts": {
+    "build": "npm run build --workspace @kumi/runtime && npm run build --workspace @kumi/app",
+    "typecheck": "npm run build --workspace @kumi/runtime && npm run typecheck --workspaces",
+    "test": "npm run build && node --test apps/kumi/dist/test/*.test.js packages/runtime/dist/test/*.test.js",
+    "setup": "npm ci && npm run build && npm ci --prefix apps/mcp-server && npm run build --prefix apps/mcp-server",
+    "kumi": "node apps/kumi/bin/kumi.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}

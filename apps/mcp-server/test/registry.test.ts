@@ -44,6 +44,19 @@ test("canonical registry includes strict snapshot and playback contracts", () =>
   assert.throws(() => validateLiveOperationResult("clip.move", { ref: "1:clip:0:1", objectIdentity: "live:clip:1", name: "Moved", createdFingerprint: "a".repeat(64), ownershipToken: "x".repeat(32) }), /not allowed/);
 });
 
+test("transport actions fence on the playback revision and explicit deletions carry their own authority", () => {
+  // Real Live's playback revision is "<epoch>:playback:<n>:<digest>", as transport.set carries it.
+  const setAuthority = { setRef: "4695124654589702:set:song", expectedObjectIdentity: "live:4695124654589702" };
+  validateLiveOperationRequest("transport.action", { ...setAuthority, action: "stop", expectedRevision: "4695124654589702:playback:1:d9860b45721dd3cf" });
+  validateLiveOperationRequest("transport.set", { ...setAuthority, metronome: true, expectedRevision: "4695124654589702:playback:1:d9860b45721dd3cf" });
+  assert.throws(() => validateLiveOperationRequest("transport.action", { ...setAuthority, action: "stop", expectedRevision: "" }), /shorter/);
+  const device = { ref: "1:device:0:1", expectedObjectIdentity: "live:device-2", expectedOwnerRef: "1:track:0", expectedOwnerIdentity: "live:track-1", expectedSiblings: [{ ref: "1:device:0:1", objectIdentity: "live:device-2" }], expectedTrackRef: "1:track:0", expectedTrackIdentity: "live:track-1" };
+  validateLiveOperationRequest("device.delete", { ...device, explicitDeletion: true });
+  assert.throws(() => validateLiveOperationRequest("device.delete", { ...device, explicitDeletion: false }), /constant/);
+  validateLiveOperationRequest("track.delete-return", { ref: "1:track:3", expectedObjectIdentity: "live:return-1", expectedStructureRevision: "a".repeat(64), explicitDeletion: true });
+  assert.throws(() => validateLiveOperationRequest("track.delete", { ref: "1:track:3", expectedObjectIdentity: "live:track-3", expectedStructureRevision: "a".repeat(64), explicitDeletion: true }), /not allowed/);
+});
+
 test("runtime registry validation rejects missing, unknown, and weak playback fields", () => {
   assert.throws(() => validateLiveOperationResult("session.playback", { ...playback, revision: undefined }), /type/);
   assert.throws(() => validateLiveOperationResult("session.playback", { ...playback, extra: true }), /not allowed/);

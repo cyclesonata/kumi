@@ -66,7 +66,7 @@ test("save writes a verified schema-versioned snapshot; recall restores values; 
   assert.equal(replay.idempotent, true);
   const undone = await parse(call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "recall-undo-1" }));
   assert.equal(undone.state, "undone");
-  assert.equal(parameter.value, 0.9, "undo restores the exact pre-recall value");
+  assert.equal(parameter.value, Math.fround(0.9), "undo restores the pre-recall value (as Live stores it, a 32-bit float)");
 });
 
 test("cross-track recall onto an equivalent device writes through exact per-parameter authority", async (t) => {
@@ -313,6 +313,6 @@ test("a mid-recall refusal rolls written parameters back to their exact prior va
   assert.equal(response.state, "compensated");
   assert.equal(response.failedIndex, 1);
   assert.equal(response.rolledBack, 1);
-  assert.equal(device.parameters[0].value, 0.1, "the written parameter was rolled back to its exact prior value");
+  assert.equal(device.parameters[0].value, Math.fround(0.1), "the written parameter was rolled back to its prior value (as Live stores it)");
   assert.equal(device.parameters[1].value, 0.95, "the fenced parameter never dispatched");
 });

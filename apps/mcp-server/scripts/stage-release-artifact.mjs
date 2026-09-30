@@ -40,7 +40,7 @@ const include = (absolute, role) => {
   files[path] = digest(absolute);
   roles[path] = role;
 };
-const runtimeModules = ["als", "analysis-job-worker", "analysis-runner", "analysis", "key-estimation", "audio-diagnosis", "audio-file", "audio-standards", "bridge/remote-adapter", "cli", "delivery", "diagnostics", "framing", "host", "index", "install-remote-script", "journeys", "lifecycle-cli", "lifecycle", "live", "loopback", "migrate", "platform", "project", "project-semantic", "project-semantic-diff", "reference-analysis", "registry", "setup", "stdio", "tool-catalog", "midi-transforms", "mcp-protocol", "transactions/session-midi", "transactions/batch", "transactions/device-state", "sqlite-reader", "library-search"];
+const runtimeModules = ["als", "analysis-job-worker", "analysis-runner", "analysis", "key-estimation", "audio-diagnosis", "audio-file", "audio-standards", "bridge/remote-adapter", "cli", "delivery", "diagnostics", "drum-sampler-preset", "framing", "host", "index", "install-remote-script", "journeys", "lifecycle-cli", "lifecycle", "live", "loopback", "migrate", "platform", "project", "project-semantic", "project-semantic-diff", "reference-analysis", "registry", "setup", "stdio", "tool-catalog", "midi-transforms", "mcp-protocol", "transactions/session-midi", "transactions/batch", "transactions/device-state", "sqlite-reader", "library-search"];
 for (const module of runtimeModules) for (const extension of ["js", "d.ts"]) {
   const path = join(packageRoot, "dist", "src", `${module}.${extension}`);
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`allowlisted runtime artifact is missing: ${module}.${extension}`);
@@ -49,6 +49,8 @@ for (const module of runtimeModules) for (const extension of ["js", "d.ts"]) {
 const remoteFiles = ["README.md", "AbletonMcpBridge/__init__.py", "AbletonMcpBridge/ableton_mcp_remote_script.py", "AbletonMcpBridge/ableton-live-v1.operations.json", "AbletonMcpBridge/manifest.json"];
 for (const name of remoteFiles) include(join(packageRoot, "remote-script", ...name.split("/")), "ableton-remote-script");
 for (const [, name] of documentation) include(join(docsRoot, name), "documentation");
+// npm includes a package-root README even when it is outside `files`.
+include(join(packageRoot, "README.md"), "documentation");
 include(licenseDestination, "license");
 include(join(packageRoot, "package.json"), "package-metadata");
 

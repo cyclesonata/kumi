@@ -1,97 +1,69 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" width="100" alt="Ableton MCP Beyond logo" />
+  <img src="docs/assets/kumi-logo.svg" alt="kumi" width="300">
 </p>
 
-<h1 align="center">Ableton MCP Beyond</h1>
-
 <p align="center">
-  Fully featured safety-first MCP control of Ableton Live 12
+  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
   English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a>
 </p>
 
+**A studio partner for Ableton Live that learns how you work.** Tell Kumi what you want in plain words and it does the work in your Set, from the tedious to the things you'd never have time to figure out: rebuilding a sound from a YouTube tutorial, comparing your mix with a reference, writing a Max for Live device you describe, or reworking the rack you point at. Every change shows up with its own undo, so nothing happens behind your back, and it remembers the techniques you keep, so it fits you better with every session.
+
 <p align="center">
-  <a href="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/user1303836/ableton-mcp-beyond/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license" /></a>
-  <a href="apps/mcp-server/package.json"><img src="https://img.shields.io/badge/node-22%20%7C%2024-339933?style=flat-square" alt="Node 22 | 24" /></a>
-  <a href="docs/en/USER_GUIDE.md"><img src="https://img.shields.io/badge/MCP-2026--07--28%20%2B%20legacy-blue?style=flat-square" alt="MCP 2026-07-28 and legacy 2025-11-25" /></a>
-  <a href="docs/en/SUPPORT_MATRIX.md"><img src="https://img.shields.io/badge/Ableton%20Live-12-555555?style=flat-square" alt="Ableton Live 12" /></a>
+  <img src="docs/assets/kumi-screenshot.png" alt="Kumi rebuilding a Drift bass from a video tutorial: the conversation with each step it took, FOCUS showing the new track's device chain, and HISTORY with an undo for every change" width="760">
 </p>
 
----
+## What it does
 
-**An MCP host that never guesses — and never wrecks your Set.**
+- **Changes almost anything in the Set:** tempo, scale and groove; the mixer, routing and sidechains; tracks, scenes and clips; notes and MIDI transforms; devices, racks and their parameters. Every change can be undone on its own.
+- **Listens:** loudness, tonal balance, width, tempo and key of a mix, a sample or its own bounce, and how your mix compares with a reference.
+- **Watches tutorials** from YouTube or a file, then builds what they show on a new track.
+- **Plays, records and resamples** when you ask.
+- **Makes Max for Live devices** you describe in plain words, and puts them on your tracks.
+- **Shows where you are:** FOCUS follows what you touch in Live, as a device tree, a piano roll or a Session or Arrangement strip. Click a device to point at it: "this Saturator's too harsh".
+- **Remembers:** notes about you and each Set, techniques it learns from what you keep, and recipes you can replay. Every save is shown, and one click forgets it.
+- **Keeps your conversations** for each Set, and says what changed while it was closed.
+- **Works with your model:** sign in with ChatGPT, or use an OpenAI, Anthropic or OpenCode API key.
 
-- **Deep Live control** — transport, Session + Arrangement, clips, MIDI notes, mixer, automation, routing, recording, projects, subscriptions.
-- **Device mastery** — recursive rack/chain/pad/macro discovery, guarded parameter edits, Browser search and load.
-- **Audio intelligence** — ITU-R BS.1770-5 / EBU R128 loudness, validated true peak, reference-mix comparison. Works without Live.
-- **Consent-bound capture** — resample one clip, analyze internally, delete every trace. Watchdog and emergency stop included.
-- **Realtime control** — token-fenced UDP/OSC/XY channel with verified writes and an independent emergency stop.
-- **Guided journeys** — `plan_user_journey` turns "make a lo-fi beat" into an ordered, confirmable, capability-aware plan.
+## Get started
 
-## Quick start
-
-Requires Node.js 22 or 24; Node 24 LTS is recommended. Node 25 is EOL and unsupported; Node 26 is not yet validated. Ableton Live 12 for the bridge; the host, tests, and demo run without it.
-
-```sh
-cd apps/mcp-server
-npm ci && npm run build
-npm run demo      # a real MCP session, no Live required
-npm test          # full suite
-```
-
-Point your MCP client at the server, and — to control Live — configure the bridge and install the Remote Script:
+You need **Node.js 22 or 24** ([nodejs.org](https://nodejs.org)) and Ableton Live 12.
 
 ```sh
-npm run setup -- --output /abs/path/client-config.json
-npm run setup -- --output /abs/path/bridge-config.json \
-  --bridge-host 127.0.0.1 --bridge-port 9000 \
-  --secret-file /abs/path/bridge.secret
-node dist/src/install-remote-script.js --destination '/abs/.../Remote Scripts/AbletonMcpBridge' --dry-run
+npm run setup                        # install and build, about a minute
+npm run kumi -- login openai-codex   # sign in with ChatGPT (or set an API key)
+npm run kumi -- bridge               # with Live closed: connect Kumi to Live
+npm run kumi                         # open Kumi next to your Set
 ```
 
-The bridge example requires an existing owner-only secret; `--dry-run` does **not** install anything. For verified candidates, use the plan/apply/activate sequence in [DELIVERY.md](docs/en/DELIVERY.md), including manual Live restart and Control Surface selection, then inspect `npm run diagnostics -- --config /abs/path/bridge-config.json`. Exit code 0 alone is not real-Live readiness. The single guided onboarding command (#66) remains unfinished.
-Full walkthrough: [docs/en/USER_GUIDE.md](docs/en/USER_GUIDE.md).
+The first time, pick **AbletonMcpBridge** as a Control Surface in Live's **Settings → Link, Tempo & MIDI**. After that, Kumi finds Live by itself.
 
-## Safety model
+Something off? `npm run kumi -- doctor` checks everything and says what to run. `npm run kumi -- report` puts what went wrong in one file to send us, and `npm run kumi -- update` keeps Kumi and its bridge current.
 
-Every mutation follows **discover → preview → confirm → apply → verify → undo**. Idempotency keys, epoch fencing, and an execution ledger make lost acknowledgements safe to reconcile; arbitrary deletes are refused. Without an explicit bridge config the server is fail-closed — it cannot read or touch Live. See [docs/en/LIVE_SAFETY.md](docs/en/LIVE_SAFETY.md).
+Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live.
 
-The deployment trusts an owner-controlled local OS account and the MCP client's approval policy. Server confirmations are not proof of human consent through a channel independent of the model. Do not auto-approve audible, recording, routing, capture, or realtime tools.
+[Full guide](docs/en/KUMI_POC.md) · [Commands and screens](docs/en/KUMI_TUI.md) · [Changelog](CHANGELOG.md)
 
-## Toolkit direction
+## Status
 
-Keep MCP while evolving the structured observation → selection → guarded execution → independent verification toolkit. Models remain optional clients: Jev-style typed choices are not vision or consent, and unrestricted desktop agents do not inherit MCP safety. Compact task discovery, a shared-authority GUI export pilot and retained bounce are follow-ups, **not shipped integrations**. See [extension boundaries and evaluation gates](docs/en/EXTENSION_SURFACES.md).
+Kumi 1.0 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
 
-## Compatibility
+## Development
 
-| Surface | Status |
-|---|---|
-| Node.js 22 / 24 | Supported contract; a green exact-current-SHA matrix is required |
-| macOS + Live 12 | Historical real-Live evidence on 12.4.5b8 beta ([evidence](docs/evidence/)); exact-candidate rerun required before release |
-| Windows host | CI contract configured; current exact-SHA result required; Windows 11 + Live not certified |
-| Linux / Live 11 or earlier | Unsupported |
+```sh
+npm run typecheck
+npm test          # no Live or sign-in needed
+```
 
-Capabilities are negotiated at connect time, so your agent always knows exactly what a given Live install can do. Full matrix: [docs/en/SUPPORT_MATRIX.md](docs/en/SUPPORT_MATRIX.md) · [docs/en/EXTENSION_SURFACES.md](docs/en/EXTENSION_SURFACES.md).
-
-## Docs
-
-| Doc | What it covers |
-|---|---|
-| [USER_GUIDE](docs/en/USER_GUIDE.md) | Tool list, mutation workflow, resources, prompts |
-| [LIVE_SAFETY](docs/en/LIVE_SAFETY.md) | The real-Live safety boundary |
-| [OPERATIONS](docs/en/OPERATIONS.md) / [RECOVERY](docs/en/RECOVERY.md) | Supervision, failure handling, uncertain-state recovery |
-| [AUDIO_INTELLIGENCE](docs/en/AUDIO_INTELLIGENCE.md) | DSP standards, capture consent, privacy limits |
-| [USER_JOURNEYS](docs/en/USER_JOURNEYS.md) | The five guided composition workflows |
-| [REALTIME_CONTROL](docs/en/REALTIME_CONTROL.md) | The armed UDP/OSC/XY control plane |
-| [CAPABILITY_MATRIX](docs/en/CAPABILITY_MATRIX.md) | What the agent can do, plus per-domain capability and evidence detail |
-| [EXTENSION_SURFACES](docs/en/EXTENSION_SURFACES.md) | Max/Link/Push/Connection-Kit evaluations and non-exposed UI dispositions |
-| [DELIVERY](docs/en/DELIVERY.md) | Install, upgrade, rollback, uninstall of packed artifacts |
-| [DISTRIBUTION_POLICY](docs/en/DISTRIBUTION_POLICY.md) | Local MIT artifact, required checks, and emergency procedure |
-| [IMPLEMENTATION_STATUS](docs/en/IMPLEMENTATION_STATUS.md) | What's verified and what's still limited |
+`apps/kumi` is the terminal app; `packages/runtime` holds Kumi's agent core, providers, memory, audio analysis and the Live integration. Kumi talks to Live through a local bridge, `apps/mcp-server` plus its Remote Script, which also works on its own with other MCP clients ([bridge guide](apps/mcp-server/README.md)).
 
 ## License
 
-Open source under the [MIT License](LICENSE.md). Package `private: true` and the local unpublished, unsigned, unnotarized delivery channel prevent accidental publication but do not change MIT rights. Ableton Live is a trademark of Ableton AG; MIT does not grant Ableton trademark rights or imply affiliation, endorsement, signing, or certification.
+[MIT](LICENSE.md). Ableton Live is a trademark of Ableton AG; Kumi is not affiliated with or endorsed by Ableton.
