@@ -622,7 +622,8 @@ export class McpHost {
       if (transactionId) IN_FLIGHT_TRANSACTION_IDS.add(transactionId);
       this.activeAsyncOperations += 1;
       owned.promise = execute(controller.signal).then(async (outcome) => {
-        if (transactionId && outcome && isObject(outcome.result) && outcome.result.isError === false) { const retire = (this.adapter as Partial<{ retireTransactionAsync(transactionId: string, context?: LiveOperationContext): Promise<unknown> }>).retireTransactionAsync; if (typeof retire === "function") { try { await retire.call(this.adapter, transactionId, { deadlineMs: Date.now() + 5_000 }); } catch { /* bounded bridge ledger remains conservative until a later terminal acknowledgement */ } } }
+        // An adapter sending single-tick mutations retires the Remote Script's replay records itself, off the path of any change.
+        if (transactionId && outcome && isObject(outcome.result) && outcome.result.isError === false) { const retire = (this.adapter as Partial<{ retireTransactionAsync(transactionId: string, context?: LiveOperationContext): Promise<unknown> }>).retireTransactionAsync; if (typeof retire === "function" && (this.adapter as { retiresOnItsOwn?: unknown }).retiresOnItsOwn !== true) { try { await retire.call(this.adapter, transactionId, { deadlineMs: Date.now() + 5_000 }); } catch { /* bounded bridge ledger remains conservative until a later terminal acknowledgement */ } } }
         return outcome;
       }).finally(() => {
         this.activeAsyncOperations -= 1; owned.settled = true;
@@ -654,6 +655,62 @@ export class McpHost {
       flight.waiters -= 1;
       if (flight.waiters === 0 && !flight.settled) flight.controller.abort();
     }
+  }
+
+  /**
+   * Previews whose apply sends one change on the preview's own references, and that change: after such a
+   * preview the adapter asks Live for the change's state digest, and the change carries it (see
+   * RemoteScriptLiveAdapter.expectStateDigest). Changes whose outcome depends on what plays (transport,
+   * launches, captures, recording) aren't here: playback moves between a preview and its apply.
+   */
+  private readonly previewChanges: Readonly<Record<string, (record: Record<string, unknown>) => LiveInvocation | undefined>> = (() => {
+    const payload = (operation: LiveInvocation["operation"], kind: string) => (record: Record<string, unknown>): LiveInvocation | undefined => record.kind === kind && isObject(record.payload) ? { operation, args: record.payload } : undefined;
+    return {
+      live_mixer_preview: payload("mixer.set", "mixer-set"),
+      live_mixer_extended_preview: payload("mixer.extended.set", "mixer-extended"),
+      live_chain_mixer_preview: payload("chain-mixer.set", "chain-mixer"),
+      live_chain_preview: payload("chain.set", "chain-set"),
+      live_routing_preview: payload("routing.set", "routing-set"),
+      live_clip_properties_preview: payload("clip.set", "clip-set"),
+      live_clip_action_preview: payload("clip.action", "clip-action"),
+      live_clip_view_preview: payload("clip.view.set", "clip-view"),
+      live_clip_duplicate_preview: payload("clip.duplicate", "duplicate"),
+      live_audio_clip_preview: payload("audio.clip.set", "audio-set"),
+      live_track_properties_preview: payload("track.set", "track-set"),
+      live_scene_preview: payload("scene.set", "scene-set"),
+      live_song_settings_preview: payload("song.set", "song-set"),
+      live_tuning_preview: payload("tuning.set", "tuning"),
+      live_device_view_preview: payload("device.view.set", "device-view"),
+      live_rack_view_preview: payload("rack.view.set", "rack-view"),
+      live_device_delete_preview: payload("device.delete", "device-delete"),
+      live_simpler_preview: payload("simpler.replace-sample", "simpler"),
+      live_browser_load_preview: payload("browser.load", "browser-load"),
+      live_object_rename_preview: (record) => record.kind === "rename" && isObject(record.payload) && typeof record.clipRef === "string"
+        ? { operation: (record.payload.kind === "takeLane" ? "take-lane.rename" : `${String(record.payload.kind)}.rename`) as LiveInvocation["operation"], args: { ref: record.clipRef } } : undefined,
+      live_device_parameter_preview: (record) => Array.isArray(record.parameters)
+        ? { operation: "device.parameters.set", args: this.parametersMutationArgs(record as unknown as DeviceParametersTransaction, () => ({ value: 0, revision: 1 })) }
+        : typeof record.parameterRef === "string" && isObject(record.authority) ? { operation: "device.parameter.set", args: this.parameterMutationArgs(record as unknown as DeviceParameterTransaction, 0, 1) } : undefined,
+    };
+  })();
+
+  /** After a preview in previewChanges succeeds, asks the adapter to fetch its change's state digest. */
+  private expectPreviewStateDigest(name: string, outcome: JsonObject | null): JsonObject | null {
+    const expect = (this.adapter as Partial<{ expectStateDigest(transactionId: string, invocation: LiveInvocation): void }>).expectStateDigest;
+    const planned = this.previewChanges[name];
+    if (typeof expect !== "function" || !planned || !outcome || !isObject(outcome.result) || outcome.result.isError !== false || !Array.isArray(outcome.result.content) || !isObject(outcome.result.content[0])) return outcome;
+    try {
+      const transactionId = (JSON.parse(String(outcome.result.content[0].text)) as { transactionId?: unknown }).transactionId;
+      const record = typeof transactionId === "string" ? this.transactionRecord(transactionId) : undefined;
+      const invocation = record ? planned(record) : undefined;
+      if (invocation) expect.call(this.adapter, transactionId as string, invocation);
+    } catch { /* without a digest the change is still fenced by its own arguments */ }
+    return outcome;
+  }
+
+  /** The retained transaction record with this id, in whichever transaction map holds it. */
+  private transactionRecord(transactionId: string): Record<string, unknown> | undefined {
+    for (const holder of Object.values(this)) if (holder instanceof Map && holder.has(transactionId)) { const value = holder.get(transactionId) as unknown; return isObject(value) ? value : undefined; }
+    return undefined;
   }
 
   private prepareWire(input: unknown): ReturnType<typeof prepareMcpRequest> & { key?: string } {
@@ -871,7 +928,8 @@ export class McpHost {
       const result = await this.liveUndoAsync(id, toolArguments, signal);
       return signal?.aborted ? null : result;
       };
-      return await this.singleFlightMutation(name, id, toolArguments, execute, signal);
+      const run = this.previewChanges[name] ? async (operationSignal?: AbortSignal) => this.expectPreviewStateDigest(name, await execute(operationSignal)) : execute;
+      return await this.singleFlightMutation(name, id, toolArguments, run, signal);
     } catch (cause) { return this.adapterToolError(id, cause, "The asynchronous Live operation failed; inspect authoritative state before retrying."); }
   }
 
