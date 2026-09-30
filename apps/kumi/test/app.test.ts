@@ -936,6 +936,36 @@ test("what Kumi heard shows as a small spectrum, and a comparison as dB over or 
   await h.app.close();
 });
 
+test("a match run shows as it works: a line per audition round, its score and time in NOW, how it ended, and the audition in HISTORY", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("make my pad sound like this reference\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "match", state: "running", check: 0, elapsedMs: 5_000, roundsLeft: 12 });
+  h.emit({ type: "auditioned", round: 1, best: { label: "Collision", score: 58 }, takes: [{ label: "Collision", score: 58 }, { label: "Operator", score: 41 }, { label: "Drift", silent: true }], gaps: ["attack too slow (40 ms against 5 ms)", "air (10000–20k Hz) −6.0 dB against the reference"] });
+  h.emit({ type: "change", change: { id: "a1", family: "clip", title: "Auditioned 3 candidates · best Collision", state: "heard", score: 58, at: 1 } });
+  h.emit({ type: "auditioned", round: 2, best: { label: "Collision", score: 71 }, previous: 58, takes: [{ label: "Collision", score: 71 }], gaps: ["darker overall (−1.2 dB/octave)"] });
+  h.emit({ type: "match", state: "running", check: 2, first: 58, best: { label: "Collision", score: 71 }, elapsedMs: 125_000, roundsLeft: 10 });
+  await delay(10);
+  let lines = h.screen();
+  assert.ok(has(lines, "Round 1 · 58% · attack too slow, air (10000–20k Hz) −6.0 dB"), lines.join("\n"));
+  assert.ok(has(lines, "Collision 58 · Operator 41 · Drift silent"), "each candidate's score, quietly");
+  assert.ok(has(lines, "Round 2 · 58% → 71% · darker overall"));
+  assert.ok(has(lines, "matching · 58→71% · 2:05"), "NOW: the score from where it started, and the time");
+  assert.ok(has(lines, "♪ Auditioned 3 candidates"), "NOW: heard, not changed");
+  assert.ok(lines.some((line) => line.includes("♪ Auditioned 3 candidates · best") && line.includes("58%")), "HISTORY: one quiet line, its score where an undo would be");
+  h.emit({ type: "match", state: "done", check: 3, first: 58, best: { label: "Collision", score: 76 }, elapsedMs: 250_000, roundsLeft: 9, stop: "plateau" });
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 250_000 });
+  h.emit({ type: "state", state: "idle" });
+  await delay(10);
+  lines = h.screen();
+  assert.ok(has(lines, "Matching: 58% → 76% (Collision) · 4:10 · no more gain"));
+  assert.ok(!has(lines, "matching ·"), "NOW lets go of it");
+  await h.app.close();
+});
+
 test("a video Kumi watched goes above the answer: its title, where its words came from, and the frames it looked at as small pictures; NOW says what it's doing meanwhile", async () => {
   const h = harness();
   void h.app.run();

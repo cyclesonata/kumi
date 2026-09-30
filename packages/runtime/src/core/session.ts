@@ -10,6 +10,7 @@ import { videoTools } from "../video/tool.js";
 import { asksForTechnique, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE, TECHNIQUE_NUDGE, techniqueInstructions, techniqueTools, type TechniqueStore } from "./techniques.js";
 import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
+import { KEEP_GOING, MATCH_BUDGET, MatchRun, startsMatch, type MatchBudget } from "./match-run.js";
 
 interface Options {
   kernelFactory: KernelFactory;
@@ -43,6 +44,8 @@ interface Options {
   techniqueSettleMs?: number;
   /** Where missing capabilities are logged for Kumi's developers (JSON lines); without it they aren't. */
   gaps?: string;
+  /** Match runs' budget (generous by default); false leaves matching to the model alone. */
+  match?: Partial<MatchBudget> | false;
 }
 interface Operation {
   id: number;
@@ -54,12 +57,15 @@ interface Operation {
   phase: "start" | "refresh" | "inference" | "undo";
   /** The turn moved on (text, a tool step): its no-progress timer starts over. */
   progress?: (event?: { type: string }) => void;
+  /** A turn that needs longer (a match run): its limit, from now. */
+  extend?: (ms: number) => void;
 }
 /** Where an unsaved Set keeps its conversations until it's saved. */
 const UNSAVED = "unsaved";
 const newConversationId = () => `${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
 /** HISTORY kept with a conversation: what it shows, without a clip's notes or where devices sit. */
 const MAX_CHANGES = 100;
+const emptyUsage = () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 const lean = ({ clip: _clip, devices: _devices, ...change }: ChangeRecord): ChangeRecord => change;
 const STILL_MISSING = "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?";
 
@@ -73,6 +79,9 @@ export function createSession(options: Options): SessionController {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const idleMs = options.idleTimeoutMs ?? options.timeoutMs ?? 180_000;
   const turnLimitMs = options.turnLimitMs ?? 20 * 60_000;
+  const budget: MatchBudget = { ...MATCH_BUDGET, ...(options.match || {}) };
+  /** The match run this answer is in, and the last one (for "keep going"). */
+  let matching: MatchRun | undefined; let lastRun: MatchRun | undefined;
   const closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
   const graceMs = options.cancelGraceMs ?? 500;
   const maxTurns = options.maxTurns;
@@ -338,12 +347,12 @@ export function createSession(options: Options): SessionController {
       ...(conversationChanges.length ? { changes: conversationChanges.slice(-MAX_CHANGES) } : {}) };
     saving = saving.then(() => store.save(where, id, conversation)).catch(() => {});
   }
-  async function observe(op: Operation, pinned?: PinnedNode) {
+  async function observe(op: Operation, pinned?: PinnedNode, continuing = false) {
     assertCurrent(op);
     if (!integration) throw new Error("Integration not started");
     op.phase = "refresh";
     observationLabel = undefined;
-    const snapshot = await integration.observe(op.controller.signal, pinned ? { pinned } : undefined);
+    const snapshot = await integration.observe(op.controller.signal, pinned || continuing ? { ...(pinned ? { pinned } : {}), ...(continuing ? { continuing } : {}) } : undefined);
     assertCurrent(op);
     // The Set was saved since the last look (its first save, or its file written again): a technique
     // drafted from work in it is kept.
@@ -375,6 +384,34 @@ export function createSession(options: Options): SessionController {
     await integration.start(op.controller.signal); assertCurrent(op);
     await observe(op); started = true;
   }
+  /**
+   * A match run's rounds, after the model's first answer: while the gate isn't met and budget
+   * remains, audition the best (when it changed since the last audition) and send the model back in.
+   * Everything shows: the status in NOW, a line per audition. Esc ends it like any turn.
+   */
+  async function runMatch(op: Operation, run: MatchRun, first: TurnResult, ask: (text: string, observation: string) => Promise<TurnResult>): Promise<TurnResult> {
+    op.extend?.(budget.ms + 5 * 60_000);
+    let result = first;
+    const usage = { ...emptyUsage(), ...first.usage };
+    const add = (more: TurnResult) => { for (const key of Object.keys(usage) as (keyof typeof usage)[]) usage[key] += more.usage?.[key] ?? 0; };
+    emit(run.status("running"));
+    while (result.stopReason === "completed" && !op.controller.signal.aborted) {
+      if (run.needsAudition && integration?.audition) {
+        emit({ type: "doing", text: "Listening to where it's got to" });
+        await integration.audition(run.last!.request!, op.controller.signal).catch(() => undefined);
+        assertCurrent(op);
+      }
+      const decision = run.decide();
+      emit(run.status("running"));
+      const text = "next" in decision ? decision.next : decision.wrapUp;
+      if (!text) { emit(run.status("done", "stop" in decision ? decision.stop : undefined)); break; }
+      const snapshot = await observe(op, undefined, true); assertCurrent(op);
+      op.phase = "inference";
+      result = await ask(text, snapshot.context); add(result);
+      if ("stop" in decision) { emit(run.status("done", decision.stop)); break; }
+    }
+    return { ...result, usage };
+  }
   function perform(isTurn: boolean, phase: Operation["phase"], work: (op: Operation) => Promise<TurnResult | undefined>, limitMs = timeoutMs, input?: string): Promise<void> {
     if (state === "closed") return Promise.reject(new Error("Session is closed"));
     if (active) return Promise.reject(new Error("Session is busy; cancel first"));
@@ -392,7 +429,8 @@ export function createSession(options: Options): SessionController {
     // A turn runs while it makes progress, up to its limit; anything else gets timeoutMs.
     const stop = (why: "quiet" | "limit") => { timedOut ??= why; op.controller.abort(); };
     let timeout = setTimeout(() => stop("quiet"), isTurn ? idleMs : limitMs);
-    const limit = isTurn ? setTimeout(() => stop("limit"), turnLimitMs) : undefined;
+    let limit = isTurn ? setTimeout(() => stop("limit"), turnLimitMs) : undefined;
+    if (isTurn) op.extend = (ms) => { clearTimeout(limit); limit = setTimeout(() => stop("limit"), ms); };
     if (isTurn) {
       // While a tool works (a plan recording for minutes, a long listen) the answer is making
       // progress: the quiet timer waits for it to end. The turn's own limit still holds.
@@ -479,9 +517,16 @@ export function createSession(options: Options): SessionController {
         // The Set as it is now (read first: a deleted build's gone), then the producer's words, may say
         // what they thought of the last build; and a new turn begins.
         learned?.drafts.said(input); learned?.drafts.turnStarted(input);
+        // "Make it sound like this" starts a match run; "keep going" after one carries it on.
+        const run = options.match === false ? undefined : startsMatch(input) ? new MatchRun(input, budget)
+          : KEEP_GOING.test(input) && lastRun ? MatchRun.carryOn(lastRun, budget) : undefined;
+        matching = run;
         op.phase = "inference";
-        return kernel!.value.run(`${input}${OBSERVATION_MARKER}\n${snapshot.context}\n</current_observation_untrusted>`, op.controller.signal,
+        const ask = (text: string, observation: string) => kernel!.value.run(`${text}${OBSERVATION_MARKER}\n${observation}\n</current_observation_untrusted>`, op.controller.signal,
           (event) => { if (current(op)) { op.progress?.(event); emit(event); } });
+        let result = await ask(input, snapshot.context);
+        if (!run) return result;
+        try { return await runMatch(op, run, result, ask); } finally { matching = undefined; lastRun = run; }
       }, undefined, input);
     },
     refresh() {
@@ -535,6 +580,9 @@ export function createSession(options: Options): SessionController {
       return true;
     },
     watch(event) {
+      // A match run hears every audition, and every change after one makes it stale.
+      if (event.type === "auditioned") { matching?.auditioned(event, event.request); return; }
+      if (event.type === "change" && event.change.state === "applied") matching?.changed();
       // What happens after a drafted technique's build says whether the producer liked it: playing it, say.
       if (event.type === "action") { if (event.playing === true) learned?.drafts.played(); return; }
       learned?.drafts.change(event.change);

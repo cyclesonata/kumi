@@ -44,7 +44,8 @@ test("an audition renders every candidate in one pass, quietly, scores each agai
     assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"]);
     assert.ok(b.requests.some((request) => request.name === "live_undo" && request.args.discard === true));
     // HISTORY has one quiet line for all of it; NOW said it once.
-    assert.deepEqual(b.records.map((record) => [record.state, record.title]), [["heard", "Auditioned 2 candidates · " + saw_!.score + "% (Saw)"]]);
+    assert.equal(b.records[0]!.score, saw_!.score);
+    assert.deepEqual(b.records.map((record) => [record.state, record.title]), [["heard", "Auditioned 2 candidates · best Saw"]]);
     assert.match(b.actions[0]!.title, /^Listening to my version quietly \(about \d+ s a round\)$/);
     assert.equal(b.actions[0]!.playing, true, "a technique drafted meanwhile counts as heard");
     assert.equal(existsSync(b.restoreFile), false, "Main is back, so there's nothing to restore after a crash");

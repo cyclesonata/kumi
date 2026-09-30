@@ -1,4 +1,5 @@
 import type { Closeness } from "../audio/match.js";
+import type { MatchStatus } from "./match-run.js";
 import type { FailureKind } from "./errors.js";
 export type JsonObject = Record<string, unknown>;
 
@@ -147,7 +148,7 @@ export interface ConversationStore {
 export interface Integration {
   start(signal: AbortSignal): Promise<void>;
   /** What's in Live now; `pinned` (what the producer pointed at) is checked against it and given to the model. */
-  observe(signal: AbortSignal, hints?: { pinned?: PinnedNode }): Promise<Observation>;
+  observe(signal: AbortSignal, hints?: { pinned?: PinnedNode; /** The same answer goes on (a match run's next round): its counts carry on. */ continuing?: boolean }): Promise<Observation>;
   close(): Promise<void>;
   /** Undo one of Kumi's changes (the latest undoable one when `id` is omitted). */
   undo?(id: string | undefined, signal: AbortSignal): Promise<ChangeRecord>;
@@ -208,6 +209,8 @@ export interface AuditionEvent {
   /** Each candidate's score, best first; silent ones say so. */
   takes: { label: string; score?: number; silent?: boolean }[];
   gaps: string[];
+  /** What was auditioned, so a match run can audition it again after changes. */
+  request?: AuditionRequest;
 }
 
 /** A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data. */
@@ -377,6 +380,7 @@ export type SessionEvent = KernelEvent
   /** `kind` and `provider` say what failed and where, so an app can offer the fix (sign in, choose a model). */
   | { type: "error"; message: string; kind?: FailureKind; provider?: string }
   | { type: "turn-complete"; result: TurnResult; elapsedMs: number }
+  | MatchStatus
   | MemoryEvent
   | HeardEvent
   | AuditionEvent
@@ -477,7 +481,7 @@ export interface SessionController {
    * conversation, for HISTORY), or an action in Live. A technique drafted from a build is kept or
    * dropped by what happens next.
    */
-  watch?(event: { type: "change"; change: ChangeRecord } | { type: "action"; title: string; playing?: boolean; recording?: boolean }): void;
+  watch?(event: { type: "change"; change: ChangeRecord } | { type: "action"; title: string; playing?: boolean; recording?: boolean } | AuditionEvent): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
   status(): SessionStatus;

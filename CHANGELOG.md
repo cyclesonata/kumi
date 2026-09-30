@@ -92,6 +92,12 @@ The first release for producers to use day to day. Ships with bridge 1.0.49.
   start, with a word to the producer). A silent render is said as such, never
   compared. HISTORY shows one quiet line with the score, and the conversation
   one line per round ("Round 2 · 58% → 71% · …"). Needs bridge 1.0.49.
+- A matching request ("make it sound like this") is a match run: when the
+  model ends its answer, Kumi auditions where it got to and, short of the
+  target, sends it back in with the score, the budget left and the biggest
+  gaps. The run ends at the target, on a plateau (only after something
+  genuinely different was tried), when its generous budget is spent, or on
+  Esc; "keep going" carries it on. NOW shows the score and time as it works.
 - Matching a sound is a search: Kumi builds several different candidates,
   auditions them together, refines the best on its biggest gaps, and says the
   score before and after. A technique drafted while matching is kept only once

@@ -4,7 +4,7 @@
  */
 import {
   FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
+  type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -207,6 +207,9 @@ export function setNameFrom(label: string): string | undefined {
   return match?.[1]?.trim() || undefined;
 }
 
+/** "3:05": minutes and seconds (hours when it's gone that long). */
+const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const seconds = String(whole % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`; };
+
 export class TuiApp {
   private readonly tty: Tty;
   private readonly renderer: Renderer;
@@ -255,6 +258,8 @@ export class TuiApp {
   /** The latest thing Kumi did in Live that isn't a change (playing, recording), for NOW. */
   /** What NOW shows for a moment: something Kumi did in Live, or kept (`memory`: shown whatever tool is running). */
   private lastAction: { title: string; at: number; glyph: string; memory?: boolean } | undefined;
+  /** A match run at work: its best score, where it started, and since when. */
+  private match: (MatchStatus & { since: number }) | undefined;
   /** What Kumi kept this session (notes, techniques, recipes), oldest first, for MEMORY: each with its forget. */
   private kept: { key: string; what: MemoryKind; title: string; forgotten?: boolean; forget: () => Promise<boolean> }[] = [];
   /** Kumi is watching the producer work in Live (watch_me), until they say they're done. */
@@ -487,6 +492,16 @@ export class TuiApp {
         this.transcript.insertBefore({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
           ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) }, this.current);
         break;
+      case "match": {
+        // A match run: NOW keeps its score and time while it works; the conversation says how it ended.
+        this.match = event.state === "running" ? { ...event, since: performance.now() - event.elapsedMs } : undefined;
+        if (event.state === "done" && event.best) {
+          const why = { reached: "close enough", plateau: "no more gain", budget: "its budget spent", "no-audition": "nothing to compare" }[event.stop ?? "plateau"];
+          this.notice(`Matching: ${event.first !== undefined && event.first !== event.best.score ? `${event.first}% → ` : ""}${event.best.score}% (${event.best.label}) · ${clockOf(event.elapsedMs)} · ${why}`, "info");
+        }
+        this.scheduler.request();
+        break;
+      }
       case "auditioned": {
         const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
         // Gaps are the analysis's words; kept short so the round reads in a line.
@@ -1529,17 +1544,18 @@ export class TuiApp {
       const dot = blink ? st.accent : st.pulse;
       const running = this.current?.steps.at(-1)?.state === "running" ? this.current.steps.at(-1) : undefined;
       // How many changes this answer has made so far; a plan's show one by one as they land.
-      const label = this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
+      const label = this.match ? `matching · ${this.match.best ? `${this.match.first !== undefined && this.match.first !== this.match.best.score ? `${this.match.first}→` : ""}${this.match.best.score}% · ` : ""}${clockOf(performance.now() - this.match.since)}`
+        : this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
       if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
-      if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `✓ ${flash.title}`, detailStyle: st.bright };
+      if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
       if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
       return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
     }
     const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
     // The newer of the two shows: a change Kumi made, or what it did or kept.
-    if (flash && !(action && action.at > this.lastChange!.at)) return { label: "", detail: `✓ ${flash.title}`, detailStyle: st.bright };
+    if (flash && !(action && action.at > this.lastChange!.at)) return { label: "", detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
     if (action) return { label: "", detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
     // Between "watch me" and "done", NOW says so: the producer is working in Live meanwhile.
     if (this.watching) return { dot: st.accent, label: "watching", detail: "Watching your changes in Live; tell Kumi when you're done", detailStyle: st.text };

@@ -1469,13 +1469,14 @@ export function createAbletonIntegration(options: Options): Integration {
       if (best && (previous === undefined || best.closeness!.score > previous)) rounds.best = best.closeness!.score;
       const result: AuditionResult = { takes, ...(best ? { best: best.label } : {}), ...(reference ? { reference: { file: reference.file, summary: heardSummary(reference) } } : {}), seconds: Math.round((Date.now() - began) / 100) / 10, notes };
       // HISTORY: one quiet line for the whole of it.
-      const title = best ? `Auditioned ${takes.length === 1 ? "" : `${takes.length} candidates · `}${best.closeness!.score}%${takes.length > 1 ? ` (${best.label})` : ""}`
+      // The score goes beside it in HISTORY, where an undo would be.
+      const title = best ? `Auditioned ${takes.length === 1 ? best.label : `${takes.length} candidates · best ${best.label}`}`
         : takes.every((take) => take.silent) && files.length ? "Auditioned: the render was silent" : `Auditioned ${takes.length === 1 ? takes[0]!.label : `${takes.length} candidates`}`;
       emitChange({ id: `a${randomUUID().slice(0, 8)}`, family: "clip", title, state: "heard", ...(best ? { score: best.closeness!.score } : {}), at: now().getTime() });
       try {
         options.onAudition?.({ type: "auditioned", round, ...(best ? { best: { label: best.label, score: best.closeness!.score } } : {}), ...(previous !== undefined ? { previous } : {}),
           takes: [...scored.map((take) => ({ label: take.label, score: take.closeness!.score })), ...takes.filter((take) => !take.closeness).map((take) => ({ label: take.label, ...(take.silent ? { silent: true } : {}) }))],
-          gaps: best?.closeness!.gaps.slice(0, 3) ?? [] });
+          gaps: best?.closeness!.gaps.slice(0, 3) ?? [], request });
       } catch { /* a listener failure must not affect Live */ }
       tell(best ? `Auditioned · ${best.closeness!.score}%` : "Auditioned", false);
       return result;
@@ -1693,7 +1694,9 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       signal.throwIfAborted();
       if (!started || closed) throw new ObservationError("Integration is not open");
-      invalidate(); const lease = observationGeneration; changesThisTurn = 0; picked.clear(); rounds = { count: 0, best: undefined };
+      invalidate(); const lease = observationGeneration; changesThisTurn = 0; picked.clear();
+      // A match run's next round is the same answer: its rounds count on.
+      if (!hints?.continuing) rounds = { count: 0, best: undefined };
       // While Live is away the conversation stays with its Set (and keeps being saved there).
       const away = () => noAccess(previous?.key ?? `${generation}:no-live`, now(), previous?.path && previous.project ? previous.project : undefined);
       if (!available || lost) return away();
