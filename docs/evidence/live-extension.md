@@ -117,3 +117,20 @@ to page by work so no request holds Live's UI for long.
 
 Duplicating the template track through the bridge's three-step change path took 0.92 s at 20 tracks,
 1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: a change still costs more the bigger the Set is.
+
+## Right-click "Ask Kumi about this"
+
+Checked on real Live with Kumi's extension running in Live's own host. Live puts an extension's
+actions in an **Extensions** submenu, prefixed with the extension's name ("kumi: Ask Kumi about this",
+"kumi: Ask Kumi about this selection"). Each click reached the bridge's connection as a `pointed` event:
+
+| Right-clicked | Event payload |
+| --- | --- |
+| A MIDI track's title | `{kind: "track", path: [0], name: "Template", trail: ["Template"]}` |
+| A time selection on a track's Arrangement lane (bars 9–26) | `{kind: "arrangement_selection", lanes: [{kind: "track", path: [1], name: "Template"}], timeSelection: {fromBeat: 32, toBeat: 100}}` |
+| An Arrangement clip | `{kind: "arrangement_clip", path: [0, 0], name: "20000 notes", trail: ["Template", "20000 notes"]}` |
+| A scene | `{kind: "scene", path: [1], name: "", trail: [""]}` (an unnamed scene: Kumi says "Scene 2") |
+
+The SDK's menu scopes are clips, tracks, clip slots, scenes, Simpler, samples and Drum Racks, and the
+selections of clip slots and Arrangement lanes: there is no scope for other devices, so right-clicking
+Operator shows only Live's own items.
