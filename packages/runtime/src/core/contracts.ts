@@ -181,8 +181,10 @@ export interface GoalRig {
   add(candidate: AuditionCandidate, signal: AbortSignal): Promise<GoalSlotInfo | string>;
   /** Each trial's values set on its slot, all rendered in one silent pass, each scored against the reference. */
   generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[] }>;
-  /** The best so far on a track of its own ("Kumi · Goal best"); its name, or why not. */
+  /** The best so far on a track of its own ("Kumi · Goal best"), replacing the last copy; its name, or why not. */
   keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
+  /** A finished goal's candidates: the top ones muted for the producer to A/B, the rest removed; what it did. */
+  tidy(top: readonly string[], signal: AbortSignal): Promise<string[]>;
   /** The rig's scratch tracks go and the transport comes back; anything the producer should know. */
   close(): Promise<string[]>;
 }

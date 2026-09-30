@@ -1553,6 +1553,8 @@ export function createAbletonIntegration(options: Options): Integration {
     try { for (const source of rig.sources) await adopt(source, signal); }
     catch (error) { await closeRig(rig); throw error; }
     const focus = request.focus;
+    /** The current "Kumi · Goal best" copy's own steps: undone when a better one replaces it. */
+    let bestSteps: string[] = [];
     return {
       slots,
       async add(candidate, given) {
@@ -1613,16 +1615,37 @@ export function createAbletonIntegration(options: Options): Integration {
           knobs.forEach((knob, index) => { const now_ = byKey.get(key(knob)); const device = fresh.devices[Number(knob.device.split(":")[0])]?.ref; if (now_ && typeof device === "string") byDevice.set(device, [...(byDevice.get(device) ?? []), { parameterRef: now_.ref, value: values[index]! }]); });
           await quietly(undefined, async () => { for (const [deviceRef, set] of byDevice) await step("set_device_parameters", { deviceRef, values: set }, signal); });
           knobs.forEach((knob, index) => last.set(key(knob), values[index]!));
-          const before = await rows("track", { fields: ["name"] }, signal);
-          const at = before.findIndex((row) => row.name === slot);
-          await step("change_structure", { action: "duplicate-track", ref: before[at]!.ref }, signal);
-          const after = await rows("track", { fields: ["name"] }, signal);
-          const copy = after[at + 1];
-          if (typeof copy?.ref !== "string") return "The copy didn't appear.";
+          // The last copy goes first: there's one best.
+          const previous = bestSteps; bestSteps = [];
+          await quietly(undefined, async () => { for (const id of [...previous].reverse()) await undoChange(id, signal, changes.get(id)?.record.family === "structure").catch(() => undefined); });
+          for (const id of previous) changes.delete(id);
           const name = `Kumi · Goal best`;
-          await step("rename", { kind: "track", ref: copy.ref, name: after.some((row) => row.name === name) ? `${name} ${randomUUID().slice(0, 3)}` : name }, signal);
+          await quietly(bestSteps, async () => {
+            const before = await rows("track", { fields: ["name"] }, signal);
+            const at = before.findIndex((row) => row.name === slot);
+            await step("change_structure", { action: "duplicate-track", ref: before[at]!.ref }, signal);
+            const after = await rows("track", { fields: ["name"] }, signal);
+            const copy = after[at + 1];
+            if (typeof copy?.ref !== "string") throw new ObservationError("The copy didn't appear.");
+            await step("rename", { kind: "track", ref: copy.ref, name: after.some((row) => row.name === name) ? `${name} ${randomUUID().slice(0, 3)}` : name }, signal);
+          });
           return name;
         } catch (error) { signal.throwIfAborted(); return error instanceof Error ? error.message : "The best couldn't be kept on its own track."; }
+      },
+      async tidy(top, given) {
+        const signal = AbortSignal.any([given, lifetime.signal]);
+        const said: string[] = [];
+        const tracks = await rows("track", { fields: ["name"] }, signal).catch(() => [] as JsonObject[]);
+        for (const slot of slots) {
+          const ref = tracks.find((row) => row.name === slot.name)?.ref;
+          if (typeof ref !== "string") continue;
+          if (top.includes(slot.name)) { await step("set_mixer", { trackRef: ref, mute: true }, signal).catch(() => undefined); continue; }
+          // The rest go, by undoing the change that added each (Kumi's, this session), recorded onto or not.
+          const made = [...changes.values()].reverse().find((entry) => entry.record.family === "structure" && entry.record.state === "applied" && entry.record.title.includes(`“${slot.name}”`));
+          const undone = made ? await undoChange(made.record.id, signal, true).catch(() => undefined) : undefined;
+          if (!undone || undone.isError) { await step("set_mixer", { trackRef: ref, mute: true }, signal).catch(() => undefined); said.push(`“${slot.name}” stays, muted.`); }
+        }
+        return said;
       },
       async close() { await closeRig(rig); return rig.notes; },
     };

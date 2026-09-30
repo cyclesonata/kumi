@@ -40,6 +40,7 @@ export class MatchRun {
   private continuations = 0;
   private explored = false;
   private nudged = 0;
+  private widened = false;
   /** The last audition's request and result, and whether the Set changed since. */
   last?: { request?: AuditionRequest; event: AuditionEvent };
   best?: { label: string; score: number };
@@ -96,7 +97,7 @@ export class MatchRun {
       return { next: "[Kumi] Before finishing, audition what you built against the reference (the audition tool; several candidates on their own tracks render together). If the producer gave no reference, listen to what they pointed at, or ask them for one and stop." };
     }
     this.checks.push(this.best.score);
-    const wrapUp = (why: string) => `[Kumi] ${why} Now give your final answer: the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which tracks hold the other candidates. Call it the closest you got.`;
+    const wrapUp = (why: string) => `[Kumi] ${why} Tidy up, then give your final answer. Keep the winner on its track, mute the runner-up for the producer to A/B, and remove the other candidate tracks you made (undo_change on the change that added each). Then say the score before and after (${this.first}% → ${this.best!.score}%), which candidate won and why, what still differs, and which track holds the runner-up. Call it the closest you got.`;
     if (this.best.score >= this.budget.target) return { stop: "reached", ...(this.continuations ? { wrapUp: wrapUp(`That reaches ${this.best.score}%, close enough to stop.`) } : {}) };
     if (left.rounds <= 0 || elapsed >= this.budget.ms) return { stop: "budget", wrapUp: wrapUp("That's the run's budget spent.") };
     // A plateau: the last checks gained less than minGain over the best before them.
@@ -105,6 +106,11 @@ export class MatchRun {
     if (stalled && this.explored) return { stop: "plateau", wrapUp: wrapUp("Refining and new ideas both stopped gaining.") };
     const gaps = this.last?.event.gaps.length ? ` Biggest gaps: ${this.last.event.gaps.join("; ")}.` : "";
     const scores = this.checks.length > 1 ? `${this.checks.at(-2)}% → ${this.best.score}%` : `${this.best.score}%`;
+    // A first round of one idea is a guess: the search starts wide.
+    if (this.checks.length === 1 && !this.widened && (this.last?.event.takes.length ?? 0) < 2) {
+      this.widened = true; this.continuations++;
+      return { next: `[Kumi] Score ${scores} with a single candidate.${` Budget left: ${left.rounds - 1} rounds, about ${left.minutes} minutes.`} Start wide: build 2–3 more genuinely different candidates on new tracks (other base instruments, serial against parallel), audition them all together with this one, then refine the best.` };
+    }
     const budget = ` Budget left: ${left.rounds} rounds, about ${left.minutes} minutes.`;
     this.continuations++;
     if (stalled) {

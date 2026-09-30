@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const request: AuditionRequest = { candidates: [{ track: "track:1", label: "Drift" }], fromBeat: 16, beats: 4, reference: "~/ref.wav" };
-const heard = (score: number, label = "Drift"): AuditionEvent => ({ type: "auditioned", round: 1, best: { label, score }, takes: [{ label, score }], gaps: ["attack too slow"], request });
+const heard = (score: number, label = "Drift"): AuditionEvent => ({ type: "auditioned", round: 1, best: { label, score }, takes: [{ label, score }, { label: "Other", score: score - 10 }], gaps: ["attack too slow"], request });
 const change = (id: string): ChangeRecord => ({ id, family: "parameter", title: "Filter 800 Hz", state: "applied", at: 1 });
 const done: TurnResult = { stopReason: "completed", usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } };
 
@@ -61,7 +61,7 @@ test("a model that stops at a first draft is sent back in with the score and its
   assert.equal(r.asked.length, 5, "four rounds and the wrap-up");
   assert.match(r.asked[1]!, /^\[Kumi\] Score 50% \(best: Drift\)\. Budget left: 12 rounds, about 45 minutes\. Biggest gaps: attack too slow\. Keep going/);
   assert.match(r.asked[2]!, /^\[Kumi\] Score 50% → 60%/);
-  assert.match(r.asked[4]!, /That reaches 93%.*final answer: the score before and after \(50% → 93%\)/);
+  assert.match(r.asked[4]!, /That reaches 93%.*mute the runner-up.*the score before and after \(50% → 93%\)/);
   const last = r.status().at(-1)!;
   assert.deepEqual([last.state, last.stop, last.first, last.best?.score], ["done", "reached", 50, 93]);
   const complete = r.events.filter((event) => event.type === "turn-complete");
@@ -180,4 +180,12 @@ test("lessons are kept in a file only this user can read, checked on the way in;
     assert.equal(matchedFrom("Make a new MIDI track with a sound that sounds like this reference: ~/ref.wav. It's a chord."), "sound");
     assert.equal(matchedFrom("build me a warm pad that sounds like the intro"), "warm pad");
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("a first round of a single candidate is sent back to start wide, once", () => {
+  const run = new MatchRun("make it sound like this", undefined, () => 0);
+  run.auditioned({ type: "auditioned", round: 1, best: { label: "Operator", score: 58 }, takes: [{ label: "Operator", score: 58 }], gaps: [], request });
+  assert.match(String((run.decide() as { next: string }).next), /with a single candidate\..*build 2–3 more genuinely different candidates/);
+  run.auditioned({ type: "auditioned", round: 2, best: { label: "Operator", score: 60 }, takes: [{ label: "Operator", score: 60 }], gaps: [], request });
+  assert.match(String((run.decide() as { next: string }).next), /Keep going/, "only once");
 });

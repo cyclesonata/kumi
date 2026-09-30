@@ -198,7 +198,7 @@ export function bridge(options: Options = {}) {
         }
         if (transaction.name === "live_track_structure_preview" && transaction.args.action === "duplicate-track") {
           const at = Number(String(transaction.args.ref).split(":").at(-1));
-          tracks = [...tracks.slice(0, at + 1), { ...structuredClone(tracks[at]!), armed: false, clips: [] }, ...tracks.slice(at + 1)];
+          tracks = [...tracks.slice(0, at + 1), { ...structuredClone(tracks[at]!), armed: false, clips: [], made: String(args.transactionId) }, ...tracks.slice(at + 1)];
           return wrap({ transactionId: args.transactionId, state: "applied" });
         }
         if (transaction.name === "live_object_rename_preview" && options.renders) {
@@ -232,6 +232,7 @@ export function bridge(options: Options = {}) {
         const transaction = pending.get(String(args.transactionId));
         if (transaction?.name === "live_tempo_preview") tempo = 120;
         // Tracks it made go, unless one has recorded since (then only with discard, as the bridge does).
+        if (transaction?.name === "live_track_structure_preview" && transaction.args.action === "duplicate-track") tracks = tracks.filter((track) => track.made !== String(args.transactionId));
         if (transaction?.name === "live_session_structure_preview") {
           const made = tracks.filter((track) => track.made === String(args.transactionId));
           if (made.some((track) => track.clips?.length) && args.discard !== true) return refusal("created Session structure was modified after apply; undo refused");

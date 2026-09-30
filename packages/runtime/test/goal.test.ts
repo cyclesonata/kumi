@@ -76,12 +76,17 @@ test("a goal: the model sets up candidates, the search renders a generation at a
   // The best, on a track of its own, with the leader's values; every candidate chain ends in a limiter; the scratch tracks are gone; Main is back.
   const names = r.b.trackNames();
   assert.ok(names.includes("Kumi · Goal best"), names.join(", "));
+  assert.equal(names.filter((name) => name.startsWith("Kumi · Goal best")).length, 1, "one best: a better one replaces the last");
   const best = r.b.devicesOf("Kumi · Goal best")!;
   assert.equal(best.at(-1)!.className, "Limiter");
   assert.ok(Math.abs(cutoff(best[0]!.params[1]!.value) - 2600) < 1400, `the best's cutoff ${cutoff(best[0]!.params[1]!.value)} Hz is near the reference's`);
   assert.ok(!names.some((name) => name.startsWith("Kumi · render")), `no scratch tracks left: ${names.join(", ")}`);
   assert.equal(r.b.main.volume, 0.85);
   assert.equal(r.b.devicesOf("Kumi · Goal · Dark")![0]!.params[0]!.value, 1, "the search never switches a device off");
+  // Done: the top two stay (muted, to A/B); one the model didn't make this session can't be removed, so it's muted and said.
+  const muted = r.b.requests.filter((request) => request.name === "live_mixer_preview" && request.args.mute === true).length;
+  assert.equal(muted, 3);
+  assert.ok(r.events.some((event) => event.type === "notice" && /stays, muted/.test(event.message)));
   // Kept on disk as done.
   assert.equal([...r.goals.kept.values()][0]!.status, "done");
   assert.ok(r.events.some((event) => event.type === "notice" && /^Goal done: .*% \(.*\) · \d+ generations · \d+ candidates · the best is on “Kumi · Goal best”/.test(event.message)));
