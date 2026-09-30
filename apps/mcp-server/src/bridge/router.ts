@@ -40,6 +40,8 @@ export function routedAdapter<T extends AsyncLiveAdapter>(remoteScript: T, exten
   const notify = () => { const status = mergedStatus(remoteScript.status(), extension.status(), extension.reason); for (const listener of statusListeners) listener(status); };
   extension.subscribeStatus(() => notify());
   const own = remoteScript as unknown as Record<string, unknown>;
+  // One subscription to the Remote Script's status, however many listen here.
+  if (typeof own.subscribeStatus === "function") (own.subscribeStatus as (listener: (status: LiveStatus) => void) => () => void).call(remoteScript, () => notify());
   const routed: Record<string, unknown> = {
     status: () => mergedStatus(remoteScript.status(), extension.status(), extension.reason),
     invokeAsync: (invocation: LiveInvocation, context?: LiveOperationContext) => routeToExtension(invocation.operation, remoteScript.status(), extension.status())
@@ -49,11 +51,7 @@ export function routedAdapter<T extends AsyncLiveAdapter>(remoteScript: T, exten
       const fromScript = remoteScript.subscribe(listener); const fromExtension = extension.subscribe(listener);
       return () => { fromScript(); fromExtension(); };
     },
-    subscribeStatus: (listener: (status: LiveStatus) => void) => {
-      statusListeners.add(listener);
-      const inner = typeof own.subscribeStatus === "function" ? (own.subscribeStatus as (listener: (status: LiveStatus) => void) => () => void).call(remoteScript, () => notify()) : () => undefined;
-      return () => { statusListeners.delete(listener); inner(); };
-    },
+    subscribeStatus: (listener: (status: LiveStatus) => void) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; },
     refreshStatusAsync: async (context?: LiveOperationContext) => {
       if (typeof own.refreshStatusAsync === "function") await (own.refreshStatusAsync as (context?: LiveOperationContext) => Promise<LiveStatus>).call(remoteScript, context);
       // Looking for the extension (maybe starting it) never holds up a status read; its tools appear when it connects.
@@ -64,7 +62,7 @@ export function routedAdapter<T extends AsyncLiveAdapter>(remoteScript: T, exten
   };
   return new Proxy(remoteScript, {
     get(target, property, receiver) {
-      if (typeof property === "string" && property in routed) return routed[property];
+      if (typeof property === "string" && Object.hasOwn(routed, property)) return routed[property];
       const value = Reflect.get(target, property, receiver);
       return typeof value === "function" ? value.bind(target) : value;
     },

@@ -42,6 +42,10 @@ copy("packages/runtime/package.json"); copy("packages/runtime/dist", "packages/r
 copy("apps/mcp-server/package.json"); copy("apps/mcp-server/package-lock.json"); copy("apps/mcp-server/dist", "apps/mcp-server/dist", noTests);
 // The bridge Kumi runs from its own tree reads Live's operations from protocol/, with the app as its working folder.
 copy("protocol");
+// Kumi's Live extension, which that bridge starts in Live's Extension Host: its committed build only.
+for (const file of ["manifest.json", "dist/extension.js", "dist/extension.js.sha256"]) copy(`apps/live-extension/${file}`);
+const extensionPackage = json(join(root, "apps", "live-extension", "package.json"));
+writeFileSync(join(stage, "apps", "live-extension", "package.json"), `${JSON.stringify({ name: extensionPackage.name, version: extensionPackage.version, private: true, license: extensionPackage.license, main: "dist/extension.js" }, null, 2)}\n`);
 
 say("Production dependencies…");
 sh(npm, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], stage);

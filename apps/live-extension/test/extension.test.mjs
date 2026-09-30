@@ -34,9 +34,9 @@ async function connect() {
   const hello = await waitFor(() => frames.find((frame) => frame.id === "hello"));
   let sequence = 0;
   const mac = (payload) => createHmac("sha256", secret).update(canonical(payload)).digest("base64url");
-  const send = async (fields, { sign = true, sequenceOverride } = {}) => {
+  const send = async (fields, { sign = true, sequenceOverride, deadlineMs } = {}) => {
     const id = `t${++sequence}`;
-    const unsigned = { version: "ableton-loopback/v1", id, ...fields, nonce: randomBytes(18).toString("base64url"), sequence: sequenceOverride ?? sequence, bridgeEpoch: hello.bridgeEpoch, connectionChallenge: hello.connectionChallenge, deadlineMs: Date.now() + 30_000 };
+    const unsigned = { version: "ableton-loopback/v1", id, ...fields, nonce: randomBytes(18).toString("base64url"), sequence: sequenceOverride ?? sequence, bridgeEpoch: hello.bridgeEpoch, connectionChallenge: hello.connectionChallenge, deadlineMs: deadlineMs ?? Date.now() + 30_000 };
     socket.write(`${JSON.stringify({ ...unsigned, mac: sign ? mac(unsigned) : "x".repeat(43) })}\n`);
     return waitFor(() => frames.find((frame) => frame.id === id));
   };
@@ -89,6 +89,7 @@ test("unsigned, replayed and unknown requests are refused", async () => {
   assert.equal((await client.send({ method: "status" }, { sequenceOverride: 1 })).error, "invalid request");
   assert.match((await client.send({ method: "invoke", operation: "tempo.set", args: {} })).error, /unavailable on the Extensions channel/);
   assert.match((await client.send({ method: "invoke", operation: "render.offline", args: { trackRef: "1:track:2" } })).error, /required by registry/);
+  assert.match((await client.send({ method: "invoke", operation: "render.offline", args: { trackRef: "1:track:2", fromBeat: 0, toBeat: 4 } })).error, /expectedName is required/);
   client.close();
 });
 
@@ -98,17 +99,15 @@ test("an Arrangement MIDI clip goes in with its notes, where the Remote Script c
   assert.deepEqual(result, { ref: "7:arrangement_clip:0:0", trackRef: "7:track:0", name: "Kumi chord", start: 8, end: 12, notes: 2 });
   const clip = live.keys.arrangementClips[0];
   assert.deepEqual(clip.notes, [{ pitch: 60, startTime: 0, duration: 2, velocity: 100 }, { pitch: 67, startTime: 2, duration: 1, muted: true, probability: 0.5 }]);
-  await assert.rejects(client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:2", start: 0, length: 4, notes: [] }), /isn't a MIDI track/);
+  await assert.rejects(client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:2", start: 0, length: 4, notes: [], expectedName: "Vox" }), /isn't a MIDI track/);
   await assert.rejects(client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:0", start: 0, length: 4, notes: [], expectedName: "Bass" }), /"Keys" now, not "Bass"/);
   client.close();
 });
 
 test("clearing a range takes the clips inside it and cuts the ones across its edges", async () => {
   const client = await connect();
-  await client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:1", start: 0, length: 4, notes: [] });
-  await client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:1", start: 4, length: 2, notes: [] });
-  await client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:1", start: 8, length: 4, notes: [] });
-  const result = await client.invoke("clip.clear-range", { trackRef: "7:track:1", fromBeat: 2, toBeat: 9 });
+  for (const [start, length] of [[0, 4], [4, 2], [8, 4]]) await client.invoke("arrangement.midi-clip.create", { trackRef: "7:track:1", start, length, notes: [], expectedName: "Drums" });
+  const result = await client.invoke("clip.clear-range", { trackRef: "7:track:1", fromBeat: 2, toBeat: 9, expectedName: "Drums" });
   assert.equal(result.clipsBefore, 3); assert.equal(result.clipsAfter, 2);
   assert.deepEqual(result.removed, [{ name: "", start: 4, end: 6, isAudio: false }]);
   assert.deepEqual(live.drums.arrangementClips.map((clip) => [clip.start, clip.end]), [[0, 2], [9, 12]]);
@@ -120,10 +119,10 @@ test("an offline render is an audio track's own clips, copied to a name of its o
   const first = await client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 0, toBeat: 8, expectedName: "Vox" });
   assert.equal(first.format, "wav"); assert.equal(first.channels, 2); assert.equal(first.sampleRate, 44100); assert.equal(first.bitDepth, 24);
   assert.equal(first.seconds, 4); assert.ok(first.path.startsWith(join(root, "temp", "renders")));
-  const second = await client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 0, toBeat: 4 });
+  const second = await client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 0, toBeat: 4, expectedName: "Vox" });
   assert.notEqual(second.path, first.path); assert.ok(existsSync(first.path)); assert.equal(second.seconds, 2);
-  await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:0", fromBeat: 0, toBeat: 8 }), /isn't an audio track/);
-  await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 4, toBeat: 4 }), /empty/);
+  await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:0", fromBeat: 0, toBeat: 8, expectedName: "Keys" }), /isn't an audio track/);
+  await assert.rejects(client.invoke("render.offline", { trackRef: "7:track:2", fromBeat: 4, toBeat: 4, expectedName: "Vox" }), /empty/);
   client.close();
 });
 
@@ -135,7 +134,9 @@ test("a device is copied straight after itself; a Drum Rack pad gets a sample wi
   const result = await client.invoke("drum-pad.sample-chain", { rackRef: "7:device:1:0", note: 38, samplePath: sample, expectedName: "Drum Rack" });
   assert.deepEqual(result, { chainRef: "7:chain:1:0:1", deviceRef: "7:device:1:0:1:0", note: 38, samplePath: sample });
   const chain = live.rack.chains[1]; assert.equal(chain.receivingNote, 38n); assert.equal(chain.devices[0].cls, "Simpler"); assert.equal(chain.devices[0].sample.filePath, sample);
-  await assert.rejects(client.invoke("drum-pad.sample-chain", { rackRef: "7:device:0:0", note: 38, samplePath: sample }), /isn't a Drum Rack/);
+  await assert.rejects(client.invoke("drum-pad.sample-chain", { rackRef: "7:device:0:0", note: 38, samplePath: sample, expectedName: "Operator" }), /isn't a Drum Rack/);
+  // A pad that already plays something isn't layered onto.
+  await assert.rejects(client.invoke("drum-pad.sample-chain", { rackRef: "7:device:1:0", note: 36, samplePath: sample, expectedName: "Drum Rack" }), /pad 36 .* already plays something/);
   client.close();
 });
 
@@ -155,5 +156,36 @@ test("right-click 'Ask Kumi about this' tells every connected host where the pro
   live.commands.get("kumi.point")(live.handle(live.keys.clipSlots[1].clip));
   const clip = await waitFor(() => client.events.length === 3 && client.events[2]);
   assert.deepEqual([clip.result.event.payload.kind, clip.result.event.payload.path], ["clip", [0, 1]]);
+  client.close();
+});
+
+test("a group starts its steps together inside one Live transaction, and names a step that fails", async () => {
+  const client = await connect();
+  const before = live.created.length;
+  const grouped = await client.invoke("transaction.group", { ops: [
+    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 32, length: 4, notes: [], expectedName: "Keys" } },
+    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:1", start: 32, length: 4, notes: [], expectedName: "Drums" } },
+  ] });
+  assert.equal(grouped.results.length, 2);
+  assert.deepEqual(live.created.slice(before).map((entry) => entry.insideTransaction), [true, true]);
+  await assert.rejects(client.invoke("transaction.group", { ops: [{ operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 40, length: 4, notes: [] } }] }), /expectedName is required/);
+  await assert.rejects(client.invoke("transaction.group", { ops: [
+    { operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 40, length: 4, notes: [], expectedName: "Keys" } },
+    { operation: "render.offline", args: { trackRef: "7:track:0", fromBeat: 0, toBeat: 4, expectedName: "Keys" } },
+  ] }), /step 2 failed \(.*isn't an audio track.*\); 1 of 2 steps were made/);
+  await assert.rejects(client.invoke("transaction.group", { ops: [{ operation: "tempo.set", args: {} }] }), /can't hold tempo\.set/);
+  client.close();
+});
+
+test("a change whose deadline passes while it waits its turn doesn't happen late", async () => {
+  const client = await connect();
+  const count = live.keys.arrangementClips.length;
+  live.renderDelayMs = 150;
+  // A slow render first; the clip behind it asks to be done within 50 ms.
+  const slow = client.send({ method: "invoke", operation: "render.offline", args: { trackRef: "7:track:2", fromBeat: 0, toBeat: 4, expectedName: "Vox" } });
+  const stale = await client.send({ method: "invoke", operation: "arrangement.midi-clip.create", args: { trackRef: "7:track:0", start: 64, length: 4, notes: [], expectedName: "Keys" } }, { deadlineMs: Date.now() + 50 });
+  assert.equal((await slow).ok, true); live.renderDelayMs = 0;
+  assert.equal(stale.ok, false); assert.match(stale.error, /deadline passed before Live could start it/);
+  assert.equal(live.keys.arrangementClips.length, count);
   client.close();
 });

@@ -20,16 +20,16 @@ const RELAUNCH_AFTER_MS = 5 * 60_000;
 
 /** The Remote Script adapter with Kumi's Live extension routed in beside it, connecting in the background. */
 export function withExtension<T extends AsyncLiveAdapter>(remoteScript: T, setup: ExtensionSetup): T {
-  let lastLaunch = 0;
+  let lastLaunch = 0; let channel: ExtensionChannel | undefined;
   const launch = setup.launch === false ? undefined : async () => {
     if (Date.now() - lastLaunch < RELAUNCH_AFTER_MS) return;
     lastLaunch = Date.now();
-    await launchExtension({ storageDirectory: setup.storageDirectory, ...(setup.liveApp ? { liveApp: setup.liveApp } : {}), ...(setup.log ? { log: setup.log } : {}) });
+    await launchExtension({ storageDirectory: setup.storageDirectory, onShared: (folder) => channel?.share(folder), ...(setup.liveApp ? { liveApp: setup.liveApp } : {}), ...(setup.log ? { log: setup.log } : {}) });
   };
   // Only a real Live has an Extension Host to reach (a simulated or fake Remote Script doesn't).
   const realLive = () => { const status = remoteScript.status(); return status.connected && status.provenance === "real-live"; };
-  const channel = new ExtensionChannel({ storageDirectory: setup.storageDirectory, enabled: realLive, ...(launch ? { launch } : {}), ...(setup.log ? { log: setup.log } : {}) });
-  const attempt = () => { if (!channel.status()) void channel.connect(); };
+  channel = new ExtensionChannel({ storageDirectory: setup.storageDirectory, enabled: realLive, ...(launch ? { launch } : {}), ...(setup.log ? { log: setup.log } : {}) });
+  const attempt = () => { if (!channel!.status()) void channel!.connect(); };
   const timer = setInterval(attempt, setup.retryMs ?? 10_000);
   timer.unref();
   const adapter = routedAdapter(remoteScript, channel, () => clearInterval(timer));

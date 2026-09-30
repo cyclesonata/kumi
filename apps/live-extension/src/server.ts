@@ -111,7 +111,12 @@ export class ExtensionServer {
         const args = (request.args ?? {}) as Record<string, unknown>;
         if (!hasOperation(operation) || !this.handlers.operations.includes(operation)) throw new Error(`operation unavailable on the Extensions channel: ${operation}`);
         validateRequest(operation, args);
-        const run = this.queue.then(() => this.handlers.invoke(operation, args));
+        const deadline = request.deadlineMs as number;
+        const run = this.queue.then(() => {
+          // Queued behind other changes past its deadline: the host has given up on it, so it mustn't happen late.
+          if (Date.now() > deadline) throw new Error("the request's deadline passed before Live could start it; nothing changed");
+          return this.handlers.invoke(operation, args);
+        });
         this.queue = run.catch(() => undefined);
         result = await run;
         validateResult(operation, result);

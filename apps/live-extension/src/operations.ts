@@ -14,6 +14,8 @@ export interface Environment { rendersDir: string }
 export type Operation = (context: Context, args: Args, environment: Environment) => Promise<Record<string, unknown>>;
 
 const str = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
+/** The name the host read at this position: required, so a position that now holds something else is refused. */
+const expected = (args: Args): string => { const name = str(args.expectedName); if (name === undefined) throw new Error("expectedName is required on the Extensions channel"); return name; };
 const num = (value: unknown): number => { if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("a number is missing"); return value; };
 
 // Renders older than this are removed as new ones are made; Kumi has read them long before.
@@ -31,8 +33,8 @@ function pruneRenders(dir: string): void {
 const renderOffline: Operation = async (context, args, environment) => {
   const { path } = parseRef(String(args.trackRef));
   const track = trackAt(context, path[0]);
+  checkName(track, expected(args), "track");
   if (!(track instanceof AudioTrack)) throw new Error(`"${track.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
-  checkName(track, str(args.expectedName), "track");
   const from = num(args.fromBeat); const to = num(args.toBeat);
   if (!(to > from)) throw new Error("the range to render is empty");
   const started = performance.now();
@@ -67,8 +69,8 @@ function noteDescriptions(value: unknown): NoteDescription[] {
 const arrangementMidiClip: Operation = async (context, args) => {
   const reference = String(args.trackRef); const { epoch, path } = parseRef(reference);
   const track = trackAt(context, path[0]);
+  checkName(track, expected(args), "track");
   if (!(track instanceof MidiTrack)) throw new Error(`"${track.name}" isn't a MIDI track`);
-  checkName(track, str(args.expectedName), "track");
   const notes = noteDescriptions(args.notes);
   let lane: MidiTrack<"1.0.0"> | TakeLane<"1.0.0"> = track; let laneIndex: number | undefined;
   if (typeof args.takeLaneRef === "string") {
@@ -84,6 +86,7 @@ const arrangementMidiClip: Operation = async (context, args) => {
   });
   const clips = lane instanceof TakeLane ? lane.clips : track.arrangementClips;
   const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
+  if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
   const ref = laneIndex === undefined ? makeRef(epoch, "arrangement_clip", [path[0]!, index]) : makeRef(epoch, "take_lane_clip", [path[0]!, laneIndex, index]);
   return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
 };
@@ -92,7 +95,7 @@ const arrangementMidiClip: Operation = async (context, args) => {
 const clearRange: Operation = async (context, args) => {
   const reference = String(args.trackRef); const { path } = parseRef(reference);
   const track = trackAt(context, path[0]);
-  checkName(track, str(args.expectedName), "track");
+  checkName(track, expected(args), "track");
   if (args.takeLaneRef !== undefined) throw new Error("a range is cleared on the track's own lane");
   const from = num(args.fromBeat); const to = num(args.toBeat);
   if (!(to > from)) throw new Error("the range to clear is empty");
@@ -106,21 +109,23 @@ const clearRange: Operation = async (context, args) => {
 const duplicateDevice: Operation = async (context, args) => {
   const reference = String(args.ref); const { epoch, path } = parseRef(reference);
   const { device, owner, index } = deviceAt(context, path);
-  checkName(device, str(args.expectedName), "device");
+  checkName(device, expected(args), "device");
   const copy = await owner.duplicateDevice(device);
   const copyIndex = owner.devices.findIndex((candidate) => candidate.handle.id === copy.handle.id);
-  return { ref: makeRef(epoch, "device", [...path.slice(0, -1), copyIndex < 0 ? index + 1 : copyIndex]), name: copy.name, index: copyIndex < 0 ? index + 1 : copyIndex };
+  if (copyIndex < 0) throw new Error("Live made the copy, but not in this device's chain");
+  return { ref: makeRef(epoch, "device", [...path.slice(0, -1), copyIndex]), name: copy.name, index: copyIndex };
 };
 
 /** A sample on a Drum Rack pad without the Browser: a new chain on the pad's note, a Simpler in it, the sample in that. */
 const padSampleChain: Operation = async (context, args) => {
   const reference = String(args.rackRef); const { epoch, path } = parseRef(reference);
   const { device: rack } = deviceAt(context, path);
+  checkName(rack, expected(args), "Drum Rack");
   if (!(rack instanceof DrumRack)) throw new Error(`"${rack.name}" isn't a Drum Rack`);
-  checkName(rack, str(args.expectedName), "Drum Rack");
   const samplePath = String(args.samplePath);
   if (!existsSync(samplePath)) throw new Error("the sample isn't there any more");
   const note = num(args.note);
+  if (rack.chains.some((existing) => existing.receivingNote === note)) throw new Error(`pad ${note} of "${rack.name}" already plays something; clear it first`);
   const chain = await rack.insertChain(rack.chains.length);
   if (!(chain instanceof DrumChain)) throw new Error("Live didn't add a pad chain to the Drum Rack");
   chain.receivingNote = note;
@@ -128,6 +133,7 @@ const padSampleChain: Operation = async (context, args) => {
   if (!("replaceSample" in simpler)) throw new Error("Live didn't put a Simpler in the new chain");
   await (simpler as unknown as { replaceSample(path: string): Promise<unknown> }).replaceSample(samplePath);
   const chainIndex = rack.chains.findIndex((candidate) => candidate.handle.id === chain.handle.id);
+  if (chainIndex < 0) throw new Error("Live added the chain, but it isn't in the rack's chains");
   return { chainRef: makeRef(epoch, "chain", [...path, chainIndex]), deviceRef: makeRef(epoch, "device", [...path, chainIndex, 0]), note, samplePath };
 };
 
@@ -144,24 +150,29 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
 };
 
 /**
- * Several of this channel's changes as one Live undo step. The SDK groups what's started inside
- * one transaction, and its creations start there; the steps run in order, each after the last.
+ * Several of this channel's changes as one Live undo step. The SDK groups only what is started inside
+ * its (synchronous) transaction callback, so the steps start there together, each running its own course;
+ * they must not depend on one another. Each step's arguments are checked against the registry first,
+ * and a failed step is named, with what the others did.
  */
-export const transactionGroup: Operation = async (context, args, environment) => {
-  const steps = Array.isArray(args.ops) ? args.ops as Array<{ operation: string; args: Args }> : [];
-  const results: Array<Record<string, unknown>> = [];
-  let chain = Promise.resolve();
-  context.withinTransaction(() => {
-    for (const step of steps) {
-      const run = OPERATIONS[step.operation];
-      if (!run) throw new Error(`a group can't hold ${step.operation}`);
-      chain = chain.then(async () => { results.push(await run(context, step.args, environment)); });
+export function transactionGroup(validate: (operation: string, args: Args) => void): Operation {
+  return async (context, args, environment) => {
+    const steps = Array.isArray(args.ops) ? args.ops as Array<{ operation: string; args: Args }> : [];
+    for (const [index, step] of steps.entries()) {
+      if (!OPERATIONS[step.operation]) throw new Error(`step ${index + 1}: a group can't hold ${step.operation}`);
+      validate(step.operation, step.args);
     }
-    return chain;
-  });
-  await chain;
-  return { results };
-};
+    const runs = context.withinTransaction(() => steps.map((step) => OPERATIONS[step.operation]!(context, step.args, environment)));
+    const settled = await Promise.allSettled(runs);
+    const failed = settled.findIndex((outcome) => outcome.status === "rejected");
+    if (failed >= 0) {
+      const reason = (settled[failed] as PromiseRejectedResult).reason;
+      const done = settled.filter((outcome) => outcome.status === "fulfilled").length;
+      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason)}); ${done} of ${steps.length} steps were made`);
+    }
+    return { results: settled.map((outcome) => (outcome as PromiseFulfilledResult<Record<string, unknown>>).value) };
+  };
+}
 
 /** True for an object the SDK knows as a track (tracks, returns and Main). */
 export const isTrack = (value: unknown): boolean => value instanceof Track;

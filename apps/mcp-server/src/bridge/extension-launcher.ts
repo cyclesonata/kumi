@@ -55,7 +55,36 @@ export function findExtensionBundle(): string | undefined {
 /** A pause that never keeps the bridge's process alive on its own. */
 const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref(); });
 
-export interface LaunchOptions { storageDirectory: string; extension?: string; liveApp?: string; waitMs?: number; log?: (line: string) => void }
+/**
+ * The Extension Hosts in a process listing: ones a Kumi bridge started (their command names the storage
+ * folder they were given, which may be another bridge's), and whether Live's own is running (Live starts
+ * one for the extensions a producer installed; it holds Live, so a second can't connect).
+ */
+export function parseExtensionHosts(listing: string): { kumi: string[]; live: boolean } {
+  const kumi: string[] = []; let live = false;
+  for (const line of listing.split(/\r?\n/)) {
+    if (!/ExtensionHost[\\/]node(\.exe)?\b/.test(line)) continue;
+    if (!line.includes("__kumiLaunchedHost")) { live = true; continue; }
+    const match = /"storageDirectory":"((?:[^"\\]|\\.)*)"/.exec(line);
+    if (match) kumi.push(JSON.parse(`"${match[1]}"`) as string);
+  }
+  return { kumi, live };
+}
+
+export function runningExtensionHosts(): { kumi: string[]; live: boolean } {
+  const listing = process.platform === "win32"
+    ? spawnSync("powershell", ["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { $_.CommandLine }"], { encoding: "utf8", windowsHide: true })
+    : spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
+  return parseExtensionHosts(listing.stdout ?? "");
+}
+
+export interface LaunchOptions {
+  storageDirectory: string; extension?: string; liveApp?: string; waitMs?: number; log?: (line: string) => void;
+  /** Look at running processes for an Extension Host already there (default true; a function stands in for the listing). */
+  scan?: boolean | (() => { kumi: string[]; live: boolean });
+  /** Another bridge's Kumi extension is running, with this storage folder: use it rather than start one. */
+  onShared?: (storageDirectory: string) => void;
+}
 
 function ensureSecret(storageDirectory: string): void {
   const path = join(storageDirectory, "secret");
@@ -78,6 +107,12 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
   const log = options.log ?? (() => undefined);
   mkdirSync(options.storageDirectory, { recursive: true, mode: 0o700 });
   if (readExtensionEndpoint(options.storageDirectory)) return;
+  // One Extension Host reaches a Live: a Kumi one another bridge started (with its own storage folder)
+  // is used where it is; Live's own (a producer's installed extensions) leaves Kumi's to kumi.ablx.
+  const running = options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts();
+  const shared = running.kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
+  if (shared) { options.onShared?.(shared); return; }
+  if (running.live) { log("extension channel: Live runs its own Extension Host (installed extensions); add Kumi's there: Settings → Extensions, then kumi.ablx"); return; }
   const extension = options.extension ?? findExtensionBundle();
   const host = findExtensionHost(options.liveApp);
   if (!extension || !isExtension(extension)) { log("extension channel: Kumi's Live extension isn't with this bridge"); return; }
@@ -96,7 +131,7 @@ export async function launchExtension(options: LaunchOptions): Promise<void> {
     const logFile = openSync(join(options.storageDirectory, "extension-host.log"), "a", 0o600);
     // The Extension Host waits for Live indefinitely; if Kumi's extension hasn't started within 20 s
     // (another Extension Host holds Live, or Live quit), it ends itself rather than wait on.
-    const script = `setTimeout(() => { if (!globalThis.__kumiLiveExtensionActive) process.exit(3); }, 20000); require(${JSON.stringify(host.module.replace(/\\/g, "/"))}).initialize(${JSON.stringify(config)});`;
+    const script = `globalThis.__kumiLaunchedHost = true; setTimeout(() => { if (!globalThis.__kumiLiveExtensionActive) process.exit(3); }, 20000); require(${JSON.stringify(host.module.replace(/\\/g, "/"))}).initialize(${JSON.stringify(config)});`;
     const child = spawn(host.node, ["-e", script], { detached: true, stdio: ["ignore", logFile, logFile], windowsHide: true });
     closeSync(logFile);
     child.unref();

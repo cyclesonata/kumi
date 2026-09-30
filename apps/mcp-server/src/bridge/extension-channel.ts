@@ -70,7 +70,7 @@ export class ExtensionChannel {
   /** Why the channel is down, in plain words (for status and `kumi doctor`). */
   reason = "not connected yet";
 
-  constructor(private readonly options: ExtensionChannelOptions) {}
+  constructor(private readonly options: ExtensionChannelOptions) { this.storage = options.storageDirectory; }
 
   /** The extension's status while connected; undefined otherwise. */
   status(): (LiveStatus & { extension?: Record<string, unknown> }) | undefined { return this.socket && !this.socket.destroyed ? this.cached : undefined; }
@@ -86,16 +86,23 @@ export class ExtensionChannel {
     return this.connecting;
   }
 
+  /** Where the extension this channel uses keeps its endpoint and secret; another bridge's, when shared. */
+  private storage: string;
+
+  /** Use the extension another bridge started, which keeps its endpoint and secret in its own folder. */
+  share(storageDirectory: string): void { this.storage = storageDirectory; }
+
   private async open(): Promise<boolean> {
-    let endpoint = readExtensionEndpoint(this.options.storageDirectory);
+    let endpoint = readExtensionEndpoint(this.storage) ?? readExtensionEndpoint(this.options.storageDirectory);
+    if (endpoint && !readExtensionEndpoint(this.storage)) this.storage = this.options.storageDirectory;
     if (!endpoint && this.options.launch) {
       await this.options.launch();
-      endpoint = readExtensionEndpoint(this.options.storageDirectory);
+      endpoint = readExtensionEndpoint(this.storage);
     }
     if (!endpoint) { this.reason = "Kumi's Live extension isn't running"; return false; }
     if (endpoint.registryHash !== LIVE_REGISTRY_HASH) { this.reason = "Kumi's Live extension is from another bridge version"; return false; }
     let secret: string;
-    try { secret = readFileSync(join(this.options.storageDirectory, "secret"), "utf8").trim(); } catch { this.reason = "the extension's secret is missing"; return false; }
+    try { secret = readFileSync(join(this.storage, "secret"), "utf8").trim(); } catch { this.reason = "the extension's secret is missing"; return false; }
     if (secret.length < 32) { this.reason = "the extension's secret is too short"; return false; }
     this.secret = secret; this.endpoint = endpoint;
     try {

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ExtensionChannel, readExtensionEndpoint } from "../src/bridge/extension-channel.js";
-import { findExtensionBundle, launchExtension } from "../src/bridge/extension-launcher.js";
+import { findExtensionBundle, launchExtension, parseExtensionHosts } from "../src/bridge/extension-launcher.js";
 import { withExtension } from "../src/bridge/extension-setup.js";
 import { mergedStatus, routeToExtension, routedAdapter } from "../src/bridge/router.js";
 import { LIVE_REGISTRY_HASH, type AsyncLiveAdapter, type LiveEvent, type LiveInvocation, type LiveStatus } from "../src/live.js";
@@ -50,9 +50,9 @@ test("the channel connects with the shared secret, runs extension operations and
   assert.equal(await channel.connect(), true);
   const status = channel.status()!;
   assert.equal(status.adapter, "extension"); assert.ok(status.operations?.includes("render.offline"));
-  const clip = await channel.invoke("arrangement.midi-clip.create", { trackRef: "3:track:0", start: 0, length: 4, notes: [{ pitch: 60, start: 0, duration: 1 }] }) as { ref: string; notes: number };
+  const clip = await channel.invoke("arrangement.midi-clip.create", { trackRef: "3:track:0", start: 0, length: 4, notes: [{ pitch: 60, start: 0, duration: 1 }], expectedName: "Keys" }) as { ref: string; notes: number };
   assert.deepEqual([clip.ref, clip.notes], ["3:arrangement_clip:0:0", 1]);
-  const rendered = await channel.invoke("render.offline", { trackRef: "3:track:2", fromBeat: 0, toBeat: 4 }) as { seconds: number; format: string };
+  const rendered = await channel.invoke("render.offline", { trackRef: "3:track:2", fromBeat: 0, toBeat: 4, expectedName: "Vox" }) as { seconds: number; format: string };
   assert.deepEqual([rendered.format, rendered.seconds], ["wav", 2]);
   await assert.rejects(channel.invoke("tempo.set", {}), /doesn't offer tempo\.set/);
   await assert.rejects(channel.invoke("render.offline", { trackRef: "3:track:2" }), /required by registry/);
@@ -87,10 +87,10 @@ test("a channel without the secret, or with another registry, isn't connected", 
 
 test("launching does nothing while an extension answers, and says why when it can't start one", async () => {
   const lines: string[] = [];
-  await launchExtension({ storageDirectory: storage, log: (line) => lines.push(line) });
+  await launchExtension({ storageDirectory: storage, scan: false, log: (line) => lines.push(line) });
   assert.equal(lines.length, 0);
   const empty = join(root, "empty");
-  await launchExtension({ storageDirectory: empty, extension: join(root, "no-extension-here"), liveApp: join(root, "No Live.app"), log: (line) => lines.push(line), waitMs: 100 });
+  await launchExtension({ storageDirectory: empty, scan: false, extension: join(root, "no-extension-here"), liveApp: join(root, "No Live.app"), log: (line) => lines.push(line), waitMs: 100 });
   assert.deepEqual(lines, ["extension channel: Kumi's Live extension isn't with this bridge"]);
 });
 
@@ -127,7 +127,7 @@ test("the routed adapter keeps the Remote Script's own methods, routes invocatio
   await adapter.invokeAsync({ operation: "tempo.set", args: {} });
   await adapter.retireTransactionAsync("transaction-1");
   await adapter.snapshotAsync();
-  const rendered = await adapter.invokeAsync({ operation: "render.offline" as LiveInvocation["operation"], args: { trackRef: "3:track:2", fromBeat: 0, toBeat: 2 } }) as { seconds: number };
+  const rendered = await adapter.invokeAsync({ operation: "render.offline" as LiveInvocation["operation"], args: { trackRef: "3:track:2", fromBeat: 0, toBeat: 2, expectedName: "Vox" } }) as { seconds: number };
   assert.equal(rendered.seconds, 1);
   assert.deepEqual(calls, ["lom:tempo.set", "retire", "snapshot"]);
   const seen: LiveEvent[] = []; adapter.subscribe((event) => seen.push(event));
@@ -161,7 +161,7 @@ setTimeout(() => undefined, 60000);
 test("launching starts Live's Extension Host with Kumi's extension, detached, and waits for its endpoint", { skip: process.platform === "win32" ? "the stand-in host is a shell script" : false }, async () => {
   const host = join(root, "host-answer"); fakeExtensionHost(host, "answer");
   const home = join(root, "launch-answer"); const lines: string[] = [];
-  await launchExtension({ storageDirectory: home, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 5_000 });
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 5_000 });
   const endpoint = readExtensionEndpoint(home);
   assert.ok(endpoint, lines.join("\n")); assert.match(lines[0]!, /started Live's Extension Host/);
   assert.equal(readFileSync(join(home, "secret"), "utf8").trim().length >= 32, true);
@@ -172,13 +172,13 @@ test("launching starts Live's Extension Host with Kumi's extension, detached, an
 test("an Extension Host that never reaches Live is stopped, not left waiting", { skip: process.platform === "win32" ? "the stand-in host is a shell script" : false }, async () => {
   const host = join(root, "host-mute"); fakeExtensionHost(host, "mute");
   const home = join(root, "launch-mute"); const lines: string[] = [];
-  await launchExtension({ storageDirectory: home, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 400 });
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 400 });
   assert.equal(readExtensionEndpoint(home), undefined);
   assert.match(lines.at(-1)!, /didn't reach Live in time; stopping it/);
   // A second bridge arriving while one launches waits for that one instead of starting another.
   writeFileSync(join(home, "launch.lock"), "");
   const waited: string[] = []; const started = Date.now();
-  await launchExtension({ storageDirectory: home, extension: extensionDir, liveApp: host, log: (line) => waited.push(line), waitMs: 200 });
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => waited.push(line), waitMs: 200 });
   assert.deepEqual(waited, []); assert.ok(Date.now() - started >= 150);
 });
 
@@ -195,4 +195,25 @@ test("withExtension routes Kumi's extension in once a real Live is connected, an
   provenance = "real-live";
   await waitFor(() => adapter.status().operations?.includes("render.offline") || undefined);
   await adapter.close();
+});
+
+test("a running Extension Host is recognised: another bridge's Kumi one is shared, Live's own leaves Kumi's to kumi.ablx", () => {
+  const kumi = `/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node -e globalThis.__kumiLaunchedHost = true; require("/x/ExtensionHostNodeModule.node").initialize({"extensions":[{"path":"/k/live-extension","storageDirectory":"/Users/p/.config/bridge-a/live-extension","tempDirectory":"/t"}]});`;
+  const own = "/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/node --some-live-arguments";
+  assert.deepEqual(parseExtensionHosts([kumi, "/usr/bin/other", ""].join("\n")), { kumi: ["/Users/p/.config/bridge-a/live-extension"], live: false });
+  assert.deepEqual(parseExtensionHosts(own), { kumi: [], live: true });
+  assert.deepEqual(parseExtensionHosts("C:\\Program\\ExtensionHost\\node.exe -e globalThis.__kumiLaunchedHost = true; x({\"storageDirectory\":\"C:/Users/p/AppData/bridge/live-extension\"})"), { kumi: ["C:/Users/p/AppData/bridge/live-extension"], live: false });
+});
+
+test("launching uses another bridge's running Kumi extension, and leaves Live's own Extension Host alone", async () => {
+  const shared: string[] = []; const lines: string[] = [];
+  await launchExtension({ storageDirectory: join(root, "mine"), scan: () => ({ kumi: [storage], live: false }), onShared: (folder) => shared.push(folder), log: (line) => lines.push(line) });
+  assert.deepEqual(shared, [storage]); assert.equal(lines.length, 0);
+  await launchExtension({ storageDirectory: join(root, "mine"), scan: () => ({ kumi: [], live: true }), log: (line) => lines.push(line) });
+  assert.match(lines[0]!, /Live runs its own Extension Host .* kumi\.ablx/);
+  // The channel follows a shared extension to its folder for the endpoint and the secret.
+  const channel = new ExtensionChannel({ storageDirectory: join(root, "mine") });
+  channel.share(storage);
+  assert.equal(await channel.connect(), true);
+  await channel.close();
 });

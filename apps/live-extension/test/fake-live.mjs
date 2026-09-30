@@ -23,7 +23,7 @@ export function wav(path, { channels = 2, sampleRate = 44100, bits = 24, seconds
 }
 
 export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
-  let next = 1n; const objects = new Map(); const menu = []; const commands = new Map(); const transactions = [];
+  let next = 1n; const objects = new Map(); const menu = []; const commands = new Map(); const transactions = []; let depth = 0; const created = [];
   const make = (cls, fields = {}, parent = null) => { const id = next++; const object = { id, cls, parent, ...fields }; objects.set(id, object); return object; };
   const handle = (object) => ({ id: object.id });
   const get = (h) => { const object = objects.get(h.id); if (!object) throw new Error("stale handle"); return object; };
@@ -31,7 +31,7 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
   const track = (cls, name, { slots = 2 } = {}) => { const t = make(cls, { name, clipSlots: [], arrangementClips: [], takeLanes: [], devices: [] }, song); for (let i = 0; i < slots; i++) t.clipSlots.push(make("ClipSlot", { clip: null }, t)); return t; };
   const device = (cls, name, owner, extra = {}) => make(cls, { name, chains: [], sample: null, ...extra }, owner);
   const clip = (cls, owner, start, duration, name = "") => make(cls, { name, start, end: start + duration, looping: false, notes: [], filePath: cls === "AudioClip" ? "/clip.wav" : undefined }, owner);
-  const model = { app, song, objects, make, track, device, clip, menu, commands, transactions, handle };
+  const model = { app, song, objects, make, track, device, clip, menu, commands, transactions, handle, created };
   const ok = (resolve, value) => resolve(value);
   const dataModel = {
     getObjectIsOfClass: (h, className) => (CLASSES[get(h).cls] ?? [get(h).cls]).includes(className),
@@ -43,7 +43,7 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
     trackGetName: (h) => get(h).name, trackSetName: (h, value) => { get(h).name = value; },
     trackGetClipSlots: (h) => get(h).clipSlots.map(handle), trackGetTakeLanes: (h) => get(h).takeLanes.map(handle),
     trackGetArrangementClips: (h) => get(h).arrangementClips.map(handle), trackGetDevices: (h) => get(h).devices.map(handle),
-    trackCreateMidiClip: (h, start, duration, resolve) => { const t = get(h); const c = clip("MidiClip", t, start, duration); t.arrangementClips.push(c); t.arrangementClips.sort((a, b) => a.start - b.start); ok(resolve, handle(c)); },
+    trackCreateMidiClip: (h, start, duration, resolve) => { const t = get(h); const c = clip("MidiClip", t, start, duration); created.push({ start, insideTransaction: depth > 0 }); t.arrangementClips.push(c); t.arrangementClips.sort((a, b) => a.start - b.start); ok(resolve, handle(c)); },
     trackClearClipsInRange: (h, from, to, resolve) => {
       const t = get(h); const kept = [];
       for (const c of t.arrangementClips) {
@@ -77,17 +77,17 @@ export function fakeLive({ storage, temp, liveTemp, tempo = 120 }) {
     sampleGetFilePath: (h) => get(h).filePath,
     sceneGetName: (h) => get(h).name, sceneSetName: (h, value) => { get(h).name = value; },
     cuePointGetName: (h) => get(h).name, cuePointGetTime: (h) => get(h).time,
-    withinTransaction: (fn) => { transactions.push("begin"); try { return fn(); } finally { transactions.push("end"); } },
+    withinTransaction: (fn) => { transactions.push("begin"); depth += 1; try { return fn(); } finally { depth -= 1; transactions.push("end"); } },
   };
   const rendered = [];
   const resources = {
-    renderPreFxAudio: (h, { startTime, endTime }, resolve, reject) => {
+    renderPreFxAudio: (h, { startTime, endTime }, resolve, reject) => setTimeout(() => {
       const t = get(h); if (t.cls !== "AudioTrack") { reject(); return; }
       mkdirSync(liveTemp, { recursive: true });
       // Live names a render after the clip, to the second.
       const path = join(liveTemp, `${t.arrangementClips[0]?.name || "render"} [2026-09-30 120000].wav`);
       wav(path, { seconds: ((endTime - startTime) * 60) / song.tempo }); rendered.push(path); resolve(path);
-    },
+    }, model.renderDelayMs ?? 0),
     importIntoProject: (path, resolve) => resolve(join(storage, "Project", "Samples", "Imported", path.split("/").pop())),
   };
   const ui = { registerContextMenuAction: (scope, title, command, done) => { menu.push({ scope, title, command }); done((finished) => finished()); } };

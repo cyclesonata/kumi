@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initialize, type ActivationContext } from "@ableton-extensions/sdk";
 import { OPERATIONS, transactionGroup } from "./operations.js";
+import { REGISTRY_HASH, validateRequest } from "./registry.js";
 import { registerPointing } from "./pointing.js";
-import { REGISTRY_HASH } from "./registry.js";
 import { ExtensionServer } from "./server.js";
 import { token } from "./wire.js";
 
@@ -54,6 +54,7 @@ export function activate(activation: ActivationContext): void {
   mkdirSync(storage, { recursive: true, mode: 0o700 });
   const environment = { rendersDir: join(temp, "renders") };
   const secret = secretIn(storage);
+  const group = transactionGroup(validateRequest);
   const server: ExtensionServer = new ExtensionServer(secret, {
     operations: OPERATION_IDS,
     status: (): Record<string, unknown> => ({
@@ -63,7 +64,7 @@ export function activate(activation: ActivationContext): void {
       extension: { version: VERSION, apiVersion: activation.hostApiVersion, pid: process.pid, storageDirectory: storage, tempDirectory: temp },
     }),
     invoke: async (operation, args) => {
-      if (operation === "transaction.group") return transactionGroup(context, args, environment);
+      if (operation === "transaction.group") return group(context, args, environment);
       const run = OPERATIONS[operation];
       if (!run) throw new Error(`operation unavailable on the Extensions channel: ${operation}`);
       return run(context, args, environment);
@@ -85,7 +86,8 @@ export function activate(activation: ActivationContext): void {
       if (misses < 3) return;
       clearInterval(watchdog); log("Live is gone; stopping");
       try { rmSync(join(storage, "endpoint.json"), { force: true }); } catch { /* already gone */ }
-      void server.close().finally(() => process.exit(0));
+      const ownHost = (globalThis as { __kumiLaunchedHost?: boolean }).__kumiLaunchedHost === true;
+      void server.close().finally(() => { if (ownHost) process.exit(0); });
     }
   }, 5_000);
   watchdog.unref();

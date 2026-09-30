@@ -1094,8 +1094,8 @@ function deviceAt(context, path) {
 function takeLaneAt(context, path) {
   return at(trackAt(context, path[0]).takeLanes, path[1], "take lane");
 }
-function checkName(object, expected, what) {
-  if (expected !== void 0 && object.name !== expected) throw new Error(`the ${what} at that position is "${object.name}" now, not "${expected}"`);
+function checkName(object, expected2, what) {
+  if (expected2 !== void 0 && object.name !== expected2) throw new Error(`the ${what} at that position is "${object.name}" now, not "${expected2}"`);
 }
 var same = (a, b) => a.handle.id === b.handle.id;
 function locateDevice(devices, target, path, trail) {
@@ -1174,14 +1174,14 @@ function signed(secret, payload) {
 function verify(secret, frame) {
   const { mac, ...unsigned } = frame;
   if (typeof mac !== "string") return false;
-  let expected;
+  let expected2;
   try {
-    expected = Buffer.from(sign(secret, unsigned));
+    expected2 = Buffer.from(sign(secret, unsigned));
   } catch {
     return false;
   }
   const received = Buffer.from(mac);
-  return expected.length === received.length && (0, import_node_crypto.timingSafeEqual)(expected, received);
+  return expected2.length === received.length && (0, import_node_crypto.timingSafeEqual)(expected2, received);
 }
 function token(bytes = 18) {
   return (0, import_node_crypto.randomBytes)(bytes).toString("base64url");
@@ -1189,6 +1189,11 @@ function token(bytes = 18) {
 
 // src/operations.ts
 var str = (value) => typeof value === "string" ? value : void 0;
+var expected = (args) => {
+  const name = str(args.expectedName);
+  if (name === void 0) throw new Error("expectedName is required on the Extensions channel");
+  return name;
+};
 var num = (value) => {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("a number is missing");
   return value;
@@ -1207,8 +1212,8 @@ function pruneRenders(dir) {
 var renderOffline = async (context, args, environment) => {
   const { path } = parseRef(String(args.trackRef));
   const track = trackAt(context, path[0]);
+  checkName(track, expected(args), "track");
   if (!(track instanceof import_sdk2.AudioTrack)) throw new Error(`"${track.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
-  checkName(track, str(args.expectedName), "track");
   const from = num(args.fromBeat);
   const to = num(args.toBeat);
   if (!(to > from)) throw new Error("the range to render is empty");
@@ -1243,8 +1248,8 @@ var arrangementMidiClip = async (context, args) => {
   const reference = String(args.trackRef);
   const { epoch, path } = parseRef(reference);
   const track = trackAt(context, path[0]);
+  checkName(track, expected(args), "track");
   if (!(track instanceof import_sdk2.MidiTrack)) throw new Error(`"${track.name}" isn't a MIDI track`);
-  checkName(track, str(args.expectedName), "track");
   const notes = noteDescriptions(args.notes);
   let lane = track;
   let laneIndex;
@@ -1262,6 +1267,7 @@ var arrangementMidiClip = async (context, args) => {
   });
   const clips = lane instanceof import_sdk2.TakeLane ? lane.clips : track.arrangementClips;
   const index = clips.findIndex((candidate) => candidate.handle.id === clip.handle.id);
+  if (index < 0) throw new Error("Live made the clip, but it isn't among the lane's clips");
   const ref = laneIndex === void 0 ? makeRef(epoch, "arrangement_clip", [path[0], index]) : makeRef(epoch, "take_lane_clip", [path[0], laneIndex, index]);
   return { ref, trackRef: reference, name: clip.name, start: clip.startTime, end: clip.endTime, notes: clip.notes.length };
 };
@@ -1269,7 +1275,7 @@ var clearRange = async (context, args) => {
   const reference = String(args.trackRef);
   const { path } = parseRef(reference);
   const track = trackAt(context, path[0]);
-  checkName(track, str(args.expectedName), "track");
+  checkName(track, expected(args), "track");
   if (args.takeLaneRef !== void 0) throw new Error("a range is cleared on the track's own lane");
   const from = num(args.fromBeat);
   const to = num(args.toBeat);
@@ -1283,20 +1289,22 @@ var duplicateDevice = async (context, args) => {
   const reference = String(args.ref);
   const { epoch, path } = parseRef(reference);
   const { device, owner, index } = deviceAt(context, path);
-  checkName(device, str(args.expectedName), "device");
+  checkName(device, expected(args), "device");
   const copy = await owner.duplicateDevice(device);
   const copyIndex = owner.devices.findIndex((candidate) => candidate.handle.id === copy.handle.id);
-  return { ref: makeRef(epoch, "device", [...path.slice(0, -1), copyIndex < 0 ? index + 1 : copyIndex]), name: copy.name, index: copyIndex < 0 ? index + 1 : copyIndex };
+  if (copyIndex < 0) throw new Error("Live made the copy, but not in this device's chain");
+  return { ref: makeRef(epoch, "device", [...path.slice(0, -1), copyIndex]), name: copy.name, index: copyIndex };
 };
 var padSampleChain = async (context, args) => {
   const reference = String(args.rackRef);
   const { epoch, path } = parseRef(reference);
   const { device: rack } = deviceAt(context, path);
+  checkName(rack, expected(args), "Drum Rack");
   if (!(rack instanceof import_sdk2.DrumRack)) throw new Error(`"${rack.name}" isn't a Drum Rack`);
-  checkName(rack, str(args.expectedName), "Drum Rack");
   const samplePath = String(args.samplePath);
   if (!(0, import_node_fs2.existsSync)(samplePath)) throw new Error("the sample isn't there any more");
   const note = num(args.note);
+  if (rack.chains.some((existing) => existing.receivingNote === note)) throw new Error(`pad ${note} of "${rack.name}" already plays something; clear it first`);
   const chain = await rack.insertChain(rack.chains.length);
   if (!(chain instanceof import_sdk2.DrumChain)) throw new Error("Live didn't add a pad chain to the Drum Rack");
   chain.receivingNote = note;
@@ -1304,6 +1312,7 @@ var padSampleChain = async (context, args) => {
   if (!("replaceSample" in simpler)) throw new Error("Live didn't put a Simpler in the new chain");
   await simpler.replaceSample(samplePath);
   const chainIndex = rack.chains.findIndex((candidate) => candidate.handle.id === chain.handle.id);
+  if (chainIndex < 0) throw new Error("Live added the chain, but it isn't in the rack's chains");
   return { chainRef: makeRef(epoch, "chain", [...path, chainIndex]), deviceRef: makeRef(epoch, "device", [...path, chainIndex, 0]), note, samplePath };
 };
 var projectImport = async (context, args) => ({ path: await context.resources.importIntoProject(String(args.filePath)) });
@@ -1315,70 +1324,23 @@ var OPERATIONS = {
   "drum-pad.sample-chain": padSampleChain,
   "project.import": projectImport
 };
-var transactionGroup = async (context, args, environment) => {
-  const steps = Array.isArray(args.ops) ? args.ops : [];
-  const results = [];
-  let chain = Promise.resolve();
-  context.withinTransaction(() => {
-    for (const step of steps) {
-      const run = OPERATIONS[step.operation];
-      if (!run) throw new Error(`a group can't hold ${step.operation}`);
-      chain = chain.then(async () => {
-        results.push(await run(context, step.args, environment));
-      });
+function transactionGroup(validate2) {
+  return async (context, args, environment) => {
+    const steps = Array.isArray(args.ops) ? args.ops : [];
+    for (const [index, step] of steps.entries()) {
+      if (!OPERATIONS[step.operation]) throw new Error(`step ${index + 1}: a group can't hold ${step.operation}`);
+      validate2(step.operation, step.args);
     }
-    return chain;
-  });
-  await chain;
-  return { results };
-};
-
-// src/pointing.ts
-var import_sdk3 = __toESM(require_dist());
-var OBJECT_SCOPES = ["AudioClip", "MidiClip", "AudioTrack", "MidiTrack", "ClipSlot", "Scene", "Simpler", "Sample", "DrumRack"];
-var SELECTION_SCOPES = ["ClipSlotSelection", "AudioTrack.ArrangementSelection", "MidiTrack.ArrangementSelection"];
-var POINT = "kumi.point";
-var POINT_SELECTION = "kumi.point-selection";
-function where(located) {
-  return { kind: located.kind, path: located.path, name: located.name, trail: located.trail };
-}
-function locateObject(context, object) {
-  const found = locate(context, object);
-  if (found) return found;
-  const parent = object.parent;
-  const owner = parent ? locate(context, parent) : void 0;
-  return owner ? { ...owner, kind: owner.kind === "device" ? "sample" : owner.kind } : void 0;
-}
-function pointedAt(context, argument) {
-  const selection = argument;
-  if (selection && Array.isArray(selection.selected_lanes)) {
-    const lanes = selection.selected_lanes.map((handle) => locateObject(context, context.getObjectFromHandle(handle, import_sdk3.DataModelObject))).filter((item) => !!item);
-    const from = Number(selection.time_selection_start);
-    const to = Number(selection.time_selection_end);
-    return { kind: "arrangement_selection", lanes: lanes.map(where), timeSelection: { fromBeat: from, toBeat: to }, name: lanes.map((lane) => lane.name).join(", "), trail: lanes.map((lane) => lane.name) };
-  }
-  if (selection && Array.isArray(selection.selected_clip_slots)) {
-    const slots = selection.selected_clip_slots.map((handle) => locateObject(context, context.getObjectFromHandle(handle, import_sdk3.DataModelObject))).filter((item) => !!item);
-    return { kind: "clip_slot_selection", slots: slots.map(where), name: `${slots.length} clip slots`, trail: [...new Set(slots.map((slot) => slot.trail[0] ?? ""))] };
-  }
-  const object = context.getObjectFromHandle(argument, import_sdk3.DataModelObject);
-  const located = locateObject(context, object);
-  return located ? where(located) : void 0;
-}
-async function registerPointing(context, onPointed, log2 = () => void 0) {
-  const handle = (argument) => {
-    try {
-      const payload = pointedAt(context, argument);
-      if (payload) onPointed({ ...payload, at: Date.now() });
-      else log2("pointed at something Kumi couldn't find in the Set");
-    } catch (error) {
-      log2(`pointing failed: ${error instanceof Error ? error.message : String(error)}`);
+    const runs = context.withinTransaction(() => steps.map((step) => OPERATIONS[step.operation](context, step.args, environment)));
+    const settled = await Promise.allSettled(runs);
+    const failed = settled.findIndex((outcome) => outcome.status === "rejected");
+    if (failed >= 0) {
+      const reason = settled[failed].reason;
+      const done = settled.filter((outcome) => outcome.status === "fulfilled").length;
+      throw new Error(`step ${failed + 1} failed (${reason instanceof Error ? reason.message : String(reason)}); ${done} of ${steps.length} steps were made`);
     }
+    return { results: settled.map((outcome) => outcome.value) };
   };
-  context.commands.registerCommand(POINT, handle);
-  context.commands.registerCommand(POINT_SELECTION, handle);
-  for (const scope of OBJECT_SCOPES) await context.ui.registerContextMenuAction(scope, "Ask Kumi about this", POINT);
-  for (const scope of SELECTION_SCOPES) await context.ui.registerContextMenuAction(scope, "Ask Kumi about this selection", POINT_SELECTION);
 }
 
 // src/registry.ts
@@ -17075,6 +17037,54 @@ function validateResult(id, value) {
   validate(operation.result, value, `${id}.result`);
 }
 
+// src/pointing.ts
+var import_sdk3 = __toESM(require_dist());
+var OBJECT_SCOPES = ["AudioClip", "MidiClip", "AudioTrack", "MidiTrack", "ClipSlot", "Scene", "Simpler", "Sample", "DrumRack"];
+var SELECTION_SCOPES = ["ClipSlotSelection", "AudioTrack.ArrangementSelection", "MidiTrack.ArrangementSelection"];
+var POINT = "kumi.point";
+var POINT_SELECTION = "kumi.point-selection";
+function where(located) {
+  return { kind: located.kind, path: located.path, name: located.name, trail: located.trail };
+}
+function locateObject(context, object) {
+  const found = locate(context, object);
+  if (found) return found;
+  const parent = object.parent;
+  const owner = parent ? locate(context, parent) : void 0;
+  return owner ? { ...owner, kind: owner.kind === "device" ? "sample" : owner.kind } : void 0;
+}
+function pointedAt(context, argument) {
+  const selection = argument;
+  if (selection && Array.isArray(selection.selected_lanes)) {
+    const lanes = selection.selected_lanes.map((handle) => locateObject(context, context.getObjectFromHandle(handle, import_sdk3.DataModelObject))).filter((item) => !!item);
+    const from = Number(selection.time_selection_start);
+    const to = Number(selection.time_selection_end);
+    return { kind: "arrangement_selection", lanes: lanes.map(where), timeSelection: { fromBeat: from, toBeat: to }, name: lanes.map((lane) => lane.name).join(", "), trail: lanes.map((lane) => lane.name) };
+  }
+  if (selection && Array.isArray(selection.selected_clip_slots)) {
+    const slots = selection.selected_clip_slots.map((handle) => locateObject(context, context.getObjectFromHandle(handle, import_sdk3.DataModelObject))).filter((item) => !!item);
+    return { kind: "clip_slot_selection", slots: slots.map(where), name: `${slots.length} clip slots`, trail: [...new Set(slots.map((slot) => slot.trail[0] ?? ""))] };
+  }
+  const object = context.getObjectFromHandle(argument, import_sdk3.DataModelObject);
+  const located = locateObject(context, object);
+  return located ? where(located) : void 0;
+}
+async function registerPointing(context, onPointed, log2 = () => void 0) {
+  const handle = (argument) => {
+    try {
+      const payload = pointedAt(context, argument);
+      if (payload) onPointed({ ...payload, at: Date.now() });
+      else log2("pointed at something Kumi couldn't find in the Set");
+    } catch (error) {
+      log2(`pointing failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  context.commands.registerCommand(POINT, handle);
+  context.commands.registerCommand(POINT_SELECTION, handle);
+  for (const scope of OBJECT_SCOPES) await context.ui.registerContextMenuAction(scope, "Ask Kumi about this", POINT);
+  for (const scope of SELECTION_SCOPES) await context.ui.registerContextMenuAction(scope, "Ask Kumi about this selection", POINT_SELECTION);
+}
+
 // src/server.ts
 var import_node_net = require("node:net");
 var REQUIRED = ["version", "id", "method", "nonce", "sequence", "bridgeEpoch", "connectionChallenge", "deadlineMs", "mac"];
@@ -17186,7 +17196,11 @@ var ExtensionServer = class {
         const args = request.args ?? {};
         if (!hasOperation(operation) || !this.handlers.operations.includes(operation)) throw new Error(`operation unavailable on the Extensions channel: ${operation}`);
         validateRequest(operation, args);
-        const run = this.queue.then(() => this.handlers.invoke(operation, args));
+        const deadline = request.deadlineMs;
+        const run = this.queue.then(() => {
+          if (Date.now() > deadline) throw new Error("the request's deadline passed before Live could start it; nothing changed");
+          return this.handlers.invoke(operation, args);
+        });
         this.queue = run.catch(() => void 0);
         result = await run;
         validateResult(operation, result);
@@ -17248,6 +17262,7 @@ function activate(activation) {
   (0, import_node_fs3.mkdirSync)(storage, { recursive: true, mode: 448 });
   const environment = { rendersDir: (0, import_node_path2.join)(temp, "renders") };
   const secret = secretIn(storage);
+  const group = transactionGroup(validateRequest);
   const server = new ExtensionServer(secret, {
     operations: OPERATION_IDS,
     status: () => ({
@@ -17263,7 +17278,7 @@ function activate(activation) {
       extension: { version: VERSION, apiVersion: activation.hostApiVersion, pid: process.pid, storageDirectory: storage, tempDirectory: temp }
     }),
     invoke: async (operation, args) => {
-      if (operation === "transaction.group") return transactionGroup(context, args, environment);
+      if (operation === "transaction.group") return group(context, args, environment);
       const run = OPERATIONS[operation];
       if (!run) throw new Error(`operation unavailable on the Extensions channel: ${operation}`);
       return run(context, args, environment);
@@ -17288,7 +17303,10 @@ function activate(activation) {
         (0, import_node_fs3.rmSync)((0, import_node_path2.join)(storage, "endpoint.json"), { force: true });
       } catch {
       }
-      void server.close().finally(() => process.exit(0));
+      const ownHost = globalThis.__kumiLaunchedHost === true;
+      void server.close().finally(() => {
+        if (ownHost) process.exit(0);
+      });
     }
   }, 5e3);
   watchdog.unref();
