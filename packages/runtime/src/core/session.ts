@@ -507,7 +507,7 @@ export function createSession(options: Options): SessionController {
         // Where it starts, heard at full length: what the tuning has to beat.
         from = (await rig.generation([{ slot: winner.name, knobs, values: start }], signal, { screen: false })).scores.get(winner.name);
         if (from === undefined) return undefined;
-        const began = Date.now();
+        const began = Date.now(); let silentRuns = 0;
         while (Date.now() - began < run.polishMs && !signal.aborted) {
           const trials = evolution.propose();
           const slots = new Map(evolution.slots.map((slot) => [slot.name, slot]));
@@ -516,7 +516,9 @@ export function createSession(options: Options): SessionController {
           for (const [name, keys] of result.frozen) evolution.freeze(name, keys);
           op.progress?.({ type: "tool-start" }); op.progress?.({ type: "tool-end" });
           emit({ type: "doing", text: `Tuning ${label}'s knobs · ${evolution.rendered} settings heard` });
-          if (!result.scores.size || evolution.stalledFor >= 12) break;
+          // A setting that silences it (a level or a filter at an extreme) is just a bad draw; silence pass after pass means the renders aren't coming through.
+          silentRuns = result.scores.size ? 0 : silentRuns + 1;
+          if (silentRuns >= 3 || evolution.stalledFor >= 12) break;
         }
         const best = evolution.leader;
         // The search's best, heard at full length (a long part is searched on a window of it), on the winner's own track.
