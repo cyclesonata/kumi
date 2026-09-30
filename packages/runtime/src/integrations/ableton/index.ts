@@ -1668,7 +1668,8 @@ export function createAbletonIntegration(options: Options): Integration {
     let screen: { from: number; beats: number; reference: Analysis } | undefined;
     if (rig.beats * 60 / tempo0 >= 6) {
       const beats = Math.max(2, Math.round(3 * tempo0 / 60));
-      const lufs = reference.overTime.lufs; const slice = reference.seconds / Math.max(1, lufs.length);
+      // The loudness slices cover what was heard (reference.seconds is the whole file's length).
+      const lufs = reference.overTime.lufs; const slice = Number.parseFloat(reference.overTime.every) || reference.seconds / Math.max(1, lufs.length);
       const across = Math.max(1, Math.round(beats * 60 / tempo0 / slice));
       let bestAt = 0; let bestScore = -Infinity;
       for (let at = 0; at + across <= lufs.length; at++) {
@@ -1883,6 +1884,7 @@ export function createAbletonIntegration(options: Options): Integration {
       for (const { take, file, start } of files) {
         const heard = await hear(file, { start, seconds: beats * 60 / tempo + LEAD_IN, ...(focus ? { focus: focus === "section" ? "mix" : "sound" } : {}), signal });
         take.heard = { lufs: heard.loudness.integratedLufs, summary: heardSummary(heard) };
+        take.render = { file, start };
         if (silentRender(heard)) { take.silent = true; continue; }
         if (reference) take.closeness = closeness(heard, reference, focus);
       }

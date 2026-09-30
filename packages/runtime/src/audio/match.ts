@@ -8,7 +8,7 @@
 import type { Analysis } from "./analyze.js";
 
 export interface Feature {
-  name: "balance" | "tilt" | "brightness" | "movement" | "envelope" | "pitch" | "density" | "width";
+  name: "balance" | "tilt" | "brightness" | "movement" | "envelope" | "pitch" | "density" | "width" | "rhythm" | "contour";
   /** 0 to 100. */
   similarity: number;
   weight: number;
@@ -50,8 +50,9 @@ export const STRUCTURE_MOVES: Record<StructuralKind, string> = {
 
 /** Weights: a single sound is its timbre, envelope and pitch; a section adds balance, density and rhythm. */
 const WEIGHTS: Record<Closeness["focus"], Record<Feature["name"], number>> = {
-  sound: { balance: 0.22, tilt: 0.1, brightness: 0.14, movement: 0.06, envelope: 0.24, pitch: 0.16, density: 0.03, width: 0.05 },
-  section: { balance: 0.24, tilt: 0.1, brightness: 0.1, movement: 0.1, envelope: 0.1, pitch: 0.06, density: 0.2, width: 0.1 },
+  sound: { balance: 0.22, tilt: 0.1, brightness: 0.14, movement: 0.06, envelope: 0.24, pitch: 0.16, density: 0.03, width: 0.05, rhythm: 0, contour: 0.04 },
+  // A section is also when things happen: its rhythm (onsets lined up) and how its loudness moves.
+  section: { balance: 0.2, tilt: 0.08, brightness: 0.08, movement: 0.04, envelope: 0.08, pitch: 0.06, density: 0.1, width: 0.08, rhythm: 0.18, contour: 0.1 },
 };
 
 const near = (distance: number, scale: number) => Math.exp(-Math.abs(distance) / scale);
@@ -122,6 +123,48 @@ export function closeness(mine: Analysis, reference: Analysis, focus?: Closeness
     features.push({ name: "width", similarity: near(width, 0.25), ...(Math.abs(width) >= 0.15 ? { gap: `${width > 0 ? "wider" : "narrower"} than the reference` } : {}) });
   }
 
+  // Timing: the onset curves lined up (a little lag allowed), and the loudness contours, on a common 20 ms grid.
+  if (mine.timeline && reference.timeline) {
+    const grid = (timeline: NonNullable<Analysis["timeline"]>, values: number[], pool: (a: number, b: number) => number) => {
+      const out: number[] = []; const per = 0.02 / timeline.step;
+      for (let at = 0; at * per < values.length; at++) {
+        const from = Math.floor(at * per); const to = Math.max(from + 1, Math.floor((at + 1) * per));
+        out.push(values.slice(from, to).reduce(pool));
+      }
+      return out;
+    };
+    const most = (x: number, y: number) => Math.max(x, y);
+    const onsetsMine = grid(mine.timeline, mine.timeline.onset, most); const onsetsReference = grid(reference.timeline, reference.timeline.onset, most);
+    const length = Math.min(onsetsMine.length, onsetsReference.length);
+    if (length >= 50) {
+      const correlate = (a: number[], b: number[], lag: number) => {
+        let sum = 0; let aa = 0; let bb = 0; const ma = a.reduce((x, y) => x + y, 0) / a.length; const mb = b.reduce((x, y) => x + y, 0) / b.length;
+        for (let index = Math.max(0, -lag); index < length && index + lag < length; index++) { const x = a[index]! - ma; const y = b[index + lag]! - mb; sum += x * y; aa += x * x; bb += y * y; }
+        return aa > 0 && bb > 0 ? sum / Math.sqrt(aa * bb) : 0;
+      };
+      // The rhythm: onsets smeared by 40 ms (a hit a little early or late still counts), the best of lags within 100 ms.
+      const smear = (values: number[]) => values.map((_, index) => Math.max(...values.slice(Math.max(0, index - 2), index + 3)));
+      const a = smear(onsetsMine.slice(0, length)); const b = smear(onsetsReference.slice(0, length));
+      // Only a part with hits has a rhythm: two held sounds have none to compare.
+      const hits = (values: number[]) => values.filter((value, index) => value >= 0.5 && value >= (values[index - 1] ?? 0) && value >= (values[index + 1] ?? 0)).length;
+      const hitsMine = hits(onsetsMine.slice(0, length)); const hitsReference = hits(onsetsReference.slice(0, length));
+      if (hitsMine >= 2 || hitsReference >= 2) {
+        let rhythm = -1;
+        if (hitsMine >= 2 && hitsReference >= 2) for (let lag = -5; lag <= 5; lag++) rhythm = Math.max(rhythm, correlate(a, b, lag));
+        features.push({ name: "rhythm", similarity: Math.max(0, rhythm), ...(rhythm < 0.4 ? { gap: "the rhythm doesn't line up with the reference's: transcribe its notes (listen with transcribe) and play those" } : {}) });
+      }
+      // The contour: loudness over time, smoothed over a quarter second.
+      const levelsMine = grid(mine.timeline, mine.timeline.level, (x, y) => Math.max(x, y)).slice(0, length); const levelsReference = grid(reference.timeline, reference.timeline.level, (x, y) => Math.max(x, y)).slice(0, length);
+      // Smoothed in power, then back to dB: the silence between hits mustn't drown how loud the hits get.
+      const smooth = (values: number[]) => values.map((_, index) => { const part = values.slice(Math.max(0, index - 6), index + 7); return 10 * Math.log10(Math.max(1e-9, part.reduce((x, y) => x + 10 ** (y / 10), 0) / part.length)); });
+      const smoothMine = smooth(levelsMine); const smoothReference = smooth(levelsReference);
+      const contour = correlate(smoothMine, smoothReference, 0);
+      const trend = (values: number[]) => { const half = Math.floor(values.length / 2); const mean = (part: number[]) => part.reduce((x, y) => x + y, 0) / Math.max(1, part.length); return mean(values.slice(half)) - mean(values.slice(0, half)); };
+      const builds = trend(smoothReference) - trend(smoothMine);
+      features.push({ name: "contour", similarity: (contour + 1) / 2,
+        ...(Math.abs(builds) >= 4 ? { gap: builds > 0 ? `the reference builds up over time (${signed(trend(smoothReference))} dB from its first half to its second); this doesn't as much` : "this builds up more over time than the reference" } : {}) });
+    }
+  }
   const weights = WEIGHTS[kind];
   const weighted = features.map((feature) => ({ ...feature, weight: weights[feature.name] }));
   // Gaps knobs can't close, each with the feature whose points it costs.

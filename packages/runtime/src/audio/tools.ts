@@ -1,5 +1,6 @@
 /** The listen tool: what the model uses to hear files, alone or against a reference. */
-import type { HeardEvent, KernelTool } from "../core/contracts.js";
+import type { HeardEvent, JsonObject, KernelTool } from "../core/contracts.js";
+import type { HeardNote } from "./analyze.js";
 import { AudioError, audioPath, compare, hear, type Analysis } from "./index.js";
 
 export const LISTEN_TOOL = "listen";
@@ -13,7 +14,27 @@ const DESCRIPTION = [
   "Say what you heard in the producer's terms, not as a data dump.",
 ].join(" ");
 
-const trimSound = (analysis: Analysis) => analysis;
+/** What the model reads of an analysis: everything but the fine timeline (for scoring), and the notes as compact rows. */
+const trimSound = (analysis: Analysis, tempo?: number) => {
+  const { timeline: _timeline, notes, ...rest } = analysis;
+  return { ...rest, ...(notes ? { notes: transcription(notes, tempo) } : {}) };
+};
+
+/**
+ * Transcribed notes as the model writes MIDI: rows of [start, pitch, velocity, length], in beats at the Set's
+ * tempo when given (to a 16th), else seconds; a hit with no clear pitch has pitch null.
+ */
+export function transcription(notes: readonly HeardNote[], tempo?: number): JsonObject {
+  const unit = tempo ? tempo / 60 : 1;
+  const at = (seconds: number) => (tempo ? Math.round(seconds * unit * 4) / 4 : Math.round(seconds * 1000) / 1000);
+  const rows = notes.slice(0, 400).map((note) => [at(note.time), note.midi, note.velocity, Math.max(tempo ? 0.25 : 0.02, at(note.duration))]);
+  const pitched = notes.filter((note) => note.midi !== null);
+  const counts = new Map<number, number>(); for (const note of pitched) counts.set(note.midi!, (counts.get(note.midi!) ?? 0) + 1);
+  return { unit: tempo ? `beats at ${tempo} BPM (a 16th is 0.25)` : "seconds", columns: ["start", "pitch (MIDI; null: a hit with no clear pitch)", "velocity", "length"], rows,
+    ...(notes.length > 400 ? { more: notes.length - 400 } : {}), pitched: pitched.length, unpitched: notes.length - pitched.length,
+    mostPlayed: [...counts].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([midi, count]) => ({ midi, count })),
+    note: "Monophonic: the strongest line. Write it with write_midi_clip (unpitched hits as a drum or percussive voice), then audition the result against the reference." };
+}
 
 /**
  * The listen tool. `resolve` turns what the model names into a file (a path, or something in the
@@ -29,25 +50,29 @@ export function listeningTools(options: { onEvent: (event: HeardEvent) => void; 
       focus: { type: "string", enum: ["mix", "sound"], description: "mix for a song or stem, sound for one note or hit; left out, chosen by length" },
       from_seconds: { type: "number", minimum: 0, description: "Where to start listening in file" },
       compare_from_seconds: { type: "number", minimum: 0, description: "Where to start listening in the reference; left out, its start" },
-      seconds: { type: "number", exclusiveMinimum: 0, maximum: 720, description: "How long to listen" } } },
+      seconds: { type: "number", exclusiveMinimum: 0, maximum: 720, description: "How long to listen" },
+      transcribe: { type: "boolean", description: "Transcribe file's notes (its first minute): when each starts, its pitch, velocity and length, to write the sequence as MIDI" },
+      tempo: { type: "number", minimum: 20, maximum: 999, description: "The Set's tempo, so transcribed notes come in beats" } } },
     async execute(input, signal) {
       const file = typeof input.file === "string" ? input.file : "";
       const focus: "mix" | "sound" | undefined = input.focus === "mix" || input.focus === "sound" ? input.focus : undefined;
-      const common = { ...(focus ? { focus } : {}),
+      const tempo = typeof input.tempo === "number" ? input.tempo : undefined;
+      const common = { ...(focus ? { focus } : {}), ...(input.transcribe === true ? { transcribe: true } : {}),
         ...(typeof input.from_seconds === "number" ? { start: input.from_seconds } : {}), ...(typeof input.seconds === "number" ? { seconds: input.seconds } : {}), signal };
       try {
         const mine = await hear(await locate(file, signal), common);
         if (typeof input.compare_to !== "string") {
           options.onEvent({ type: "heard", file: mine.file, summary: summary(mine), bands: mine.balance.bands.map((band) => band.db) });
-          return { text: JSON.stringify(trimSound(mine)) };
+          return { text: JSON.stringify(trimSound(mine, tempo)) };
         }
         // The reference's own place: the same seconds into another song are rarely the same part of it.
         const { start: _mine, ...rest } = common;
-        const reference = await hear(await locate(input.compare_to, signal), { ...rest, ...(typeof input.compare_from_seconds === "number" ? { start: input.compare_from_seconds } : {}), ...(mine.analyzed.focus ? { focus: mine.analyzed.focus } : {}) });
+        const { transcribe: _transcribe, ...restNoNotes } = rest as typeof rest & { transcribe?: boolean };
+        const reference = await hear(await locate(input.compare_to, signal), { ...restNoNotes, ...(typeof input.compare_from_seconds === "number" ? { start: input.compare_from_seconds } : {}), ...(mine.analyzed.focus ? { focus: mine.analyzed.focus } : {}) });
         const comparison = compare(mine, reference);
         options.onEvent({ type: "heard", file: mine.file, summary: summary(mine), bands: mine.balance.bands.map((band) => band.db),
           compared: { reference: reference.file, summary: summary(reference), differences: comparison.balance.map((band) => band.difference), headlines: comparison.headlines } });
-        return { text: JSON.stringify({ comparison, mine: { loudness: mine.loudness, tempo: mine.tempo, key: mine.key }, reference: { loudness: reference.loudness, tempo: reference.tempo, key: reference.key } }) };
+        return { text: JSON.stringify({ comparison, mine: { loudness: mine.loudness, tempo: mine.tempo, key: mine.key, ...(mine.notes ? { notes: transcription(mine.notes, tempo) } : {}) }, reference: { loudness: reference.loudness, tempo: reference.tempo, key: reference.key } }) };
       } catch (error) {
         signal.throwIfAborted();
         return { text: error instanceof AudioError ? error.message : `Kumi couldn't listen to that: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };

@@ -212,6 +212,8 @@ export interface AuditionTake {
   /** The render was (nearly) silent: nothing to compare. */
   silent?: boolean;
   closeness?: Closeness;
+  /** The render's file, and where the part starts in it (seconds). */
+  render?: { file: string; start: number };
   heard?: { lufs: number | null; summary: string };
 }
 export interface AuditionResult {

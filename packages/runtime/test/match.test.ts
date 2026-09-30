@@ -43,3 +43,24 @@ test("a gap no knob closes is named with the structure that closes it: a missing
   assert.match(result.structural!.move, /sub layer/);
   assert.equal(closeness(mine, mine).structural, undefined, "nothing to change against itself");
 });
+
+test("a section's timing counts: the same sound in another rhythm scores lower, and a part that builds up against one that doesn't is named", async () => {
+  const hit = saw(0.08, 110).map((value, index) => value * Math.exp(-index / (0.02 * 48000)));
+  const place = (times: number[], seconds: number, gain = (_time: number) => 1) => {
+    const out = new Float32Array(Math.round(seconds * 48000));
+    for (const time of times) { const from = Math.round(time * 48000); hit.forEach((value, index) => { if (from + index < out.length) out[from + index]! += value * gain(time); }); }
+    return out;
+  };
+  const straight = Array.from({ length: 16 }, (_, index) => index * 0.25);
+  const other = straight.map((time, index) => time + (index % 2 ? 0.125 : 0));
+  const reference = await analyzeFile(wav("rhythm-ref.wav", place(straight, 4.2)), { focus: "mix" });
+  const same = closeness(await analyzeFile(wav("rhythm-same.wav", place(straight, 4.2)), { focus: "mix" }), reference, "section");
+  const shifted = closeness(await analyzeFile(wav("rhythm-shifted.wav", place(other, 4.2)), { focus: "mix" }), reference, "section");
+  const rhythm = (result: typeof same) => result.features.find((feature) => feature.name === "rhythm")!.similarity;
+  assert.ok(rhythm(same) > 90 && rhythm(shifted) < rhythm(same) - 20, `rhythm ${rhythm(same)} against ${rhythm(shifted)}`);
+  assert.ok(shifted.score < same.score);
+  // A swell against a level part.
+  const swell = await analyzeFile(wav("contour-swell.wav", place(straight, 4.2, (time) => 0.05 + time / 4)), { focus: "mix" });
+  const level = closeness(await analyzeFile(wav("contour-level.wav", place(straight, 4.2, () => 0.5)), { focus: "mix" }), swell, "section");
+  assert.match(level.gaps.join(" "), /the reference builds up over time/);
+});

@@ -48,7 +48,17 @@ export interface Analysis {
   overTime: { every: string; lufs: (number | null)[] };
   spectrogram: { rows: { band: string; cells: string }[]; columns: string; scale: string };
   sound?: SoundAnalysis;
+  /**
+   * When things happen, finely: the onset strength (0–1) and the level (dB) every `step` seconds. For
+   * comparing rhythm and how loudness moves (closeness), not for the model to read.
+   */
+  timeline?: { step: number; onset: number[]; level: number[] };
+  /** The notes heard, when asked for (transcribe): each onset with its pitch, velocity and length. */
+  notes?: HeardNote[];
 }
+
+/** A note transcribed from audio: when (seconds from the start of what was analyzed), how long, its pitch (MIDI; none for a hit without one), how hard. */
+export interface HeardNote { time: number; duration: number; midi: number | null; velocity: number; confidence: number }
 
 export interface AnalyzeOptions {
   /** "sound" for a single note or hit, "mix" for a song; "auto" picks by length. */
@@ -57,6 +67,8 @@ export interface AnalyzeOptions {
   start?: number;
   seconds?: number;
   signal?: AbortSignal;
+  /** Transcribe the notes (the first minute at most). */
+  transcribe?: boolean;
 }
 
 /** The longest stretch analyzed; more is sampled from its start. */
@@ -80,7 +92,7 @@ export async function analyzeSource(source: AudioSource, name: string, options: 
   source.seek(startSeconds * sampleRate);
   const frames = Math.floor(length * sampleRate);
   const meter = new Meter(sampleRate, channels, frames);
-  const keepMono = focus === "sound" ? new Float32Array(frames) : undefined;
+  const keepMono = focus === "sound" || options.transcribe ? new Float32Array(Math.min(frames, focus === "sound" ? frames : sampleRate * 60)) : undefined;
   let done = 0;
   while (done < frames) {
     options.signal?.throwIfAborted();
@@ -98,7 +110,8 @@ export async function analyzeSource(source: AudioSource, name: string, options: 
     seconds: round(total, 2), analyzed: { from: clock(startSeconds), to: clock(startSeconds + done / sampleRate), focus },
     ...summary,
   };
-  if (keepMono) analysis.sound = analyzeSound(keepMono.subarray(0, done), sampleRate, summary.tempo?.bpm);
+  if (keepMono && focus === "sound") analysis.sound = analyzeSound(keepMono.subarray(0, done), sampleRate, summary.tempo?.bpm);
+  if (keepMono && options.transcribe) analysis.notes = transcribe(keepMono.subarray(0, Math.min(done, keepMono.length)), sampleRate, meter.onsetCurve());
   return analysis;
 }
 
@@ -183,7 +196,7 @@ class Meter {
       }
       const mono = (l + r) / 2;
       this.sumSquares += mono * mono; this.sumLR += l * r; this.sumLL += l * l; this.sumRR += r * r;
-      if (keepMono) keepMono[offset + index] = mono;
+      if (keepMono && offset + index < keepMono.length) keepMono[offset + index] = mono;
       // Spectrum.
       this.left[this.ring] = l; this.right[this.ring] = r;
       if (++this.ring === FRAME) { this.spectrum(); this.ring = 0; }
@@ -261,7 +274,24 @@ class Meter {
       tempo, key,
       overTime: overTime(this.squares, this.channels, seconds),
       spectrogram: this.picture(seconds),
+      timeline: this.timeline(onsets),
     };
+  }
+
+  /** The onset strength per 512 samples, for transcribing. */
+  onsetCurve(): Float64Array { return onsetStrength(this.onsetFrames); }
+
+  /** Onsets and level at a fine step (512 samples, pooled so a long file keeps 2,000 points at most). */
+  private timeline(onsets: Float64Array): NonNullable<Analysis["timeline"]> {
+    const pool = Math.max(1, Math.ceil(onsets.length / 2000));
+    const peak = Math.max(1e-9, ...onsets);
+    const onset: number[] = []; const level: number[] = [];
+    for (let at = 0; at < onsets.length; at += pool) {
+      let strongest = 0; let energy = 0;
+      for (let index = at; index < Math.min(onsets.length, at + pool); index++) { strongest = Math.max(strongest, onsets[index]!); energy += this.onsetFrames[index]?.[1] ?? 0; }
+      onset.push(round(strongest / peak, 2)); level.push(round(Math.max(-90, db(energy / (512 * pool)))));
+    }
+    return { step: round(512 * pool / this.sampleRate, 4), onset, level };
   }
 
   private sliceSum(band: number): number { return this.slices.reduce((sum, slice) => sum + (slice?.[band] ?? 0), 0); }
@@ -368,6 +398,50 @@ function onsetStrength(frames: number[][]): Float64Array {
     smooth[index] = Math.max(0, out[index]! - running / Math.min(index + 1, span));
   }
   return smooth;
+}
+
+/** The onsets' places in a strength curve: peaks over the threshold, at least ~50 ms apart. */
+function onsetPeaks(strength: Float64Array): number[] {
+  if (strength.length < 3) return [];
+  const values = Array.from(strength);
+  const threshold = percentile(values, 0.5) + 2 * Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
+  const peaks: number[] = []; let last = -10;
+  for (let index = 1; index < strength.length - 1; index++) {
+    const value = strength[index]!;
+    if (value > threshold && value >= strength[index - 1]! && value >= strength[index + 1]! && index - last >= 4) { peaks.push(index); last = index; }
+  }
+  return peaks;
+}
+
+/**
+ * The notes in a stretch of audio: each onset, the pitch it settles on (by the same pitch tracking as a
+ * single sound's, over its first 150 ms), how hard it starts against the loudest, and how long until it
+ * falls 18 dB or the next one starts. A hit without a clear pitch has none. Monophonic: the strongest line.
+ */
+export function transcribe(mono: Float32Array, sampleRate: number, strength: Float64Array): HeardNote[] {
+  const hop = 512; const peaks = onsetPeaks(strength);
+  const rms = (from: number, length: number) => { let sum = 0; const to = Math.min(mono.length, from + length); for (let index = from; index < to; index++) sum += mono[index]! ** 2; return Math.sqrt(sum / Math.max(1, to - from)); };
+  const found = peaks.map((peak, index) => {
+    const start = Math.max(0, peak * hop - hop);
+    const next = index + 1 < peaks.length ? peaks[index + 1]! * hop : mono.length;
+    // Its attack: the loudest 5 ms in its first 60 ms, and where that is.
+    const slot = Math.round(sampleRate * 0.005);
+    const levels = Array.from({ length: 12 }, (_, step) => rms(start + step * slot, slot));
+    const loudestAt = levels.indexOf(Math.max(...levels));
+    const attack = dbAmplitude(Math.max(1e-9, levels[loudestAt]!));
+    // Its length: from where it starts sounding until it falls 18 dB below its attack, or the next note starts (two seconds at most).
+    const window = Math.round(sampleRate * 0.01);
+    let end = start + loudestAt * slot;
+    while (end + window < Math.min(next, start + sampleRate * 2) && dbAmplitude(rms(end, window)) > attack - 18) end += window;
+    // Its pitch: tracked over its first 150 ms, after the first 20 ms of attack.
+    const from = start + Math.round(sampleRate * 0.02);
+    const tracked = from < mono.length ? trackPitch(mono.subarray(from, Math.min(mono.length, from + Math.round(sampleRate * 0.15) + 4096)), sampleRate).filter((frame) => frame.confidence > 0.6 && frame.hz > 30) : [];
+    const hz = tracked.length ? percentile(tracked.map((frame) => frame.hz), 0.5) : 0;
+    const confidence = tracked.length ? percentile(tracked.map((frame) => frame.confidence), 0.5) : 0;
+    return { time: start / sampleRate, duration: Math.max(0.02, (end - start) / sampleRate), midi: hz > 0 ? noteOf(hz).midi : null, attack, confidence };
+  });
+  const loudest = Math.max(-200, ...found.map((note) => note.attack));
+  return found.map(({ attack, ...note }) => ({ ...note, time: round(note.time, 3), duration: round(note.duration, 3), velocity: Math.max(1, Math.min(127, Math.round(127 + 3 * (attack - loudest)))), confidence: round(note.confidence, 2) }));
 }
 
 function countOnsets(strength: Float64Array): number {
