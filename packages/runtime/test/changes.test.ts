@@ -319,6 +319,12 @@ test("parameters of one device in a row change as one change: one Live request, 
     const stale = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_device_parameter", input: { deviceRef: "device:1" }, each: { parameterRef: ["parameter:1", "7:parameter:9"], value: [0.5, 0.5] } }] }, signal());
     assert.equal(stale.isError, true); assert.match(stale.text, /parameterRef must come from discovery/, "every parameter's reference is checked");
     assert.equal(b.requests.filter((request) => request.name === "live_device_parameter_preview").length, 2, "and nothing more reached Live");
+    // A number written as text is that number; a value outside the range says what the range is and where it is now.
+    const texted = await tool(b.tools, "set_device_parameter").execute({ deviceRef: "device:1", parameterRef: "parameter:2", value: "0.4" }, signal());
+    assert.equal(texted.isError, false, texted.text);
+    const outside = await tool(b.tools, "set_device_parameter").execute({ deviceRef: "device:1", parameterRef: "parameter:2", value: 800 }, signal());
+    assert.equal(outside.isError, true);
+    assert.match(outside.text, /outside authoritative bounds.* Values are the parameter's own, between its min and max, not what Live shows: Filter Freq takes 0 to 1 \(now 0\)\.$/);
   } finally { await b.integration.close(); }
 });
 

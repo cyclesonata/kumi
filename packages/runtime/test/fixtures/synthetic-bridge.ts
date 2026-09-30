@@ -136,6 +136,10 @@ export function bridge(options: Options = {}) {
         if (name === "live_chain_mixer_preview") return wrap({ ...base, chainRef: args.chainRef, chainName: "Pad", rackName: "Instrument Rack", prior: { volume: 0.85, pan: 0 }, proposed: { volume: args.volume, pan: args.pan } });
         if (name === "live_device_parameter_preview") {
           const device = { ref: args.deviceRef, name: "Operator", trackRef: "7:track:0" };
+          // Live's own checks: a finite value, within the parameter's range (these are 0 to 1).
+          const given = Array.isArray(args.values) ? (args.values as JsonObject[]).map((item) => item.value) : [args.value];
+          if (given.some((value) => typeof value !== "number" || !Number.isFinite(value))) return refusal("The bridge rejected the arguments: deviceRef, parameterRef, and finite value are required");
+          if (given.some((value) => (value as number) < 0 || (value as number) > 1)) return refusal(JSON.stringify({ reason: "parameter value is outside authoritative bounds", remediation: "Parameter preview failed without mutation" }));
           const row = (parameterRef: unknown, value: unknown) => ({ ref: parameterRef, name: ["Osc-A Level", "Filter Freq", "Ae Release"][Number(String(parameterRef).split(":").at(-1))], currentValue: 0, proposedValue: value, min: 0, max: 1 });
           return wrap(Array.isArray(args.values) ? { ...base, device, parameters: (args.values as JsonObject[]).map((item) => row(item.parameterRef, item.value)) } : { ...base, device, parameter: row(args.parameterRef, args.value) });
         }

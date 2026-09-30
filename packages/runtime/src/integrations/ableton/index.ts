@@ -464,7 +464,7 @@ export function createAbletonIntegration(options: Options): Integration {
   function requireFreshReferences(args: JsonObject, depth = 0) {
     for (const field of REFERENCE_FIELDS) {
       const value = args[field];
-      if (value !== undefined && (typeof value !== "string" || !refs.has(value))) throw new ObservationError(`${field} must come from discovery in this turn; discover it again`);
+      if (value !== undefined && (typeof value !== "string" || !refs.has(value))) throw new ObservationError(`${field} must come from discovery in this turn; discover it again${field === "parameterRef" ? " (or name the parameter instead, with parameter \"Filter Freq\", and the device's deviceRef from this turn's observation)" : ""}`);
     }
     // And the ones in a list, such as each parameter of several changed at once.
     if (depth < 2) for (const value of Object.values(args)) if (Array.isArray(value)) for (const item of value) if (item && typeof item === "object" && !Array.isArray(item)) requireFreshReferences(item as JsonObject, depth + 1);
@@ -605,6 +605,12 @@ export function createAbletonIntegration(options: Options): Integration {
       async parameters(deviceRef) {
         return (await deviceParameters(deviceRef, ["ref", "name"], signal))
           .filter((row): row is JsonObject & { ref: string; name: string } => typeof row.ref === "string" && typeof row.name === "string").map((row) => ({ ref: row.ref, name: row.name }));
+      },
+      async ranges(deviceRef) {
+        return (await deviceParameters(deviceRef, ["ref", "name", "min", "max", "value", "displayValue"], signal))
+          .filter((row): row is JsonObject & { ref: string; name: string } => typeof row.ref === "string" && typeof row.name === "string")
+          .map((row) => ({ ref: row.ref, name: row.name, ...(typeof row.min === "number" ? { min: row.min } : {}), ...(typeof row.max === "number" ? { max: row.max } : {}),
+            ...(typeof row.value === "number" ? { value: row.value } : {}), ...(typeof row.displayValue === "string" ? { display: row.displayValue } : {}) }));
       },
       async pick(selector: SampleSelector) {
         const named = (selector.folders ?? []).map((folder) => folderPath(folder)).filter((folder): folder is string => Boolean(folder));
@@ -992,7 +998,10 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!settled) await guardEpoch(signal, epoch, lease);
       const args = await appendAtEnd(kind, prepared, signal); assertLease(lease, signal);
       const previewed = await tools.call(kind.preview, args, signal, { host: true }); assertLease(lease, signal);
-      if (previewed.isError) return { text: JSON.stringify(previewed), isError: true };
+      if (previewed.isError) {
+        const more = kind.explain ? await kind.explain(JSON.stringify(previewed), args, changeContext(signal)).catch(() => undefined) : undefined;
+        return { text: `${JSON.stringify(previewed)}${more ? ` ${more}` : ""}`, isError: true };
+      }
       const preview = payload(previewed);
       if (preview.epoch !== undefined && preview.epoch !== epoch) changed();
       const { transactionId, confirmation } = preview;

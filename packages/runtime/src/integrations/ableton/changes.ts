@@ -17,6 +17,8 @@ export interface ChangeContext {
   sample(path: string): { path: string; folder: string } | undefined;
   /** A device's parameters as Live has them now (for a parameter named rather than referenced). */
   parameters(deviceRef: string): Promise<{ ref: string; name: string }[]>;
+  /** A device's parameters with their ranges and where they are now, as Live shows them. */
+  ranges(deviceRef: string): Promise<{ ref: string; name: string; min?: number; max?: number; value?: number; display?: string }[]>;
   /** A sample Kumi finds itself (at random, or the best match for the words), not one already picked in this answer. */
   pick(selector: SampleSelector): Promise<{ path: string; folder: string } | undefined>;
 }
@@ -72,6 +74,8 @@ export interface ChangeKind {
   inputSchema?: JsonObject;
   /** Turn the model's input into the preview's; a string refuses, in words for the model. */
   prepare?(input: JsonObject, context: ChangeContext): JsonObject | string | Promise<JsonObject | string>;
+  /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
+  explain?(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
   produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" } | undefined;
   /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
@@ -181,7 +185,11 @@ function namedParameters(schema: JsonObject): JsonObject {
 }
 
 /** Parameters named rather than referenced, found on the device as it is now (exact name first, then a prefix). */
-async function resolveParameters(input: JsonObject, context: ChangeContext): Promise<JsonObject | string> {
+async function resolveParameters(given: JsonObject, context: ChangeContext): Promise<JsonObject | string> {
+  // A number written as text ("0.55") is that number.
+  const numeric = (value: unknown) => (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)) ? Number(value) : value);
+  const input: JsonObject = { ...given, ...(given.value !== undefined ? { value: numeric(given.value) } : {}),
+    ...(Array.isArray(given.values) ? { values: given.values.map((item) => (item && typeof item === "object" && !Array.isArray(item) && "value" in item ? { ...(item as JsonObject), value: numeric((item as JsonObject).value) } : item)) } : {}) };
   const named = typeof input.parameter === "string" || (Array.isArray(input.values) && input.values.some((item) => item && typeof item === "object" && typeof (item as JsonObject).parameter === "string"));
   if (!named) return input;
   if (typeof input.deviceRef !== "string") return "Name the device (deviceRef) whose parameter this is.";
@@ -203,6 +211,17 @@ async function resolveParameters(input: JsonObject, context: ChangeContext): Pro
     values.push({ ...value, parameterRef: found.ref });
   }
   return { ...rest, values };
+}
+
+/** Live refused a value: each parameter it was for, with the range it takes and where it is now. */
+async function explainParameters(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined> {
+  if (!/bounds|finite value|value .*required|range/i.test(error) || typeof input.deviceRef !== "string") return undefined;
+  const list = await context.ranges(input.deviceRef);
+  const refs = new Set([input.parameterRef, ...(Array.isArray(input.values) ? input.values.map((item) => (item && typeof item === "object" ? (item as JsonObject).parameterRef : undefined)) : [])].filter((ref): ref is string => typeof ref === "string"));
+  const asked = list.filter((row) => refs.has(row.ref));
+  const shown = (asked.length ? asked : list).slice(0, 16).flatMap((row) => row.min === undefined || row.max === undefined ? [] :
+    [`${row.name} takes ${formatNumber(row.min)} to ${formatNumber(row.max)}${row.value !== undefined ? ` (now ${formatNumber(row.value)}${row.display ? `, shown as ${row.display}` : ""})` : ""}`]);
+  return shown.length ? `Values are the parameter's own, between its min and max, not what Live shows: ${shown.join("; ")}.` : undefined;
 }
 
 const BASE_CHANGES: readonly ChangeKind[] = [
@@ -363,6 +382,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
     description: "Set one device parameter to a value between its min and max, or several of one device at once with values (one change, one undo) when offered. deviceRef and parameterRef come from discovery in this turn; instead of parameterRef, parameter names it (\"Drive\"), found on the device when the step runs: that's how a plan or a recipe sets a device an earlier step loaded (deviceRef \"@sat\").",
     schema: namedParameters,
     prepare: (input, context) => resolveParameters(input, context),
+    explain: explainParameters,
     summarize(preview, input, track, applied) {
       if (Array.isArray(preview.parameters)) return parametersSummary(preview, input, track, applied);
       const parameter = record(preview.parameter); const device = record(preview.device);
@@ -382,6 +402,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
     tool: "set_device_parameters", preview: "live_device_parameter_preview", apply: "live_device_parameter_apply", family: "parameter", internal: true,
     description: "Set several parameters of one device as one change; undo restores them all.",
     prepare: (input, context) => resolveParameters(input, context),
+    explain: explainParameters,
     summarize: (preview, input, track, applied) => parametersSummary(preview, input, track, applied),
   },
   {
