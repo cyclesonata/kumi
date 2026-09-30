@@ -7106,3 +7106,129 @@ class ScaleBenchmarkTests(unittest.TestCase):
         self.assertEqual(changed["value"], 0.75)
         print("\n  scale benchmark (200 tracks, 1000 devices, 4 x 5000 parameters, 20000 notes):")
         for name, seconds in timings.items(): print(f"    {name:48s} {seconds * 1000:9.1f} ms")
+
+
+def mutate_through(bridge, operation, args, key, transaction="transaction-phase2", holder=None):
+    """A single-request change as the host sends it: the preview's digest, then `mutate`, both
+    checked against the operation's registry schema."""
+    validate_operation_payload(operation, "request", args)
+    digest = bridge.mapper.invoke("authority.digest", {"operation": operation, "args": args})["stateDigest"]
+    result = bridge._dispatch_with_holder("mutate", {"operation": operation, "transactionId": transaction, "idempotencyKey": key, "stateDigest": digest, "args": args}, {} if holder is None else holder)
+    validate_operation_payload(operation, "result", result)
+    return result
+
+
+def read_through(bridge, operation, args):
+    """A read as the host sends it: invoked with no mutation authority, checked against the registry."""
+    validate_operation_payload(operation, "request", args)
+    result = bridge._dispatch_with_holder("invoke", {"operation": operation, "args": args}, {})
+    validate_operation_payload(operation, "result", result)
+    return result
+
+
+class FakeDataTrack(FakeTrack):
+    def __init__(self):
+        super().__init__(); self.data = {}
+    def get_data(self, key, default): return self.data.get(key, default)
+    def set_data(self, key, value): self.data[key] = value
+
+
+class FakeDataSong(FakeSong):
+    def __init__(self):
+        super().__init__(); self.data = {}; self.tracks = [FakeDataTrack(), FakeDataTrack()]
+    def get_data(self, key, default): return self.data.get(key, default)
+    def set_data(self, key, value): self.data[key] = value
+
+
+class SetDataTests(unittest.TestCase):
+    """data.get/data.set: text saved inside the Set (Song.get_data/set_data) or with a track."""
+
+    def test_text_saved_in_the_set_and_on_a_track_reads_back(self):
+        song = FakeDataSong(); bridge = immediate_bridge(song); snapshot = bridge.mapper.snapshot()
+        set_ref, track_ref = snapshot["set"]["ref"], snapshot["tracks"][1]["ref"]
+        self.assertEqual({operation for operation in ("data.get", "data.set") if not remote_module._mutation_authority_required(operation)}, {"data.get"})
+        self.assertEqual(read_through(bridge, "data.get", {"ref": set_ref, "key": "kumi.notes"}), {"ref": set_ref, "key": "kumi.notes", "value": None})
+        self.assertEqual(mutate_through(bridge, "data.set", {"ref": set_ref, "key": "kumi.notes", "value": "verse at bar 9"}, "data-key-0001"), {"ref": set_ref, "key": "kumi.notes", "value": "verse at bar 9", "prior": None})
+        self.assertEqual(song.data, {"kumi.notes": "verse at bar 9"})
+        # A track keeps its own: the Set's is untouched.
+        self.assertEqual(mutate_through(bridge, "data.set", {"ref": track_ref, "key": "kumi.notes", "value": "bass"}, "data-key-0002")["prior"], None)
+        self.assertEqual((song.tracks[1].data, song.tracks[0].data, song.data["kumi.notes"]), ({"kumi.notes": "bass"}, {}, "verse at bar 9"))
+        self.assertEqual(read_through(bridge, "data.get", {"ref": track_ref, "key": "kumi.notes"})["value"], "bass")
+        # Compare-and-set: only while the key holds what was read.
+        with self.assertRaisesRegex(ValueError, "changed since it was read"): bridge.mapper.invoke("data.set", {"ref": set_ref, "key": "kumi.notes", "value": "x", "expectedValue": "chorus"})
+        self.assertEqual(mutate_through(bridge, "data.set", {"ref": set_ref, "key": "kumi.notes", "value": None, "expectedValue": "verse at bar 9"}, "data-key-0003"), {"ref": set_ref, "key": "kumi.notes", "value": None, "prior": "verse at bar 9"})
+
+    def test_what_isnt_text_or_isnt_there_is_refused_and_an_unconfirmed_write_goes_back(self):
+        song = FakeDataSong(); mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); set_ref = snapshot["set"]["ref"]
+        song.data["other.script"] = {"not": "text"}
+        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.get", {"ref": set_ref, "key": "other.script"})
+        with self.assertRaisesRegex(ValueError, "isn't text"): mapper.invoke("data.set", {"ref": set_ref, "key": "other.script", "value": "mine"})
+        self.assertEqual(song.data["other.script"], {"not": "text"})
+        with self.assertRaisesRegex(ValueError, "track reference is stale or invalid"): mapper.invoke("data.get", {"ref": f"{mapper.refs.epoch}:track:9", "key": "k"})
+        with self.assertRaisesRegex(ValueError, "track reference is stale or invalid"): mapper.invoke("data.get", {"ref": "0:track:0", "key": "k"})
+        # Live keeps something else than was written: the prior value goes back and the change fails.
+        song.data["k"] = "before"; song.set_data = lambda key, value: song.data.__setitem__(key, value if value == "before" else value.upper())
+        with self.assertRaisesRegex(ValueError, "^data change was not confirmed$"): mapper.invoke("data.set", {"ref": set_ref, "key": "k", "value": "after"})
+        self.assertEqual(song.data["k"], "before")
+        self.assertTrue(mapper._operation_supported("data.set")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("data.get"))
+
+
+class FakeSelectableNoteClip(FakeNoteClip):
+    """Live 12's note selection and region deletion on top of FakeNoteClip."""
+
+    def __init__(self, length=4.0, notes=()):
+        super().__init__(length, notes); self.selected = set(); self.extra_removal = None
+    def select_all_notes(self): self.selected = set(self.stored)
+    def deselect_all_notes(self): self.selected = set()
+    def select_notes_by_id(self, ids): self.selected |= set(ids)
+    def get_selected_notes_extended(self): return FakeMidiNoteVector(self.stored[note_id].copy() for note_id in sorted(self.selected))
+    def remove_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
+        for note_id, note in list(self.stored.items()):
+            if from_pitch <= note.pitch < from_pitch + pitch_span and from_time <= note.start_time < from_time + time_span: del self.stored[note_id]
+        if self.extra_removal is not None: self.stored.pop(self.extra_removal, None)
+    def add_new_notes(self, notes):
+        for note in notes:
+            value = note if isinstance(note, dict) else {"pitch": note.pitch, "start_time": note.start_time, "duration": note.duration, "velocity": note.velocity}
+            note_id = max(self.stored, default=0) + 1
+            self.stored[note_id] = FakeMidiNote(note_id, value["pitch"], value["start_time"], value["duration"], value["velocity"], value.get("mute", False), value.get("probability", 1.0), value.get("velocity_deviation", 0.0), value.get("release_velocity", 64.0))
+
+
+class NoteSelectionAndRegionTests(unittest.TestCase):
+    """note.select and note.delete-range, checked on the clip's hierarchy (and its notes, to delete)."""
+
+    def clip_bridge(self):
+        clip = FakeSelectableNoteClip(4.0, [FakeMidiNote(1, 60, 0.0, 0.5), FakeMidiNote(2, 62, 1.0, 0.5), FakeMidiNote(3, 64, 2.0, 0.5), FakeMidiNote(4, 72, 1.0, 0.5)])
+        song = FakeSong(); song.tracks[0].clip_slots[0].clip = clip; bridge = immediate_bridge(song)
+        row = bridge.mapper.snapshot()["tracks"][0]["clips"][0]
+        return bridge, clip, row["ref"]
+
+    def test_notes_are_selected_all_none_or_exactly_by_id(self):
+        bridge, clip, reference = self.clip_bridge(); authority = bridge.mapper._session_clip_authority(reference)
+        self.assertEqual(mutate_through(bridge, "note.select", {"ref": reference, "all": True, "expectedClipAuthority": authority}, "select-key-0001"), {"selected": 4})
+        self.assertEqual(mutate_through(bridge, "note.select", {"ref": reference, "noteIds": [1, 3], "expectedClipAuthority": authority}, "select-key-0002"), {"selected": 2})
+        self.assertEqual(clip.selected, {1, 3})
+        self.assertEqual(mutate_through(bridge, "note.select", {"ref": reference, "none": True, "expectedClipAuthority": authority}, "select-key-0003"), {"selected": 0})
+        for broken, message in (({"all": True, "none": True}, "exactly one"), ({"none": False}, "exactly one"), ({"noteIds": [9]}, "not present in the clip"), ({"noteIds": [1, 1]}, "note ids are invalid")):
+            with self.assertRaisesRegex(ValueError, message): bridge.mapper.invoke("note.select", {"ref": reference, "expectedClipAuthority": authority, **broken})
+        # Another clip in the slot: the preview's hierarchy no longer holds.
+        bridge.mapper.song.tracks[0].clip_slots[0].clip = FakeSelectableNoteClip(4.0, [FakeMidiNote(1, 60, 0.0, 0.5)])
+        with self.assertRaisesRegex(ValueError, "hierarchy identity changed"): bridge.mapper.invoke("note.select", {"ref": reference, "all": True, "expectedClipAuthority": authority})
+        self.assertTrue(bridge.mapper._operation_supported("note.select")); self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("note.select"))
+
+    def test_a_region_loses_exactly_its_notes_or_nothing(self):
+        bridge, clip, reference = self.clip_bridge()
+        def request(**fields):
+            notes = bridge.mapper._read_notes(clip)
+            return {"ref": reference, "fromPitch": 60, "pitchSpan": 6, "fromTime": 0.5, "timeSpan": 2.0, "expectedClipAuthority": bridge.mapper._session_clip_authority(reference), "expectedNotesRevision": hashlib.sha256(bridge.mapper._bounded_canonical(notes).encode()).hexdigest(), **fields}
+        # Pitches 60-65 starting in [0.5, 2.5): notes 2 and 3; note 1 starts before, note 4 is above.
+        result = mutate_through(bridge, "note.delete-range", request(), "range-key-0001")
+        self.assertEqual(result["deleted"], 2); self.assertEqual(sorted(clip.stored), [1, 4])
+        self.assertEqual(result["notesRevision"], hashlib.sha256(bridge.mapper._bounded_canonical(bridge.mapper._read_notes(clip)).encode()).hexdigest())
+        # Live takes a note outside the region too: the notes taken go back and it fails.
+        clip.stored[5] = FakeMidiNote(5, 61, 1.5, 0.5); clip.extra_removal = 4
+        before = sorted((note.pitch, note.start_time) for note in clip.stored.values())
+        with self.assertRaisesRegex(ValueError, "changed notes outside its region"): bridge.mapper.invoke("note.delete-range", request())
+        self.assertEqual(sorted((note.pitch, note.start_time) for note in clip.stored.values()), before)
+        with self.assertRaisesRegex(ValueError, "clip notes changed since preview"): bridge.mapper.invoke("note.delete-range", request(expectedNotesRevision="0" * 64))
+        with self.assertRaisesRegex(ValueError, "the time range is invalid"): bridge.mapper.invoke("note.delete-range", request(timeSpan=0))
+        self.assertTrue(bridge.mapper._operation_supported("note.delete-range"))

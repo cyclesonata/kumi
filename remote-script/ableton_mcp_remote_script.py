@@ -301,7 +301,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit"}
+_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -996,6 +996,14 @@ class LiveObjectMapper:
             return callable(getattr(song, "begin_undo_step", None)) and callable(getattr(song, "end_undo_step", None))
         if operation in {"song.undo", "song.redo"}:
             return callable(getattr(song, "undo" if operation == "song.undo" else "redo", None))
+        if operation == "data.get":
+            return callable(getattr(song, "get_data", None))
+        if operation == "data.set":
+            return callable(getattr(song, "get_data", None)) and callable(getattr(song, "set_data", None))
+        if operation == "note.select":
+            return self._offers("clip", "select_all_notes", "deselect_all_notes", "select_notes_by_id")
+        if operation == "note.delete-range":
+            return self._offers("clip", "remove_notes_extended")
         if operation == "subscribe":
             return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
@@ -2567,12 +2575,17 @@ class LiveObjectMapper:
         if isinstance(self._read_attr(self.song, "record_mode"), bool): self.song.record_mode = False
         return {"stopped": True, "stoppedTargets": sorted(active_keys), "recordingStopped": True}
 
-    def _guard_note_clip(self, args: dict[str, Any]) -> Any:
+    def _guard_clip_authority(self, args: dict[str, Any]) -> Any:
+        """The Session clip a note edit names, its track, slot and scene exactly as previewed."""
         reference = str(args.get("ref")); self._refresh(reference); authority = self._session_clip_authority(reference)
-        expected_authority = args.get("expectedClipAuthority"); expected_revision = args.get("expectedNotesRevision")
+        expected_authority = args.get("expectedClipAuthority")
         if not isinstance(expected_authority, dict) or not hmac.compare_digest(self._bounded_canonical(authority), self._bounded_canonical(expected_authority)):
             raise ValueError("note clip hierarchy identity changed since preview")
-        clip = self.refs.get(reference); current_revision = hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()
+        return self.refs.get(reference)
+
+    def _guard_note_clip(self, args: dict[str, Any]) -> Any:
+        clip = self._guard_clip_authority(args); expected_revision = args.get("expectedNotesRevision")
+        current_revision = hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()
         if not isinstance(expected_revision, str) or not hmac.compare_digest(current_revision, expected_revision):
             raise ValueError("clip notes changed since preview")
         return clip
@@ -2698,14 +2711,24 @@ class LiveObjectMapper:
             if operation_error is None: operation_error = error
             after_rows = []
         if canonical_rows(after_rows) == canonical_rows(expected_rows): return {"deleted": len(note_ids)}
-        rollback_failed = False
+        failure = operation_error or ValueError("note deletion did not produce the exact complete expected state")
+        if not self._restore_removed_notes(clip, before_rows): raise ValueError("note deletion failed and exact content rollback failed") from failure
+        raise failure
+
+    _NOTE_CONTENT_FIELDS = ("pitch", "start", "duration", "velocity", "channel", "mute", "probability", "velocityDeviation", "releaseVelocity")
+
+    def _restore_removed_notes(self, clip: Any, before_rows: list[dict[str, Any]]) -> bool:
+        """After a removal went wrong, add back the notes it took, matched by content (Live gives them
+        new ids). Whether the clip then holds exactly before_rows' content, nothing more."""
         try:
-            content = lambda row: {key: row.get(key) for key in ("pitch", "start", "duration", "velocity", "channel", "mute", "probability", "velocityDeviation", "releaseVelocity")}; remaining = [content(row) for row in after_rows]; missing: list[dict[str, Any]] = []
+            content = lambda row: {key: row.get(key) for key in self._NOTE_CONTENT_FIELDS}
+            remaining = [content(row) for row in self._read_notes(clip)]; missing: list[dict[str, Any]] = []
             for prior in before_rows:
                 prior_content = content(prior); match = next((index for index, candidate in enumerate(remaining) if self._bounded_canonical(candidate) == self._bounded_canonical(prior_content)), None)
                 if match is None: missing.append(prior)
                 else: remaining.pop(match)
-            if remaining: raise ValueError("native deletion changed content outside its exact targets")
+            # Content the removal changed rather than took can't be put back by adding notes.
+            if remaining: return False
             if missing:
                 try: spec_class = getattr(__import__("Live.Clip", fromlist=["MidiNoteSpecification"]), "MidiNoteSpecification", None)
                 except Exception: spec_class = None
@@ -2715,10 +2738,73 @@ class LiveObjectMapper:
                     additions = [{"pitch": row["pitch"], "start_time": float(row["start"]), "duration": float(row["duration"]), "velocity": row["velocity"], "channel": row.get("channel", 1), "mute": bool(row.get("mute", False)), "probability": float(row.get("probability") if row.get("probability") is not None else 1.0), "velocity_deviation": float(row.get("velocityDeviation") if row.get("velocityDeviation") is not None else 0.0), "release_velocity": float(row.get("releaseVelocity") if row.get("releaseVelocity") is not None else 64.0)} for row in missing]
                 clip.add_new_notes(additions)
             restored = self._read_notes(clip); restored_ids = [row.get("id") for row in restored]
-            if len(restored_ids) != len(set(restored_ids)) or any(not isinstance(note_id, int) for note_id in restored_ids) or self._bounded_canonical(sorted([content(row) for row in restored], key=self._bounded_canonical)) != self._bounded_canonical(sorted([content(row) for row in before_rows], key=self._bounded_canonical)): rollback_failed = True
-        except BaseException: rollback_failed = True
-        failure = operation_error or ValueError("note deletion did not produce the exact complete expected state")
-        if rollback_failed: raise ValueError("note deletion failed and exact content rollback failed") from failure
+            return len(restored_ids) == len(set(restored_ids)) and all(isinstance(note_id, int) for note_id in restored_ids) and self._bounded_canonical(sorted([content(row) for row in restored], key=self._bounded_canonical)) == self._bounded_canonical(sorted([content(row) for row in before_rows], key=self._bounded_canonical))
+        except BaseException:
+            return False
+
+    def _selected_note_count(self, clip: Any) -> int | None:
+        """How many of a clip's notes Live has selected; None where Live can't say."""
+        for name in ("get_selected_notes_extended", "get_selected_notes"):
+            reader = getattr(clip, name, None)
+            if not callable(reader): continue
+            try: return len(list(reader()))
+            except BaseException: continue
+        return None
+
+    def _note_select(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Select a clip's notes as a click in its editor would: all, none, or exactly the notes with
+        these ids (the rest deselected). What Live then counts as selected must match."""
+        if set(args) - {"ref", "noteIds", "all", "none", "expectedClipAuthority"}: raise ValueError("note selection arguments are invalid")
+        modes = [key for key in ("noteIds", "all", "none") if key in args]
+        if len(modes) != 1 or (modes[0] != "noteIds" and args[modes[0]] is not True): raise ValueError("name exactly one of noteIds, all: true or none: true")
+        clip = self._guard_clip_authority(args); rows = self._read_notes(clip)
+        if "all" in args:
+            select = getattr(clip, "select_all_notes", None)
+            if not callable(select): raise ValueError("note selection is unavailable on this Live shape")
+            select(); expected = len(rows)
+        else:
+            deselect = getattr(clip, "deselect_all_notes", None)
+            if not callable(deselect): raise ValueError("note selection is unavailable on this Live shape")
+            if "none" in args:
+                deselect(); expected = 0
+            else:
+                note_ids = args["noteIds"]
+                if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= MAX_WIRE_ARRAY_LENGTH or len(set(note_ids)) != len(note_ids) or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids): raise ValueError("note ids are invalid")
+                present = {row.get("id") for row in rows}
+                if any(note_id not in present for note_id in note_ids): raise ValueError("note id is not present in the clip")
+                select = getattr(clip, "select_notes_by_id", None)
+                if not callable(select): raise ValueError("note selection by id is unavailable on this Live shape")
+                deselect(); select(list(note_ids)); expected = len(note_ids)
+        selected = self._selected_note_count(clip)
+        if selected is not None and selected != expected: raise ValueError("note selection was not confirmed")
+        return {"selected": expected}
+
+    def _note_delete_range(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Delete the notes starting inside a region of pitch and time (Live's remove_notes_extended):
+        every other note stays exactly as it was, or the notes taken are put back and it fails."""
+        if set(args) - {"ref", "fromPitch", "pitchSpan", "fromTime", "timeSpan", "expectedClipAuthority", "expectedNotesRevision"}: raise ValueError("note range arguments are invalid")
+        from_pitch, pitch_span, from_time, time_span = (args.get(key) for key in ("fromPitch", "pitchSpan", "fromTime", "timeSpan"))
+        if not isinstance(from_pitch, int) or isinstance(from_pitch, bool) or not 0 <= from_pitch <= 127 or not isinstance(pitch_span, int) or isinstance(pitch_span, bool) or not 1 <= pitch_span <= 128: raise ValueError("the pitch range is invalid")
+        if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in (from_time, time_span)) or float(from_time) < 0 or float(time_span) <= 0: raise ValueError("the time range is invalid")
+        clip = self._guard_note_clip(args)
+        remover = getattr(clip, "remove_notes_extended", None)
+        if not callable(remover): raise ValueError("deleting notes by region is unavailable on this Live shape")
+        before_rows = self._read_notes(clip); start = float(from_time); end = start + float(time_span)
+        def inside(row: dict[str, Any], slack: float) -> bool:
+            return from_pitch <= int(row["pitch"]) < from_pitch + pitch_span and start - slack <= float(row["start"]) < end + slack
+        operation_error: BaseException | None = None; after_rows: list[dict[str, Any]] | None = None
+        try: remover(from_pitch, pitch_span, start, float(time_span))
+        except BaseException as error: operation_error = error
+        try: after_rows = self._read_notes(clip)
+        except BaseException as error: operation_error = operation_error or error
+        if operation_error is None and after_rows is not None:
+            kept = {row.get("id") for row in after_rows}; removed = [row for row in before_rows if row.get("id") not in kept]
+            # Live keeps note times as 32-bit floats: a note right on the region's edge may go either way.
+            slack = 1e-6
+            if self._same_note_rows(after_rows, [row for row in before_rows if row.get("id") in kept]) and all(inside(row, slack) for row in removed) and not any(inside(row, -slack) for row in after_rows):
+                return {"deleted": len(removed), "notesRevision": hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()}
+        failure = operation_error or ValueError("note range deletion changed notes outside its region")
+        if not self._restore_removed_notes(clip, before_rows): raise ValueError("note range deletion failed and exact content rollback failed") from failure
         raise failure
 
     def _transport_set(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3317,6 +3403,14 @@ class LiveObjectMapper:
             return self._undo_step_operation(operation, args)
         if operation in {"song.undo", "song.redo"}:
             return self._song_undo(operation, args)
+        if operation == "data.get":
+            return self._data_get(args)
+        if operation == "data.set":
+            return self._data_set(args)
+        if operation == "note.select":
+            return self._note_select(args)
+        if operation == "note.delete-range":
+            return self._note_delete_range(args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
@@ -3388,6 +3482,62 @@ class LiveObjectMapper:
             caller(); done = True
         can_undo, can_redo = self._read_attr(self.song, "can_undo"), self._read_attr(self.song, "can_redo")
         return {"done": done, "canUndo": can_undo if isinstance(can_undo, bool) else None, "canRedo": can_redo if isinstance(can_redo, bool) else None}
+
+    def _positional_track(self, reference: Any) -> tuple[Any, int]:
+        """The track at a track ref's place now (a ref names a place), reading only that track."""
+        parts = reference.split(":") if isinstance(reference, str) else []
+        if len(parts) != 3 or parts[0] != str(self.refs.epoch) or parts[1] != "track" or not parts[2].isdigit(): raise ValueError("track reference is stale or invalid")
+        entry = self._track_entry(int(parts[2]))
+        if entry is None: raise ValueError("track reference is stale or invalid")
+        self.refs.put("track", entry[0], parts[2])
+        return entry[0], int(parts[2])
+
+    # Text saved inside the Set, as the registry bounds it.
+    MAX_DATA_TEXT = 1024 * 1024
+
+    def _data_store(self, reference: Any) -> Any:
+        """What keeps data saved inside the Set under a ref: the Song (the Set's ref) or a track."""
+        if isinstance(reference, str) and reference == self.refs.put("set", self.song, "song"): return self.song
+        return self._positional_track(reference)[0]
+
+    def _stored_text(self, owner: Any, key: str) -> str | None:
+        reader = getattr(owner, "get_data", None)
+        if not callable(reader): raise ValueError("data saved in the Set is unavailable on this Live shape")
+        value = reader(key, None)
+        if value is not None and not isinstance(value, str): raise ValueError("the data under that key isn't text")
+        if isinstance(value, str) and len(value) > self.MAX_DATA_TEXT: raise ValueError("the data under that key is longer than 1 MiB")
+        return value
+
+    def _data_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Text saved inside the Set (Song.get_data) or with a track (Track.get_data); null when none."""
+        key = args.get("key")
+        if set(args) - {"ref", "key"} or not isinstance(key, str) or not 1 <= len(key) <= 256: raise ValueError("data read arguments are invalid")
+        return {"ref": args["ref"], "key": key, "value": self._stored_text(self._data_store(args.get("ref")), key)}
+
+    def _data_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Save text inside the Set or with a track (null clears it), read back to confirm. With
+        expectedValue, only while the key still holds what was read then."""
+        key = args.get("key")
+        if set(args) - {"ref", "key", "value", "expectedValue"} or not isinstance(key, str) or not 1 <= len(key) <= 256 or "value" not in args: raise ValueError("data arguments are invalid")
+        for field in ("value", "expectedValue"):
+            item = args.get(field)
+            if item is not None and (not isinstance(item, str) or len(item) > self.MAX_DATA_TEXT): raise ValueError(f"{field} must be text of at most 1 MiB, or null")
+        value = args["value"]; owner = self._data_store(args.get("ref")); writer = getattr(owner, "set_data", None)
+        if not callable(writer): raise ValueError("data saved in the Set is unavailable on this Live shape")
+        prior = self._stored_text(owner, key)
+        if "expectedValue" in args and prior != args["expectedValue"]: raise ValueError("the data under that key changed since it was read")
+        try:
+            writer(key, value)
+            observed = self._stored_text(owner, key)
+            if observed != value: raise ValueError("data change was not confirmed")
+        except BaseException as error:
+            restored: Any = None
+            try:
+                writer(key, prior); restored = self._stored_text(owner, key)
+            except BaseException: restored = error
+            if restored != prior: raise ValueError("data change failed and exact rollback failed") from error
+            raise
+        return {"ref": args["ref"], "key": key, "value": observed, "prior": prior}
 
     def _check_parameter_authority(self, reference: str, args: dict[str, Any]) -> None:
         """The parameter, its device, track and sibling parameters are exactly as previewed."""
