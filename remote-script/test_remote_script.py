@@ -52,10 +52,12 @@ class BridgeConfigNormalizationTests(unittest.TestCase):
     def test_version_two_accepts_only_the_bounded_diagnostics_shape(self):
         base = {"version": 2, "server": {"command": "node", "args": []}, "bridge": {"host": "127.0.0.1", "port": 9765, "secretFile": "/tmp/secret", "timeoutMs": 5000}}
         absolute_path = str((Path(tempfile.gettempdir()) / "owner" / "bridge-diagnostics.log").resolve())
-        diagnostics = {"path": absolute_path, "maxBytes": 256 * 1024}
-        normalized = _normalize_bridge_config({**base, "bridge": {**base["bridge"], "diagnostics": diagnostics}})
-        self.assertEqual(normalized["diagnostics"], diagnostics)
-        for invalid in [{"path": "relative.log", "maxBytes": 256 * 1024}, {"path": absolute_path, "maxBytes": 1}, {"path": absolute_path, "maxBytes": 256 * 1024, "extra": True}, True]:
+        # 16 MiB now; a configuration written before the bound went up (256 KiB) still loads.
+        for max_bytes in (16 * 1024 * 1024, 256 * 1024):
+            diagnostics = {"path": absolute_path, "maxBytes": max_bytes}
+            normalized = _normalize_bridge_config({**base, "bridge": {**base["bridge"], "diagnostics": diagnostics}})
+            self.assertEqual(normalized["diagnostics"], diagnostics)
+        for invalid in [{"path": "relative.log", "maxBytes": 256 * 1024}, {"path": absolute_path, "maxBytes": 1}, {"path": absolute_path, "maxBytes": 1024 * 1024}, {"path": absolute_path, "maxBytes": True}, {"path": absolute_path, "maxBytes": [256 * 1024]}, {"path": absolute_path, "maxBytes": 256 * 1024, "extra": True}, True]:
             with self.assertRaises(ValueError):
                 _normalize_bridge_config({**base, "bridge": {**base["bridge"], "diagnostics": invalid}})
 
@@ -125,10 +127,16 @@ class DiagnosticsSecurityTests(unittest.TestCase):
     def test_thread_start_failure_and_prefilled_oversize_file_fail_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._owner_file(directory)
-            path.write_bytes(b"sensitive-canary" * 30000)
+            path.write_bytes(b"sensitive-canary" * (remote_module._DIAGNOSTICS_MAX_BYTES // 16 + 1))
             bounded = self._sink(path, start_writer=False)
             self.assertTrue(bounded.enabled); self.assertEqual(path.stat().st_size, 0)
             bounded.close()
+            # A configuration from before the bound went up keeps its own, smaller bound.
+            path.write_bytes(b"sensitive-canary" * 30000)
+            legacy = _DiagnosticsSink(str(path), remote_module._DIAGNOSTICS_LEGACY_MAX_BYTES, start_writer=False, security_validator=_diagnostics_path_safe)
+            self.assertTrue(legacy.enabled); self.assertEqual(path.stat().st_size, 0)
+            legacy.close()
+            self.assertFalse(_DiagnosticsSink(str(path), 1024 * 1024, start_writer=False, security_validator=_diagnostics_path_safe).enabled)
             # Patch only after replacing the Windows validator with an in-process
             # equivalent. subprocess.capture_output also starts helper threads on
             # Windows, and globally failing those would not exercise the writer.
@@ -165,9 +173,9 @@ class DiagnosticsSecurityTests(unittest.TestCase):
                 # One near-boundary write proves rotation without launching the
                 # Windows security verifier thousands of times.
                 self.assertIsNotNone(bounded._fd)
-                os.write(bounded._fd, b"x" * (256 * 1024 - 1))
+                os.write(bounded._fd, b"x" * (remote_module._DIAGNOSTICS_MAX_BYTES - 1))
                 bounded._write((1, "realtime-packet-failure", "internal-error"))
-                self.assertLessEqual(path.stat().st_size, 256 * 1024)
+                self.assertLessEqual(path.stat().st_size, remote_module._DIAGNOSTICS_MAX_BYTES)
                 self.assertNotIn(b"x", path.read_bytes())
             finally: bounded.close()
 
@@ -1258,7 +1266,9 @@ class ControlSurfaceTests(unittest.TestCase):
             def __init__(self, value): self.beat_time = value; self.sample_time = value * 100.0
         song = FakeSong(); clip = FakeClip(4.0); clip.warp_markers = [Marker(float(index)) for index in range(257)]; song.tracks[0].clip_slots[0].clip = clip
         mapper = LiveObjectMapper(song)
-        with self.assertRaisesRegex(ValueError, "warp-marker content exceeds"):
+        # A clip's markers aren't capped: 257 read whole. Only past the discovery bound is a read refused.
+        mapper._capture_authority_revision()
+        with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaisesRegex(ValueError, "warp-marker content exceeds"):
             mapper._capture_authority_revision()
 
     def test_scene_capture_authority_refuses_unreadable_warp_markers(self):
@@ -2908,8 +2918,12 @@ class RealtimePlaneTests(unittest.TestCase):
             target_track = bridge.mapper.song.tracks[0]; crowd = []
             for _ in range(65):
                 track = FakeTrack(); track.devices = [FakeDevice() for _ in range(256)]; crowd.append(track)
+            # A big Set is never refused for its size: 65 tracks of 256 devices around the target change nothing.
+            bridge.mapper.song.tracks = [target_track] + crowd
+            self.assertEqual(bridge.mapper._realtime_parameter_authority(device_rows[4]["parameters"][0]["ref"])["parameterIdentity"], device_rows[4]["parameters"][0]["objectIdentity"])
+            # The reference is positional: with the target moved behind them, it names another track's device, not the parameter.
             bridge.mapper.song.tracks = crowd + [target_track]
-            with self.assertRaisesRegex(ValueError, "exceeded its bound"): bridge.mapper._realtime_parameter_authority(device_rows[4]["parameters"][0]["ref"])
+            with self.assertRaisesRegex(ValueError, "no longer in the authoritative hierarchy"): bridge.mapper._realtime_parameter_authority(device_rows[4]["parameters"][0]["ref"])
             bridge.mapper.song.tracks = [target_track]
             rack = FakeDevice(); rack.can_have_chains = True; rack.chains = []; rack.macros = [rack.parameters[0]]; bridge.mapper.song.tracks[0].devices = [rack]
             rack_row = bridge.mapper.snapshot()["tracks"][0]["devices"][0]; macro_ref = rack_row["macros"][0]["ref"]; macro_authority = bridge.mapper._realtime_parameter_authority(macro_ref)
@@ -5908,3 +5922,121 @@ class MainThreadTransportTests(unittest.TestCase):
         self.bridge.disconnect()
         self.assertEqual((len(self.bridge._clients), len(self.bridge._connections)), (0, 0))
         self.bridge.update_display()
+
+
+class SetScaleCapTests(unittest.TestCase):
+    """WS1: nothing in a Set is refused for its size. What once had a literal cap (512 notes, 256 warp
+    markers, 64 take lanes, 512 scenes, 64 parameters per request...) reads and changes whole; only
+    semantic bounds (MIDI's 0-127, colours) and the pump budget, met by paging, remain."""
+
+    def test_note_operations_take_any_number_of_notes(self):
+        song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live"); transaction = "scale-notes-transaction"
+        track_ref = mapper.snapshot()["tracks"][0]["ref"]
+        # A Session clip longer than 1024 beats, as the registry allows (up to 100000).
+        created = mapper.invoke("clip.create", ControlSurfaceTests.clip_creation_args(mapper, track_ref, 0, kind="midi", name="Long", length=4096), transaction)
+        notes = [{"pitch": 36 + index % 48, "start": index * 0.5, "duration": 0.25, "velocity": 100, "channel": 1} for index in range(2000)]
+        request = {"ref": created["ref"], "notes": notes, **ControlSurfaceTests.note_authority(mapper, created["ref"])}
+        validate_operation_payload("note.add-batch", "request", request)
+        result = mapper.invoke("note.add-batch", request, transaction)
+        self.assertEqual(result["added"], 2000); self.assertEqual(len(set(result["noteIds"])), 2000)
+        clip = song.tracks[0].clip_slots[0].clip
+        clip.get_notes_by_id = lambda ids: [note for note in clip.notes if note["note_id"] in set(ids)]
+        read = mapper.invoke("note.read-by-id", {"ref": created["ref"], "noteIds": result["noteIds"][:1500]})
+        self.assertEqual(len(read["notes"]), 1500); validate_operation_payload("note.read-by-id", "result", read)
+        deleted = mapper.invoke("note.delete", {"ref": created["ref"], "noteIds": result["noteIds"][:600], **ControlSurfaceTests.note_authority(mapper, created["ref"])}, transaction)
+        self.assertEqual(deleted, {"deleted": 600}); self.assertEqual(len(clip.notes), 1400)
+
+    def test_a_note_update_patches_hundreds_of_notes_at_once(self):
+        clip = FakeNoteClip(800.0, [FakeMidiNote(index, 60, float(index), 0.5) for index in range(1, 701)])
+        mapper, reference = NoteModificationTests().clip_mapper(clip)
+        self.assertEqual(NoteModificationTests().update(mapper, reference, [{"id": index, "velocity": 90} for index in range(1, 601)]), {"updated": 600})
+        self.assertEqual(sum(1 for note in clip.stored.values() if note.velocity == 90.0), 600)
+
+    def test_a_hundred_parameters_of_one_device_change_in_one_request(self):
+        song = FakeSong(); device = song.tracks[0].devices[0]; device.parameters = [FakeParameter() for _ in range(100)]
+        for index, parameter in enumerate(device.parameters): parameter.name = f"P{index}"
+        mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"][0]["devices"][0]["parameters"]
+        authority = ControlSurfaceTests.parameter_authority(mapper, rows[0]["ref"]); shared = {key: value for key, value in authority.items() if key != "expectedObjectIdentity"}
+        items = [{"ref": row["ref"], "value": 0.75, "expectedRevision": row["revision"], "expectedObjectIdentity": row["objectIdentity"]} for row in rows]
+        result = mapper.invoke("device.parameters.set", {**shared, "parameters": items})
+        self.assertEqual(len(result["parameters"]), 100); self.assertTrue(all(parameter.value == 0.75 for parameter in device.parameters))
+
+    def test_collections_past_their_old_literal_caps_read_whole(self):
+        class Marker:
+            def __init__(self, value): self.beat_time = value; self.sample_time = value * 100.0
+        song = FakeSong(); track = song.tracks[0]
+        track.take_lanes = [FakeTakeLane(f"Take {index}") for index in range(70)]
+        track.take_lanes[0].arrangement_clips = [FakeClip(1.0) for _ in range(300)]
+        track.arrangement_clips = [FakeClip(1.0) for _ in range(300)]
+        song.scenes = [FakeScene(f"Scene {index}") for index in range(600)]
+        audio = FakeClip(4.0); audio.is_audio_clip = True; audio.warp_markers = [Marker(float(index)) for index in range(300)]; track.clip_slots[0].clip = audio
+        song.groove_pool = FakeGroovePool([FakeGroove(f"Groove {index}") for index in range(300)]); song.groove_amount = 0.5
+        mapper = LiveObjectMapper(song); snapshot = mapper.snapshot()
+        row = snapshot["tracks"][0]
+        self.assertEqual((len(row["takeLanes"]), len(row["takeLanes"][0]["clips"]), len(snapshot["arrangement"]["clips"]), len(snapshot["scenes"])), (70, 300, 300, 600))
+        self.assertEqual(len(row["clips"][0]["warpMarkers"]), 300)
+        mapper._take_lane_collection_revision(track, 0); mapper._arrangement_collection_revision(track, 0); mapper._scene_collection_revision()
+        self.assertEqual(len(mapper.invoke("groove.read", {"setRef": snapshot["set"]["ref"]})["grooves"]), 300)
+
+    def test_set_wide_reads_take_hundreds_of_tracks(self):
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(300)]
+        for index, track in enumerate(song.tracks): track.name = f"Track {index}"
+        song.visible_tracks = list(song.tracks)
+        mapper = LiveObjectMapper(song); set_ref = mapper.snapshot()["set"]["ref"]
+        self.assertEqual(len(mapper.invoke("song.read", {"setRef": set_ref})["visibleTracks"]), 300)
+        performance = mapper.invoke("performance.read", {"setRef": set_ref})
+        self.assertEqual(len(performance["tracks"]), 300); validate_operation_payload("performance.read", "result", performance)
+
+    def test_an_envelope_reads_every_point(self):
+        clip = FakeClip(10000.0)
+        envelope = types.SimpleNamespace(canonical_parent=clip, events_in_range=lambda start, end: [types.SimpleNamespace(time=float(index), value=0.5) for index in range(700)])
+        self.assertEqual(len(LiveObjectMapper(FakeSong())._envelope_points(envelope)), 700)
+
+    def test_device_positions_go_to_the_registry_bound_but_never_past_the_siblings(self):
+        song = FakeSong(); track = song.tracks[0]; track.devices = [FakeDevice() for _ in range(300)]
+        def insert_device(name, index):
+            device = FakeDevice(); device.name = name; track.devices.insert(len(track.devices) if index < 0 else index, device)
+        track.insert_device = insert_device; track.delete_device = lambda index: track.devices.pop(index)
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        siblings = [{"ref": device["ref"], "objectIdentity": device["objectIdentity"]} for device in row["devices"]]
+        args = {"trackRef": row["ref"], "deviceName": "Utility", "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": siblings}
+        with self.assertRaisesRegex(ValueError, "exceeds the exact sibling boundary"): mapper.invoke("device.insert", {**args, "index": 301})
+        with self.assertRaisesRegex(ValueError, "device index is invalid"): mapper.invoke("device.insert", {**args, "index": 100001})
+        self.assertEqual(mapper.invoke("device.insert", {**args, "index": 300})["index"], 300)
+        moved = []
+        song.move_device = lambda device, target, position: (target.devices.remove(device), target.devices.insert(position, device), moved.append(position))
+        snapshot = mapper.snapshot(); row = snapshot["tracks"][0]; first = row["devices"][0]
+        move_args = {"ref": first["ref"], "expectedObjectIdentity": first["objectIdentity"], "expectedOwnerRef": row["ref"], "expectedOwnerIdentity": row["objectIdentity"], "expectedSiblings": [{"ref": device["ref"], "objectIdentity": device["objectIdentity"]} for device in row["devices"]], "expectedTrackRef": row["ref"], "expectedTrackIdentity": row["objectIdentity"]}
+        self.assertEqual(mapper.invoke("device.move", {**move_args, "index": 299})["index"], 299); self.assertEqual(moved, [299])
+
+    def test_discovery_pages_and_budgets_go_to_the_registry_bounds(self):
+        mapper = LiveObjectMapper(FakeSong())
+        self.assertEqual(len(mapper.discover("track", limit=100000, traversal_budget=10_000_000, requested_fields=[f"field{index}" for index in range(256)])["items"]), 1)
+        for invalid in ({"limit": 100001}, {"traversal_budget": 10_000_001}, {"requested_fields": [f"field{index}" for index in range(257)]}):
+            with self.assertRaises(ValueError): mapper.discover("track", **invalid)
+        validate_operation_payload("discover", "request", {"kind": "track", "limit": 100000, "traversalBudget": 10_000_000})
+
+    def test_a_request_may_carry_sixty_four_arguments(self):
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: {"lanes": []})
+        def invoke(sequence, count):
+            unsigned = remote.bound({"version": PROTOCOL, "id": f"args-{sequence}", "method": "invoke", "operation": "audio.take-lane.read", "args": {f"a{index}": index for index in range(count)}, "nonce": f"args-nonce-{sequence:08d}", "sequence": sequence})
+            return remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        self.assertNotEqual(invoke(1, 64)["error"], "args must be a bounded object", "64 arguments reach the registry's own check")
+        self.assertEqual(invoke(2, 65)["error"], "args must be a bounded object")
+
+    def test_ledgers_hold_thousands_of_authorities_and_owned_objects(self):
+        bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(FakeSong(), provenance="real-live"); bridge._executed_mutations = {}; bridge._pending_mutations = {}; bridge._retired_mutation_keys = {}; bridge._finalized_transactions = set(); bridge._executed_lock = threading.Lock()
+        class ImmediateQueue:
+            def submit(self, action, deadline_ms=None, on_cancel=None): return action()
+        bridge.queue = ImmediateQueue(); holder = {}
+        parameter = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
+        request = {"operation": "device.parameter.set", "transactionId": "transaction-ledgers", "args": {"ref": parameter["ref"], "value": 0.75, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(bridge.mapper, parameter["ref"])}}
+        preflights = [bridge._dispatch_with_holder("preflight", request, holder) for _ in range(100)]
+        self.assertEqual(len(holder["preflights"]), 100)
+        for index in range(300): bridge._executed_mutations[f"filler-{index:04d}"] = {"operation": "track.set", "argsDigest": "0" * 64, "transactionId": "filler", "result": {}}
+        prepared = bridge._dispatch_with_holder("prepare", {**request, "preflightToken": preflights[-1]["preflightToken"], "confirmation": preflights[-1]["confirmation"], "idempotencyKey": "ledger-apply"}, holder)
+        self.assertEqual(bridge._dispatch_with_holder("invoke", {**request, "authorityToken": prepared["authorityToken"]}, holder)["value"], 0.75)
+        mapper = bridge.mapper
+        for index in range(5000): mapper._owned_cleanup_tokens[f"filler-token-{index}"] = {"transactionId": "filler", "ref": f"{mapper.refs.epoch + 1}:track:{index}", "objectIdentity": f"filler:{index}", "fingerprint": "0" * 64}
+        created = mapper.invoke("track.create", {"name": "Owned past 4096", "kind": "midi", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, "transaction-ledgers")
+        self.assertIn("ownershipToken", created)

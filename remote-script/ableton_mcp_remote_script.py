@@ -29,7 +29,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 PROTOCOL = "ableton-loopback/v1"
-_DIAGNOSTICS_MAX_BYTES = 256 * 1024
+_DIAGNOSTICS_MAX_BYTES = 16 * 1024 * 1024
+# Configurations written before the bound went up name the old one; they keep working (with it).
+_DIAGNOSTICS_LEGACY_MAX_BYTES = 256 * 1024
+_DIAGNOSTICS_ACCEPTED_MAX_BYTES = frozenset({_DIAGNOSTICS_MAX_BYTES, _DIAGNOSTICS_LEGACY_MAX_BYTES})
 _DIAGNOSTICS_QUEUE_LIMIT = 64
 _DIAGNOSTICS_RECORD_LIMIT = 512
 _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure", "bridge-accept-failure"}
@@ -66,7 +69,7 @@ class _DiagnosticsSink:
         self._fd: int | None = None
         self._thread: threading.Thread | None = None
         self.enabled = False
-        if not self._path.is_absolute() or max_bytes != _DIAGNOSTICS_MAX_BYTES or (os.name == "nt" and security_validator is None):
+        if not self._path.is_absolute() or not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes not in _DIAGNOSTICS_ACCEPTED_MAX_BYTES or (os.name == "nt" and security_validator is None):
             return
         try:
             self._fd = self._secure_open()
@@ -446,6 +449,23 @@ MAX_WIRE_OBJECT_PROPERTIES = 1_000_000
 MAX_DISCOVERY_COLLECTION_LENGTH = 10_000_000
 MAX_QUEUE_ITEMS = 65_536
 DEFAULT_TIMEOUT_SECONDS = 5.0
+# Nothing in a Set is refused for its size: what's left bounds a request's shape (as the registry
+# does) or stops a runaway walk (a cyclic device tree), never the producer's content.
+# Positions in a collection (a device's place in its chain, a rack variation, a scene), as the registry bounds them.
+MAX_COLLECTION_INDEX = 100_000
+# Walks over a Set's device trees, selection and identities: only a cyclic tree reaches it.
+MAX_TRAVERSAL = 10_000_000
+# A discovery page, and how many fields one discovery may name.
+MAX_DISCOVERY_LIMIT = 100_000
+MAX_REQUESTED_FIELDS = 256
+# Top-level arguments of one request.
+MAX_REQUEST_ARGS = 64
+# Preflight and prepared-authority tokens one connection may hold at once.
+MAX_CONNECTION_AUTHORITIES = 4096
+# Mutations applied or in flight by idempotency key, kept for replay.
+MAX_MUTATION_LEDGER = 65_536
+# Cleanup ownership of created objects, moved ownership, retired keys and finalized transactions.
+MAX_OWNERSHIP_LEDGER = 1_000_000
 
 
 # Selection, arm, meters, playback status and view change without anyone editing the object;
@@ -676,7 +696,7 @@ class AuthenticatedRemoteScript:
         if request["method"] in {"invoke", "preflight", "prepare", "discover"}:
             if request["method"] in {"invoke", "preflight", "prepare"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z]+(?:[.-][a-z]+)+", request["operation"])):
                 return self._error(request["id"], "operation is required")
-            if not isinstance(request.get("args", {}), dict) or len(request.get("args", {})) > 32:
+            if not isinstance(request.get("args", {}), dict) or len(request.get("args", {})) > MAX_REQUEST_ARGS:
                 return self._error(request["id"], "args must be a bounded object")
         try:
             authenticated = len(request["nonce"]) >= 16 and len(request["nonce"]) <= MAX_NONCE_LENGTH and request["sequence"] > self._last_sequence and hmac.compare_digest(self.sign(unsigned), request["mac"])
@@ -1297,7 +1317,7 @@ class LiveObjectMapper:
             offset = int(offset_text)
         except (ValueError, TypeError, UnicodeError, OSError) as error:
             raise ValueError("invalid discovery cursor") from error
-        if not 0 <= offset <= MAX_DISCOVERY_COLLECTION_LENGTH * MAX_DISCOVERY_COLLECTION_LENGTH:
+        if not 0 <= offset <= MAX_TRAVERSAL:
             raise ValueError("invalid discovery cursor")
         return offset
 
@@ -1335,14 +1355,14 @@ class LiveObjectMapper:
         }
         values["availableAudioFields"] = [field for field in ("gain", "pitchCoarse", "pitchFine", "warpMode", "warping", "fadeInLength", "fadeOutLength", "loopStart", "loopEnd") if values.get(field) is not None]
         available_warp_modes = self._read_attr(clip, "available_warp_modes")
-        values["availableWarpModes"] = [int(mode) for mode in self._items(available_warp_modes) if isinstance(mode, int) and not isinstance(mode, bool)][:32] if available_warp_modes is not None else None
+        values["availableWarpModes"] = [int(mode) for mode in self._items(available_warp_modes) if isinstance(mode, int) and not isinstance(mode, bool)] if available_warp_modes is not None else None
         sample_length = self._read_attr(clip, "sample_length")
         values["sampleLength"] = float(sample_length) if isinstance(sample_length, (int, float)) and not isinstance(sample_length, bool) and math.isfinite(float(sample_length)) else None
         try:
             markers = list(getattr(clip, "warp_markers", None) or [])
         except Exception as error:
             raise ValueError("complete warp-marker collection is unreadable") from error
-        if len(markers) > 256:
+        if len(markers) > MAX_DISCOVERY_COLLECTION_LENGTH:
             raise ValueError("complete warp-marker content exceeds its authoritative bound")
         marker_rows = []
         for marker in markers:
@@ -1358,7 +1378,7 @@ class LiveObjectMapper:
         length = self._read_attr(clip, "length")
         if not isinstance(length, (int, float)) or isinstance(length, bool) or not math.isfinite(float(length)) or float(length) < 0: raise ValueError("clip content length is unavailable")
         notes = [{key: value for key, value in note.items() if key != "id"} for note in self._read_notes(clip)]; notes.sort(key=self._bounded_canonical)
-        if len(self._items(self._read_attr(clip, "warp_markers") or [])) > 256: raise ValueError("complete warp-marker content exceeds its authoritative move bound")
+        if len(self._items(self._read_attr(clip, "warp_markers") or [])) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("complete warp-marker content exceeds its authoritative move bound")
         row = {"name": str(self._read_attr(clip, "name") or ""), "length": float(length), "kind": "midi" if callable(getattr(clip, "add_new_notes", None)) else "audio", "notes": notes, "audio": self._audio_fields(clip)}
         return hashlib.sha256(self._bounded_canonical(row).encode("utf-8")).hexdigest()
 
@@ -1473,7 +1493,7 @@ class LiveObjectMapper:
                 "defaultValue": float(self._read_attr(parameter, "default_value")) if isinstance(self._read_attr(parameter, "default_value"), (int, float)) and not isinstance(self._read_attr(parameter, "default_value"), bool) and math.isfinite(float(self._read_attr(parameter, "default_value"))) else None,
                 "originalName": str(self._read_attr(parameter, "original_name") or "") if isinstance(self._read_attr(parameter, "original_name"), str) else None,
                 "state": int(self._read_attr(parameter, "state")) if isinstance(self._read_attr(parameter, "state"), int) and not isinstance(self._read_attr(parameter, "state"), bool) else None,
-                "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])][:64] if self._read_attr(parameter, "value_items") is not None else None,
+                "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])] if self._read_attr(parameter, "value_items") is not None else None,
             })
         enabled = self._read_attr(device, "is_active", "is_enabled", "enabled")
         bank_count_method = getattr(device, "parameter_bank_count", None)
@@ -1919,9 +1939,9 @@ class LiveObjectMapper:
         parent_required = {"clip_slot", "clip", "session_clip", "arrangement_clip", "note", "parameter", "routing_choice"}
         if kind in parent_required and parent is None:
             raise ValueError("a kind-specific parent reference is required")
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_DISCOVERY_LIMIT:
             raise ValueError("discovery limit is invalid")
-        if not isinstance(traversal_budget, int) or isinstance(traversal_budget, bool) or not 1 <= traversal_budget <= 10_000:
+        if not isinstance(traversal_budget, int) or isinstance(traversal_budget, bool) or not 1 <= traversal_budget <= MAX_TRAVERSAL:
             raise ValueError("traversal budget is invalid")
         if parent is not None and not isinstance(parent, str):
             raise ValueError("parent reference is invalid")
@@ -1929,7 +1949,7 @@ class LiveObjectMapper:
             return value is None or isinstance(value, bool) or isinstance(value, str) and len(value) <= 256 or isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and abs(float(value)) <= 2**53 - 1
         if filters is not None and (not isinstance(filters, dict) or len(filters) > 16 or any(not isinstance(key, str) or not key or len(key) > 64 or not valid_filter_value(value) for key, value in filters.items())):
             raise ValueError("discovery filters are invalid")
-        if requested_fields is not None and (not isinstance(requested_fields, list) or len(requested_fields) > 32 or any(not isinstance(field, str) or not field for field in requested_fields)):
+        if requested_fields is not None and (not isinstance(requested_fields, list) or len(requested_fields) > MAX_REQUESTED_FIELDS or any(not isinstance(field, str) or not field for field in requested_fields)):
             raise ValueError("requested fields are invalid")
         snapshot = self.snapshot()
         set_row = snapshot["set"]
@@ -2092,11 +2112,11 @@ class LiveObjectMapper:
             raise ValueError("set identity is invalid")
         if not isinstance(scene_name, str) or len(scene_name) > 256:
             raise ValueError("scene identity is invalid")
-        if not isinstance(scene_index, int) or isinstance(scene_index, bool) or not 0 <= scene_index <= 10000:
+        if not isinstance(scene_index, int) or isinstance(scene_index, bool) or not 0 <= scene_index <= MAX_COLLECTION_INDEX:
             raise ValueError("scene index is invalid")
         if not isinstance(playback_revision, str) or not 1 <= len(playback_revision) <= 256:
             raise ValueError("playback revision is invalid")
-        if not isinstance(eligible, list) or not 1 <= len(eligible) <= 256 or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
+        if not isinstance(eligible, list) or not 1 <= len(eligible) <= MAX_DISCOVERY_COLLECTION_LENGTH or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
             raise ValueError("eligible targets are invalid")
         eligible_keys = set(eligible)
         snapshot = self.snapshot()
@@ -2132,7 +2152,7 @@ class LiveObjectMapper:
             raise ValueError("scene reference is stale or invalid")
         if not isinstance(set_name, str) or not 1 <= len(set_name) <= 256:
             raise ValueError("set identity is invalid")
-        if not isinstance(eligible, list) or len(eligible) > 256 or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
+        if not isinstance(eligible, list) or len(eligible) > MAX_DISCOVERY_COLLECTION_LENGTH or len(set(eligible)) != len(eligible) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in eligible):
             raise ValueError("eligible targets are invalid")
         eligible_keys = set(eligible)
         snapshot = self.snapshot()
@@ -2150,7 +2170,7 @@ class LiveObjectMapper:
 
     def _guarded_emergency_stop(self, args: dict[str, Any]) -> dict[str, Any]:
         expected, expected_recording = args.get("expectedTargets"), args.get("expectedRecording")
-        if not isinstance(expected, list) or len(expected) > 256 or len(set(expected)) != len(expected) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in expected):
+        if not isinstance(expected, list) or len(expected) > MAX_DISCOVERY_COLLECTION_LENGTH or len(set(expected)) != len(expected) or not all(isinstance(item, str) and 1 <= len(item) <= 1024 for item in expected):
             raise ValueError("expected targets are invalid")
         playback = self._playback()
         session_record, arrangement_record = playback["transport"].get("sessionRecord") is True, playback["transport"].get("arrangementRecord") is True
@@ -2179,7 +2199,7 @@ class LiveObjectMapper:
     def _note_update(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
         patches = args.get("notes")
-        if not isinstance(patches, list) or not 1 <= len(patches) <= 512:
+        if not isinstance(patches, list) or not 1 <= len(patches) <= MAX_WIRE_ARRAY_LENGTH:
             raise ValueError("note patches are invalid")
         if not callable(getattr(clip, "get_notes_extended", None)) or not callable(getattr(clip, "apply_note_modifications", None)) or not callable(getattr(clip, "get_all_notes_extended", None)):
             raise ValueError("note modification is unavailable on this Live shape")
@@ -2283,7 +2303,7 @@ class LiveObjectMapper:
     def _note_delete(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
         note_ids = args.get("noteIds")
-        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= 512 or len(set(note_ids)) != len(note_ids) or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids):
+        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= MAX_WIRE_ARRAY_LENGTH or len(set(note_ids)) != len(note_ids) or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids):
             raise ValueError("note ids are invalid")
         if not callable(getattr(clip, "remove_notes_by_id", None)):
             raise ValueError("note deletion is unavailable on this Live shape")
@@ -2538,7 +2558,7 @@ class LiveObjectMapper:
         created_slots = [(track_index, slot_index, slot, getattr(slot, "clip", None)) for track_index, track in enumerate(self._items(getattr(self.song, "tracks", []))) for slot_index, slot in enumerate(self._items(getattr(track, "clip_slots", []))) if getattr(slot, "clip", None) is not None and (track_index, slot_index) not in before]
         try:
             if capture_error is not None: raise capture_error
-            if len(created_slots) > 256: raise ValueError("MIDI capture created too many clips")
+            if len(created_slots) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("MIDI capture created too many clips")
             captured: list[str] = []; identities: list[dict[str, str]] = []
             for track_index, slot_index, _, clip in created_slots:
                 reference = self.refs.put("clip", clip, f"{track_index}:{slot_index}"); captured.append(reference); identities.append({"ref": reference, "objectIdentity": self._capture_object_identity(clip), "createdFingerprint": self._mapped_fingerprint(reference)})
@@ -2595,8 +2615,9 @@ class LiveObjectMapper:
         enforce_ownership = transaction_id is not None or self.provenance == "real-live"
         if enforce_ownership and operation in _TRANSACTION_CREATIONS.union(_TRANSACTION_DELETIONS) and (not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128): raise ValueError("mutation transaction identity is required")
         if enforce_ownership and operation in _TRANSACTION_CREATIONS:
-            reserve = 256 if operation == "session.capture-midi" else 1
-            if len(self._owned_cleanup_tokens) + reserve > 4096: raise ValueError("transaction-owned cleanup ledger is full")
+            # A MIDI capture makes at most one clip per track.
+            reserve = max(1, len(self._items(getattr(self.song, "tracks", [])))) if operation == "session.capture-midi" else 1
+            if len(self._owned_cleanup_tokens) + reserve > MAX_OWNERSHIP_LEDGER: raise ValueError("transaction-owned cleanup ledger is full")
         explicit_deletion = _explicit_deletion(operation, args)
         if enforce_ownership and operation in _TRANSACTION_DELETIONS and not explicit_deletion: self._require_cleanup_ownership(operation, args, str(transaction_id), ownership_token)
         consumed_move_ownership: str | None = None
@@ -2936,7 +2957,7 @@ class LiveObjectMapper:
         sibling parameters, before any changes; if one then fails, the ones before it go back."""
         shared = {"expectedOwnerRef", "expectedOwnerIdentity", "expectedTrackRef", "expectedTrackIdentity", "expectedSiblings"}
         items = args.get("parameters")
-        if set(args) - shared - {"parameters"} or not isinstance(items, list) or not 1 <= len(items) <= 64 or not all(isinstance(item, dict) and not set(item) - {"ref", "value", "expectedRevision", "expectedObjectIdentity"} for item in items): raise ValueError("parameter authority is invalid")
+        if set(args) - shared - {"parameters"} or not isinstance(items, list) or not 1 <= len(items) <= MAX_WIRE_ARRAY_LENGTH or not all(isinstance(item, dict) and not set(item) - {"ref", "value", "expectedRevision", "expectedObjectIdentity"} for item in items): raise ValueError("parameter authority is invalid")
         references = [str(item.get("ref")) for item in items]
         if len(set(references)) != len(references): raise ValueError("parameter changes name the same parameter twice")
         common = {key: args.get(key) for key in shared}
@@ -3056,7 +3077,7 @@ class LiveObjectMapper:
             if kind == ["device"]:
                 pending = [device for track in tracks for device in self._items(self._read_attr(track, "devices") or [])]
                 for at, device in enumerate(pending):
-                    if at > 16384: return True
+                    if at > MAX_TRAVERSAL: return True
                     if same(device): return True
                     for chain in self._items(self._read_attr(device, "chains") or []): pending.extend(self._items(self._read_attr(chain, "devices") or []))
                     for pad in self._items(self._read_attr(device, "drum_pads") or []):
@@ -3102,13 +3123,13 @@ class LiveObjectMapper:
             if row.get("transactionId") != transaction_id:
                 moved = self._owned_cleanup_tokens.pop(token, None)
                 if moved is not None: self._moved_ownership[token] = {**moved, "movedBy": cause_identity}
-        while len(self._moved_ownership) > 4096: self._moved_ownership.pop(next(iter(self._moved_ownership)))
+        while len(self._moved_ownership) > MAX_OWNERSHIP_LEDGER: self._moved_ownership.pop(next(iter(self._moved_ownership)))
 
     def _restore_moved_ownership(self, deleted_identity: Any) -> None:
         """The inserted object that moved others was cleaned up (its undo): they are back where they
         were made, and own their references again. Their cleanup still checks identity and content."""
         for token, row in list(self._moved_ownership.items()):
-            if row.get("movedBy") == deleted_identity and len(self._owned_cleanup_tokens) < 4096:
+            if row.get("movedBy") == deleted_identity and len(self._owned_cleanup_tokens) < MAX_OWNERSHIP_LEDGER:
                 self._moved_ownership.pop(token, None); self._owned_cleanup_tokens[token] = {key: value for key, value in row.items() if key != "movedBy"}
 
     def _structure_create_atomic(self, kind: str, index: int, name: str, creator: Callable[[int], Any]) -> dict[str, Any]:
@@ -3281,7 +3302,7 @@ class LiveObjectMapper:
             if getattr(slot, "clip", None) is not None:
                 raise ValueError("session slot is occupied")
             length = args.get("length")
-            if not isinstance(length, (int, float)) or isinstance(length, bool) or not math.isfinite(float(length)) or not 0 < float(length) <= 1024:
+            if not isinstance(length, (int, float)) or isinstance(length, bool) or not math.isfinite(float(length)) or not 0 < float(length) <= 100000:
                 raise ValueError("clip length is invalid")
             name = args.get("name")
             if not isinstance(name, str) or not 1 <= len(name) <= 256:
@@ -3320,7 +3341,7 @@ class LiveObjectMapper:
             self.refs.delete(str(args["ref"])); return {"deleted": args["ref"]}
         clip = self.refs.get(str(args["ref"]))
         if operation == "note.add-batch":
-            if not isinstance(args.get("notes"), list) or not 1 <= len(args["notes"]) <= 512:
+            if not isinstance(args.get("notes"), list) or not 1 <= len(args["notes"]) <= MAX_WIRE_ARRAY_LENGTH:
                 raise ValueError("note batch is invalid")
             return self._note_add_batch(args)
         if not isinstance(args.get("note"), dict):
@@ -3383,11 +3404,11 @@ class LiveObjectMapper:
 
     def _take_lane_rows(self, track: Any, track_index: int) -> list[dict[str, Any]]:
         lanes = self._items(self._read_attr(track, "take_lanes") or [])
-        if len(lanes) > 64: raise ValueError("take-lane collection exceeds its bound")
+        if len(lanes) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("take-lane collection exceeds its bound")
         rows = []
         for lane_index, lane in enumerate(lanes):
             clips = self._items(self._read_attr(lane, "arrangement_clips") or [])
-            if len(clips) > 256: raise ValueError("take-lane clip collection exceeds its bound")
+            if len(clips) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("take-lane clip collection exceeds its bound")
             clip_rows = []
             for clip_index, clip in enumerate(clips):
                 reference = self.refs.put("take_lane_clip", clip, f"{track_index}:{lane_index}:{clip_index}")
@@ -3403,12 +3424,12 @@ class LiveObjectMapper:
 
     def _take_lane_collection_revision(self, track: Any, track_index: int) -> str:
         lanes = self._items(self._read_attr(track, "take_lanes") or []); siblings = [{"ref": self.refs.put("take_lane", lane, f"{track_index}:{index}"), "objectIdentity": self._capture_object_identity(lane), "name": str(getattr(lane, "name", ""))} for index, lane in enumerate(lanes)]
-        if len(siblings) > 64: raise ValueError("take-lane collection exceeds authority bound")
+        if len(siblings) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("take-lane collection exceeds authority bound")
         return hashlib.sha256(self._bounded_canonical(siblings).encode("utf-8")).hexdigest()
 
     def _take_lane_clip_collection_revision(self, lane: Any, lane_ref: str) -> str:
         path = ":".join(lane_ref.split(":")[2:]); clips = self._items(self._read_attr(lane, "arrangement_clips") or []); siblings = [{"ref": self.refs.put("take_lane_clip", clip, f"{path}:{index}"), "objectIdentity": self._capture_object_identity(clip)} for index, clip in enumerate(clips)]
-        if len(siblings) > 256: raise ValueError("take-lane clip collection exceeds authority bound")
+        if len(siblings) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("take-lane clip collection exceeds authority bound")
         return hashlib.sha256(self._bounded_canonical(siblings).encode("utf-8")).hexdigest()
 
     def _take_lane_location(self, reference: str) -> tuple[Any, Any, int, int]:
@@ -3422,13 +3443,13 @@ class LiveObjectMapper:
 
     def _arrangement_collection_revision(self, track: Any, track_index: int) -> str:
         clips = self._items(self._read_attr(track, "arrangement_clips") or []); siblings = [{"ref": self.refs.put("arrangement_clip", clip, f"{track_index}:{index}"), "objectIdentity": self._capture_object_identity(clip)} for index, clip in enumerate(clips)]
-        if len(siblings) > 256: raise ValueError("Arrangement clip collection exceeds authority bound")
+        if len(siblings) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("Arrangement clip collection exceeds authority bound")
         return hashlib.sha256(self._bounded_canonical(siblings).encode("utf-8")).hexdigest()
 
     def _arrangement_clip_authority_revision(self, reference: str) -> str:
         owner, clip, track_index, _ = self._arrangement_location(reference); owner_ref = self.refs.put("track", owner, str(track_index)); clips = self._items(self._read_attr(owner, "arrangement_clips") or [])
         siblings = [{"ref": self.refs.put("arrangement_clip", item, f"{track_index}:{index}"), "objectIdentity": self._capture_object_identity(item)} for index, item in enumerate(clips)]
-        if len(siblings) > 256: raise ValueError("Arrangement clip collection exceeds authority bound")
+        if len(siblings) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("Arrangement clip collection exceeds authority bound")
         authority = {"clip": {"ref": reference, "objectIdentity": self._capture_object_identity(clip)}, "owner": {"ref": owner_ref, "objectIdentity": self._capture_object_identity(owner)}, "siblings": siblings}
         return hashlib.sha256(self._bounded_canonical(authority).encode("utf-8")).hexdigest()
 
@@ -3517,7 +3538,7 @@ class LiveObjectMapper:
             reference = row.get("deviceRef") if operation == "browser.load" else row.get("ref"); identity = row.get("deviceObjectIdentity") if operation == "browser.load" else row.get("objectIdentity"); fingerprint = row.get("createdFingerprint")
             if not isinstance(reference, str) or not isinstance(identity, str) or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint): raise ValueError("created-object ownership evidence is incomplete")
             normalized.append((row, reference, identity, fingerprint))
-        if len(self._owned_cleanup_tokens) + len(normalized) > 4096: raise ValueError("transaction-owned cleanup ledger is full")
+        if len(self._owned_cleanup_tokens) + len(normalized) > MAX_OWNERSHIP_LEDGER: raise ValueError("transaction-owned cleanup ledger is full")
         for row, reference, identity, fingerprint in normalized:
             token = secrets.token_urlsafe(32); self._owned_cleanup_tokens[token] = {"transactionId": transaction_id, "ref": reference, "objectIdentity": identity, "fingerprint": fingerprint, "createdAt": time.monotonic()}; row["ownershipToken"] = token
         return result
@@ -3617,7 +3638,7 @@ class LiveObjectMapper:
         target_track_ref = args.get("targetTrackRef"); target_scene_index = args.get("targetSceneIndex")
         if not isinstance(target_track_ref, str) or not target_track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("target track reference is required for Session duplication")
-        if not isinstance(target_scene_index, int) or isinstance(target_scene_index, bool) or not 0 <= target_scene_index <= 10000:
+        if not isinstance(target_scene_index, int) or isinstance(target_scene_index, bool) or not 0 <= target_scene_index <= MAX_COLLECTION_INDEX:
             raise ValueError("target scene index is invalid")
         target_track = self.refs.get(target_track_ref); slots = self._items(getattr(target_track, "clip_slots", [])); scenes = self._items(getattr(self.song, "scenes", []))
         if target_scene_index >= len(slots) or target_scene_index >= len(scenes): raise ValueError("target scene index is invalid")
@@ -4154,7 +4175,7 @@ class LiveObjectMapper:
 
     def _warp_marker_rows(self, clip: Any) -> list[dict[str, Any]]:
         markers = list(getattr(clip, "warp_markers", None) or [])
-        if len(markers) > 256: raise ValueError("complete warp-marker collection exceeds its authoritative bound")
+        if len(markers) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("complete warp-marker collection exceeds its authoritative bound")
         rows = []
         for marker in markers:
             beat_time = self._read_attr(marker, "beat_time"); sample_time = self._read_attr(marker, "sample_time")
@@ -4412,7 +4433,6 @@ class LiveObjectMapper:
         if mixer is not None:
             parameters.extend(param for param in (self._read_attr(mixer, "volume"), self._read_attr(mixer, "panning"), self._read_attr(mixer, "cue_volume")) if param is not None)
             parameters.extend(self._items(self._read_attr(mixer, "sends") or []))
-        if len(parameters) > 512: raise ValueError("parameter collection exceeds its envelope bound")
         def presence() -> list[bool]:
             rows = []
             for parameter in parameters:
@@ -4432,12 +4452,12 @@ class LiveObjectMapper:
     def _note_read_by_id(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref"); note_ids = args.get("noteIds")
         if not isinstance(reference, str) or set(args) - {"ref", "noteIds"}: raise ValueError("note read arguments are invalid")
-        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= 1024 or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids): raise ValueError("note ids are invalid")
+        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= MAX_WIRE_ARRAY_LENGTH or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids): raise ValueError("note ids are invalid")
         clip = self.refs.get(reference)
         if not callable(getattr(clip, "get_notes_by_id", None)): raise ValueError("targeted note reads are unavailable on this Live shape")
         try: raw = list(clip.get_notes_by_id(note_ids))
         except BaseException as error: raise ValueError("targeted note read failed") from error
-        if len(raw) > 1024: raise ValueError("note read exceeds its bound")
+        if len(raw) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("note read exceeds its bound")
         rows = self._note_rows_from(raw)
         return {"notes": rows, "notesRevision": hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()}
 
@@ -4449,13 +4469,13 @@ class LiveObjectMapper:
         if not callable(reader): return {"available": False, "notes": [], "notesRevision": hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()}
         try: raw = list(reader())
         except BaseException as error: raise ValueError("selected note read failed") from error
-        if len(raw) > 1024: raise ValueError("selected note read exceeds its bound")
+        if len(raw) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("selected note read exceeds its bound")
         return {"available": True, "notes": self._note_rows_from(raw), "notesRevision": hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()}
 
     def _note_duplicate(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
         note_ids = args.get("noteIds")
-        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= 512 or len(set(note_ids)) != len(note_ids) or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids):
+        if not isinstance(note_ids, list) or not 1 <= len(note_ids) <= MAX_WIRE_ARRAY_LENGTH or len(set(note_ids)) != len(note_ids) or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in note_ids):
             raise ValueError("note ids are invalid")
         if not callable(getattr(clip, "duplicate_notes_by_id", None)): raise ValueError("note duplication is unavailable on this Live shape")
         before_rows = self._read_notes(clip); existing = {int(row["id"]) for row in before_rows if isinstance(row.get("id"), int)}
@@ -4795,7 +4815,7 @@ class LiveObjectMapper:
                             "randomAmount": float_or_none(self._read_attr(groove, "random_amount")),
                             "timingAmount": float_or_none(self._read_attr(groove, "timing_amount")),
                             "velocityAmount": float_or_none(self._read_attr(groove, "velocity_amount"))})
-        if len(grooves) > 256: raise ValueError("groove collection exceeds its bound")
+        if len(grooves) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("groove collection exceeds its bound")
         amount = self._read_attr(self.song, "groove_amount")
         return {"grooveAmount": float(amount) if isinstance(amount, (int, float)) and not isinstance(amount, bool) and math.isfinite(float(amount)) else None, "grooves": grooves}
 
@@ -4987,7 +5007,7 @@ class LiveObjectMapper:
         canonical_index = {self._capture_object_identity(track): index for index, track in enumerate(canonical_tracks)}
         visible = []
         for track in self._items(getattr(song, "visible_tracks", [])):
-            if len(visible) >= 256: raise ValueError("visible track collection exceeds its bound")
+            if len(visible) >= MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("visible track collection exceeds its bound")
             index = canonical_index.get(self._capture_object_identity(track))
             if index is None: raise ValueError("visible track is not part of the canonical track traversal")
             visible.append(self.refs.put("track", track, str(index)))
@@ -5398,7 +5418,7 @@ class LiveObjectMapper:
         def devices(rows: Any, depth: int = 0) -> None:
             for device in rows or []:
                 budget[0] += 1
-                if depth > 32 or budget[0] > 16384 or not isinstance(device, dict): return
+                if depth > 32 or budget[0] > MAX_TRAVERSAL or not isinstance(device, dict): return
                 note("device", device)
                 for parameter in list(device.get("parameters") or []) + list(device.get("macros") or []): note("parameter", parameter)
                 for chain in device.get("chains") or []: note("chain", chain); devices(chain.get("devices") if isinstance(chain, dict) else None, depth + 1)
@@ -5684,7 +5704,6 @@ class LiveObjectMapper:
                     for pad in row.get("drumPads", []):
                         for chain in pad.get("chains", []): collect(chain.get("devices", []))
             collect(track.get("devices", []))
-            if len(devices) > 256: raise ValueError("device performance collection exceeds its bound")
             tracks.append({
                 "ref": track["ref"],
                 "performanceImpact": track.get("performanceImpact"),
@@ -5692,7 +5711,6 @@ class LiveObjectMapper:
                 "outputMeterLeft": track.get("outputMeterLeft"), "outputMeterRight": track.get("outputMeterRight"), "outputMeterLevel": track.get("outputMeterLevel"),
                 "devices": devices,
             })
-        if len(tracks) > 256: raise ValueError("track performance collection exceeds its bound")
         state = {"averageProcessUsage": average, "peakProcessUsage": peak, "tracks": tracks}
         return {**state, "sampledAt": int(time.time() * 1000), "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
 
@@ -5842,7 +5860,7 @@ class LiveObjectMapper:
         inputs = self._items(self._read_attr(owner, "audio_inputs") or [])
         io = inputs[0] if inputs else None
         if io is None: return {"availableRoutingTypes": [], "routingType": None, "routingChannel": None, "defaultExternalRoutingChannelIsNone": None}
-        types = [name for name in (self._choice_name(item) for item in self._items(self._read_attr(io, "available_routing_types") or [])) if name is not None][:64]
+        types = [name for name in (self._choice_name(item) for item in self._items(self._read_attr(io, "available_routing_types") or [])) if name is not None]
         default_none = self._read_attr(io, "default_external_routing_channel_is_none")
         return {
             "availableRoutingTypes": types,
@@ -6266,7 +6284,7 @@ class LiveObjectMapper:
         if "visibleMacroCount" in args: raise ValueError("RackDevice.visible_macro_count is read-only in the public LOM; use rack.action add-macro/remove-macro to change it")
         if "selectedVariationIndex" in args:
             value = args["selectedVariationIndex"]
-            if not isinstance(value, int) or isinstance(value, bool) or not -1 <= value <= 256: raise ValueError("selectedVariationIndex is invalid")
+            if not isinstance(value, int) or isinstance(value, bool) or not -1 <= value <= MAX_COLLECTION_INDEX: raise ValueError("selectedVariationIndex is invalid")
             proposals.append(("selected_variation_index", value))
         if not proposals: raise ValueError("rack mutation has no fields")
         assignments = [(attribute, value, self._read_attr(device, attribute)) for attribute, value in proposals]
@@ -6298,7 +6316,7 @@ class LiveObjectMapper:
         state_revision = hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("rack state changed since preview")
         index = args.get("index")
-        if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= 256): raise ValueError("index is invalid")
+        if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= MAX_COLLECTION_INDEX): raise ValueError("index is invalid")
         method_name = {"add-macro": "add_macro", "remove-macro": "remove_macro", "randomize-macros": "randomize_macros", "insert-chain": "insert_chain", "copy-pad": "copy_pad", "store-variation": "store_variation", "recall-variation": "recall_selected_variation", "delete-variation": "delete_selected_variation"}[action]
         method = getattr(device, method_name, None)
         if not callable(method): raise ValueError(f"rack action {action} is unavailable on this Live shape")
@@ -6376,7 +6394,7 @@ class LiveObjectMapper:
             return value if isinstance(value, bool) else None
         def name_list(value: Any) -> list[str] | None:
             if value is None: return None
-            items = self._items(value)[:64]
+            items = self._items(value)
             names = []
             for item in items:
                 name = self._choice_name(item)
@@ -6428,7 +6446,7 @@ class LiveObjectMapper:
         if "looper" in class_name:
             rows["looper"] = self._looper_state(device)
         if "plugindevice" in normalized or self._read_attr(device, "presets") is not None:
-            presets = self._items(self._read_attr(device, "presets") or [])[:256]
+            presets = self._items(self._read_attr(device, "presets") or [])
             rows["plugin"] = {
                 "presets": [str(self._read_attr(item, "name") or item) for item in presets],
                 "selectedPresetIndex": self._read_attr(device, "selected_preset_index") if isinstance(self._read_attr(device, "selected_preset_index"), int) and not isinstance(self._read_attr(device, "selected_preset_index"), bool) else None,
@@ -6589,7 +6607,7 @@ class LiveObjectMapper:
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("plugin state changed since preview")
         if "presetIndex" in args:
             value = args["presetIndex"]
-            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 1024: raise ValueError("presetIndex is invalid")
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COLLECTION_INDEX: raise ValueError("presetIndex is invalid")
             presets = self._items(self._read_attr(device, "presets") or [])
             if not presets: raise ValueError("preset selection is unavailable on this device")
             if value >= len(presets): raise ValueError("presetIndex exceeds the available preset collection")
@@ -6888,7 +6906,7 @@ class LiveObjectMapper:
     def _scene_collection_revision(self) -> str:
         scenes = self._items(getattr(self.song, "scenes", []))
         rows = [{"ref": self.refs.put("scene", scene, str(index)), "objectIdentity": self._capture_object_identity(scene), "name": str(getattr(scene, "name", "")), **self._scene_state_fields(scene)} for index, scene in enumerate(scenes)]
-        if len(rows) > 512: raise ValueError("scene collection exceeds authority bound")
+        if len(rows) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("scene collection exceeds authority bound")
         return hashlib.sha256(self._bounded_canonical(rows).encode("utf-8")).hexdigest()
 
     def _mixer_row(self, track: Any, track_index: int) -> dict[str, Any]:
@@ -7027,7 +7045,7 @@ class LiveObjectMapper:
         budget = [0]
         def consume(amount: int = 1) -> None:
             budget[0] += amount
-            if budget[0] > 16384: raise ValueError("realtime parameter identity traversal exceeded its bound")
+            if budget[0] > MAX_TRAVERSAL: raise ValueError("realtime parameter identity traversal exceeded its bound")
         def descriptor(current_ref: str, parameter: Any, owner_ref: str, owner: Any, track_ref: str, track: Any, siblings: list[dict[str, str]]) -> dict[str, Any]:
             return {"ref": current_ref, "parameterIdentity": self._capture_object_identity(parameter), "ownerRef": owner_ref, "ownerIdentity": self._capture_object_identity(owner), "trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "siblings": siblings}
         for track_index, track in enumerate(tracks):
@@ -7196,7 +7214,7 @@ class LiveObjectMapper:
             envelope = creator(parameter)
         return clip, envelope
 
-    def _envelope_points(self, envelope: Any, limit: int = 512) -> list[dict[str, Any]]:
+    def _envelope_points(self, envelope: Any, limit: int = MAX_WIRE_ARRAY_LENGTH) -> list[dict[str, Any]]:
         clip = getattr(envelope, "canonical_parent", None); length = self._read_attr(clip, "length") if clip is not None else None
         if not isinstance(length, (int, float)) or isinstance(length, bool) or not math.isfinite(float(length)) or not 0 <= float(length) <= 100000: raise ValueError("complete automation envelope range is unavailable or exceeds its bound")
         window = float(length) + 4.0
@@ -7295,7 +7313,7 @@ class LiveObjectMapper:
 
     def _envelope_point_insert(self, args: dict[str, Any]) -> dict[str, Any]:
         self._guard_envelope_mutation(args); points = args.get("points")
-        if not isinstance(points, list) or not 1 <= len(points) <= 512: raise ValueError("points are invalid")
+        if not isinstance(points, list) or not 1 <= len(points) <= MAX_WIRE_ARRAY_LENGTH: raise ValueError("points are invalid")
         clip, prior_envelope = self._envelope(str(args["clipRef"]), str(args["parameterRef"])); parameter = self._resolve_parameter(str(args["parameterRef"])); clip_length = self._read_attr(clip, "length"); minimum = self._read_attr(parameter, "min", "min_value"); maximum = self._read_attr(parameter, "max", "max_value")
         if not isinstance(clip_length, (int, float)) or isinstance(clip_length, bool) or not math.isfinite(float(clip_length)) or float(clip_length) <= 0 or not isinstance(minimum, (int, float)) or not isinstance(maximum, (int, float)): raise ValueError("automation bounds are unavailable")
         for point in points:
@@ -7361,7 +7379,7 @@ class LiveObjectMapper:
             if len(devices) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device sibling collection exceeds the authoritative bound")
             for device in devices:
                 traversed += 1
-                if traversed > 16384: raise ValueError("device hierarchy traversal exceeds its bound")
+                if traversed > MAX_TRAVERSAL: raise ValueError("device hierarchy traversal exceeds its bound")
                 if self._capture_object_identity(device) == target_identity: target_occurrences += 1
                 for chain in self._items(self._read_attr(device, "chains") or []): count(chain)
                 for pad in self._items(self._read_attr(device, "visible_drum_pads") or self._read_attr(device, "drum_pads") or []):
@@ -7445,7 +7463,7 @@ class LiveObjectMapper:
         if sample_path is not None and (not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha()))):
             raise ValueError("samplePath must be an absolute path")
         index = args.get("index")
-        if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= 256):
+        if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= MAX_COLLECTION_INDEX):
             raise ValueError("device index is invalid")
         all_tracks = self._all_track_objects(); track_index = self._capture_index(all_tracks, track, str(args.get("expectedTrackIdentity")))
         if track_index is None or track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("device insertion track hierarchy is stale")
@@ -7544,7 +7562,7 @@ class LiveObjectMapper:
 
     def _device_move(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref"); index = args.get("index")
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 256: raise ValueError("device index is invalid")
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= MAX_COLLECTION_INDEX: raise ValueError("device index is invalid")
         owner, device, _, current, owner_ref = self._device_location(str(reference), args.get("expectedObjectIdentity"), args.get("expectedOwnerRef"), args.get("expectedOwnerIdentity"), args.get("expectedSiblings"), args.get("expectedTrackRef"), args.get("expectedTrackIdentity"))
         target_track_ref = args.get("targetTrackRef"); target_chain_ref = args.get("targetChainRef")
         if target_track_ref is not None or target_chain_ref is not None:
@@ -7643,7 +7661,6 @@ class LiveObjectMapper:
             node = self._read_attr(browser, name)
             if node is not None:
                 roots.append({"name": name, "binding": "unofficial-internal", "searchable": False})
-        if len(roots) > 64: raise ValueError("browser root collection exceeds its bound")
         preview = getattr(browser, "preview_item", None)
         state = {"roots": roots, "previewAvailable": callable(preview), "bindingEvidence": f"shape-probed on the connected build (Live {version_note}); undocumented Remote Script internals, version-specific"}
         return {**state, "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
@@ -8689,7 +8706,7 @@ class LiveObjectMapper:
     def _note_add_batch(self, args: dict[str, Any]) -> dict[str, Any]:
         clip = self._guard_note_clip(args)
         values = args.get("notes")
-        if not isinstance(values, list) or not 1 <= len(values) <= 512:
+        if not isinstance(values, list) or not 1 <= len(values) <= MAX_WIRE_ARRAY_LENGTH:
             raise ValueError("note batch is invalid")
         notes = [self._validated_note(clip, value) for value in values]; prior_rows = self._read_notes(clip)
         if len(prior_rows) + len(notes) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("note batch would exceed the authoritative clip-note bound")
@@ -8710,11 +8727,14 @@ class LiveObjectMapper:
             else:
                 clip.add_new_notes([{"pitch": note["pitch"], "start_time": float(note["start"]), "duration": float(note["duration"]), "velocity": note["velocity"], "mute": bool(note.get("mute", False)), "channel": note["channel"], "probability": float(note.get("probability", 1.0)), "velocityDeviation": float(note.get("velocityDeviation", 0.0)), "velocity_deviation": float(note.get("velocityDeviation", 0.0)), "releaseVelocity": float(note.get("releaseVelocity", 64.0)), "release_velocity": float(note.get("releaseVelocity", 64.0))} for note in notes])
             after_rows = self._read_notes(clip); content = lambda row: {"pitch": int(row.get("pitch", 0)), "start": float(row.get("start", row.get("start_time", 0))), "duration": float(row.get("duration", 0)), "velocity": row.get("velocity", 0), "channel": int(row.get("channel", 1)), "mute": bool(row.get("mute", False)), "probability": float(row.get("probability", 1.0) if row.get("probability") is not None else 1.0), "velocityDeviation": float(row.get("velocityDeviation", 0.0) if row.get("velocityDeviation") is not None else 0.0), "releaseVelocity": float(row.get("releaseVelocity", 64.0) if row.get("releaseVelocity") is not None else 64.0)}; canonical_content = lambda rows: self._bounded_canonical(sorted([content(row) for row in rows], key=lambda row: self._bounded_canonical(row)))
-            unmatched = [row for row in after_rows if isinstance(row.get("id"), int) and row["id"] not in prior_ids]
+            # Each requested note takes the first new note with its exact content, in Live's order:
+            # by content, so a batch of thousands matches in one pass instead of one per note.
+            unmatched: dict[str, deque[int]] = {}
+            for row in after_rows:
+                if isinstance(row.get("id"), int) and row["id"] not in prior_ids: unmatched.setdefault(self._bounded_canonical(content(row)), deque()).append(int(row["id"]))
             for note in notes:
-                expected_note = content(note); match = next((index for index, row in enumerate(unmatched) if self._bounded_canonical(content(row)) == self._bounded_canonical(expected_note)), None)
-                if match is None: note_ids.append(None)
-                else: note_ids.append(int(unmatched[match]["id"])); unmatched.pop(match)
+                candidates = unmatched.get(self._bounded_canonical(content(note)))
+                note_ids.append(candidates.popleft() if candidates else None)
             expected_content = canonical_content(prior_rows + notes)
             after_ids = [row.get("id") for row in after_rows]
             if len(after_rows) != len(prior_rows) + len(notes) or any(not isinstance(note_id, int) for note_id in after_ids) or len(set(after_ids)) != len(after_ids) or any(note_id is None for note_id in note_ids) or canonical_content(after_rows) != expected_content: raise ValueError("note batch did not produce the exact complete expected state")
@@ -9472,7 +9492,6 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any]) -> s
     playback = {**playback, "transport": playback_transport}
     song_state = {key: mapper._read_attr(mapper.song, key) for key in ("tempo", "loop", "loop_start", "loop_length", "is_playing", "record_mode", "session_record") if not (key == "tempo" and tempo_automated)}
     locator_items = mapper._locator_items(); arrangement_items = mapper._arrangement_clip_items()
-    if len(locator_items) > 256 or len(arrangement_items) > 256: raise ValueError("mutation authority collection exceeds its complete-state bound")
     locators = [{key: row.get(key) for key in ("ref", "name", "position")} for row in locator_items]
     arrangement = [{key: row.get(key) for key in ("ref", "trackRef", "name", "start", "length")} for row in arrangement_items]
     identity = {"epoch": mapper.refs.epoch, "structure": mapper._structure_revision(), "song": song_state, "playback": playback, "locators": locators, "arrangement": arrangement, "references": observed}
@@ -9693,7 +9712,7 @@ class AbletonMcpBridge:
                 if operation in _TRANSACTION_DELETIONS and not _explicit_deletion(operation, args): self.mapper._require_cleanup_ownership(operation, args, transaction_id, ownership_token)
                 for key, row in list(preflights.items()):
                     if row["expiresAt"] <= now: preflights.pop(key, None)
-                if len(preflights) >= 64: raise ValueError("too many pending mutation preflights")
+                if len(preflights) >= MAX_CONNECTION_AUTHORITIES: raise ValueError("too many pending mutation preflights")
                 args_digest = hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(args).encode("utf-8")).hexdigest(); state_digest = _authority_state_digest(self.mapper, args, operation)
                 token = secrets.token_urlsafe(24); confirmation = secrets.token_urlsafe(24); expires_at = now + 10000
                 preflights[token] = {"operation": operation, "argsDigest": args_digest, "stateDigest": state_digest, "confirmation": confirmation, "transactionId": transaction_id, "ownershipToken": ownership_token, "expiresAt": expires_at}
@@ -9709,7 +9728,7 @@ class AbletonMcpBridge:
                 args_digest = hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(args).encode("utf-8")).hexdigest(); state_digest = _authority_state_digest(self.mapper, args, operation)
                 if preflight_row is None or preflight_row["expiresAt"] <= now or preflight_row["operation"] != operation or preflight_row["argsDigest"] != args_digest or preflight_row["stateDigest"] != state_digest or preflight_row["transactionId"] != transaction_id or preflight_row.get("ownershipToken") != ownership_token or not hmac.compare_digest(preflight_row["confirmation"], str(request["confirmation"])):
                     raise ValueError("missing, expired, stale, or mismatched mutation preflight")
-                if len(authorities) >= 64: raise ValueError("too many pending mutation authorities")
+                if len(authorities) >= MAX_CONNECTION_AUTHORITIES: raise ValueError("too many pending mutation authorities")
                 token = secrets.token_urlsafe(24); expires_at = now + 10000
                 authorities[token] = {"operation": operation, "argsDigest": args_digest, "stateDigest": state_digest, "transactionId": transaction_id, "ownershipToken": ownership_token, "expiresAt": expires_at, "idempotencyKey": request["idempotencyKey"]}
                 return {"authorityToken": token, "operation": operation, "argsDigest": args_digest, "stateDigest": state_digest, "expiresAt": expires_at}
@@ -9736,7 +9755,7 @@ class AbletonMcpBridge:
                 prior_pending = pending.get(idempotency_key)
                 if prior_pending is not None and (prior_pending["transactionId"] != transaction_id or prior_pending["operation"] != request.get("operation") or prior_pending["argsDigest"] != digest): raise ValueError("idempotency key conflicts with a pending mutation")
                 if prior_pending is None:
-                    if len(pending) >= 256: raise ValueError("pending mutation ledger is full")
+                    if len(pending) >= MAX_MUTATION_LEDGER: raise ValueError("pending mutation ledger is full")
                     pending_row = {"transactionId": transaction_id, "operation": request.get("operation"), "argsDigest": digest, "count": 1, "claims": {claim}}
                     pending[idempotency_key] = pending_row
                 else:
@@ -9761,7 +9780,7 @@ class AbletonMcpBridge:
                     if prior is not None:
                         if prior["operation"] != request.get("operation") or prior["argsDigest"] != digest or prior.get("transactionId") != transaction_id: raise ValueError("idempotency key conflicts with an executed mutation")
                         return prior["result"]
-                    if len(self._executed_mutations) >= 256: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
+                    if len(self._executed_mutations) >= MAX_MUTATION_LEDGER: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
                     result = apply(); self._executed_mutations[idempotency_key] = {"operation": request["operation"], "argsDigest": digest, "transactionId": transaction_id, "result": result}; return result
             def invoke_authorized() -> Any:
                 try:
@@ -9798,10 +9817,10 @@ class AbletonMcpBridge:
                     keys = [key for key, row in self._executed_mutations.items() if row.get("transactionId") == transaction_id]
                     pending_keys = [key for key, row in pending.items() if row.get("transactionId") == transaction_id]
                     retiring = set(keys + pending_keys)
-                    if len(set(retired).union(retiring)) > 4096: raise ValueError("retired mutation ledger is full; reconnect after authoritative recovery")
+                    if len(set(retired).union(retiring)) > MAX_OWNERSHIP_LEDGER: raise ValueError("retired mutation ledger is full; reconnect after authoritative recovery")
                     finalized = getattr(self, "_finalized_transactions", None)
                     if finalized is None: finalized = self._finalized_transactions = set()
-                    if terminal and transaction_id not in finalized and len(finalized) >= 4096: raise ValueError("finalized transaction ledger is full; reconnect after authoritative recovery")
+                    if terminal and transaction_id not in finalized and len(finalized) >= MAX_OWNERSHIP_LEDGER: raise ValueError("finalized transaction ledger is full; reconnect after authoritative recovery")
                     for key in keys: self._executed_mutations.pop(key, None)
                     for key in retiring: retired[key] = now + 60000
                     if terminal: finalized.add(transaction_id)
