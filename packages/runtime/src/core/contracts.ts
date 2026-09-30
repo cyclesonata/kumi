@@ -1,5 +1,7 @@
 import type { Closeness } from "../audio/match.js";
 import type { MatchStatus } from "./match-run.js";
+import type { Knob } from "./evolve.js";
+import type { GoalStatus } from "./goal.js";
 import type { FailureKind } from "./errors.js";
 export type JsonObject = Record<string, unknown>;
 
@@ -166,6 +168,23 @@ export interface Integration {
   arrangementStrip?(signal: AbortSignal): Promise<ArrangementStrip | undefined>;
   /** Render candidates quietly, hear them and set them against a reference (the audition tool's work). */
   audition?(request: AuditionRequest, signal: AbortSignal): Promise<AuditionResult | string>;
+  /** A goal's render rig over these candidates (kept open across generations), or why not. */
+  goal?(request: AuditionRequest, signal: AbortSignal): Promise<GoalRig | string>;
+}
+
+/** A goal's candidate chain in Live: its track, what it is, and the knobs a search may move. */
+export interface GoalSlotInfo { name: string; label: string; chain: string; knobs: Knob[] }
+/** A render rig a goal keeps open: its slots, a generation rendered and scored in one pass, the best kept, and closing. */
+export interface GoalRig {
+  readonly slots: GoalSlotInfo[];
+  /** A candidate the model built mid-search joins (with a safety limiter at the end of its chain). */
+  add(candidate: AuditionCandidate, signal: AbortSignal): Promise<GoalSlotInfo | string>;
+  /** Each trial's values set on its slot, all rendered in one silent pass, each scored against the reference. */
+  generation(trials: readonly { slot: string; knobs: readonly Knob[]; values: readonly number[] }[], signal: AbortSignal): Promise<{ scores: Map<string, number>; gaps: Map<string, string[]>; silent: string[] }>;
+  /** The best so far on a track of its own ("Kumi · Goal best"); its name, or why not. */
+  keepBest(slot: string, knobs: readonly Knob[], values: readonly number[], signal: AbortSignal): Promise<string>;
+  /** The rig's scratch tracks go and the transport comes back; anything the producer should know. */
+  close(): Promise<string[]>;
 }
 
 /** An audition: the candidate tracks, where the part is, and what to match. */
@@ -211,6 +230,8 @@ export interface AuditionEvent {
   gaps: string[];
   /** What was auditioned, so a match run can audition it again after changes. */
   request?: AuditionRequest;
+  /** The reference as heard ("C2 · bright, rich · attack 15 ms"), for what a lesson says was matched. */
+  reference?: string;
 }
 
 /** A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data. */
@@ -383,6 +404,7 @@ export type SessionEvent = KernelEvent
   /** A lesson Kumi learned from a match run (or forgot): its line, as /memory shows it. */
   | { type: "lesson"; action: "learned" | "updated" | "forgot"; id: string; line: string }
   | MatchStatus
+  | GoalStatus
   | MemoryEvent
   | HeardEvent
   | AuditionEvent
@@ -505,6 +527,10 @@ export interface SessionController {
   /** The techniques Kumi learned, and forgetting one by id. */
   techniques?(): Promise<TechniqueSummary[]>;
   forgetTechnique?(id: string): Promise<boolean>;
+  /** /goal: pursue one (with what to reach), or pick a paused one up (without); stop ends it; the dashboard's numbers. */
+  goal?(text?: string): Promise<void>;
+  stopGoal?(): Promise<boolean>;
+  goalStatus?(): GoalStatus | undefined;
   /** What Kumi learned matching sounds, newest first, and forgetting one. */
   lessons?(): Promise<{ id: string; line: string; at: number }[]>;
   forgetLesson?(id: string): Promise<boolean>;

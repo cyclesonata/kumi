@@ -25,6 +25,8 @@ const both = { candidates: [{ track: "track:1", label: "Saw" }, { track: "track:
 test("an audition renders every candidate in one pass, quietly, scores each against the reference, and leaves the Set as it was", async () => {
   const b = await rig();
   try {
+    // The producer left the drums armed: disarmed for the render (Live records exactly the armed tracks), armed again after.
+    b.arm(1);
     const result = await tool(b.tools, "audition").execute(both, signal());
     assert.equal(result.isError, false, result.text);
     const reply = JSON.parse(result.text) as { round: number; best: string; takes: { label: string; score: number; gaps: string[] }[] };
@@ -42,6 +44,7 @@ test("an audition renders every candidate in one pass, quietly, scores each agai
     assert.equal(b.main.volume, 0.85);
     // The scratch tracks are gone, though they recorded.
     assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"]);
+    assert.deepEqual(b.armed(), [1], "the drums are armed again");
     assert.ok(b.requests.some((request) => request.name === "live_undo" && request.args.discard === true));
     // HISTORY has one quiet line for all of it; NOW said it once.
     assert.equal(b.records[0]!.score, saw_!.score);
@@ -49,6 +52,8 @@ test("an audition renders every candidate in one pass, quietly, scores each agai
     assert.match(b.actions[0]!.title, /^Listening to my version quietly \(about \d+ s a round\)$/);
     assert.equal(b.actions[0]!.playing, true, "a technique drafted meanwhile counts as heard");
     assert.equal(existsSync(b.restoreFile), false, "Main is back, so there's nothing to restore after a crash");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(b.released.length >= 2, "the render's own steps (Main down and back) gave up their undo in the bridge");
     assert.deepEqual(b.auditions.map((event) => [event.round, event.best?.label, event.takes.length]), [[1, "Saw", 2]]);
     // A second round says the score before it.
     const again = JSON.parse((await tool(b.tools, "audition").execute({ ...both, candidates: [both.candidates[1]!] }, signal())).text) as { round: number };
@@ -91,6 +96,7 @@ test("a silent render is said as such, and never compared", async () => {
     assert.equal(reply.takes[0]!.score, undefined);
     assert.match(reply.notes.join(" "), /The render was silent: is the source playing in the Arrangement/);
     assert.equal(b.records[0]!.title, "Auditioned: the render was silent");
+    assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"], "a single scratch track goes too");
   } finally { await b.integration.close(); }
 });
 

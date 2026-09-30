@@ -1056,3 +1056,18 @@ candidates · 76% (Drift chord)"). A round took about 40 s for a 2 s part, mostl
 per-step round trips. Found on the way: the registry didn't list the recording's new fields
 (1.0.48), and Live itself refused deleting a recorded-onto scratch track (1.0.49); a window
 opening right on an attack read as a flurry of onsets (now 0.1 s of lead-in).
+
+## A match run on real Live, with Claude Sonnet 5.5 (2026-09-29)
+
+"Make a new MIDI track with a sound that sounds like this reference" (a 2.3 s Operator chord
+render), in "Kumi Focus Demo". The model built one Operator patch and auditioned it (58%), then
+stopped after three flat rounds; the harness sent it back in each time. It went on to two
+candidates a round, shortening the attack and adding a decay (envelope 41 → 77) and opening the
+filter (68 → 73). The run ended on a plateau at 58% → 73% after 14:36, with a lesson in the playbook.
+Round lines, NOW's "matching · 58→73% · 12:59" and HISTORY's ♪ lines showed throughout.
+
+What it found: after about ten minutes the bridge refused mixer, routing and Browser loads. It had
+kept 64 applied changes of each kind for their undo, and the renders filled that (fixed in 1.0.50:
+512, and Kumi releases its render steps). A one-candidate audition left its scratch track, because
+the record of adding it carried the track's own name and was skipped as "goes with the track"
+(fixed). The lesson's "what was matched" was the request sentence (now the reference as heard).

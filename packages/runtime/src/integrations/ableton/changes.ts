@@ -473,7 +473,7 @@ export const UNDO_DESCRIPTION = "Undo one of your changes from this session: pas
 /** Bridge tools only Kumi calls, behind its change tools: previews, applies and undo. */
 /** Stops clips, the transport and recording at once, whatever Live is doing: Kumi's stop when the ordinary one can't. */
 export const EMERGENCY_STOP = "live_session_emergency_stop";
-export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), ...ACTIONS.flatMap((kind) => [kind.preview, kind.apply]), "live_undo", EMERGENCY_STOP]);
+export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), ...ACTIONS.flatMap((kind) => [kind.preview, kind.apply]), "live_undo", "live_transaction_release", EMERGENCY_STOP]);
 
 /** The fields of a change tool's input that name Live objects; they must come from discovery in this turn. */
 export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef", "chainRef", "rackRef", ...MORE_REFERENCE_FIELDS] as const;

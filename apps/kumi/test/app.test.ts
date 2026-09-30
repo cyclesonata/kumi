@@ -966,6 +966,37 @@ test("a match run shows as it works: a line per audition round, its score and ti
   await h.app.close();
 });
 
+test("/goal starts a goal and shows its dashboard in the GOAL tab: what it's after, its generations, the best with a sparkline, the leader, what was tried; /goal stop ends it", async () => {
+  const goals: (string | undefined)[] = []; let stopped = 0;
+  const h = harness(140, 40, undefined, { async goal(text) { goals.push(text); }, async stopGoal() { stopped++; return true; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("/goal make my pad sound like ~/ref.wav\r");
+  assert.deepEqual(goals, ["make my pad sound like ~/ref.wav"]);
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "goal", state: "running", goal: "make my pad sound like ~/ref.wav", generation: 12, rendered: 36, trend: [58, 58, 61, 64, 64, 70, 71, 71, 74, 76, 76, 81], first: 58,
+    best: { label: "Collision", score: 81 }, leader: "Collision · Collision → Delay → Limiter", idea: "Tried a Collision with parallel delays.", elapsedMs: 185_000, candidates: 3 });
+  await delay(10);
+  let lines = h.screen();
+  assert.ok(has(lines, "GOAL"), lines.join("\n"));
+  assert.ok(has(lines, "searching · gen 12 · 36 heard · 3") && has(lines, "candidates · 3:05"), lines.join("\n"));
+  assert.ok(lines.some((line) => line.includes("81% from 58%") && /▁.*█/.test(line)), "the best, where it started, and its trend");
+  assert.ok(has(lines, "best  Collision · Collision → Delay →"));
+  assert.ok(has(lines, "tried  Tried a Collision with parallel"));
+  assert.ok(has(lines, "goal · 81% · gen 12 · 3:05"), "NOW's one line");
+  await h.type("/goal stop\r");
+  assert.equal(stopped, 1);
+  h.emit({ type: "goal", state: "done", goal: "make my pad sound like ~/ref.wav", generation: 13, rendered: 39, trend: [58, 81], first: 58, best: { label: "Collision", score: 81 }, elapsedMs: 200_000, candidates: 3, bestTrack: "Kumi · Goal best", why: "stopped" });
+  h.emit({ type: "state", state: "idle" });
+  await delay(10);
+  lines = h.screen();
+  assert.ok(has(lines, "done · stopped · gen 13"));
+  assert.ok(has(lines, "kept on  Kumi · Goal best"));
+  assert.ok(!has(lines, "goal · 81%"), "NOW lets go of it");
+  await h.app.close();
+});
+
 test("a video Kumi watched goes above the answer: its title, where its words came from, and the frames it looked at as small pictures; NOW says what it's doing meanwhile", async () => {
   const h = harness();
   void h.app.run();

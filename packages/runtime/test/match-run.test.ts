@@ -177,5 +177,7 @@ test("lessons are kept in a file only this user can read, checked on the way in;
     assert.equal(playbookBrief([], "anything"), "");
     assert.equal(matchedFrom("Make my pad sound like this reference: ~/ref.wav"), "pad");
     assert.equal(matchedFrom("recreate this sound"), "sound");
+    assert.equal(matchedFrom("Make a new MIDI track with a sound that sounds like this reference: ~/ref.wav. It's a chord."), "sound");
+    assert.equal(matchedFrom("build me a warm pad that sounds like the intro"), "warm pad");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -102,6 +102,16 @@ The first release for producers to use day to day. Ships with bridge 1.0.50.
   gaps. The run ends at the target, on a plateau (only after something
   genuinely different was tried), when its generous budget is spent, or on
   Esc; "keep going" carries it on. NOW shows the score and time as it works.
+- `/goal` goes after a sound until Kumi gets there: the model sets up a few
+  genuinely different candidates, then Kumi's own search nudges, crosses and
+  redraws their knobs a generation at a time, every candidate rendered in one
+  silent pass, with the model making structural leaps every few generations or
+  when the search stalls. The GOAL tab shows it as it works: generations,
+  candidates heard, the best with its trend, the leader, what was tried last,
+  the time, and tokens on an API key. It ends at the target, at a safety cap of
+  hours, or with /goal stop; Esc pauses it, and /goal picks it up again, after a
+  restart too. The best so far lands on a "Kumi · Goal best" track, and every
+  candidate's chain ends in a limiter. Needs bridge 1.0.50.
 - Kumi learns from its match runs: each leaves a short lesson with its
   evidence ("plucked metallic percussion: Collision + parallel delays won,
   52% → 74%; Operator FM 52% → Collision 64% → …"), which the next matching

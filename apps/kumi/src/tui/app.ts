@@ -4,7 +4,7 @@
  */
 import {
   FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
+  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -89,6 +89,7 @@ const COMMANDS = [
   { name: "/model", about: "Choose the model Kumi talks to" },
   { name: "/effort", about: "How hard the model thinks" },
   { name: "/login", about: "Sign in to a provider" },
+  { name: "/goal", about: "Go after a sound until Kumi gets there" },
   { name: "/memory", about: "What Kumi remembers" },
   { name: "/recipes", about: "Your saved ways of working" },
   { name: "/logout", about: "Sign out of a provider" },
@@ -258,6 +259,8 @@ export class TuiApp {
   /** The latest thing Kumi did in Live that isn't a change (playing, recording), for NOW. */
   /** What NOW shows for a moment: something Kumi did in Live, or kept (`memory`: shown whatever tool is running). */
   private lastAction: { title: string; at: number; glyph: string; memory?: boolean } | undefined;
+  /** The goal being pursued (or the last one): the dashboard's numbers, and since when. */
+  private goal: (GoalStatus & { since: number }) | undefined;
   /** A match run at work: its best score, where it started, and since when. */
   private match: (MatchStatus & { since: number }) | undefined;
   /** What Kumi kept this session (notes, techniques, recipes), oldest first, for MEMORY: each with its forget. */
@@ -305,7 +308,8 @@ export class TuiApp {
     this.depth = options.colorDepth ?? detectColorDepth();
     this.icons = options.icons ?? detectIconStyle();
     const history: Tab = { id: "history", title: "HISTORY", empty: "Nothing changed yet", badge: () => this.changes.length || undefined, rows: (width) => this.historyRows(width) };
-    this.tabs = new TabPanel([history, ...(options.tabs ?? [])], options.panelTab?.load(), (id) => options.panelTab?.save(id));
+    const goal: Tab = { id: "goal", title: "GOAL", empty: "No goal yet: /goal and what to reach", rows: (width) => this.goalRows(width) };
+    this.tabs = new TabPanel([history, ...(options.controller.goal ? [goal] : []), ...(options.tabs ?? [])], options.panelTab?.load(), (id) => options.panelTab?.save(id));
     this.renderer = new Renderer(this.depth);
     this.scheduler = new FrameScheduler(() => this.draw(), options.frameMs ?? 16);
     this.tty = new Tty({
@@ -500,6 +504,13 @@ export class TuiApp {
         this.transcript.insertBefore({ kind: "heard", file: sanitizeText(event.file, this.secrets).slice(0, 120), summary: sanitizeText(event.summary, this.secrets).slice(0, 200), bands: event.bands,
           ...(event.compared ? { compared: { reference: sanitizeText(event.compared.reference, this.secrets).slice(0, 120), summary: sanitizeText(event.compared.summary, this.secrets).slice(0, 200), differences: event.compared.differences } } : {}) }, this.current);
         break;
+      case "goal": {
+        // The dashboard is the GOAL tab: shown when a goal starts, then kept up to date.
+        if (!this.goal || event.state === "starting") this.tabs.show("goal");
+        this.goal = { ...event, since: performance.now() - event.elapsedMs };
+        this.scheduler.request();
+        break;
+      }
       case "match": {
         // A match run: NOW keeps its score and time while it works; the conversation says how it ended.
         this.match = event.state === "running" ? { ...event, since: performance.now() - event.elapsedMs } : undefined;
@@ -792,7 +803,25 @@ export class TuiApp {
       this.scheduler.request();
       return;
     }
+    // /goal stop ends a goal, running or paused; /goal alone shows it (picking a paused one up when Kumi's free).
+    if ((command === "/goal stop" || command === "/goal end") && controller.stopGoal) {
+      this.editor.clear();
+      if (!await controller.stopGoal()) this.notice("There's no goal to stop.", "info");
+      return;
+    }
+    if (command === "/goal" && this.busy && this.goal) { this.editor.clear(); this.tabs.show("goal"); this.scheduler.request(); return; }
     if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+    if ((command === "/goal" || command.startsWith("/goal ")) && controller.goal) {
+      this.editor.clear();
+      const text = command.slice(5).trim();
+      if (text) this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
+      this.tabs.show("goal");
+      this.activity = text ? "setting up the goal" : "picking the goal up";
+      this.pendingTurn = true; this.scheduler.request();
+      await controller.goal(text || undefined).catch((error: unknown) => { this.pendingTurn = false; if (!this.closing) this.notice(safeError(error, this.secrets), "warn"); });
+      this.scheduler.request();
+      return;
+    }
     if (command === "/undo") { this.editor.clear(); await this.undo(); return; }
     if (command === "/copy") { this.editor.clear(); this.copyLastAnswer(); return; }
     this.editor.clear();
@@ -1556,7 +1585,8 @@ export class TuiApp {
       const dot = blink ? st.accent : st.pulse;
       const running = this.current?.steps.at(-1)?.state === "running" ? this.current.steps.at(-1) : undefined;
       // How many changes this answer has made so far; a plan's show one by one as they land.
-      const label = this.match ? `matching · ${this.match.best ? `${this.match.first !== undefined && this.match.first !== this.match.best.score ? `${this.match.first}→` : ""}${this.match.best.score}% · ` : ""}${clockOf(performance.now() - this.match.since)}`
+      const goal = this.goal && (this.goal.state === "running" || this.goal.state === "starting") ? this.goal : undefined;
+      const label = goal ? `goal · ${goal.best ? `${goal.best.score}% · ` : ""}gen ${goal.generation} · ${clockOf(performance.now() - goal.since)}` : this.match ? `matching · ${this.match.best ? `${this.match.first !== undefined && this.match.first !== this.match.best.score ? `${this.match.first}→` : ""}${this.match.best.score}% · ` : ""}${clockOf(performance.now() - this.match.since)}`
         : this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
       if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
@@ -1822,6 +1852,36 @@ export class TuiApp {
    * Kumi's changes, newest first, each with its own undo; a title gets two lines, so the values
    * ("0.0 dB → -2.0 dB") aren't the part cut off.
    */
+  /**
+   * The GOAL tab: what it's after, how far it's got (generations, candidates heard, time), the best
+   * score with its trend as a small sparkline, the leader, what the model tried last, and where the
+   * best is kept. Quiet: the numbers that matter in the palette's text, the rest dim.
+   */
+  private goalRows(width: number): TabRow[] {
+    const goal = this.goal;
+    if (!goal) return [];
+    const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
+    const running = goal.state === "running" || goal.state === "starting";
+    const elapsed = running ? performance.now() - goal.since : goal.elapsedMs;
+    const rows: TabRow[] = [];
+    const line = (spans: TabRow["spans"]) => rows.push(...wrap(spans, width).map((row) => ({ spans: row })));
+    line([{ text: clean(goal.goal, 300), style: st.text }]);
+    const state = { starting: "setting up", running: "searching", paused: "paused · /goal carries on", done: `done${goal.why ? ` · ${clean(goal.why, 80)}` : ""}` }[goal.state];
+    line([{ text: `${state} · gen ${goal.generation} · ${goal.rendered} heard · ${goal.candidates} ${goal.candidates === 1 ? "candidate" : "candidates"} · ${clockOf(elapsed)}`, style: st.dim }]);
+    if (goal.best) {
+      const trend = goal.trend.slice(-Math.max(4, width - 16));
+      const low = Math.min(...trend); const high = Math.max(...trend);
+      const spark = trend.map((value) => "▁▂▃▄▅▆▇█"[high > low ? Math.round((value - low) / (high - low) * 7) : 7]).join("");
+      line([{ text: `${goal.best.score}%`, style: st.accent }, { text: goal.first !== undefined && goal.first !== goal.best.score ? ` from ${goal.first}%  ` : "  ", style: st.dim }, { text: spark, style: st.accent }]);
+      if (goal.leader) line([{ text: "best  ", style: st.faint }, { text: clean(goal.leader, 200), style: st.text }]);
+    }
+    if (goal.idea) line([{ text: "tried  ", style: st.faint }, { text: clean(goal.idea, 200), style: st.dim }]);
+    if (goal.bestTrack) line([{ text: "kept on  ", style: st.faint }, { text: clean(goal.bestTrack, 80), style: st.text }]);
+    const tokens = this.tokensUsed();
+    if (tokens) line([{ text: tokens.replace(/^ · /, ""), style: st.faint }]);
+    return rows;
+  }
+
   private historyRows(width: number): TabRow[] {
     const rows: TabRow[] = [];
     const kept = [...this.kept].reverse().slice(0, 3);

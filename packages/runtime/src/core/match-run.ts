@@ -45,6 +45,8 @@ export class MatchRun {
   best?: { label: string; score: number };
   first?: number;
   changedSince = false;
+  /** The reference as heard, for the lesson. */
+  reference?: string;
   /** Every audition's best, in order: what moved the score. */
   readonly history: { label: string; score: number }[] = [];
 
@@ -57,6 +59,7 @@ export class MatchRun {
     if (previous.first !== undefined) run.first = previous.first;
     if (previous.best) run.best = previous.best;
     if (previous.last) run.last = previous.last;
+    if (previous.reference) run.reference = previous.reference;
     run.changedSince = previous.changedSince;
     return run;
   }
@@ -64,6 +67,7 @@ export class MatchRun {
   /** An audition happened (the model's or the harness's own). */
   auditioned(event: AuditionEvent, request?: AuditionRequest): void {
     this.last = { event, ...(request ? { request } : {}) };
+    if (event.reference) this.reference = event.reference;
     this.changedSince = false;
     if (!event.best) return;
     this.history.push(event.best);

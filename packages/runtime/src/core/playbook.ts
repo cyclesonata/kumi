@@ -71,7 +71,7 @@ export function createPlaybookStore(file: string): PlaybookStore {
 /** "Make my pad sound like this reference: …" → "my pad". What was matched, briefly. */
 export function matchedFrom(request: string): string {
   const first = request.split(/[.!?\n]/, 1)[0] ?? request;
-  const what = /(?:make|get)\s+(?:the\s+|my\s+|this\s+|it\s+)?(.+?)\s+(?:sound\s+(?:more\s+)?like|closer to|match)/i.exec(first)?.[1]
+  const what = /(?:make|get|build|create)\s+(?:me\s+)?(?:the\s+|my\s+|this\s+|it\s+|an?\s+)?(?:new\s+)?(?:(?:midi|audio)\s+track\s+with\s+(?:an?\s+)?)?(.+?)\s+(?:that\s+|which\s+)?(?:sounds?\s+(?:more\s+)?like|closer to|match)/i.exec(first)?.[1]
     ?? /(?:recreate|re-create|match)\s+(?:this\s+|the\s+|that\s+)?(.+)$/i.exec(first)?.[1] ?? first;
   return text(what, 160) || "a sound";
 }
@@ -82,7 +82,9 @@ export function lessonFrom(run: MatchRun, at: number): Lesson | undefined {
   // Only the rounds that raised the best: the ideas that worked, with the score they reached.
   const moves: Lesson["moves"] = []; let best = -1;
   for (const move of run.history) if (move.score > best) { moves.push(move); best = move.score; }
-  return { id: `l${randomUUID().replaceAll("-", "").slice(0, 8)}`, at, matched: matchedFrom(run.request), winner: run.best.label, from: run.first, to: run.best.score, moves: moves.slice(-12) };
+  // What was matched: the producer's words for it, and the reference as heard.
+  const matched = `${matchedFrom(run.request)}${run.reference ? ` (${run.reference})` : ""}`.slice(0, 160);
+  return { id: `l${randomUUID().replaceAll("-", "").slice(0, 8)}`, at, matched, winner: run.best.label, from: run.first, to: run.best.score, moves: moves.slice(-12) };
 }
 
 /** One lesson in a line, as the model and /memory read it. */

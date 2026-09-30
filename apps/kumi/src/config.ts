@@ -44,6 +44,7 @@ export const loadSettingsFile = (env: Env = process.env) => absoluteFile(env, "K
 export const loadMemoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_MEMORY_FILE", join(homedir(), ".kumi", "memory.json"));
 /** What Kumi learned building things the producer liked (techniques), in any project. */
 export const loadTechniquesFile = (env: Env = process.env) => absoluteFile(env, "KUMI_TECHNIQUES_FILE", join(homedir(), ".kumi", "techniques.json"));
+export const loadGoalsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_GOALS_DIR", join(homedir(), ".kumi", "goals"));
 export const loadPlaybookFile = (env: Env = process.env) => absoluteFile(env, "KUMI_PLAYBOOK_FILE", join(homedir(), ".kumi", "playbook.json"));
 /** What Kumi couldn't do for lack of a tool, logged on this computer for Kumi's developers (not a memory). */
 export const loadGapsFile = (env: Env = process.env) => absoluteFile(env, "KUMI_GAPS_FILE", join(homedir(), ".kumi", "gaps.jsonl"));
