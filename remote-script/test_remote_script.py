@@ -6558,3 +6558,158 @@ class ScopedAuthorityDigestTests(unittest.TestCase):
         answer = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
         self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"]["stateDigest"], result["stateDigest"])
         with self.assertRaisesRegex(ValueError, "authority digest arguments are invalid"): mapper.invoke("authority.digest", {"operation": "device.parameter.set", "args": "not an object"})
+
+
+def immediate_bridge(song=None, provenance="fake-live"):
+    """A bridge whose Live-thread queue runs work at once, as the pump does inline."""
+    bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(song or FakeSong(), provenance=provenance)
+    bridge._executed_mutations = {}; bridge._pending_mutations = {}; bridge._retired_mutation_keys = {}; bridge._finalized_transactions = set(); bridge._executed_lock = threading.Lock()
+    class ImmediateQueue:
+        def submit(self, action, deadline_ms=None, on_cancel=None): return action()
+    bridge.queue = ImmediateQueue()
+    return bridge
+
+
+class SingleRequestMutationTests(unittest.TestCase):
+    """WS2.2: `mutate` checks and applies a change in one Live-thread callback, through the same
+    idempotency ledger as invoke."""
+
+    def parameter_request(self, bridge, key="mutate-key-0001", value=0.75, digest=True):
+        parameter = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
+        args = {"ref": parameter["ref"], "value": value, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(bridge.mapper, parameter["ref"])}
+        request = {"operation": "device.parameter.set", "transactionId": "transaction-mutate", "idempotencyKey": key, "args": args}
+        if digest: request["stateDigest"] = bridge.mapper.invoke("authority.digest", {"operation": "device.parameter.set", "args": args})["stateDigest"]
+        return request
+
+    def test_a_change_applies_in_one_request_and_a_retry_returns_what_was_recorded(self):
+        bridge = immediate_bridge(); request = self.parameter_request(bridge); calls = []
+        original = bridge.mapper.invoke
+        bridge.mapper.invoke = lambda *args, **kwargs: calls.append(args[0]) or original(*args, **kwargs)
+        result = bridge._dispatch_with_holder("mutate", request, {})
+        self.assertEqual((result["value"], result["revision"]), (0.75, 2)); validate_operation_payload("device.parameter.set", "result", result)
+        self.assertEqual(calls, ["device.parameter.set"]); self.assertEqual(bridge._pending_mutations, {})
+        # Live changed (by this very change), so the preview's digest no longer matches: the retry still gets the recorded result.
+        self.assertEqual(bridge._dispatch_with_holder("mutate", request, {}), result); self.assertEqual(calls, ["device.parameter.set"])
+        with self.assertRaisesRegex(ValueError, "conflicts with an executed mutation"): bridge._dispatch_with_holder("mutate", {**request, "args": {**request["args"], "value": 0.25}}, {})
+        self.assertEqual(bridge._dispatch_with_holder("retire", {"transactionId": "transaction-mutate", "deadlineMs": int(time.time() * 1000) + 5000}, {}), {"retired": 1})
+        with self.assertRaisesRegex(ValueError, "replay authority has been retired"): bridge._dispatch_with_holder("mutate", request, {})
+
+    def test_a_stale_preview_refuses_and_nothing_changes(self):
+        bridge = immediate_bridge(); request = self.parameter_request(bridge)
+        parameter = bridge.mapper.song.tracks[0].devices[0].parameters[0]; parameter.value = 0.25
+        with self.assertRaisesRegex(ValueError, "^Live state changed since the preview$"): bridge._dispatch_with_holder("mutate", request, {})
+        self.assertEqual(parameter.value, 0.25); self.assertEqual((bridge._pending_mutations, bridge._executed_mutations), ({}, {}))
+        # Without a digest, the operation's own fences decide (its revision and identities still match).
+        parameter.value = 0.5
+        self.assertEqual(bridge._dispatch_with_holder("mutate", {key: value for key, value in self.parameter_request(bridge, key="mutate-key-0002").items() if key != "stateDigest"}, {})["value"], 0.75)
+
+    def test_reads_and_owned_deletions_keep_their_rules(self):
+        bridge = immediate_bridge(provenance="real-live")
+        with self.assertRaisesRegex(ValueError, "read-only operations are invoked, not mutated"): bridge._dispatch_with_holder("mutate", {"operation": "song.read", "transactionId": "transaction-read", "idempotencyKey": "read-key-0001", "args": {"setRef": "x"}}, {})
+        created = bridge.mapper.invoke("scene.create", {"name": "Owned", "index": 1, "expectedStructureRevision": bridge.mapper._structure_revision()}, "transaction-owner")
+        delete = {"operation": "scene.delete", "transactionId": "transaction-other", "idempotencyKey": "delete-key-0001", "args": {"ref": created["ref"], "expectedStructureRevision": bridge.mapper._structure_revision(), "expectedObjectIdentity": created["objectIdentity"]}}
+        with self.assertRaisesRegex(ValueError, "lacks exact transaction-owned authority"): bridge._dispatch_with_holder("mutate", delete, {})
+        self.assertEqual(len(bridge.mapper.song.scenes), 2)
+        owned = {**delete, "transactionId": "transaction-owner", "idempotencyKey": "delete-key-0002", "ownershipToken": created["ownershipToken"]}
+        self.assertEqual(bridge._dispatch_with_holder("mutate", owned, {}), {"deleted": created["ref"]}); self.assertEqual(len(bridge.mapper.song.scenes), 1)
+
+    def test_the_wire_checks_a_mutation_and_its_result_against_the_operations_schema(self):
+        bridge = immediate_bridge(); request = self.parameter_request(bridge)
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
+        def send(sequence, **fields):
+            unsigned = remote.bound({"version": PROTOCOL, "id": f"mutate-{sequence}", "method": "mutate", "nonce": f"mutate-nonce-{sequence:04d}", "sequence": sequence, **fields})
+            return remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        answer = send(1, **request)
+        self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"]["value"], 0.75)
+        for sequence, broken in enumerate(({**request, "idempotencyKey": "short"}, {**request, "stateDigest": "0" * 63}, {key: value for key, value in request.items() if key != "transactionId"}, {**request, "args": {**request["args"], "unknown": 1}}, {**request, "operation": "snapshot"}), 2):
+            self.assertFalse(send(sequence, **broken)["ok"], broken)
+        unsigned = remote.bound({"version": PROTOCOL, "id": "invoke-digest", "method": "invoke", "operation": "status", "stateDigest": "0" * 64, "nonce": "invoke-digest-0001", "sequence": 20})
+        self.assertFalse(remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})["ok"], "a state digest belongs to mutate alone")
+
+
+class FakeUndoSong(FakeSong):
+    def __init__(self):
+        super().__init__(); self.calls = []; self.can_undo = True; self.can_redo = False
+    def begin_undo_step(self): self.calls.append("begin")
+    def end_undo_step(self): self.calls.append("end")
+    def undo(self): self.calls.append("undo"); self.can_redo = True
+    def redo(self): self.calls.append("redo"); self.can_redo = False
+
+
+class LiveUndoTests(unittest.TestCase):
+    """WS3.2/WS3.4: one Live undo step around a plan, never left open; Live's own undo and redo."""
+
+    def test_an_undo_step_opens_closes_and_closes_a_previous_one_first(self):
+        song = FakeUndoSong(); mapper = LiveObjectMapper(song)
+        self.assertTrue(mapper._operation_supported("undo.step.begin") and mapper._operation_supported("undo.step.end"))
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("undo.step.begin"))
+        opened = mapper.invoke("undo.step.begin", {"label": "Kumi: make it warmer"}); validate_operation_payload("undo.step.begin", "result", opened)
+        self.assertEqual((opened["open"], opened["closedPrevious"], song.calls), (True, False, ["begin"]))
+        self.assertAlmostEqual(opened["expiresAt"], time.time() * 1000 + 120000, delta=2000)
+        second = mapper.invoke("undo.step.begin", {"timeoutMs": 5000})
+        self.assertTrue(second["closedPrevious"]); self.assertEqual(song.calls, ["begin", "end", "begin"])
+        other = mapper.invoke("undo.step.end", {"stepId": opened["stepId"]}); validate_operation_payload("undo.step.end", "result", other)
+        self.assertEqual(other, {"closed": False, "stepId": second["stepId"], "reason": "other-step"}); self.assertEqual(song.calls[-1], "begin")
+        ended = mapper.invoke("undo.step.end", {"stepId": second["stepId"]})
+        self.assertEqual(ended, {"closed": True, "stepId": second["stepId"], "reason": "ended"}); self.assertEqual(song.calls[-1], "end")
+        self.assertEqual(mapper.invoke("undo.step.end", {}), {"closed": False, "stepId": None, "reason": "not-open"})
+        for invalid in ({"timeoutMs": 999}, {"timeoutMs": 3600001}, {"label": ""}, {"other": 1}):
+            with self.assertRaises(ValueError): mapper.invoke("undo.step.begin", invalid)
+
+    def test_undo_steps_need_no_mutation_authority_but_are_not_reads(self):
+        self.assertFalse(remote_module._mutation_authority_required("undo.step.begin")); self.assertFalse(remote_module._mutation_authority_required("undo.step.end"))
+        self.assertTrue(remote_module._AUTHORITY_FREE_INVOKES.isdisjoint(remote_module._READ_ONLY_INVOKES))
+        bridge = immediate_bridge(FakeUndoSong())
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
+        unsigned = remote.bound({"version": PROTOCOL, "id": "undo-begin", "method": "invoke", "operation": "undo.step.begin", "args": {}, "nonce": "undo-begin-000001", "sequence": 1})
+        answer = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
+        self.assertTrue(answer["ok"], answer); self.assertTrue(answer["result"]["open"])
+
+    def test_a_guard_closes_the_step_at_its_deadline_on_close_reconnect_and_shutdown(self):
+        song = FakeUndoSong(); bridge = immediate_bridge(song); holder = {}
+        opened = bridge._dispatch_with_holder("invoke", {"operation": "undo.step.begin", "args": {"timeoutMs": 1000}}, holder)
+        with patch("ableton_mcp_remote_script.time.time", return_value=(opened["expiresAt"] - 1) / 1000): bridge.mapper.undo_step_tick()
+        self.assertEqual(song.calls, ["begin"])
+        with patch("ableton_mcp_remote_script.time.time", return_value=opened["expiresAt"] / 1000): bridge.mapper.undo_step_tick()
+        self.assertEqual(song.calls, ["begin", "end"]); self.assertIsNone(bridge.mapper._undo_step)
+        # Its connection closing closes it; another connection's doesn't.
+        bridge._connections = []; bridge._clients = set()
+        bridge._dispatch_with_holder("invoke", {"operation": "undo.step.begin", "args": {}}, holder)
+        class Closable:
+            def close(self): pass
+        bridge._close(types.SimpleNamespace(holder={}, socket=Closable())); self.assertEqual(song.calls[-1], "begin")
+        bridge._close(types.SimpleNamespace(holder=holder, socket=Closable())); self.assertEqual(song.calls[-1], "end")
+        bridge._dispatch_with_holder("mutate", {"operation": "undo.step.begin", "transactionId": "transaction-undo", "idempotencyKey": "undo-key-0001", "args": {}}, holder)
+        bridge.mapper.invoke("session.reconnect", {}); self.assertEqual(song.calls[-2:], ["begin", "end"])
+        # And the bridge shutting down.
+        import socket as _socket
+        probe = _socket.socket(); probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]; probe.close()
+        instance = FakeInstance(); instance.song = FakeUndoSong(); live = AbletonMcpBridge(instance, {"host": "127.0.0.1", "port": port, "secret": "x" * 40})
+        live.mapper.invoke("undo.step.begin", {}); live.update_display(); self.assertEqual(instance.song.calls, ["begin"])
+        live.disconnect(); self.assertEqual(instance.song.calls, ["begin", "end"])
+
+    def test_lives_own_undo_and_redo_run_only_when_there_is_something_to_undo(self):
+        song = FakeUndoSong(); mapper = LiveObjectMapper(song)
+        self.assertTrue(mapper._operation_supported("song.undo") and mapper._operation_supported("song.redo"))
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("song.undo"))
+        self.assertTrue(remote_module._mutation_authority_required("song.undo") and remote_module._mutation_authority_required("song.redo"))
+        undone = mapper.invoke("song.undo", {}); validate_operation_payload("song.undo", "result", undone)
+        self.assertEqual((undone, song.calls), ({"done": True, "canUndo": True, "canRedo": True}, ["undo"]))
+        self.assertEqual(mapper.invoke("song.redo", {}), {"done": True, "canUndo": True, "canRedo": False})
+        song.can_undo = False
+        self.assertEqual(mapper.invoke("song.undo", {}), {"done": False, "canUndo": False, "canRedo": False}); self.assertEqual(song.calls, ["undo", "redo"])
+        self.assertEqual(mapper.invoke("song.redo", {})["done"], False); self.assertEqual(song.calls, ["undo", "redo"])
+        with self.assertRaises(ValueError): mapper.invoke("song.undo", {"steps": 2})
+
+
+class MutateOverTheWireTests(_BridgeSocketFixture, unittest.TestCase):
+    def test_a_previewed_change_is_one_round_trip(self):
+        client, channel = self.connect()
+        mapper = self.bridge.mapper; parameter = mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
+        args = {"ref": parameter["ref"], "value": 0.75, "expectedRevision": parameter["revision"], **ControlSurfaceTests.parameter_authority(mapper, parameter["ref"])}
+        client.sendall(self.frame(channel, 1, method="invoke", operation="authority.digest", args={"operation": "device.parameter.set", "args": args}))
+        digest = self.read_lines(client, 1)[0]["result"]["stateDigest"]
+        client.sendall(self.frame(channel, 2, method="mutate", operation="device.parameter.set", args=args, transactionId="transaction-wire", idempotencyKey="wire-key-0001", stateDigest=digest))
+        answer = self.read_lines(client, 1)[0]
+        self.assertTrue(answer["ok"], answer); self.assertEqual(answer["result"]["value"], 0.75)
+        self.assertEqual(mapper.song.tracks[0].devices[0].parameters[0].value, 0.75)

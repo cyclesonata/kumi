@@ -299,7 +299,7 @@ def _debug_trace(context: str) -> None:
     if sink is not None:
         sink.record(context)
 
-METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "subscribe", "reconnect", "retire"}
+METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
 _READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"}
@@ -311,7 +311,10 @@ _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.d
 # return track: itself and the Session structure). Mirrors EXPLICIT_DELETIONS in the host adapter.
 _EXPLICIT_DELETIONS = {"device.delete", "track.delete-return"}
 def _explicit_deletion(operation: str, args: Any) -> bool: return operation in _EXPLICIT_DELETIONS and isinstance(args, dict) and args.get("explicitDeletion") is True
-def _mutation_authority_required(operation: str) -> bool: return operation not in _READ_ONLY_INVOKES
+# Changes to Live's own undo history, not to the Set: no preflight->prepare fence, and a Live-thread
+# guard closes an open step (deadline, connection close, reconnect, shutdown). Mirrors the host adapter.
+_AUTHORITY_FREE_INVOKES = {"undo.step.begin", "undo.step.end"}
+def _mutation_authority_required(operation: str) -> bool: return operation not in _READ_ONLY_INVOKES and operation not in _AUTHORITY_FREE_INVOKES
 
 def _require_output_safety(args: dict[str, Any]) -> None:
     evidence = args.get("outputSafety")
@@ -688,12 +691,12 @@ class AuthenticatedRemoteScript:
             args = dict(request.get("args", {})); operation = str(request.get("operation")); digest = hashlib.sha256(self._bounded_canonical(args).encode("utf-8")).hexdigest()
             if method == "preflight": return "authority.preflight", {"operation": operation, "argsDigest": digest, "transactionId": request.get("transactionId")}
             return "authority.prepare", {"operation": operation, "argsDigest": digest, "transactionId": request.get("transactionId"), "preflightToken": request.get("preflightToken"), "confirmation": request.get("confirmation"), "idempotencyKey": request.get("idempotencyKey")}
-        if method == "invoke": return str(request.get("operation")), dict(request.get("args", {}))
+        if method in {"invoke", "mutate"}: return str(request.get("operation")), dict(request.get("args", {}))
         return method, dict(request.get("args", {}))
 
     def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         required = {"version", "id", "method", "nonce", "sequence", "bridgeEpoch", "connectionChallenge", "deadlineMs", "mac"}
-        optional = {"ref", "property", "value", "operation", "args", "preflightToken", "confirmation", "idempotencyKey", "authorityToken", "transactionId", "ownershipToken", "terminal"}
+        optional = {"ref", "property", "value", "operation", "args", "preflightToken", "confirmation", "idempotencyKey", "authorityToken", "transactionId", "ownershipToken", "terminal", "stateDigest"}
         if not isinstance(request, dict) or set(request) - required - optional or not required <= set(request):
             return self._error("invalid", "invalid request")
         unsigned = {key: value for key, value in request.items() if key != "mac"}
@@ -708,7 +711,9 @@ class AuthenticatedRemoteScript:
             or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request["id"])
             or request["method"] not in METHODS
             or (request["method"] == "prepare" and (not isinstance(request.get("preflightToken"), str) or not 24 <= len(request["preflightToken"]) <= 128 or not isinstance(request.get("confirmation"), str) or not 24 <= len(request["confirmation"]) <= 128 or not isinstance(request.get("idempotencyKey"), str) or not 8 <= len(request["idempotencyKey"]) <= 128))
-            or (request["method"] in {"preflight", "prepare"} and (not isinstance(request.get("transactionId"), str) or not 8 <= len(request["transactionId"]) <= 128))
+            or (request["method"] in {"preflight", "prepare", "mutate"} and (not isinstance(request.get("transactionId"), str) or not 8 <= len(request["transactionId"]) <= 128))
+            or (request["method"] == "mutate" and (not isinstance(request.get("idempotencyKey"), str) or not 8 <= len(request["idempotencyKey"]) <= 128 or ("stateDigest" in request and (not isinstance(request["stateDigest"], str) or re.fullmatch(r"[a-f0-9]{64}", request["stateDigest"]) is None))))
+            or (request["method"] != "mutate" and "stateDigest" in request)
             or (request["method"] == "invoke" and _mutation_authority_required(str(request.get("operation"))) and (not isinstance(request.get("authorityToken"), str) or not 24 <= len(request["authorityToken"]) <= 128 or not isinstance(request.get("transactionId"), str) or not 8 <= len(request["transactionId"]) <= 128))
             or ("ownershipToken" in request and (not isinstance(request["ownershipToken"], str) or not 32 <= len(request["ownershipToken"]) <= 128))
             or (request["method"] == "retire" and (not isinstance(request.get("transactionId"), str) or not 8 <= len(request["transactionId"]) <= 128 or ("terminal" in request and not isinstance(request["terminal"], bool))))
@@ -718,8 +723,8 @@ class AuthenticatedRemoteScript:
             or not isinstance(request["mac"], str)
         ):
             return self._error(request.get("id", "invalid"), "invalid request")
-        if request["method"] in {"invoke", "preflight", "prepare", "discover", "snapshot"}:
-            if request["method"] in {"invoke", "preflight", "prepare"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", request["operation"])):
+        if request["method"] in {"invoke", "preflight", "prepare", "mutate", "discover", "snapshot"}:
+            if request["method"] in {"invoke", "preflight", "prepare", "mutate"} and (not isinstance(request.get("operation"), str) or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", request["operation"])):
                 return self._error(request["id"], "operation is required")
             if not isinstance(request.get("args", {}), dict) or len(request.get("args", {})) > MAX_REQUEST_ARGS:
                 return self._error(request["id"], "args must be a bounded object")
@@ -839,6 +844,9 @@ class LiveObjectMapper:
         self._playback_revision_counter = 0
         # Set while reads share one snapshot (see _shared_reads).
         self._read_cache: dict[str, Any] | None = None
+        # The Live undo step a client opened ({stepId, expiresAt, owner, label}): closed by the client,
+        # or by a guard (its deadline, its connection closing, a reconnect, the bridge shutting down).
+        self._undo_step: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         registry, registry_hash = operation_registry()
@@ -888,6 +896,10 @@ class LiveObjectMapper:
             return _live_module() is not None
         if operation == "authority.digest":
             return True
+        if operation in _AUTHORITY_FREE_INVOKES:
+            return callable(getattr(self.song, "begin_undo_step", None)) and callable(getattr(self.song, "end_undo_step", None))
+        if operation in {"song.undo", "song.redo"}:
+            return callable(getattr(self.song, "undo" if operation == "song.undo" else "redo", None))
         if operation == "subscribe":
             return bool(_supported_event_types(self.song) - {"reset"})
         if operation == "transport.set":
@@ -3206,6 +3218,8 @@ class LiveObjectMapper:
         if operation == "session.status":
             return self.status()
         if operation == "session.reconnect":
+            # A step the previous session opened can't be closed by its references any more.
+            self._end_undo_step()
             self.refs.reset()
             self._playback_state_digest = None
             self._playback_revision_counter = 0
@@ -3232,12 +3246,81 @@ class LiveObjectMapper:
             return self._device_parameters_set(args)
         if operation == "dev.lom-audit":
             return _lom_audit(_live_module(), int(args.get("maxDepth", 8)))
+        if operation in _AUTHORITY_FREE_INVOKES:
+            return self._undo_step_operation(operation, args)
+        if operation in {"song.undo", "song.redo"}:
+            return self._song_undo(operation, args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
             if not isinstance(named, str) or not isinstance(named_args, dict): raise ValueError("authority digest arguments are invalid")
             return {"stateDigest": _authority_state_digest(self, named_args, named), "epoch": self.refs.epoch}
         raise ValueError("live operation unavailable")
+
+    def _undo_step_operation(self, operation: str, args: dict[str, Any], owner: Any = None) -> dict[str, Any]:
+        """Open or close one Live undo step, so everything between becomes one Cmd-Z in Live.
+
+        Opening while one is open closes that one first (closedPrevious). Closing names the step it
+        means; a different open step is left alone. The step belongs to its owner (the connection
+        that opened it): a guard closes it when that connection goes, when its deadline passes, on
+        reconnect and on shutdown, so Live is never left with an open step."""
+        begin, end = getattr(self.song, "begin_undo_step", None), getattr(self.song, "end_undo_step", None)
+        if not callable(begin) or not callable(end): raise ValueError("Live's undo steps are unavailable")
+        if operation == "undo.step.begin":
+            if set(args) - {"label", "timeoutMs"}: raise ValueError("undo step arguments are invalid")
+            label, timeout = args.get("label"), args.get("timeoutMs", 120000)
+            if label is not None and (not isinstance(label, str) or not 1 <= len(label) <= 256): raise ValueError("undo step label is invalid")
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1000 <= timeout <= 3600000: raise ValueError("undo step timeout is invalid")
+            closed_previous = self._end_undo_step() is not None
+            begin()
+            step_id = f"undo_{secrets.token_urlsafe(18)}"; expires_at = int(time.time() * 1000) + timeout
+            self._undo_step = {"stepId": step_id, "expiresAt": expires_at, "owner": owner, "label": label}
+            return {"open": True, "stepId": step_id, "expiresAt": expires_at, "closedPrevious": closed_previous}
+        if set(args) - {"stepId"}: raise ValueError("undo step arguments are invalid")
+        requested = args.get("stepId")
+        if requested is not None and (not isinstance(requested, str) or not 8 <= len(requested) <= 128): raise ValueError("undo step id is invalid")
+        step = self._undo_step
+        if step is None: return {"closed": False, "stepId": None, "reason": "not-open"}
+        if requested is not None and requested != step["stepId"]: return {"closed": False, "stepId": step["stepId"], "reason": "other-step"}
+        self._undo_step = None
+        try: end()
+        except Exception as error: raise ValueError("Live refused to close the undo step") from error
+        return {"closed": True, "stepId": step["stepId"], "reason": "ended"}
+
+    def _end_undo_step(self) -> str | None:
+        """Close the open undo step, if there is one; its id. A guard: it never raises."""
+        step = self._undo_step
+        if step is None: return None
+        self._undo_step = None
+        end = getattr(self.song, "end_undo_step", None)
+        if callable(end):
+            try: end()
+            except BaseException: pass
+        return step["stepId"]
+
+    def undo_step_tick(self) -> None:
+        """Close an undo step whose deadline passed (checked on every display tick)."""
+        step = self._undo_step
+        if step is not None and int(time.time() * 1000) >= step["expiresAt"]: self._end_undo_step()
+
+    def release_connection(self, owner: Any) -> None:
+        """A connection went: what it held open in Live (an undo step) is closed."""
+        step = self._undo_step
+        if step is not None and owner is not None and step.get("owner") is owner: self._end_undo_step()
+
+    def _song_undo(self, operation: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Live's own undo or redo, once, when Live says there's something to undo (redo); otherwise
+        nothing is called. An open undo step is closed first: undoing inside one isn't Live's model."""
+        if args: raise ValueError("song undo and redo take no arguments")
+        available, method = ("can_undo", "undo") if operation == "song.undo" else ("can_redo", "redo")
+        caller = getattr(self.song, method, None)
+        if not callable(caller): raise ValueError(f"Live's {method} is unavailable")
+        done = False
+        if self._read_attr(self.song, available) is True:
+            self._end_undo_step()
+            caller(); done = True
+        can_undo, can_redo = self._read_attr(self.song, "can_undo"), self._read_attr(self.song, "can_redo")
+        return {"done": done, "canUndo": can_undo if isinstance(can_undo, bool) else None, "canRedo": can_redo if isinstance(can_redo, bool) else None}
 
     def _check_parameter_authority(self, reference: str, args: dict[str, Any]) -> None:
         """The parameter, its device, track and sibling parameters are exactly as previewed."""
@@ -10045,6 +10128,7 @@ class AbletonMcpBridge:
         self._pump()
         self.queue.drain()
         self.mapper.capture_tick()
+        self.mapper.undo_step_tick()
 
     def _pump(self) -> None:
         """Serve every connection with non-blocking I/O on Live's main thread.
@@ -10137,6 +10221,10 @@ class AbletonMcpBridge:
 
     def _close(self, connection: "_Connection") -> None:
         if connection in self._connections: self._connections.remove(connection)
+        mapper = getattr(self, "mapper", None)
+        if mapper is not None:
+            try: mapper.release_connection(connection.holder)
+            except BaseException: pass
         subscription = connection.holder.get("subscription")
         if subscription is not None:
             connection.holder["subscription"] = None
@@ -10161,6 +10249,91 @@ class AbletonMcpBridge:
             return {"subscribed": False, "subscriptionId": "none"}
         holder["subscription"] = _Subscription(self.mapper, set(types))
         return {"subscribed": True, "subscriptionId": secrets.token_urlsafe(12)}
+
+    def _claim_mutation(self, idempotency_key: str, transaction_id: str, operation: str, digest: str) -> Callable[..., None]:
+        """Reserve an idempotency key for a mutation on its way to Live's thread (a retry of the same
+        mutation shares the reservation; anything else under the key is refused), and return its
+        release: idempotent, called once the mutation ran or was cancelled before running."""
+        now = int(time.time() * 1000); claim = object()
+        with self._executed_lock:
+            retired = getattr(self, "_retired_mutation_keys", None)
+            if retired is None: retired = self._retired_mutation_keys = {}
+            pending = getattr(self, "_pending_mutations", None)
+            if pending is None: pending = self._pending_mutations = {}
+            for key, expires_at in list(retired.items()):
+                if expires_at <= now: retired.pop(key, None)
+            finalized = getattr(self, "_finalized_transactions", set())
+            if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
+            if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
+            prior_pending = pending.get(idempotency_key)
+            if prior_pending is not None and (prior_pending["transactionId"] != transaction_id or prior_pending["operation"] != operation or prior_pending["argsDigest"] != digest): raise ValueError("idempotency key conflicts with a pending mutation")
+            if prior_pending is None:
+                if len(pending) >= MAX_MUTATION_LEDGER: raise ValueError("pending mutation ledger is full")
+                pending_row = {"transactionId": transaction_id, "operation": operation, "argsDigest": digest, "count": 1, "claims": {claim}}
+                pending[idempotency_key] = pending_row
+            else:
+                pending_row = prior_pending
+                pending_row["claims"].add(claim); pending_row["count"] = len(pending_row["claims"])
+        released = False
+        def release_pending(_error: BaseException | None = None) -> None:
+            nonlocal released
+            with self._executed_lock:
+                if released: return
+                released = True
+                pending = getattr(self, "_pending_mutations", {}); row = pending.get(idempotency_key)
+                if row is not pending_row or claim not in pending_row["claims"]: return
+                pending_row["claims"].remove(claim); pending_row["count"] = len(pending_row["claims"])
+                if pending_row["count"] == 0: pending.pop(idempotency_key, None)
+        return release_pending
+
+    def _replay_or_apply(self, idempotency_key: str, transaction_id: str, operation: str, digest: str, apply: Callable[[], Any], check: Callable[[], None] | None = None) -> Any:
+        """Apply a mutation once per idempotency key: a retry gets the recorded result, never a second
+        application. `check` (the fences) runs only when nothing was recorded yet."""
+        with self._executed_lock:
+            retired = getattr(self, "_retired_mutation_keys", {}); finalized = getattr(self, "_finalized_transactions", set())
+            if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
+            if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
+            prior = self._executed_mutations.get(idempotency_key)
+            if prior is not None:
+                if prior["operation"] != operation or prior["argsDigest"] != digest or prior.get("transactionId") != transaction_id: raise ValueError("idempotency key conflicts with an executed mutation")
+                return prior["result"]
+            if len(self._executed_mutations) >= MAX_MUTATION_LEDGER: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
+            if check is not None: check()
+            result = apply(); self._executed_mutations[idempotency_key] = {"operation": operation, "argsDigest": digest, "transactionId": transaction_id, "result": result}; return result
+
+    def _apply_mutation(self, operation: str, args: dict[str, Any], transaction_id: str | None, ownership_token: str | None, holder: dict[str, Any] | None) -> Any:
+        """Run a mutation on Live's thread: the realtime plane's arm and disarm, an undo step held for
+        the connection that opened it, or the mapper's operation."""
+        if operation in {"realtime.arm", "realtime.disarm"}: return self._realtime_op(operation, args)
+        if operation in _AUTHORITY_FREE_INVOKES: return self.mapper._undo_step_operation(operation, args, holder)
+        return self.mapper.invoke(operation, args, transaction_id, ownership_token)
+
+    def _mutate(self, request: dict[str, Any], holder: dict[str, Any]) -> Any:
+        """One request, one Live-thread callback: the cleanup ownership an owned deletion needs, the
+        state digest from the preview (when given; a mismatch refuses), then the mutation through the
+        same idempotency ledger invoke uses, so a retried request returns what was recorded instead
+        of applying twice. Reads are invoked, not mutated."""
+        operation = str(request.get("operation")); args = dict(request.get("args", {})); transaction_id = request.get("transactionId"); idempotency_key = request.get("idempotencyKey"); ownership_token = request.get("ownershipToken"); expected = request.get("stateDigest")
+        entry = _registry_operation(operation)
+        if operation in _READ_ONLY_INVOKES or operation == "realtime.stats": raise ValueError("read-only operations are invoked, not mutated")
+        if entry is None or entry.get("method") != "invoke": raise ValueError("only Live operations are mutated")
+        if not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128: raise ValueError("mutation transaction identity is required")
+        if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128: raise ValueError("mutation idempotency key is required")
+        if expected is not None and (not isinstance(expected, str) or re.fullmatch(r"[a-f0-9]{64}", expected) is None): raise ValueError("mutation state digest is invalid")
+        digest = hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(args).encode("utf-8")).hexdigest()
+        release_pending = self._claim_mutation(idempotency_key, transaction_id, operation, digest)
+        def fences() -> None:
+            # Removing what a transaction made takes that transaction's ownership, as preflight asks.
+            if operation in _TRANSACTION_DELETIONS and not _explicit_deletion(operation, args): self.mapper._require_cleanup_ownership(operation, args, transaction_id, ownership_token)
+            if expected is not None and not hmac.compare_digest(_authority_state_digest(self.mapper, args, operation), expected): raise ValueError("Live state changed since the preview")
+        def mutate_on_live() -> Any:
+            try: return self._replay_or_apply(idempotency_key, transaction_id, operation, digest, lambda: self._apply_mutation(operation, args, transaction_id, ownership_token, holder), fences)
+            finally: release_pending()
+        try:
+            return self.queue.submit(mutate_on_live, deadline_ms=request.get("deadlineMs"), on_cancel=release_pending)
+        except BaseException as error:
+            if not isinstance(error, _DispatchUncertainError): release_pending()
+            raise
 
     def _dispatch_with_holder(self, method: str, request: dict[str, Any], holder: dict[str, Any]) -> Any:
         if method == "subscribe":
@@ -10200,54 +10373,12 @@ class AbletonMcpBridge:
             if authority is None or authority["expiresAt"] <= now or authority["operation"] != request.get("operation") or authority["argsDigest"] != digest or authority["transactionId"] != transaction_id or authority.get("ownershipToken") != request.get("ownershipToken"):
                 raise ValueError("missing, expired, or mismatched mutation authority")
             if not isinstance(transaction_id, str): raise ValueError("mutation transaction identity is required")
-            idempotency_key = authority["idempotencyKey"]
-            claim = object()
-            with self._executed_lock:
-                retired = getattr(self, "_retired_mutation_keys", None)
-                if retired is None: retired = self._retired_mutation_keys = {}
-                pending = getattr(self, "_pending_mutations", None)
-                if pending is None: pending = self._pending_mutations = {}
-                for key, expires_at in list(retired.items()):
-                    if expires_at <= now: retired.pop(key, None)
-                finalized = getattr(self, "_finalized_transactions", set())
-                if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
-                if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
-                prior_pending = pending.get(idempotency_key)
-                if prior_pending is not None and (prior_pending["transactionId"] != transaction_id or prior_pending["operation"] != request.get("operation") or prior_pending["argsDigest"] != digest): raise ValueError("idempotency key conflicts with a pending mutation")
-                if prior_pending is None:
-                    if len(pending) >= MAX_MUTATION_LEDGER: raise ValueError("pending mutation ledger is full")
-                    pending_row = {"transactionId": transaction_id, "operation": request.get("operation"), "argsDigest": digest, "count": 1, "claims": {claim}}
-                    pending[idempotency_key] = pending_row
-                else:
-                    pending_row = prior_pending
-                    pending_row["claims"].add(claim); pending_row["count"] = len(pending_row["claims"])
-            released = False
-            def release_pending(_error: BaseException | None = None) -> None:
-                nonlocal released
-                with self._executed_lock:
-                    if released: return
-                    released = True
-                    pending = getattr(self, "_pending_mutations", {}); row = pending.get(idempotency_key)
-                    if row is not pending_row or claim not in pending_row["claims"]: return
-                    pending_row["claims"].remove(claim); pending_row["count"] = len(pending_row["claims"])
-                    if pending_row["count"] == 0: pending.pop(idempotency_key, None)
-            def replay_or_apply(apply: Callable[[], Any]) -> Any:
-                with self._executed_lock:
-                    retired = getattr(self, "_retired_mutation_keys", {}); finalized = getattr(self, "_finalized_transactions", set())
-                    if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
-                    if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
-                    prior = self._executed_mutations.get(idempotency_key)
-                    if prior is not None:
-                        if prior["operation"] != request.get("operation") or prior["argsDigest"] != digest or prior.get("transactionId") != transaction_id: raise ValueError("idempotency key conflicts with an executed mutation")
-                        return prior["result"]
-                    if len(self._executed_mutations) >= MAX_MUTATION_LEDGER: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
-                    result = apply(); self._executed_mutations[idempotency_key] = {"operation": request["operation"], "argsDigest": digest, "transactionId": transaction_id, "result": result}; return result
+            idempotency_key = authority["idempotencyKey"]; operation = str(request["operation"])
+            release_pending = self._claim_mutation(idempotency_key, transaction_id, operation, digest)
             def invoke_authorized() -> Any:
                 try:
-                    operation = str(request["operation"])
                     if _authority_state_digest(self.mapper, args, operation) != authority["stateDigest"]: raise ValueError("Live state changed after mutation authority preparation")
-                    if operation in {"realtime.arm", "realtime.disarm"}: return replay_or_apply(lambda: self._realtime_op(operation, args))
-                    return replay_or_apply(lambda: self.mapper.invoke(operation, args, transaction_id, request.get("ownershipToken")))
+                    return self._replay_or_apply(idempotency_key, transaction_id, operation, digest, lambda: self._apply_mutation(operation, args, transaction_id, request.get("ownershipToken"), holder))
                 finally:
                     release_pending()
             try:
@@ -10255,6 +10386,12 @@ class AbletonMcpBridge:
             except BaseException as error:
                 if not isinstance(error, _DispatchUncertainError): release_pending()
                 raise
+        if method == "mutate":
+            return self._mutate(request, holder)
+        if method == "invoke" and str(request.get("operation")) in _AUTHORITY_FREE_INVOKES:
+            operation = str(request["operation"]); args = dict(request.get("args", {}))
+            return self.queue.submit(lambda: self._apply_mutation(operation, args, None, None, holder), deadline_ms=request.get("deadlineMs"))
+
         if method == "invoke" and request.get("operation") == "realtime.stats":
             return self._realtime_op(request["operation"], request.get("args", {}))
         if method == "retire":
@@ -10315,6 +10452,7 @@ class AbletonMcpBridge:
         self._realtime.close()
         try: self.mapper.capture_shutdown()
         except BaseException: pass
+        self.mapper._end_undo_step()
         self.queue.close()
         with self._executed_lock: self._executed_mutations.clear()
         self.mapper.refs.reset()
