@@ -1,0 +1,17 @@
+{
+  "name": "@kumi/live-extension",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Kumi's Live extension: offline render, right-click pointing and the rest of the Extensions SDK, for Kumi's bridge",
+  "main": "dist/extension.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "typescript": "~5.9.3"
+  }
+}
