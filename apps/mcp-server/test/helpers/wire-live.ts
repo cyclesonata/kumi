@@ -52,7 +52,7 @@ function stateDigest(simulator: DeterministicLiveSimulator, operation: string, a
   return createHash("sha256").update(JSON.stringify([operation, rows])).digest("hex");
 }
 
-export async function serveSimulator(simulator = new DeterministicLiveSimulator(), extraOperations: readonly string[] = ["authority.digest"]): Promise<WireLive> {
+export async function serveSimulator(simulator = new DeterministicLiveSimulator(), extraOperations: readonly string[] = ["authority.digest", "subscribe"]): Promise<WireLive> {
   const requests: WireRequest[] = [];
   const executed = new Map<string, unknown>();
   const sockets = new Set<Socket>();

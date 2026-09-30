@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import {
-  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, checkSnapshotAnswer, liveCapabilitiesForOperations,
+  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, REMOTE_SCRIPT_EVENT_TYPES, checkSnapshotAnswer, liveCapabilitiesForOperations,
   type AsyncLiveAdapter, type LiveDiscoveryKind, type LiveDiscoveryRequest, type LiveDiscoveryResult,
   type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotRequest, type LiveStatus,
 } from "../live.js";
@@ -21,7 +21,8 @@ const MAX_DEADLINE_MS = 60_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
-const EVENT_TYPES = new Set(["transport", "object", "reset"]);
+// What the Remote Script pushes: its subscription's event types (the registry's subscribe types).
+const EVENT_TYPES: ReadonlySet<string> = new Set(REMOTE_SCRIPT_EVENT_TYPES);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
 export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"]);
 /** Changes the Remote Script makes without mutation authority: its own undo steps, and a message in Live's status bar. */

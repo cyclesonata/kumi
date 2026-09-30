@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -2489,13 +2489,35 @@ export class McpHost {
     });
   }
 
+  /**
+   * An event from Live, forwarded as `notifications/live_event` with the channel it came from (each numbers
+   * its own). A `pointed` event (the producer right-clicked something in Live: Kumi's Live extension) gets
+   * the Remote Script reference of what it names, so Kumi's tools can act on it at once.
+   */
   private onLiveEvent(event: LiveEvent): void {
     if (this.protocolEra !== "legacy") return;
-    const line = JSON.stringify({ jsonrpc: "2.0", method: "notifications/live_event", params: event });
+    const params = { ...event, channel: event.channel ?? "remote-script", ...(event.type === "pointed" && isObject(event.payload) ? { payload: this.pointedWithRefs(event.payload) } : {}) };
+    const line = JSON.stringify({ jsonrpc: "2.0", method: "notifications/live_event", params });
     if (this.eventQueue.length >= MAX_QUEUED_EVENTS) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(line);
     if (event.type === "reset") this.noteToolListChanged();
     this.scheduleEventFlush();
+  }
+
+  /**
+   * A pointed event's payload with the Remote Script reference of each object it names: the extension
+   * gives kind and position (the LOM's own scheme), and the reference takes Live's current epoch. A
+   * Sample points at its Simpler. Selections name their lanes or slots, each with its reference.
+   */
+  private pointedWithRefs(payload: JsonObject): JsonObject {
+    const epoch = this.safeAdapterStatus().epoch;
+    const refOf = (located: unknown): string | undefined => {
+      if (typeof epoch !== "number" || !isObject(located) || typeof located.kind !== "string" || !/^[a-z_]+$/.test(located.kind) || !Array.isArray(located.path) || !located.path.every((step) => Number.isInteger(step) && (step as number) >= 0)) return undefined;
+      return `${epoch}:${located.kind === "sample" ? "device" : located.kind}:${located.path.join(":")}`;
+    };
+    const withRef = (located: unknown): unknown => { const ref = refOf(located); return ref && isObject(located) ? { ...located, ref } : located; };
+    const ref = refOf(payload);
+    return { ...payload, ...(ref ? { ref } : {}), ...(Array.isArray(payload.lanes) ? { lanes: payload.lanes.map(withRef) } : {}), ...(Array.isArray(payload.slots) ? { slots: payload.slots.map(withRef) } : {}) };
   }
 
   /** Fingerprint of the inputs that determine the visible tool list. */
@@ -2697,9 +2719,9 @@ export class McpHost {
   }
 
   private async liveSubscribeAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    const types = ["transport", "object", "reset"];
+    const types: readonly string[] = REMOTE_SCRIPT_EVENT_TYPES;
     const validTypes = !isObject(params) || params.types === undefined || (Array.isArray(params.types) && params.types.length <= types.length && new Set(params.types).size === params.types.length && params.types.every((item: unknown) => typeof item === "string" && types.includes(item)));
-    if (!isObject(params) || !hasOnly(params, ["types"]) || !validTypes) return error(id, -32602, "types must be a unique bounded subset of transport, object, reset");
+    if (!isObject(params) || !hasOnly(params, ["types"]) || !validTypes) return error(id, -32602, `types must be a unique subset of ${types.join(", ")}`);
     try {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("subscriptions")) throw new Error("subscriptions are unavailable");

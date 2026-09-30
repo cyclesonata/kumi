@@ -47,8 +47,10 @@ export function routedAdapter<T extends AsyncLiveAdapter>(remoteScript: T, exten
     invokeAsync: (invocation: LiveInvocation, context?: LiveOperationContext) => routeToExtension(invocation.operation, remoteScript.status(), extension.status())
       ? extension.invoke(invocation.operation, invocation.args, context)
       : remoteScript.invokeAsync(invocation, context),
+    // Each channel numbers its own events: every one says which it came from.
     subscribe: (listener: (event: LiveEvent) => void) => {
-      const fromScript = remoteScript.subscribe(listener); const fromExtension = extension.subscribe(listener);
+      const fromScript = remoteScript.subscribe((event) => listener({ ...event, channel: "remote-script" }));
+      const fromExtension = extension.subscribe((event) => listener({ ...event, channel: "extension" }));
       return () => { fromScript(); fromExtension(); };
     },
     subscribeStatus: (listener: (status: LiveStatus) => void) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; },

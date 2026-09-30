@@ -230,22 +230,39 @@ export function lightTrackRow(track: Track, setRef?: LiveRef): Track {
   return { ref: track.ref, parentRef: track.parentRef ?? setRef, objectIdentity: track.objectIdentity, name: track.name, kind: track.kind, mediaKind: track.mediaKind ?? (track.kind === "midi" ? "midi" : "audio"), light: true, armed: track.armed ?? null, colorIndex: track.colorIndex ?? null, groupTrackRef: track.groupTrackRef ?? null, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } as unknown as Track;
 }
 export interface LiveSongState { visibleTracks: LiveRef[]; appointedDevice: LiveRef | null; selectOnLaunch?: boolean | null; songLength: number | null; startTime: number | null; signatureNumerator: number | null; signatureDenominator: number | null; swingAmount: number | null; overdub: boolean | null; arrangementOverdub: boolean | null; backToArranger: boolean | null; canCaptureMidi: boolean | null; canUndo: boolean | null; canRedo: boolean | null; exclusiveArm: boolean | null; exclusiveSolo: boolean | null; isCountingIn: boolean | null; tempoFollowerEnabled: boolean | null; reEnableAutomationEnabled: boolean | null; sessionRecord: boolean | null; sessionAutomationRecord: boolean | null; clipTriggerQuantization: { name: string; value: number | null } | null; midiRecordingQuantization: { name: string; value: number | null } | null; isAbletonLinkEnabled: boolean | null; isAbletonLinkStartStopSyncEnabled: boolean | null; tempoFollower: boolean | null; }
-export interface LiveEvent { epoch: number; sequence: number; type: "state" | "transport" | "object" | "meter" | "max" | "osc" | "reset"; ref?: LiveRef; payload: unknown; }
+/** What the Remote Script pushes to a subscription (its _Subscription), as the registry's subscribe types name them. */
+export const REMOTE_SCRIPT_EVENT_TYPES = ["transport", "object", "reset", "selection", "name", "mixer", "parameter", "structure"] as const;
+/** Every event type: the Remote Script's, Kumi's Live extension's `pointed` (a right-click on an object), and the simulator's own. */
+export const LIVE_EVENT_TYPES = [...REMOTE_SCRIPT_EVENT_TYPES, "pointed", "state", "meter", "max", "osc"] as const;
+/** One event from Live, numbered in its channel's own sequence; `coalesced` counts the events it stands for. */
+export interface LiveEvent { epoch: number; sequence: number; type: typeof LIVE_EVENT_TYPES[number]; ref?: LiveRef; payload: unknown; channel?: "remote-script" | "extension"; coalesced?: number; }
 
-export type LiveOperation =
-  | "arrangement.clip.create" | "arrangement.clip.delete" | "arrangement.clip.move" | "arrangement.audio-clip.create" | "arrangement.automation.read" | "arrangement.automation.create" | "arrangement.automation.delete" | "arrangement.automation.point.insert" | "arrangement.automation.point.delete"
-  | "audio.capture.cleanup" | "audio.capture.emergency-stop" | "audio.capture.inspect" | "audio.capture.start" | "audio.capture.status" | "audio.capture.stop" | "audio.clip.set" | "audio.warp-marker.read" | "audio.warp-marker.add" | "audio.warp-marker.move" | "audio.warp-marker.delete" | "audio.take-lane.read" | "audio.comp.read"
-  | "automation.envelope.clear" | "automation.envelope.create" | "automation.envelope.delete" | "automation.envelope.read" | "automation.point.delete" | "automation.point.insert"
-  | "browser.inspect" | "browser.load" | "ownership.settle" | "browser.roots" | "browser.search" | "browser.preview.start" | "browser.preview.stop" | "chain.set" | "clip.action" | "clip.create" | "drum-pad.delete-all-chains" | "drum-pad.load-sample" | "drum-pad.load-samples" | "device.parameters.set" | "drum-pad.set" | "rack.action" | "rack.set" | "rack.view.set" | "clip.delete" | "clip.duplicate" | "clip.move" | "clip.rename" | "clip.set"
-  | "application.dialog" | "clip.view.set" | "device.bank.set" | "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "looper.action" | "looper.set" | "meld.set" | "plugin.set" | "simpler.replace-sample" | "device.comparison.save-to-slot" | "device.delete" | "device.enable" | "device.insert" | "device.move" | "device.parameter.set" | "device.rename" | "device.view.set" | "observe.poll" | "observe.subscribe" | "observe.unsubscribe" | "parameter.re-enable-automation" | "selection.set" | "song.view.set"
-  | "chain-mixer.set" | "compressor.sidechain.set" | "device-io.set" | "locator.add" | "locator.delete" | "locator.jump" | "locator.jump-to" | "locator.rename" | "mixer.extended.set" | "mixer.set" | "note.add" | "note.add-batch" | "note.delete" | "note.duplicate" | "note.quantize" | "note.read-by-id" | "note.read-selected" | "note.update"
-  | "project.bounce" | "project.collect" | "project.export" | "project.new" | "project.open" | "project.save" | "project.save-as"
-  | "authority.digest" | "dev.lom-audit"
-  | "undo.step.begin" | "undo.step.end" | "song.undo" | "song.redo"
-  | "render.offline" | "arrangement.midi-clip.create" | "clip.clear-range" | "device.duplicate" | "drum-pad.sample-chain" | "project.import" | "transaction.group"
-  | "performance.read" | "realtime.arm" | "realtime.disarm" | "realtime.stats" | "recording.arrangement" | "recording.session" | "routing.set"
-  | "scene.capture" | "scene.create" | "scene.delete" | "scene.fire-selected" | "scene.rename" | "scene.set" | "session.audio-clip.create" | "session.audition-launch" | "session.audition-stop" | "session.capture-midi" | "session.clip-launch" | "session.clip-stop" | "session.discover" | "session.emergency-stop"
-  | "song.read" | "song.set" | "song.time-convert" | "scene.duplicate" | "tempo.set" | "track.create" | "track.create-return" | "track.delete" | "track.delete-return" | "track.duplicate" | "track.rename" | "track.select-instrument" | "track.set" | "track.view.set" | "transport.action" | "transport.set" | "groove.edit" | "groove.read" | "groove.set" | "take-lane.create" | "take-lane.rename" | "take-lane.clip.create" | "take-lane.audio-clip.create" | "tuning.read" | "tuning.set" | "view.control" | "view.set" | "subscribe";
+/** Every operation the bridge invokes on Live (the registry's invoke operations, and the simulator's older ones). */
+export const LIVE_OPERATIONS = [
+  "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "arrangement.automation.read", "arrangement.automation.create",
+  "arrangement.automation.delete", "arrangement.automation.point.insert", "arrangement.automation.point.delete", "audio.capture.cleanup", "audio.capture.emergency-stop",
+  "audio.capture.inspect", "audio.capture.start", "audio.capture.status", "audio.capture.stop", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add",
+  "audio.warp-marker.move", "audio.warp-marker.delete", "audio.take-lane.read", "audio.comp.read", "automation.envelope.clear", "automation.envelope.create",
+  "automation.envelope.delete", "automation.envelope.read", "automation.point.delete", "automation.point.insert", "browser.inspect", "browser.load", "ownership.settle",
+  "browser.roots", "browser.search", "browser.preview.start", "browser.preview.stop", "chain.set", "clip.action", "clip.create", "drum-pad.delete-all-chains",
+  "drum-pad.load-sample", "drum-pad.load-samples", "device.parameters.set", "drum-pad.set", "rack.action", "rack.set", "rack.view.set", "clip.delete", "clip.duplicate",
+  "clip.move", "clip.rename", "clip.set", "application.dialog", "clip.view.set", "device.bank.set", "drift.set", "drum-cell.set", "eq8.set", "hybrid-reverb.set", "looper.action",
+  "looper.set", "meld.set", "plugin.set", "simpler.replace-sample", "device.comparison.save-to-slot", "device.delete", "device.enable", "device.insert", "device.move",
+  "device.parameter.set", "device.rename", "device.view.set", "observe.poll", "observe.subscribe", "observe.unsubscribe", "parameter.re-enable-automation", "selection.set",
+  "song.view.set", "chain-mixer.set", "compressor.sidechain.set", "device-io.set", "locator.add", "locator.delete", "locator.jump", "locator.jump-to", "locator.rename",
+  "mixer.extended.set", "mixer.set", "note.add", "note.add-batch", "note.delete", "note.duplicate", "note.quantize", "note.read-by-id", "note.read-selected", "note.update",
+  "project.bounce", "project.collect", "project.export", "project.new", "project.open", "project.save", "project.save-as", "authority.digest", "dev.lom-audit", "undo.step.begin",
+  "undo.step.end", "song.undo", "song.redo", "render.offline", "arrangement.midi-clip.create", "clip.clear-range", "device.duplicate", "drum-pad.sample-chain", "project.import",
+  "transaction.group", "performance.read", "realtime.arm", "realtime.disarm", "realtime.stats", "recording.arrangement", "recording.session", "routing.set", "scene.capture",
+  "scene.create", "scene.delete", "scene.fire-selected", "scene.rename", "scene.set", "session.audio-clip.create", "session.audition-launch", "session.audition-stop",
+  "session.capture-midi", "session.clip-launch", "session.clip-stop", "session.discover", "session.emergency-stop", "song.read", "song.set", "song.time-convert",
+  "scene.duplicate", "tempo.set", "track.create", "track.create-return", "track.delete", "track.delete-return", "track.duplicate", "track.rename", "track.select-instrument",
+  "track.set", "track.view.set", "transport.action", "transport.set", "groove.edit", "groove.read", "groove.set", "take-lane.create", "take-lane.rename", "take-lane.clip.create",
+  "take-lane.audio-clip.create", "tuning.read", "tuning.set", "view.control", "view.set", "subscribe", "application.message", "automation.step.insert", "automation.value-at",
+  "clip.time-convert", "data.get", "data.set", "device.action", "device.banks.read", "device.property.set", "fire-button.set", "note.delete-range", "note.select",
+  "plugin.parameter-names", "sample.set", "sample.slice", "track.action", "wavetable.modulation.set", "wavetable.set",
+] as const;
+export type LiveOperation = typeof LIVE_OPERATIONS[number];
 
 export interface LiveInvocation { operation: LiveOperation; args: Record<string, unknown>; }
 

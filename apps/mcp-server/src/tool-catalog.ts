@@ -605,8 +605,8 @@ const toolDescriptors = [
   },
   {
     name: "live_subscribe",
-    description: "Subscribe to authenticated, epoch- and sequence-bound transport and object events with continuity-preserving coalescing, bounded queues, overflow reset, and resnapshot recovery.",
-    inputSchema: { type: "object", properties: { types: { type: "array", maxItems: 3, uniqueItems: true, items: { type: "string", enum: ["transport", "object", "reset"] } } }, required: [], additionalProperties: false },
+    description: "Subscribe to what changes in Live as it happens, sent as notifications/live_event (channel remote-script; each channel numbers its own events): transport (playing, recording), object (the track or scene list), selection (what's selected), name (a track, scene or clip's name or colour), mixer (a track's mute, solo, arm, volume, pan or a send), parameter (the selected device's parameters), structure (tracks, scenes, locators, a track's devices or clips), and reset (read Live again). A fader drag is one event per tick. Right-clicking something in Live and choosing Ask Kumi about this sends a pointed event (channel extension) without subscribing.",
+    inputSchema: { type: "object", properties: { types: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", enum: ["transport", "object", "reset", "selection", "name", "mixer", "parameter", "structure"] } } }, required: [], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
