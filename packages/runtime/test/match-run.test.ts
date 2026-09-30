@@ -183,6 +183,18 @@ test("lessons are kept in a file only this user can read, checked on the way in;
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("the best's track and clip are kept by name and scene, which last from turn to turn, for Kumi's knob search at the end", () => {
+  const run = new MatchRun("make it sound like this", undefined, () => 0);
+  run.auditioned({ type: "auditioned", round: 1, best: { label: "Drift", score: 60 }, takes: [{ label: "Drift", score: 60, where: { track: "Cand Drift", clip: "scene:2" } }, { label: "Other", score: 50, where: { track: "Cand Other" } }], gaps: [], request });
+  assert.deepEqual(run.bestCandidate, { track: "Cand Drift", label: "Drift", clip: "scene:2" });
+  assert.equal(run.polishes, true);
+  run.auditioned({ type: "auditioned", round: 2, best: { label: "Other", score: 55 }, takes: [{ label: "Other", score: 55, where: { track: "Cand Other" } }], gaps: [], request });
+  assert.equal(run.bestCandidate!.track, "Cand Drift", "a lower score doesn't move it");
+  run.tuned("Drift, tuned", 66);
+  assert.deepEqual(run.best, { label: "Drift, tuned", score: 66 });
+  assert.equal(run.polishes, false, "once a run");
+});
+
 test("a first round of a single candidate is sent back to start wide, once", () => {
   const run = new MatchRun("make it sound like this", undefined, () => 0);
   run.auditioned({ type: "auditioned", round: 1, best: { label: "Operator", score: 58 }, takes: [{ label: "Operator", score: 58 }], gaps: [], request });

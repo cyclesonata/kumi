@@ -211,6 +211,8 @@ export interface AuditionRequest {
 export interface AuditionTake {
   label: string;
   track: string;
+  /** Where it is in names that last from turn to turn: its track's name, and its clip ("scene:2") when it played one. */
+  where?: { track: string; clip?: string };
   /** The render was (nearly) silent: nothing to compare. */
   silent?: boolean;
   closeness?: Closeness;
@@ -236,7 +238,7 @@ export interface AuditionEvent {
   best?: { label: string; score: number };
   previous?: number;
   /** Each candidate's score, best first; silent ones say so. */
-  takes: { label: string; score?: number; silent?: boolean }[];
+  takes: { label: string; score?: number; silent?: boolean; where?: { track: string; clip?: string } }[];
   gaps: string[];
   /** What was auditioned, so a match run can audition it again after changes. */
   request?: AuditionRequest;

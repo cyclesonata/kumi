@@ -1373,7 +1373,7 @@ export function createAbletonIntegration(options: Options): Integration {
    */
   interface Rig {
     tag: string;
-    sources: { track: string; name: string; scratch: string; label: string; clip?: string }[];
+    sources: { track: string; name: string; scratch: string; label: string; clip?: string; /** The scene its clip is in, once copied: it names the clip in a later turn. */ scene?: number }[];
     /** The candidates play Session clips, copied to a free stretch of the Arrangement at `from`. */
     clips: boolean;
     /** A goal's rig holds Main down, the transport primed and recording on between passes (see renderPass). */
@@ -1417,7 +1417,7 @@ export function createAbletonIntegration(options: Options): Integration {
         const end = typeof song.songLength === "number" ? song.songLength : 0;
         rig.from = (Math.ceil(end / beatsPerBar) + 2) * beatsPerBar;
         let longest = 0;
-        for (const source of rig.sources) longest = Math.max(longest, await copyClip(rig, source.track, source.clip, signal));
+        for (const source of rig.sources) longest = Math.max(longest, await copyClip(rig, source.track, source.clip, signal, source));
         rig.beats = beats ?? Math.min(32, longest || 8);
       }
       await addScratch(rig, rig.sources, signal);
@@ -1429,14 +1429,17 @@ export function createAbletonIntegration(options: Options): Integration {
    * A candidate's Session clip (the one named, or "first": its first) copied to the rig's stretch of the
    * Arrangement; its length in beats. A track without one plays nothing there, and is said so.
    */
-  async function copyClip(rig: Rig, track: string, clipRef: string | undefined, signal: AbortSignal): Promise<number> {
+  async function copyClip(rig: Rig, track: string, clipRef: string | undefined, signal: AbortSignal, source?: Rig["sources"][number]): Promise<number> {
     const slots = await rows("clip-slot", { parent: track, fields: ["clipRef"] }, signal);
-    const slot = clipRef && clipRef !== "first" ? slots.find((row) => row.clipRef === clipRef) : slots.find((row) => typeof row.clipRef === "string");
+    // A clip by its reference from this turn, by its scene ("scene:2", which lasts from turn to turn), or the track's first.
+    const scene = /^scene:(\d+)$/.exec(clipRef ?? "")?.[1];
+    const slot = scene !== undefined ? slots[Number(scene)] : clipRef && clipRef !== "first" ? slots.find((row) => row.clipRef === clipRef) : slots.find((row) => typeof row.clipRef === "string");
     if (!slot || typeof slot.clipRef !== "string") {
       if (clipRef && clipRef !== "first") throw new ObservationError(`${clipRef} isn't a Session clip on that track; discover its clip slots again.`);
       rig.notes.push("A candidate has no Session clip to play, so it renders silent.");
       return 0;
     }
+    if (source) source.scene = slots.indexOf(slot);
     const clip = (await rows("session-clip", { parent: slot.ref, fields: ["length"] }, signal))[0];
     await step("duplicate_clip", { clipRef: slot.clipRef, arrangementPosition: rig.from }, signal);
     return typeof clip?.length === "number" ? clip.length : 0;
@@ -1455,7 +1458,7 @@ export function createAbletonIntegration(options: Options): Integration {
   async function addToRig(rig: Rig, candidate: { track: string; name: string; label: string; clip?: string }, signal: AbortSignal): Promise<void> {
     const source = { ...candidate, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}` };
     await quietly(rig.steps, async () => {
-      if (rig.clips) await copyClip(rig, candidate.track, candidate.clip ?? "first", signal);
+      if (rig.clips) await copyClip(rig, candidate.track, candidate.clip ?? "first", signal, source);
       await addScratch(rig, [source], signal);
     });
     rig.sources.push(source);
@@ -1895,7 +1898,10 @@ export function createAbletonIntegration(options: Options): Integration {
       const rendered = await renderPass(rig, signal);
       for (const [index, source] of rig.sources.entries()) {
         const found = rendered.get(source.name);
-        if (found) files.push({ take: takes[index]!, ...found }); else takes[index]!.silent = true;
+        // Where it is, in names that last beyond this turn: its track's, and its clip's scene.
+        const take = takes.find((item) => item.track === source.track || item.track === source.name) ?? takes[index]!;
+        take.where = { track: source.name, ...(source.scene !== undefined ? { clip: `scene:${source.scene}` } : {}) };
+        if (found) files.push({ take, ...found }); else take.silent = true;
       }
     } catch (error) {
       if (originalSignal.aborted) notes.push("Stopped before it finished.");
@@ -1927,7 +1933,7 @@ export function createAbletonIntegration(options: Options): Integration {
       emitChange({ id: `a${randomUUID().slice(0, 8)}`, family: "clip", title, state: "heard", ...(best ? { score: best.closeness!.score } : {}), at: now().getTime() });
       try {
         options.onAudition?.({ type: "auditioned", round, ...(best ? { best: { label: best.label, score: best.closeness!.score } } : {}), ...(previous !== undefined ? { previous } : {}),
-          takes: [...scored.map((take) => ({ label: take.label, score: take.closeness!.score })), ...takes.filter((take) => !take.closeness).map((take) => ({ label: take.label, ...(take.silent ? { silent: true } : {}) }))],
+          takes: [...scored.map((take) => ({ label: take.label, score: take.closeness!.score, ...(take.where ? { where: take.where } : {}) })), ...takes.filter((take) => !take.closeness).map((take) => ({ label: take.label, ...(take.silent ? { silent: true } : {}), ...(take.where ? { where: take.where } : {}) }))],
           gaps: best?.closeness!.gaps.slice(0, 3) ?? [], request, ...(reference ? { reference: heardSummary(reference) } : {}),
           ...(best?.closeness!.structural ? { structural: { gap: best.closeness.structural.gap, move: best.closeness.structural.move } } : {}) });
       } catch { /* a listener failure must not affect Live */ }

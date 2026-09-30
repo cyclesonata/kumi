@@ -260,8 +260,12 @@ test("a match run's last step: Kumi's knob search tunes the best, keeps what bea
     }),
     integrationFactory: () => b.integration,
   });
+  const heardEvents: unknown[] = [];
   await session.start();
+  const watch = session.watch!.bind(session);
+  session.watch = (event) => { heardEvents.push(event); watch(event); };
   await session.submit("make my pad sound like the reference");
+  assert.deepEqual((heardEvents[0] as { takes: { where?: unknown }[] }).takes[0]!.where, { track: "Kumi · Goal · Dark" }, "where it is, by name");
   const wrapUp = asked.at(-1)!;
   assert.match(wrapUp, /^\[Kumi\] Kumi's knob search then tried \d+ settings of Dark Operator \(on “Kumi · Goal · Dark”\): (\d+)% → (\d+)% at full length, kept on the track/);
   const [, from, to] = /(\d+)% → (\d+)% at full length/.exec(wrapUp)!.map(Number);

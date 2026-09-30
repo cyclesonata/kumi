@@ -73,7 +73,8 @@ export class MatchRun {
 
   /** An audition happened (the model's or the harness's own). */
   auditioned(event: AuditionEvent, request?: AuditionRequest): void {
-    this.last = { event, ...(request ? { request } : {}) };
+    const asked = request ?? event.request;
+    this.last = { event, ...(asked ? { request: asked } : {}) };
     if (event.reference) this.reference = event.reference;
     this.changedSince = false;
     if (!event.best) return;
@@ -81,11 +82,9 @@ export class MatchRun {
     this.first ??= event.best.score;
     if (!this.best || event.best.score > this.best.score) {
       this.best = event.best;
-      // Its track: the candidate of that label (or, unlabelled, in that place).
-      const candidates = event.request?.candidates ?? request?.candidates ?? [];
-      const index = event.takes.findIndex((take) => take.label === event.best!.label);
-      const candidate = candidates.find((item) => item.label === event.best!.label) ?? (candidates.every((item) => !item.label) ? candidates[index] : undefined);
-      if (candidate) this.bestCandidate = candidate; else delete this.bestCandidate;
+      // Its track and clip, by names that last beyond this turn (references don't).
+      const where = event.takes.find((take) => take.label === event.best!.label)?.where;
+      if (where) this.bestCandidate = { track: where.track, label: event.best.label, ...(where.clip ? { clip: where.clip } : {}) }; else delete this.bestCandidate;
     }
   }
   /** Kumi's knob search tuned the best: its score, heard at full length, is the run's new best. */
