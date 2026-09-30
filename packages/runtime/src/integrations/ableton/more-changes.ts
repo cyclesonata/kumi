@@ -96,6 +96,18 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
     },
   },
   {
+    tool: "edit_rack_mapping", preview: "live_willington_device_preview", apply: "live_willington_device_apply", family: "device",
+    description: "Experimental Willington rack edits: kind macro-name renames macroIndex 0–15; variation-name renames the selected variation; macro-mapping assigns targetRef to mappingIndex 0–15 with minimum, maximum and mappingKind continuous, enum or boolean. Null mappingIndex unmaps. Boolean endpoints are macro thresholds 0–127; others use target parameter units. Requires stopped playback.",
+    summarize(_preview, input, track) { return withTrack({ title: `Changed rack ${String(input.kind ?? "mapping")}` }, ownerTrack(input.ref, track)); },
+  },
+  {
+    tool: "set_clip_follow_actions", preview: "live_follow_actions_preview", apply: "live_follow_actions_apply", family: "clip",
+    description: "Set Session clip Follow Actions with experimental Willington support. Requires stopped playback. Actions: 0 none, 1 stop, 2 again, 3 previous, 4 next, 5 first, 6 last, 7 any, 8 other, 9 jump. Chances are percentages; supplying one sets the complementary chance. Linked timing uses loop count; unlinked time uses beats. Jump targets are 1-based scene numbers. Does not change scene Follow Actions or the global switch.",
+    summarize(_preview, input, track) {
+      return withTrack({ title: "Changed clip Follow Actions" }, ownerTrack(input.clipRef, track));
+    },
+  },
+  {
     tool: "set_clip", preview: "live_clip_properties_preview", apply: "live_clip_properties_apply", family: "clip",
     description: "Change a clip's settings: muted, colorIndex (0–69), looping with loopStart and loopEnd (beats from the clip's start), launchMode (0 trigger, 1 gate, 2 toggle, 3 repeat), launchQuantization (0 global, then none, 8 bars, 4, 2, 1 bar, 1/2, 1/2T, 1/4, 1/4T, 1/8, 1/8T, 1/16, 1/16T, 1/32), legato, ramMode and velocityAmount (0–1). clipRef comes from discovery (a clip-slot's clipRef).",
     summarize(preview, input, track) {

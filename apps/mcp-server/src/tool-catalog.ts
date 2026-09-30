@@ -1,3 +1,4 @@
+import { FOLLOW_ACTION_SCHEMA } from "./follow-actions.js";
 import { JOURNEY_IDS } from "./journeys.js";
 import type { LiveCapability, LiveStatus } from "./live.js";
 
@@ -85,6 +86,8 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { prefix: "live_arrangement_section_", prereq: { capabilitiesAll: ["arrangement.write"], operationsAll: ["snapshot", "locator.add", "locator.delete"] } },
   { prefix: "live_arrangement_clip_", prereq: { capabilitiesAll: ["arrangement.write"], operationsAll: ["snapshot", "arrangement.clip.delete"], operationsAny: ["arrangement.clip.create", "arrangement.audio-clip.create", "take-lane.clip.create"] } },
   { name: "live_arrangement_automation_read", prereq: { capabilitiesAll: ["arrangement.read"], operationsAll: ["snapshot", "arrangement.automation.read"] } },
+  { prefix: "live_willington_device_", prereq: { capabilitiesAll: ["session.read"], operationsAll: ["willington.device.read", "willington.device.set"] } },
+  { prefix: "live_follow_actions_", prereq: { capabilitiesAll: ["clips"], operationsAll: ["snapshot", "clip.follow-actions.set"] } },
   { prefix: "live_clip_properties_", prereq: { capabilitiesAll: ["clips"], operationsAll: ["snapshot", "clip.set"] } },
   { prefix: "live_locator_jump_", prereq: { capabilitiesAll: ["arrangement.read"], operationsAll: ["snapshot", "locator.jump"] } },
   { prefix: "live_view_", prereq: { capabilitiesAll: ["view"], operationsAll: ["view.set", "view.control"] } },
@@ -827,6 +830,30 @@ const toolDescriptors = [
   {
     name: "live_locator_jump_apply",
     description: "Apply an exact, unexpired locator-jump preview with confirmation and idempotency.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_willington_device_preview",
+    description: "Preview exact-build Willington rack edits with complete prior-state capture: macro-name, variation-name (selected variation), or macro-mapping. Mapping indices are zero-based; null removes a mapping. Boolean ranges use 0–127 macro thresholds; others use parameter units. Playback must be stopped.",
+    inputSchema: {"type": "object", "properties": {"ref": {"type": "string", "minLength": 1, "maxLength": 256}, "kind": {"type": "string", "enum": ["macro-name", "macro-mapping", "variation-name"]}, "macroIndex": {"type": "integer", "minimum": 0, "maximum": 15}, "targetRef": {"type": "string", "minLength": 1, "maxLength": 256}, "name": {"type": "string", "minLength": 1, "maxLength": 256}, "mappingIndex": {"type": ["integer", "null"], "minimum": 0, "maximum": 15}, "minimum": {"type": "number"}, "maximum": {"type": "number"}, "mappingKind": {"type": "string", "enum": ["continuous", "enum", "boolean"]}}, "required": ["ref", "kind"], "additionalProperties": false},
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_willington_device_apply",
+    description: "Apply an exact, unexpired Willington rack preview with confirmation, idempotency and verified readback.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_follow_actions_preview",
+    description: "Preview experimental Session clip Follow Actions on an explicitly enabled Willington build. Captures all ten fields for restoration. Stopped playback required. Actions 0 none, 1 stop, 2 again, 3 previous, 4 next, 5 first, 6 last, 7 any, 8 other, 9 jump. Chances sum to 100; changing one complements the other. Time is beats; jump scenes are 1-based.",
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, ...FOLLOW_ACTION_SCHEMA }, required: ["clipRef"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_follow_actions_apply",
+    description: "Apply an exact, unexpired Follow Action preview with confirmation and idempotency.",
     inputSchema: { type: "object", properties: { transactionId: { type: "string", minLength: 1, maxLength: 128 }, confirmation: { type: "string", enum: ["apply"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["transactionId", "confirmation", "idempotencyKey"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },

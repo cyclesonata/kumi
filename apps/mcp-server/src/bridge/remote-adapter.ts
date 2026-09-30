@@ -16,7 +16,7 @@ const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
 const EVENT_TYPES = new Set(["transport", "object", "reset"]);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
-export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"]);
+export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "willington.device.read", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into

@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "a04384186aab64327446734075e888368565522e35062acf1eb0bbf343884bac",
-  "operationCount": 160,
+  "registryHash": "1b62b8fee89110864a81f1992379fabe8f7d79bff2799d168a70770b7ee0d774",
+  "operationCount": 163,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -10,6 +10,41 @@
     "Executable operations are negotiated at connect time; reserved operations fail closed and report the actual limitation."
   ],
   "families": [
+    {
+      "family": "willington-devices",
+      "surface": "Experimental exact-build native rack bindings (optional)",
+      "operations": [
+        {
+          "id": "willington.device.read",
+          "status": "executable-negotiated",
+          "access": [
+            "read"
+          ]
+        },
+        {
+          "id": "willington.device.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        }
+      ],
+      "firstTested": "Kumi integration pending exact-candidate validation"
+    },
+    {
+      "family": "willington-follow-actions",
+      "surface": "Experimental exact-build native Clip bindings (optional)",
+      "operations": [
+        {
+          "id": "clip.follow-actions.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        }
+      ],
+      "firstTested": "Kumi integration pending exact-candidate real-Live validation; standalone binding evidence is not Kumi evidence"
+    },
     {
       "family": "session-read",
       "surface": "Song/Track/Scene/Clip/ClipSlot/Chain/Device/Parameter (LOM)",

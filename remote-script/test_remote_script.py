@@ -620,7 +620,8 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "a04384186aab64327446734075e888368565522e35062acf1eb0bbf343884bac")
+        evidence = json.loads((Path(__file__).resolve().parent.parent / "docs/evidence/capability-manifest.json").read_text())
+        self.assertEqual(digest, evidence["registryHash"])
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -4712,7 +4713,7 @@ class FakeRackDevice:
         self.chains = []
         self.return_chains = []
         self.macros = [FakeMacro("Macro 1")]
-        self.macro_mapped = [True]
+        self.macros_mapped = [True]
         self.visible_macro_count = 8
         self.variation_count = 1
         self.selected_variation_index = 0
@@ -5071,6 +5072,41 @@ class RackMacroDrumPadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 mapper.invoke("drum-pad.load-samples", bad)
         self.assertEqual([len(pad.chains) for pad in pads], [0, 0, 0])
+
+    def test_native_rack_macro_shape_and_indexed_variation(self):
+        song = FakeSong(); rack = FakeRackDevice(); del rack.macros
+        rack.parameters = [FakeParameter(), FakeParameter()]
+        rack.variation_count = 3
+        song.tracks[0].devices = [rack]; mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual(len(row["macros"]), 1)
+        self.assertEqual(row["macros"][0]["objectIdentity"], row["parameters"][1]["objectIdentity"])
+        called = []
+        rack.recall_selected_variation = lambda: called.append(rack.selected_variation_index)
+        def args(index):
+            return {"ref": row["ref"], "action": "recall-variation", "index": index,
+                    "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": host_rack_state_revision(mapper.snapshot()["tracks"][0]["devices"][0])}
+        mapper.invoke("rack.action", args(2)); self.assertEqual(called, [2])
+        with self.assertRaisesRegex(ValueError, "out of range"): mapper.invoke("rack.action", args(3))
+        self.assertEqual(called, [2])
+        stale = args(1); rack.selected_variation_index = 0
+        with self.assertRaisesRegex(ValueError, "state changed"): mapper.invoke("rack.action", stale)
+
+    def test_modulator_fallback_search_and_resolution_share_real_items(self):
+        def node(**values): return type("BrowserNode", (), values)()
+        lfo = node(name="LFO", uri="query:AudioFx#LFO", is_loadable=True, children=[])
+        impostor = node(name="LFO", uri="user:LFO", is_loadable=True, children=[])
+        browser = node(audio_effects=node(children=[lfo, impostor]), midi_effects=node(children=[]))
+        mapper = LiveObjectMapper(FakeSong())
+        with patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+            self.assertIn("modulators", [item["name"] for item in mapper._browser_roots({})["roots"]])
+            rows = mapper._browser_search({"category": "modulators"})["items"]
+            self.assertEqual(len(rows), 1)
+            self.assertIs(mapper._browser_find(rows[0]["id"])[0], lfo)
+            browser.modulators = node(children=[])
+            self.assertEqual(mapper._browser_search({"category": "modulators"})["items"], rows)
+            browser.modulators = node(children=[impostor])
+            self.assertIs(mapper._browser_find(rows[0]["id"])[0], impostor)
 
     def test_rack_rows_actions_and_view(self):
         song = FakeSong()
