@@ -10115,7 +10115,7 @@ class LiveObjectMapper:
             raise ValueError("recording start requires an exact destination track identity")
         # Tracks recorded alongside the destination (renders of several sources at once): each exact and armed.
         also_refs, also_identities = args.get("alsoTrackRefs") or [], args.get("alsoTrackIdentities") or []
-        if not isinstance(also_refs, list) or not isinstance(also_identities, list) or len(also_refs) != len(also_identities) or len(also_refs) > 7 or (also_refs and action != "start"):
+        if not isinstance(also_refs, list) or not isinstance(also_identities, list) or len(also_refs) != len(also_identities) or len(also_refs) > 1024 or (also_refs and action != "start"):
             raise ValueError("tracks recorded alongside are invalid")
         also = []
         for ref, identity in zip(also_refs, also_identities):

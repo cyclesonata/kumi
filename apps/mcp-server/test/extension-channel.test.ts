@@ -240,3 +240,19 @@ test("Live keeps Kumi's extension in its Extensions folder, and its data beside 
   assert.equal(kumiExtensionFolders({}, "linux", "/home/p"), undefined);
   assert.match(kumiExtensionFolders({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32", "C:/Users/p")!.data, /AppData[\\/]Roaming[\\/]Ableton[\\/]Extensions Data[\\/]kumi\.kumi$/);
 });
+
+test("a host that can't reach Live (Developer Mode off) isn't started again until Live starts again", async () => {
+  let epoch = 7; const epochs: number[] = [];
+  const remoteScript = {
+    status: () => ({ ...remoteStatus, epoch, provenance: "real-live" }), snapshot: () => { throw new Error("async"); }, get: () => undefined, invoke: () => undefined, reconnect: () => remoteStatus,
+    subscribe: () => () => undefined, snapshotAsync: async () => ({}) as never, discoverAsync: async () => ({}) as never, getAsync: async () => undefined,
+    invokeAsync: async () => ({}), reconnectAsync: async () => remoteStatus, close: async () => undefined,
+  } as unknown as AsyncLiveAdapter;
+  const adapter = withExtension(remoteScript, { storageDirectory: join(root, "nowhere"), installedStorage: join(root, "not-installed"), retryMs: 10, launcher: async () => { epochs.push(epoch); return "failed"; } });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(epochs, [7], "one try while Live stays up");
+  epoch = 8;
+  await waitFor(() => epochs.length === 2 || undefined);
+  assert.deepEqual(epochs, [7, 8], "Live started again: one more try, at once");
+  await adapter.close();
+});

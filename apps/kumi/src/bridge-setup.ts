@@ -14,6 +14,7 @@ import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
+import { extensionSource, installExtension, liveExtensionsDir } from "./live-extension.js";
 import { KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -99,6 +100,26 @@ const activated = (value: Record<string, unknown>) => {
   return value.state === "activated" || receipt?.effectiveStatus === "activated";
 };
 
+/**
+ * Puts Kumi's extension in Live's Extensions folder, from the first of `bridgeRoots` that carries one
+ * (an older bridge carries none). Never fatal: the bridge works without it.
+ */
+function placeExtension(io: BridgeSetupIo, say: (line?: string) => void, bridgeRoots: readonly string[], liveOpen: boolean): void {
+  const folder = liveExtensionsDir(io.env);
+  const source = bridgeRoots.map(extensionSource).find(Boolean);
+  if (!folder || !source) return;
+  try {
+    const placed = installExtension(source, folder);
+    if (!placed.changed) return;
+    say(`Added Kumi's extension to Live: it renders tracks without playing them, writes MIDI clips in the Arrangement, and adds "Ask Kumi about this" to Live's right-click menu.${liveOpen ? " It starts the next time you open Live." : ""}`);
+  } catch (error) {
+    say(`Kumi couldn't add its extension to Live (${error instanceof Error ? error.message : "unknown error"}); everything else works. Run ${KUMI} bridge again to retry.`);
+  }
+}
+
+/** The package folder a bridge configuration's entry (<package>/dist/src/cli.js) belongs to. */
+const packageRootOf = (entry: string | undefined) => (entry ? dirname(dirname(dirname(entry))) : undefined);
+
 export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   const say = (line = "") => io.out.write(`${line}\n`);
   const run = io.run ?? runProgram;
@@ -111,14 +132,16 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
 
   const config = findBridgeConfig(io.env);
   const state = config ? dirname(config) : join(io.home ?? kumiDir(io.env), "bridge", "state");
-  let installed: string | undefined;
-  try { installed = config ? readBridgeServer(config).version : undefined; } catch { installed = undefined; }
+  let installed: string | undefined; let installedRoot: string | undefined;
+  try { const server = config ? readBridgeServer(config) : undefined; installed = server?.version; installedRoot = packageRootOf(server?.entry); } catch { installed = undefined; }
   const lifecycle = (root: string, action: string, extra: readonly string[] = []) => run(process.execPath, [join(root, "dist", "src", "lifecycle-cli.js"), action,
     "--remote-scripts-dir", scripts, "--state-dir", state, "--package-root", root, ...extra, ...(io.allowDirty ? ["--allow-dirty-private-build"] : [])]);
 
   // Up to date: say so, and whether Live has been seen through it.
   if (config && installed === bundled) {
     say(`The Ableton bridge ${bundled} is installed, the same as Kumi's.`);
+    // A bridge installed before Kumi had an extension gets it now; Live loads it when it next opens.
+    placeExtension(io, say, [installedRoot, bridgeDir].filter((root): root is string => Boolean(root)), await (io.liveRunning ?? (() => isLiveRunning(run)))());
     return 0;
   }
   say(config ? `Kumi's bridge is ${bundled}; the one Live uses is ${installed ?? "older"}. Updating it takes a minute.` : `Kumi will install the Ableton bridge ${bundled}: the Remote Script Live loads, and the local server Kumi talks to.`);
@@ -175,6 +198,7 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   const applied = lifecycleAnswer(await lifecycle(root, action, [...artifactArgs, "--apply", "--confirm-live-stopped"]));
   if (!applied.ok) { say(`The bridge's installer stopped, and put back what was there: ${applied.reason}`); return 1; }
   say(`Done: the Ableton bridge ${bundled} is installed (${tilde(scripts)}).`);
+  placeExtension(io, say, [root], false);
   say("");
   say(config ? "Now open Live. Kumi connects on its own." : "Now open Live, and in Settings → Link, Tempo & MIDI choose AbletonMcpBridge as a Control Surface. Kumi connects on its own.");
 

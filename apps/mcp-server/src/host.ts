@@ -2520,7 +2520,7 @@ export class McpHost {
 
   private async liveRecordingPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["action", "lane", "intent", "destinationTrackRef", "alsoTrackRefs", "outputSafety"]) || (params.action !== "start" && params.action !== "stop")
-      || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 7 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
+      || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 1024 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
     try {
       this.validateOutputSafety(params.outputSafety);
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
