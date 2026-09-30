@@ -1071,3 +1071,30 @@ kept 64 applied changes of each kind for their undo, and the renders filled that
 512, and Kumi releases its render steps). A one-candidate audition left its scratch track, because
 the record of adding it carried the track's own name and was skipped as "goes with the track"
 (fixed). The lesson's "what was matched" was the request sentence (now the reference as heard).
+
+## Goals on real Live, with Claude Sonnet 5.5 (2026-09-29)
+
+The same reference and Set, `/goal make a new MIDI track that sounds like … keys-chord-ref.wav`.
+The model set up four genuinely different candidates in about five minutes (Operator, Wavetable,
+Drift or Analog, a parallel rack; 53–84%), then Kumi's search ran on its own with the model leaping
+every few generations or on a stall (about four minutes a leap).
+
+- Run 1 paused after one generation: Live refused a value for one of Operator's 192 knobs, and the
+  refusal stopped the search (fixed: a refused knob leaves the search; 24 knobs a chain at most).
+- Run 2, resumed, heard nothing for nine generations: the setup had used Session clips, and a resumed
+  goal rendered an empty stretch of the Arrangement (fixed; two silent generations now pause it).
+  Its render tracks couldn't be removed after the best was copied above them (fixed: the end runs in
+  an order Live can undo).
+- Run 3: 10 generations, 48 candidates heard in 19 minutes, 76% → 84%. The 84% held from generation 1
+  while the model heard the same patch at 77% (fixed: a holding best is heard again, its score the
+  mean). A candidate fell from 73% to 26% on joining, its upper mids up 20 dB: the safety limiter was
+  limiting hot synths (fixed: its "Input Gain" at 0.25, -12 dB, read back on Live). The model's leap
+  made tracks above the render tracks, which Live then wouldn't remove (fixed: the rig closes around
+  each leap).
+- Run 4: 8 generations, 32 candidates, 73% → 77% climbing (75% at generation 2, 77% at 5), about 35 s a
+  generation of four (seven candidates a minute between the model's turns). It paused when reopening
+  the rig after a leap outlasted the answer's quiet timer (fixed: a goal has no quiet timer, only its
+  cap).
+
+Throughput: up to six candidates rendered in one silent pass on this Mac; a generation is bounded by
+the bridge's per-step round trips more than by the audio (a one-bar part).

@@ -72,6 +72,8 @@ interface Operation {
   extend?: (ms: number) => void;
   /** How long a cancelled turn may take to put things back (a goal's cleanup) before it's set aside. */
   linger?: number;
+  /** A turn that's at work the whole time (a goal): no quiet timer, only its limit. */
+  steady?: boolean;
 }
 /** Where an unsaved Set keeps its conversations until it's saved. */
 const UNSAVED = "unsaved";
@@ -484,6 +486,9 @@ export function createSession(options: Options): SessionController {
     if (!text && !state) throw new KumiError("request", "There's no goal to pick up. Say what to reach, such as: /goal make my pad sound like ~/ref.wav");
     if (!text && state?.status === "done") throw new KumiError("request", `That goal is done (${state.why ?? "finished"}). Start another with /goal and what to reach.`);
     op.extend?.(goalBudget.ms + 15 * 60_000);
+    // A goal is at work the whole time (a rig opening after a leap reads every knob for minutes): the
+    // answer's quiet timer doesn't apply. Its own safety cap bounds it.
+    op.steady = true; op.progress?.({ type: "steady" });
     const usage = emptyUsage();
     let said = "";
     const ask = async (prompt: string) => {
@@ -654,7 +659,7 @@ export function createSession(options: Options): SessionController {
         if (event?.type === "tool-start") working++;
         if (event?.type === "tool-end") working = Math.max(0, working - 1);
         clearTimeout(timeout);
-        if (working === 0) timeout = setTimeout(() => stop("quiet"), idleMs);
+        if (working === 0 && !op.steady) timeout = setTimeout(() => stop("quiet"), idleMs);
       };
     }
     op.done = (async () => {

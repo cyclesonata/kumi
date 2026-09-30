@@ -30,7 +30,7 @@ function memoryGoals(): GoalStore & { kept: Map<string, GoalState> } {
 }
 
 /** A session over the synthetic bridge whose model, asked to set a goal up or leap, auditions tracks named "Kumi · Goal · …". */
-function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore) {
+function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook?: PlaybookStore, idleTimeoutMs?: number) {
   const events: SessionEvent[] = [];
   const asked: string[] = [];
   let connection: ((state: "connected" | "connecting" | "disconnected" | "error") => void) | undefined;
@@ -40,7 +40,7 @@ function rig(goals = memoryGoals(), renderWith: typeof render = render, playbook
     onConnection: (state) => connection?.(state), onAudition: (event) => session.watch?.(event) });
   const call = async (tools: readonly KernelTool[], name: string, input: Record<string, unknown>) => tools.find((tool) => tool.name === name)!.execute(input, AbortSignal.timeout(60_000));
   session = createSession({
-    onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goals, goalRandom: seeded(5), ...(playbook ? { playbook } : {}),
+    onEvent: (event) => events.push(event), timeoutMs: 10_000, cancelGraceMs: 10, closeTimeoutMs: 100, goals, goalRandom: seeded(5), ...(playbook ? { playbook } : {}), ...(idleTimeoutMs ? { idleTimeoutMs } : {}),
     goalBudget: { target: 99, leapEvery: 3, stallGenerations: 99 },
     kernelFactory: async ({ tools }) => ({
       async run(input, _signal, emit) {
@@ -146,5 +146,18 @@ test("a goal whose renders stop coming through pauses and says so, rather than s
   assert.equal(last.state, "paused");
   assert.match(last.why ?? "", /nothing came through the last renders/);
   assert.equal(r.b.main.volume, 0.85);
+  await r.session.close();
+});
+
+test("a goal is at work the whole time: an answer's quiet timer doesn't call it stuck", async () => {
+  // Each generation takes over a second here; the quiet timer is 0.4 s.
+  const r = rig(memoryGoals(), render, undefined, 400);
+  await r.session.start();
+  const running = r.session.goal!("make my pad sound like the reference");
+  while ((r.statuses().at(-1)?.generation ?? 0) < 3) await delay(50);
+  await r.session.stopGoal!();
+  await running;
+  assert.equal(r.statuses().at(-1)!.why, "stopped", "stopped by /goal stop, not as stuck");
+  assert.ok(!r.events.some((event) => event.type === "error" && /without progress/.test(event.message)), JSON.stringify(r.events.filter((event) => event.type === "error")));
   await r.session.close();
 });
