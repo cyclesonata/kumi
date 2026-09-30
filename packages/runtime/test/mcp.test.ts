@@ -227,3 +227,24 @@ test("actual built bridge interoperates without config and truthfully reports un
     assert(!tools.list().some((tool) => tool.name === "live_discover"));
   } finally { await tools.close(); }
 });
+
+test("reads sent together share one reading of the catalog, and a change announced meanwhile starts it over", async () => {
+  let lists = 0; let announce: (() => void) | undefined; let announced = false;
+  const endpoint = {
+    async list() {
+      lists++;
+      await delay(20);
+      // Live changes what it offers while the first reading is under way.
+      if (!announced) { announced = true; announce?.(); }
+      return { tools: [{ name: "live_status", inputSchema: { type: "object" } }, { name: "live_discover", inputSchema: { type: "object" } }] };
+    },
+    async call() { return { content: [] }; },
+    onCatalogChanged(listener: () => void) { announce = listener; return () => {}; },
+    onDisconnect() { return () => {}; },
+    async close() {},
+  } as unknown as ConstructorParameters<typeof AllowedTools>[0];
+  const tools = new AllowedTools(endpoint);
+  await Promise.all([tools.refresh(freshSignal()), tools.refresh(freshSignal()), tools.refresh(freshSignal()), tools.refresh(freshSignal())]);
+  assert.equal(tools.has("live_status"), true);
+  assert.equal(lists, 2, "one reading for all four, read again once after the change");
+});

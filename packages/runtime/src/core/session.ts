@@ -495,47 +495,50 @@ export function createSession(options: Options): SessionController {
     emit({ type: "doing", text: `Tuning ${label}'s knobs` });
     const signal = op.controller.signal;
     try {
-      const rig = await integration.goal({ ...request, candidates: [{ ...candidate, label }] }, signal).catch((error: unknown) => error instanceof Error ? error.message : "it couldn't start");
+      // The winner and three copies of it: four settings heard in each pass.
+      const rig = await integration.goal({ ...request, candidates: [{ ...candidate, label }] }, signal, { spares: 3 }).catch((error: unknown) => error instanceof Error ? error.message : "it couldn't start");
       if (typeof rig === "string") { emit({ type: "notice", message: `Kumi's knob search couldn't tune ${label}: ${rig}` }); return undefined; }
       const evolution = new Evolution(options.goalRandom ?? Math.random);
-      const slot = evolution.add(rig.slots[0]!);
-      const knobs = slot.knobs; const start = slot.elite.slice();
-      let from: number | undefined; let to: number | undefined; let kept = false; const notes: string[] = [];
+      for (const slot of rig.slots) evolution.add(slot);
+      const winner = evolution.slots[0]!;
+      const knobs = winner.knobs; const start = winner.elite.slice();
+      const keyOf = (knob: Knob) => `${knob.device}|${knob.name}`;
+      let from: number | undefined; let to: number | undefined; let kept: { knobs: Knob[]; values: number[] } | undefined; const notes: string[] = [];
       try {
         // Where it starts, heard at full length: what the tuning has to beat.
-        from = (await rig.generation([{ slot: slot.name, knobs, values: start }], signal, { screen: false })).scores.get(slot.name);
+        from = (await rig.generation([{ slot: winner.name, knobs, values: start }], signal, { screen: false })).scores.get(winner.name);
         if (from === undefined) return undefined;
         const began = Date.now();
         while (Date.now() - began < run.polishMs && !signal.aborted) {
           const trials = evolution.propose();
-          const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: evolution.slots[0]!.knobs, values: trial.values, ...(trial.how === "recheck" ? { fresh: true } : {}) })), signal, { screen: rig.screens });
+          const slots = new Map(evolution.slots.map((slot) => [slot.name, slot]));
+          const result = await rig.generation(trials.map((trial) => ({ slot: trial.slot, knobs: slots.get(trial.slot)!.knobs, values: trial.values, ...(trial.how === "recheck" ? { fresh: true } : {}) })), signal, { screen: rig.screens });
           evolution.scored(trials, result.scores);
           for (const [name, keys] of result.frozen) evolution.freeze(name, keys);
           op.progress?.({ type: "tool-start" }); op.progress?.({ type: "tool-end" });
           emit({ type: "doing", text: `Tuning ${label}'s knobs · ${evolution.rendered} settings heard` });
-          if (!result.scores.size || evolution.stalledFor >= 10) break;
+          if (!result.scores.size || evolution.stalledFor >= 12) break;
         }
-        const best = evolution.slots[0]!;
-        // The search's best, heard at full length (a long part is searched on a window of it).
-        if (best.knobs.some((knob, index) => best.elite[index] !== start[knobs.indexOf(knob)])) to = (await rig.generation([{ slot: best.name, knobs: best.knobs, values: best.elite, fresh: true }], signal, { screen: false })).scores.get(best.name);
-        kept = to !== undefined && to >= from + 1;
+        const best = evolution.leader;
+        // The search's best, heard at full length (a long part is searched on a window of it), on the winner's own track.
+        const moved = best && best.knobs.some((knob, index) => best.elite[index] !== start[knobs.findIndex((item) => keyOf(item) === keyOf(knob))]);
+        if (best && moved) to = (await rig.generation([{ slot: winner.name, knobs: best.knobs, values: best.elite, fresh: true }], signal, { screen: false })).scores.get(winner.name);
+        if (best && to !== undefined && to >= from + 1) kept = { knobs: best.knobs, values: best.elite };
       } finally {
         notes.push(...await rig.close().catch(() => ["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."]));
-        const best = evolution.slots[0]!;
         const cleanup = AbortSignal.timeout(120_000);
         // Left at what won: the tuned settings, or the ones it started from.
-        const settled = kept ? await rig.settle(best.name, best.knobs, best.elite, cleanup) : await rig.settle(slot.name, knobs, start, cleanup);
-        if (settled) notes.push(`Its settings couldn't all be put back (${settled}); check ${best.name}.`);
+        const settled = await rig.settle(winner.name, kept?.knobs ?? knobs, kept?.values ?? start, cleanup);
+        if (settled) notes.push(`Its settings couldn't all be put back (${settled}); check ${winner.name}.`);
       }
-      const best = evolution.slots[0]!;
-      const heard = `Kumi's knob search then tried ${evolution.rendered} settings of ${label} (on “${best.name}”)`;
+      const heard = `Kumi's knob search then tried ${evolution.rendered} settings of ${label} (on “${winner.name}”)`;
       if (!kept) return `[Kumi] ${heard}: none beat it at full length (${Math.round(from)}%), so its settings are as you left them.${notes.length ? ` ${notes.join(" ")}` : ""}`;
       run.tuned(`${label}, tuned`, Math.round(to!));
-      const moved = best.knobs.flatMap((knob, index) => {
-        const was = start[knobs.indexOf(knob)]; const now = best.elite[index]!;
+      const changed = kept.knobs.flatMap((knob, index) => {
+        const was = start[knobs.findIndex((item) => keyOf(item) === keyOf(knob))]; const now = kept!.values[index]!;
         return was === undefined || Math.abs(now - was) < 1e-6 * Math.max(1, knob.max - knob.min) ? [] : [`${knob.device.replace(/^\d+:/, "")} ${knob.name} ${round3(was)} → ${round3(now)}`];
       });
-      return `[Kumi] ${heard}: ${Math.round(from)}% → ${Math.round(to!)}% at full length, kept on the track (and a Limiter ends its chain for safety). The knobs it moved: ${moved.slice(0, 30).join("; ")}${moved.length > 30 ? `; and ${moved.length - 30} more` : ""}. Use these values if you rebuild it elsewhere.${notes.length ? ` ${notes.join(" ")}` : ""}`;
+      return `[Kumi] ${heard}: ${Math.round(from)}% → ${Math.round(to!)}% at full length, kept on the track (and a Limiter ends its chain for safety). The knobs it moved: ${changed.slice(0, 30).join("; ")}${changed.length > 30 ? `; and ${changed.length - 30} more` : ""}. Use these values if you rebuild it elsewhere.${notes.length ? ` ${notes.join(" ")}` : ""}`;
     } finally { op.progress?.({ type: "tool-end" }); }
   }
   /**

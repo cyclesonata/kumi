@@ -34,7 +34,32 @@ export class AllowedTools {
   tool(name: string): Tool | undefined { const found = this.isValid ? this.catalog.get(name) : undefined; return found ? structuredClone(found) : undefined; }
   private allowed(name: string): boolean { return MODEL_TOOLS.has(name) || this.hostTools.has(name); }
 
-  async refresh(signal: AbortSignal): Promise<void> {
+  /**
+   * Reads the catalog again. Callers at the same moment (reads sent together) share one reading: a second
+   * reading would invalidate the first, and each would fail the other. A change announced while it reads
+   * starts it over, a few times.
+   */
+  refresh(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (this.closed) return Promise.reject(new Error("MCP catalog is closed"));
+    this.reading ??= (async () => {
+      try {
+        for (let attempt = 0; ; attempt++) {
+          try { return await this.enumerate(signal); }
+          catch (error) { if (attempt >= 3 || this.closed || signal.aborted || !(error instanceof Error && /changed during enumeration/.test(error.message))) throw error; }
+        }
+      } finally { this.reading = undefined; }
+    })();
+    const shared = this.reading;
+    return new Promise<void>((resolve, reject) => {
+      const stop = () => reject(signal.reason);
+      signal.addEventListener("abort", stop, { once: true });
+      shared.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+    });
+  }
+  private reading: Promise<void> | undefined;
+
+  private async enumerate(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     if (this.closed) throw new Error("MCP catalog is closed");
     this.valid = false;
