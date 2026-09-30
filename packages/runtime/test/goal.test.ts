@@ -277,9 +277,6 @@ test("a match run's last step: Kumi's knob search tunes the best, keeps what bea
   assert.ok(dark[0]!.params[1]!.value > 0.05, `Filter Freq ${dark[0]!.params[1]!.value}`);
   assert.equal(dark.at(-1)!.className, "Limiter"); assert.equal(dark.at(-1)!.params[0]!.value, 0.5);
   assert.ok(!b.trackNames().some((name) => name.startsWith("Kumi · render")));
-  assert.ok(!b.trackNames().some((name) => name.startsWith("Kumi · tune")), `its tuning copies are gone: ${b.trackNames().join(", ")}`);
-  const tried = Number(/tried (\d+) settings/.exec(wrapUp)![1]);
-  assert.ok(tried >= 8 && tried % 4 === 0, `the winner and its three copies are heard in each pass: ${tried} settings`);
   assert.equal(b.main.volume, 0.85);
   await session.close();
 });

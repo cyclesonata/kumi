@@ -495,8 +495,7 @@ export function createSession(options: Options): SessionController {
     emit({ type: "doing", text: `Tuning ${label}'s knobs` });
     const signal = op.controller.signal;
     try {
-      // The winner and three copies of it: four settings heard in each pass.
-      const rig = await integration.goal({ ...request, candidates: [{ ...candidate, label }] }, signal, { spares: 3 }).catch((error: unknown) => error instanceof Error ? error.message : "it couldn't start");
+      const rig = await integration.goal({ ...request, candidates: [{ ...candidate, label }] }, signal).catch((error: unknown) => error instanceof Error ? error.message : "it couldn't start");
       if (typeof rig === "string") { emit({ type: "notice", message: `Kumi's knob search couldn't tune ${label}: ${rig}` }); return undefined; }
       const evolution = new Evolution(options.goalRandom ?? Math.random);
       for (const slot of rig.slots) evolution.add(slot);

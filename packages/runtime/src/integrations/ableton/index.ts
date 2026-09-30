@@ -1631,51 +1631,15 @@ export function createAbletonIntegration(options: Options): Integration {
    * A goal's rig: the candidates' scratch tracks kept open for every generation, a safety limiter at
    * the end of each candidate's chain, and the reference heard once.
    */
-  async function openGoal(given: AuditionRequest, originalSignal: AbortSignal, goalOptions: { spares?: number } = {}): Promise<GoalRig | string> {
+  async function openGoal(given: AuditionRequest, originalSignal: AbortSignal): Promise<GoalRig | string> {
     if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
     if (!supported({ since: GOAL_BRIDGE })) return tooOld({ since: GOAL_BRIDGE });
     if (!given.reference) return "A goal needs a reference to reach.";
     if (!currentTempo) return "Kumi doesn't know the Set's tempo yet; try again.";
     const signal = AbortSignal.any([originalSignal, lifetime.signal]);
     const reference = await heardReference(given.reference, given, signal);
-    // Copies of a single candidate, searched beside it: each copied from the last, so the newest is the
-    // furthest along and Live can undo them newest first (it removes a track only from the last one back).
-    const spareSteps: string[] = [];
-    const dropSpares = async () => {
-      const notes: string[] = [];
-      for (const id of [...spareSteps].reverse()) {
-        const undone = await undoChange(id, AbortSignal.timeout(60_000), changes.get(id)?.record.family === "structure").catch(() => undefined);
-        if (!undone || undone.isError) { notes.push("Kumi couldn't remove its tuning copies; delete the “Kumi · tune” tracks by hand."); break; }
-      }
-      for (const id of spareSteps) changes.delete(id);
-      spareSteps.length = 0;
-      return notes;
-    };
-    let request = given;
-    if (goalOptions.spares && given.candidates.length === 1) {
-      const tag = randomUUID().slice(0, 4); const names: string[] = [];
-      try {
-        await quietly(spareSteps, async () => {
-          let from = given.candidates[0]!.track;
-          for (let copy = 0; copy < goalOptions.spares!; copy++) {
-            const before = await rows("track", { fields: ["name"] }, signal);
-            const at = before.findIndex((row) => row.ref === from || row.name === from);
-            if (at < 0) throw new ObservationError(`${from} isn't a track in this turn's discovery; discover again.`);
-            await step("change_structure", { action: "duplicate-track", ref: before[at]!.ref }, signal);
-            const after = await rows("track", { fields: ["name"] }, signal);
-            const made = after[at + 1];
-            if (typeof made?.ref !== "string") throw new ObservationError("The copy didn't appear.");
-            const name = `Kumi · tune ${copy + 2} ${tag}`;
-            await step("rename", { kind: "track", ref: made.ref, name }, signal);
-            names.push(name); from = name;
-          }
-        });
-      } catch (error) { await dropSpares(); throw error; }
-      request = { ...given, candidates: [...given.candidates, ...names.map((name) => ({ track: name, label: name, ...(given.candidates[0]!.clip ? { clip: given.candidates[0]!.clip } : {}) }))] };
-    }
-    let rig: Rig;
-    try { rig = await openRig(request.candidates, request.fromBeat, request.beats, signal); }
-    catch (error) { await dropSpares(); throw error; }
+    const request = given;
+    const rig = await openRig(request.candidates, request.fromBeat, request.beats, signal);
     // Held between passes: Main stays down while the goal searches (said once), the transport primed, recording on.
     rig.hold = {};
     try { options.onAction?.({ title: "Live stays quiet while the goal searches; it comes back when the goal stops or pauses" }); } catch { /* a listener failure must not affect Live */ }
@@ -1715,7 +1679,7 @@ export function createAbletonIntegration(options: Options): Integration {
       return slot;
     };
     try { for (const source of rig.sources) await adopt(source, signal); }
-    catch (error) { await closeRig(rig); await dropSpares(); throw error; }
+    catch (error) { await closeRig(rig); throw error; }
     const focus = request.focus;
     // A long part is screened on its most characteristic few seconds: the reference's loudest, most changing
     // stretch, found in its loudness over time, and the same stretch of the part.
@@ -1907,7 +1871,7 @@ export function createAbletonIntegration(options: Options): Integration {
         }
         return said;
       },
-      async close() { await closeRig(rig); return [...rig.notes, ...await dropSpares()]; },
+      async close() { await closeRig(rig); return rig.notes; },
     };
   }
   /**
@@ -2191,7 +2155,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     },
     audioFile: (named, signal) => clipFile(named, signal),
     audition: (request, signal) => audition(request, signal),
-    goal: (request, signal, options) => openGoal(request, signal, options),
+    goal: (request, signal) => openGoal(request, signal),
     async observe(originalSignal, hints) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       signal.throwIfAborted();

@@ -169,8 +169,7 @@ export interface Integration {
   /** Render candidates quietly, hear them and set them against a reference (the audition tool's work). */
   audition?(request: AuditionRequest, signal: AbortSignal): Promise<AuditionResult | string>;
   /** A goal's render rig over these candidates (kept open across generations), or why not. */
-  /** With spares, a single candidate is searched on copies of itself too (removed when the rig closes): that many more settings a pass. */
-  goal?(request: AuditionRequest, signal: AbortSignal, options?: { spares?: number }): Promise<GoalRig | string>;
+  goal?(request: AuditionRequest, signal: AbortSignal): Promise<GoalRig | string>;
 }
 
 /** A goal's candidate chain in Live: its track, what it is, and the knobs a search may move. */
