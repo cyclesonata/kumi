@@ -111,7 +111,8 @@ function placeExtension(io: BridgeSetupIo, say: (line?: string) => void, bridgeR
   try {
     const placed = installExtension(source, folder);
     if (!placed.changed) return;
-    say(`Added Kumi's extension to Live: it renders tracks without playing them, writes MIDI clips in the Arrangement, and adds "Ask Kumi about this" to Live's right-click menu.${liveOpen ? " It starts the next time you open Live." : ""}`);
+    const next = liveOpen ? " It starts the next time you open Live." : "";
+    say(placed.replaced ? `Updated Kumi's extension in Live.${next}` : `Added Kumi's extension to Live: it renders tracks without playing them, writes MIDI clips in the Arrangement, and adds "Ask Kumi about this" to Live's right-click menu.${next}`);
   } catch (error) {
     say(`Kumi couldn't add its extension to Live (${error instanceof Error ? error.message : "unknown error"}); everything else works. Run ${KUMI} bridge again to retry.`);
   }

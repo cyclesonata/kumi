@@ -21,7 +21,7 @@ export const KUMI_EXTENSION_ID = "kumi.kumi";
  * 12.4; Windows: beside Live's other folders in %APPDATA%\Ableton, to be confirmed there). Undefined
  * where there's no Live.
  */
-export function liveExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform, home = homedir()): string | undefined {
+export function liveExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform, home = env.HOME || homedir()): string | undefined {
   if (env.KUMI_LIVE_EXTENSIONS_DIR) return env.KUMI_LIVE_EXTENSIONS_DIR;
   if (platform === "darwin") return join(home, "Library", "Application Support", "Ableton", "Extensions");
   if (platform === "win32") return join(env.APPDATA || join(home, "AppData", "Roaming"), "Ableton", "Extensions");
@@ -57,12 +57,12 @@ export const installedExtension = (extensionsDir: string) => readExtension(join(
  * beside the folder first, where Live doesn't look). Refused when Live's own folder (the one that
  * holds Extensions) isn't there: Live isn't installed, or has never been opened.
  */
-export function installExtension(source: string, extensionsDir: string): { path: string; version: string; changed: boolean } {
+export function installExtension(source: string, extensionsDir: string): { path: string; version: string; changed: boolean; replaced: boolean } {
   const target = join(extensionsDir, KUMI_EXTENSION_ID);
   const wanted = readExtension(source);
   if (!wanted) throw new Error("Kumi's copy of its Live extension is incomplete");
   const current = readExtension(target);
-  if (current?.digest === wanted.digest && current.version === wanted.version) return { path: target, version: wanted.version, changed: false };
+  if (current?.digest === wanted.digest && current.version === wanted.version) return { path: target, version: wanted.version, changed: false, replaced: false };
   if (!existsSync(dirname(extensionsDir))) throw new Error(`Live's folder isn't there (${dirname(extensionsDir)}); open Live once`);
   mkdirSync(extensionsDir, { recursive: true });
   const staging = join(dirname(extensionsDir), `.kumi-extension-${process.pid}`);
@@ -82,7 +82,15 @@ export function installExtension(source: string, extensionsDir: string): { path:
     throw error;
   }
   rmSync(retired, { recursive: true, force: true });
-  return { path: target, version: wanted.version, changed: true };
+  return { path: target, version: wanted.version, changed: true, replaced: current !== undefined };
+}
+
+/** Takes Kumi's extension out of Live: its folder and its data. Whether there was any. */
+export function removeExtension(extensionsDir: string): boolean {
+  const code = join(extensionsDir, KUMI_EXTENSION_ID); const data = extensionDataDir(extensionsDir);
+  const had = existsSync(code) || existsSync(data);
+  rmSync(code, { recursive: true, force: true }); rmSync(data, { recursive: true, force: true });
+  return had;
 }
 
 export interface RunningExtension { folder: string; port: number; pid: number }

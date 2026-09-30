@@ -162,6 +162,10 @@ test("installing the bridge puts Kumi's extension in Live's Extensions folder; a
     assert.equal(readFileSync(join(current.root, "Ableton", "Extensions", "kumi.kumi", "dist", "extension.js"), "utf8"), "installed();\n");
     assert.match(current.out, /It starts the next time you open Live\./);
     assert.equal(current.calls.length, 0, "nothing runs");
+    // A newer extension replaces the one there, and says so.
+    writeFileSync(join(carried, "dist", "extension.js"), "newer();\n");
+    assert.equal(await setupBridge(current.io()), 0);
+    assert.match(current.out, /Updated Kumi's extension in Live\./);
     // Once it's there, the same again changes nothing and says nothing more.
     const before = current.out.length;
     assert.equal(await setupBridge(current.io()), 0);
