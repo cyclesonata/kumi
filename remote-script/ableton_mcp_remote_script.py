@@ -910,6 +910,8 @@ class LiveObjectMapper:
         "eq8": ("Eq8Device", "Eq8Device"), "hybrid_reverb": ("HybridReverbDevice", "HybridReverbDevice"), "looper": ("LooperDevice", "LooperDevice"),
         "meld": ("MeldDevice", "MeldDevice"), "drum_cell": ("DrumCellDevice", "DrumCellDevice"), "compressor": ("CompressorDevice", "CompressorDevice"),
         "max": ("MaxDevice", "MaxDevice"), "envelope": ("Envelope", "Envelope"),
+        "wavetable": ("WavetableDevice", "WavetableDevice"), "roar": ("RoarDevice", "RoarDevice"), "shifter": ("ShifterDevice", "ShifterDevice"),
+        "spectral_resonator": ("SpectralResonatorDevice", "SpectralResonatorDevice"), "cc_control": ("CcControlDevice", "CcControlDevice"), "sample": ("Sample", "Sample"),
     }
     # How far a probe looks into the Set when Live's module isn't there (a test double): a few of each kind.
     _PROBE_SAMPLE = 8
@@ -942,10 +944,14 @@ class LiveObjectMapper:
             if self._read_attr(device, "can_have_chains") is True: kinds.append("rack")
             for marker, kind in (("drift", "drift"), ("eq8", "eq8"), ("hybridreverb", "hybrid_reverb"), ("looper", "looper"), ("meld", "meld"), ("drumcell", "drum_cell"), ("compressor", "compressor"), ("maxdevice", "max"), ("simpler", "simpler"), ("plugin", "plugin")):
                 if marker in name: kinds.append(kind)
+            family = self._device_family(device)
+            if family is not None and family not in kinds: kinds.append(family)
             return kinds
         def devices_of(owner: Any, depth: int) -> None:
             for device in self._items(self._read_attr(owner, "devices") or [])[:sample * 2]:
-                for kind in device_kind(device): probe[kind].append(device)
+                kinds = device_kind(device)
+                for kind in kinds: probe[kind].append(device)
+                if "simpler" in kinds and self._read_attr(device, "sample") is not None: probe["sample"].append(self._read_attr(device, "sample"))
                 probe["parameter"].extend(self._items(getattr(device, "parameters", []))[:sample])
                 if depth < 2:
                     for chain in self._items(self._read_attr(device, "chains") or [])[:sample]:
@@ -1027,6 +1033,18 @@ class LiveObjectMapper:
             return self._offers("clip", "automation_envelope", "create_automation_envelope", "clear_envelope") and self._offers("envelope", "insert_step")
         if operation == "automation.value-at":
             return self._offers("clip", "automation_envelope") and self._offers("envelope", "value_at_time")
+        if operation == "device.property.set":
+            return any(self._offers(family, attribute, method=False) for family, attribute, _ in self._DEVICE_PROPERTIES.values())
+        if operation == "device.action":
+            return self._offers("cc_control", "resend") or self._offers_any("simpler", "warp_as", "warp_double", "warp_half")
+        if operation == "sample.set":
+            return self._offers_any("sample", *self._SAMPLE_FIELDS.values(), method=False)
+        if operation == "sample.slice":
+            return self._offers_any("sample", "insert_slice", "move_slice", "remove_slice", "clear_slices", "reset_slices")
+        if operation == "wavetable.set":
+            return self._offers_any("wavetable", *self._WAVETABLE_FIELDS.values(), method=False)
+        if operation == "wavetable.modulation.set":
+            return self._offers("wavetable", "get_modulation_value", "set_modulation_value")
         if operation == "subscribe":
             return bool(_supported_event_types(song) - {"reset"})
         if operation == "transport.set":
@@ -1254,7 +1272,7 @@ class LiveObjectMapper:
             if self._probe_classes("rack"): return self._offers("rack", "visible_macro_count", method=False)
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for device in self._shape_probe()["rack"])
         if operation == "rack.action":
-            return self._offers_any("rack", "add_macro", "remove_macro", "randomize_macros", "insert_chain", "copy_pad", "store_variation", "recall_variation", "delete_variation")
+            return self._offers_any("rack", "add_macro", "remove_macro", "randomize_macros", "insert_chain", "copy_pad", "store_variation", "recall_selected_variation", "delete_selected_variation", "recall_last_used_variation")
         if operation == "rack.view.set":
             return self._offers("rack", "view", method=False)
         if operation == "drift.set":
@@ -1266,7 +1284,7 @@ class LiveObjectMapper:
         if operation == "hybrid-reverb.set":
             return self._offers_any("hybrid_reverb", "ir_attack_time", "ir_decay_time", "ir_size_factor", "ir_category_index", method=False)
         if operation in {"looper.action", "looper.set"}:
-            return self._offers_any("looper", "record", "overdub", "play", "stop", "clear") or self._offers("looper", "speed", method=False)
+            return self._offers_any("looper", "record", "overdub", "play", "stop", "clear", "double_length", "half_length") or self._offers("looper", "speed", method=False)
         if operation == "meld.set":
             return self._offers_any("meld", "selected_engine", "unison_voices", "poly_voices", method=False)
         if operation == "plugin.set":
@@ -3442,6 +3460,18 @@ class LiveObjectMapper:
             return self._envelope_step_insert(args)
         if operation == "automation.value-at":
             return self._envelope_value_at(args)
+        if operation == "device.property.set":
+            return self._device_property_set(args)
+        if operation == "device.action":
+            return self._device_action(args)
+        if operation == "sample.set":
+            return self._sample_set(args)
+        if operation == "sample.slice":
+            return self._sample_slice(args)
+        if operation == "wavetable.set":
+            return self._wavetable_set(args)
+        if operation == "wavetable.modulation.set":
+            return self._wavetable_modulation_set(args)
         if operation == "authority.digest":
             # The very digest a mutation of that operation, with those arguments, is checked against.
             named, named_args = args.get("operation"), args.get("args")
@@ -7220,7 +7250,7 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
-    _RACK_ACTIONS = {"add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation"}
+    _RACK_ACTIONS = {"add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation", "recall-last-variation"}
 
     def _rack_action(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref"); action = args.get("action")
@@ -7233,7 +7263,7 @@ class LiveObjectMapper:
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("rack state changed since preview")
         index = args.get("index")
         if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= MAX_COLLECTION_INDEX): raise ValueError("index is invalid")
-        method_name = {"add-macro": "add_macro", "remove-macro": "remove_macro", "randomize-macros": "randomize_macros", "insert-chain": "insert_chain", "copy-pad": "copy_pad", "store-variation": "store_variation", "recall-variation": "recall_selected_variation", "delete-variation": "delete_selected_variation"}[action]
+        method_name = {"add-macro": "add_macro", "remove-macro": "remove_macro", "randomize-macros": "randomize_macros", "insert-chain": "insert_chain", "copy-pad": "copy_pad", "store-variation": "store_variation", "recall-variation": "recall_selected_variation", "delete-variation": "delete_selected_variation", "recall-last-variation": "recall_last_used_variation"}[action]
         method = getattr(device, method_name, None)
         if not callable(method): raise ValueError(f"rack action {action} is unavailable on this Live shape")
         if action in {"add-macro", "remove-macro", "recall-variation", "delete-variation"}:
@@ -7321,8 +7351,9 @@ class LiveObjectMapper:
             if idx is None or names is None or not 0 <= idx < len(names): return None
             return names[idx]
         if "drift" in class_name:
-            sources = name_list(self._read_attr(device, "mod_matrix_sources", "mod_sources"))
-            targets = name_list(self._read_attr(device, "mod_matrix_targets", "mod_targets"))
+            # Live names each matrix slot's choices (mod_matrix_source_1_list...); slots of a kind share them.
+            sources = name_list(self._read_attr(device, "mod_matrix_source_1_list", "mod_matrix_sources", "mod_sources"))
+            targets = name_list(self._read_attr(device, "mod_matrix_target_1_list", "mod_matrix_targets", "mod_targets"))
             rows["drift"] = {
                 "modSources": sources,
                 "modTargets": targets,
@@ -7331,6 +7362,11 @@ class LiveObjectMapper:
                 "voiceMode": int_or_none(self._read_attr(device, "voice_mode_index")),
                 "voiceCountList": name_list(self._read_attr(device, "voice_count_list")),
                 "voiceModeList": name_list(self._read_attr(device, "voice_mode_list")),
+                **{field: int_or_none(self._read_attr(device, attribute)) for field, attribute in self._DRIFT_MOD_FIELDS.items()},
+                "modFilterSourceList": name_list(self._read_attr(device, "mod_matrix_filter_source_1_list")),
+                "modPitchSourceList": name_list(self._read_attr(device, "mod_matrix_pitch_source_1_list")),
+                "modShapeSourceList": name_list(self._read_attr(device, "mod_matrix_shape_source_list")),
+                "modLfoSourceList": name_list(self._read_attr(device, "mod_matrix_lfo_source_list")),
             }
         if "eq8" in normalized:
             view = getattr(device, "view", None)
@@ -7340,7 +7376,7 @@ class LiveObjectMapper:
                 "oversample": bool_or_none(self._read_attr(device, "oversample")),
                 "selectedBand": int_or_none(self._read_attr(view, "selected_band")) if view is not None else None,
             }
-        if "hybridreverb" in normalized:
+        if "hybridreverb" in normalized or self._device_family(device) == "hybrid_reverb":
             rows["hybridReverb"] = {
                 "irCategory": indexed_name(self._read_attr(device, "ir_category_index"), self._read_attr(device, "ir_category_list")),
                 "irFile": indexed_name(self._read_attr(device, "ir_file_index"), self._read_attr(device, "ir_file_list")),
@@ -7368,13 +7404,15 @@ class LiveObjectMapper:
                 "selectedPresetIndex": self._read_attr(device, "selected_preset_index") if isinstance(self._read_attr(device, "selected_preset_index"), int) and not isinstance(self._read_attr(device, "selected_preset_index"), bool) else None,
                 "isEditorOpen": self._read_attr(device, "is_editor_open") if isinstance(self._read_attr(device, "is_editor_open"), bool) else None,
             }
-        if "maxdevice" in normalized:
+        if "maxdevice" in normalized or type(device).__name__ == "MaxDevice":
             rows["maxDevice"] = {
                 "audioIns": name_list(self._read_attr(device, "audio_inputs")),
                 "audioOuts": name_list(self._read_attr(device, "audio_outputs")),
                 "midiIns": name_list(self._read_attr(device, "midi_inputs")),
                 "midiOuts": name_list(self._read_attr(device, "midi_outputs")),
             }
+        for key, value in self._family_rows(device).items():
+            rows[key] = {**rows[key], **value} if isinstance(rows.get(key), dict) and isinstance(value, dict) else value
         return rows
 
     def _specialized_state(self, device: Any, specs: list[tuple[str, str]]) -> dict[str, Any]:
@@ -7386,13 +7424,16 @@ class LiveObjectMapper:
     def _specialized_read(self, device: Any, attr: str) -> Any:
         if attr.startswith("view."):
             return self._read_attr(getattr(device, "view", None), attr[5:])
+        if attr.startswith("sample."):
+            return self._read_attr(self._read_attr(device, "sample"), attr[7:])
         return self._read_attr(device, attr)
 
     def _specialized_write(self, device: Any, attr: str, value: Any) -> None:
-        if attr.startswith("view."):
-            view = getattr(device, "view", None)
-            if view is None: raise ValueError("device view is unavailable")
-            setattr(view, attr[5:], value)
+        if attr.startswith("view.") or attr.startswith("sample."):
+            prefix, name = attr.split(".", 1)
+            owner = getattr(device, "view", None) if prefix == "view" else self._read_attr(device, "sample")
+            if owner is None: raise ValueError(f"device {prefix} is unavailable")
+            setattr(owner, name, value)
             return
         setattr(device, attr, value)
 
@@ -7436,6 +7477,7 @@ class LiveObjectMapper:
             "pitchBendRange": ("pitch_bend_range", lambda value: isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 96),
             "voiceCount": ("voice_count_index", lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 64),
             "voiceMode": ("voice_mode_index", lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 8),
+            **{field: (attribute, lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000) for field, attribute in self._DRIFT_MOD_FIELDS.items()},
         }, "drift")
 
     def _drum_cell_set(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -7568,7 +7610,7 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision, "filePath": after_path or file_path}
 
-    _LOOPER_ACTIONS = {"record", "overdub", "play", "stop", "clear", "undo", "double-speed", "half-speed", "export"}
+    _LOOPER_ACTIONS = {"record", "overdub", "play", "stop", "clear", "undo", "double-speed", "half-speed", "export", "double-length", "half-length"}
 
     def _looper_action(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = args.get("ref"); action = args.get("action")
@@ -7591,7 +7633,7 @@ class LiveObjectMapper:
             revision = self.refs.touch(reference)
             return {"done": True, "revision": revision}
         if "slotRef" in args: raise ValueError("slotRef is only valid for the export action")
-        method_name = {"record": "record", "overdub": "overdub", "play": "play", "stop": "stop", "clear": "clear", "undo": "undo", "double-speed": "double_speed", "half-speed": "half_speed"}[action]
+        method_name = {"record": "record", "overdub": "overdub", "play": "play", "stop": "stop", "clear": "clear", "undo": "undo", "double-speed": "double_speed", "half-speed": "half_speed", "double-length": "double_length", "half-length": "half_length"}[action]
         method = getattr(device, method_name, None)
         if not callable(method): raise ValueError(f"looper action {action} is unavailable on this device shape")
         method()
@@ -7761,6 +7803,307 @@ class LiveObjectMapper:
             "overdubAfterRecord": ("overdub_after_record", lambda value: isinstance(value, bool)),
             "recordLengthIndex": ("record_length_index", lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 8),
         }, "looper")
+
+    # Drift's modulation matrix slots by drift.set's names.
+    _DRIFT_MOD_FIELDS = {"modFilterSource1": "mod_matrix_filter_source_1_index", "modFilterSource2": "mod_matrix_filter_source_2_index", "modLfoSource": "mod_matrix_lfo_source_index", "modPitchSource1": "mod_matrix_pitch_source_1_index", "modPitchSource2": "mod_matrix_pitch_source_2_index", "modShapeSource": "mod_matrix_shape_source_index", "modSource1": "mod_matrix_source_1_index", "modSource2": "mod_matrix_source_2_index", "modSource3": "mod_matrix_source_3_index", "modTarget1": "mod_matrix_target_1_index", "modTarget2": "mod_matrix_target_2_index", "modTarget3": "mod_matrix_target_3_index"}
+
+    # A device's family, for what only it has: by the Python class Live hands out for it, or by
+    # Device.class_name (Live's internal names: Wavetable is InstrumentVector, Simpler OriginalSimpler).
+    _DEVICE_FAMILY_CLASSES = {"SimplerDevice": "simpler", "WavetableDevice": "wavetable", "RoarDevice": "roar", "ShifterDevice": "shifter", "SpectralResonatorDevice": "spectral_resonator", "CcControlDevice": "cc_control", "HybridReverbDevice": "hybrid_reverb"}
+    _DEVICE_FAMILY_NAMES = {"originalsimpler": "simpler", "simpler": "simpler", "instrumentvector": "wavetable", "wavetable": "wavetable", "roar": "roar", "shifter": "shifter", "spectralresonator": "spectral_resonator", "cccontrol": "cc_control", "hybrid": "hybrid_reverb", "hybridreverb": "hybrid_reverb"}
+    _FAMILY_LABELS = {"simpler": "Simpler", "wavetable": "Wavetable", "roar": "Roar", "shifter": "Shifter", "spectral_resonator": "Spectral Resonator", "cc_control": "CC Control", "hybrid_reverb": "Hybrid Reverb"}
+    # The device row's key for each family's row.
+    _FAMILY_ROW_KEYS = {"simpler": "simpler", "wavetable": "wavetable", "roar": "roar", "shifter": "shifter", "spectral_resonator": "spectralResonator", "cc_control": "ccControl", "hybrid_reverb": "hybridReverb"}
+
+    # The settings device.property.set changes, by its names: (family, attribute, the attribute listing
+    # its choices). The family's row names each as its attribute in camelCase (simpler.playback_mode is
+    # the device row's simpler.playbackMode; roar.routing_mode_index's choices are roar.routingModeList).
+    _DEVICE_PROPERTIES: dict[str, tuple[str, str, str | None]] = {
+        "roar.routing_mode_index": ("roar", "routing_mode_index", "routing_mode_list"),
+        "roar.env_listen": ("roar", "env_listen", None),
+        "shifter.pitch_mode_index": ("shifter", "pitch_mode_index", "pitch_mode_list"),
+        "spectral_resonator.frequency_dial_mode": ("spectral_resonator", "frequency_dial_mode", "frequency_dial_mode_list"),
+        "spectral_resonator.midi_gate": ("spectral_resonator", "midi_gate", "midi_gate_list"),
+        "spectral_resonator.mod_mode": ("spectral_resonator", "mod_mode", "mod_mode_list"),
+        "spectral_resonator.mono_poly": ("spectral_resonator", "mono_poly", "mono_poly_list"),
+        "spectral_resonator.pitch_mode": ("spectral_resonator", "pitch_mode", "pitch_mode_list"),
+        "hybrid_reverb.ir_time_shaping_on": ("hybrid_reverb", "ir_time_shaping_on", None),
+        "cc_control.custom_bool_target": ("cc_control", "custom_bool_target", "custom_bool_target_list"),
+        **{f"cc_control.custom_float_target_{index}": ("cc_control", f"custom_float_target_{index}", f"custom_float_target_{index}_list") for index in range(12)},
+        "simpler.playback_mode": ("simpler", "playback_mode", None),
+        "simpler.retrigger": ("simpler", "retrigger", None),
+        "simpler.slicing_playback_mode": ("simpler", "slicing_playback_mode", None),
+        "simpler.voices": ("simpler", "voices", None),
+        "simpler.pad_slicing": ("simpler", "pad_slicing", None),
+        "simpler.note_pitch_bend_range": ("simpler", "note_pitch_bend_range", None),
+    }
+    # What else a family's row reads (not set by device.property.set).
+    _FAMILY_ROW_EXTRAS = {"simpler": ("multi_sample_mode", "pitch_bend_range", "can_warp_as", "can_warp_double", "can_warp_half"), "shifter": ("pitch_bend_range",), "spectral_resonator": ("polyphony", "pitch_bend_range")}
+
+    # A Simpler sample's warp-mode and slicing settings by sample.set's names.
+    _SAMPLE_FIELDS = {"beatsGranulationResolution": "beats_granulation_resolution", "beatsTransientEnvelope": "beats_transient_envelope", "beatsTransientLoopMode": "beats_transient_loop_mode", "complexProEnvelope": "complex_pro_envelope", "complexProFormants": "complex_pro_formants", "textureFlux": "texture_flux", "textureGrainSize": "texture_grain_size", "tonesGrainSize": "tones_grain_size", "slicingStyle": "slicing_style", "slicingBeatDivision": "slicing_beat_division", "slicingRegionCount": "slicing_region_count", "slicingSensitivity": "slicing_sensitivity"}
+
+    # Wavetable's settings by wavetable.set's names, each oscillator's category before its index.
+    _WAVETABLE_FIELDS = {"oscillator1WavetableCategory": "oscillator_1_wavetable_category", "oscillator1WavetableIndex": "oscillator_1_wavetable_index", "oscillator2WavetableCategory": "oscillator_2_wavetable_category", "oscillator2WavetableIndex": "oscillator_2_wavetable_index", "oscillator1EffectMode": "oscillator_1_effect_mode", "oscillator2EffectMode": "oscillator_2_effect_mode", "filterRouting": "filter_routing", "unisonMode": "unison_mode", "unisonVoiceCount": "unison_voice_count"}
+
+    _DEVICE_ACTIONS = {"cc-control-resend": ("cc_control", "resend"), "simpler-warp-as": ("simpler", "warp_as"), "simpler-warp-double": ("simpler", "warp_double"), "simpler-warp-half": ("simpler", "warp_half")}
+
+    def _device_family(self, device: Any) -> str | None:
+        family = self._DEVICE_FAMILY_CLASSES.get(type(device).__name__)
+        if family is not None: return family
+        return self._DEVICE_FAMILY_NAMES.get(str(self._read_attr(device, "class_name") or "").lower().replace("_", "").replace(" ", ""))
+
+    @staticmethod
+    def _plain(value: Any) -> Any:
+        """A Live value as rows carry it: a bool, a whole number, a finite number; anything else None."""
+        if isinstance(value, bool): return value
+        if isinstance(value, int): return int(value)
+        if isinstance(value, float) and math.isfinite(value): return value
+        return None
+
+    def _names(self, value: Any) -> list[str] | None:
+        """A list of choices' names (Live lists strings or named objects); None where there's no list."""
+        if value is None: return None
+        names = []
+        for item in self._items(value):
+            name = self._choice_name(item)
+            names.append(name if name is not None else str(item)[:128])
+        return names
+
+    @staticmethod
+    def _camel(name: str) -> str:
+        head, *rest = name.split("_")
+        return head + "".join(part[:1].upper() + part[1:] for part in rest)
+
+    def _family_rows(self, device: Any) -> dict[str, Any]:
+        """What only some devices have, under their family's key in the device row: each setting
+        device.property.set changes (and its choices), Simpler's modes and its sample, Wavetable's
+        settings. Nothing for other devices."""
+        family = self._device_family(device)
+        if family is None: return {}
+        if family == "wavetable": return {"wavetable": self._wavetable_row(device)}
+        row: dict[str, Any] = {}
+        for owner, attribute, choices in self._DEVICE_PROPERTIES.values():
+            if owner != family: continue
+            row[self._camel(attribute)] = self._plain(self._read_attr(device, attribute))
+            if choices is not None: row[self._camel(choices)] = self._names(self._read_attr(device, choices))
+        for attribute in self._FAMILY_ROW_EXTRAS.get(family, ()): row[self._camel(attribute)] = self._plain(self._read_attr(device, attribute))
+        rows: dict[str, Any] = {self._FAMILY_ROW_KEYS[family]: row}
+        if family == "simpler":
+            sample = self._read_attr(device, "sample")
+            rows["sample"] = self._sample_row(sample) if sample is not None else None
+        return rows
+
+    def _slices(self, sample: Any) -> list[int]:
+        return [int(value) for value in self._items(self._read_attr(sample, "slices") or []) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))]
+
+    def _sample_row(self, sample: Any) -> dict[str, Any]:
+        """A Simpler's sample: its file and warping, the warp-mode and slicing settings sample.set
+        changes (by its names), and its slice points in sample frames."""
+        file_path = self._read_attr(sample, "file_path"); warp_mode = self._read_attr(sample, "warp_mode")
+        return {"filePath": file_path if isinstance(file_path, str) and file_path else None,
+                "length": self._plain(self._read_attr(sample, "length")), "sampleRate": self._plain(self._read_attr(sample, "sample_rate")),
+                "warping": self._read_attr(sample, "warping") if isinstance(self._read_attr(sample, "warping"), bool) else None,
+                "warpMode": int(warp_mode) if isinstance(warp_mode, int) and not isinstance(warp_mode, bool) else None,
+                **{field: self._plain(self._read_attr(sample, attribute)) for field, attribute in self._SAMPLE_FIELDS.items()},
+                "slices": self._slices(sample)}
+
+    def _wavetable_row(self, device: Any) -> dict[str, Any]:
+        """Wavetable's settings wavetable.set changes (by its names), its voicing, the wavetables its
+        oscillators can pick from, and the parameters its modulation matrix targets."""
+        return {**{field: self._plain(self._read_attr(device, attribute)) for field, attribute in self._WAVETABLE_FIELDS.items()},
+                "monoPoly": self._plain(self._read_attr(device, "mono_poly")), "polyVoices": self._plain(self._read_attr(device, "poly_voices")),
+                "categories": self._names(self._read_attr(device, "oscillator_wavetable_categories")),
+                "oscillator1Wavetables": self._names(self._read_attr(device, "oscillator_1_wavetables")),
+                "oscillator2Wavetables": self._names(self._read_attr(device, "oscillator_2_wavetables")),
+                "visibleModulationTargetNames": self._names(self._read_attr(device, "visible_modulation_target_names"))}
+
+    def _family_device(self, args: dict[str, Any], family: str) -> Any:
+        """The device a device operation names, as previewed, of the family the operation is for."""
+        reference = args.get("ref")
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:"): raise ValueError("device reference is stale or invalid")
+        device = self.refs.get(reference)
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(device), args["expectedObjectIdentity"]): raise ValueError("device identity changed since preview")
+        if self._device_family(device) != family: raise ValueError(f"this needs a {self._FAMILY_LABELS[family]}; that device isn't one")
+        return device
+
+    def _check_state(self, state: Any, expected: Any, what: str) -> None:
+        if not isinstance(expected, str) or not hmac.compare_digest(hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest(), expected): raise ValueError(f"{what} state changed since preview")
+
+    def _device_property_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """One setting of a Roar, Shifter, Spectral Resonator, Hybrid Reverb, CC Control or Simpler
+        that isn't a parameter (a mode, a routing, a voice count), by the operation's name for it.
+        Fenced on its value ({"property", "value"}, the value as the family's row shows it), read
+        back, or put back."""
+        if set(args) - {"ref", "property", "value", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("device property arguments are invalid")
+        name = args.get("property"); spec = self._DEVICE_PROPERTIES.get(name) if isinstance(name, str) else None
+        if spec is None: raise ValueError("device property is unknown")
+        family, attribute, choices = spec
+        device = self._family_device(args, family)
+        current = self._plain(self._read_attr(device, attribute))
+        if current is None: raise ValueError(f"{name} is unavailable on this device")
+        self._check_state({"property": name, "value": current}, args.get("expectedStateRevision"), "device property")
+        value = args.get("value")
+        if isinstance(current, bool):
+            if not isinstance(value, bool): raise ValueError(f"{name} takes true or false")
+        elif isinstance(current, int):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or not float(value).is_integer(): raise ValueError(f"{name} takes a whole number")
+            value = int(value); options = self._items(self._read_attr(device, choices) or []) if choices is not None else []
+            if (options and not 0 <= value < len(options)) or not 0 <= value <= MAX_COLLECTION_INDEX: raise ValueError(f"{name} is not one of its choices")
+        elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)): raise ValueError(f"{name} takes a number")
+        else: value = float(value)
+        prior = self._read_attr(device, attribute)
+        try:
+            setattr(device, attribute, value); observed = self._plain(self._read_attr(device, attribute))
+            if (observed is not value) if isinstance(value, bool) else (observed is None or isinstance(observed, bool) or not _same_number(observed, value)): raise ValueError(f"{name} change was not confirmed")
+        except BaseException as error:
+            try:
+                setattr(device, attribute, prior); restored = self._plain(self._read_attr(device, attribute))
+            except BaseException: restored = None
+            if restored != current: raise ValueError(f"{name} change failed and exact rollback failed") from error
+            raise
+        return {"changed": True, "revision": self.refs.touch(str(args["ref"])), "value": observed}
+
+    def _device_action(self, args: dict[str, Any]) -> dict[str, Any]:
+        """CC Control's resend (its values out again) and Simpler's warp actions (warp its sample as
+        a number of beats; double or halve its warped length). Fenced on the Simpler's sample row as
+        the device row shows it ({"sample": ...}, null for CC Control)."""
+        if set(args) - {"ref", "action", "beats", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("device action arguments are invalid")
+        action = args.get("action"); spec = self._DEVICE_ACTIONS.get(action) if isinstance(action, str) else None
+        if spec is None: raise ValueError("device action is unknown")
+        family, method_name = spec
+        device = self._family_device(args, family)
+        sample = self._read_attr(device, "sample") if family == "simpler" else None
+        self._check_state({"sample": self._sample_row(sample) if sample is not None else None}, args.get("expectedStateRevision"), "device")
+        beats = args.get("beats")
+        if (action == "simpler-warp-as") != ("beats" in args): raise ValueError("beats goes with simpler-warp-as, and only with it")
+        if action == "simpler-warp-as" and (isinstance(beats, bool) or not isinstance(beats, (int, float)) or not math.isfinite(float(beats)) or float(beats) <= 0): raise ValueError("beats is invalid")
+        if family == "simpler":
+            if sample is None: raise ValueError("this Simpler has no sample")
+            if self._read_attr(device, f"can_{method_name}") is False: raise ValueError(f"Live says {action} isn't possible for this sample now")
+        method = getattr(device, method_name, None)
+        if not callable(method): raise ValueError(f"{action} is unavailable on this Live shape")
+        if action == "simpler-warp-as": method(float(beats))
+        else: method()
+        return {"done": True, "revision": self.refs.touch(str(args["ref"]))}
+
+    def _sample_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A Simpler sample's settings for its warp modes (Beats, Complex Pro, Texture, Tones) and its
+        slicing, by sample.set's names. Fenced on all of them as the device row's sample row shows
+        them, written, read back and put back as the specialized device families are."""
+        device = self._family_device(args, "simpler"); sample = self._read_attr(device, "sample")
+        if sample is None: raise ValueError("this Simpler has no sample")
+        normalized = dict(args)
+        for field, attribute in self._SAMPLE_FIELDS.items():
+            if field not in args: continue
+            value = args[field]; current = self._read_attr(sample, attribute)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)): raise ValueError(f"{field} is invalid")
+            # Live's whole-number settings take ints (a float is an ArgumentError); the rest floats.
+            if isinstance(current, int) and not isinstance(current, bool):
+                if not float(value).is_integer(): raise ValueError(f"{field} takes a whole number")
+                normalized[field] = int(value)
+            else: normalized[field] = float(value)
+        number = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 1000000
+        return self._specialized_set(str(args.get("ref")), normalized, {field: (f"sample.{attribute}", number) for field, attribute in self._SAMPLE_FIELDS.items()}, "sample")
+
+    def _sample_slice(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Edit a Simpler sample's slice points (sample frames): insert, move or remove one, or clear
+        or reset them all. Fenced on the slices as the sample row shows them ({"slices": [...]}); an
+        edit of one slice must show in the slices after, or the slices go back."""
+        if set(args) - {"ref", "action", "time", "toTime", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("slice arguments are invalid")
+        action = args.get("action")
+        if action not in {"insert", "move", "remove", "clear", "reset"}: raise ValueError("slice action is unknown")
+        device = self._family_device(args, "simpler"); sample = self._read_attr(device, "sample")
+        if sample is None: raise ValueError("this Simpler has no sample")
+        before = self._slices(sample)
+        self._check_state({"slices": before}, args.get("expectedStateRevision"), "slice")
+        needs = {"insert": ("time",), "move": ("time", "toTime"), "remove": ("time",), "clear": (), "reset": ()}[action]
+        if set(needs) != {key for key in ("time", "toTime") if key in args}: raise ValueError(f"slice {action} takes {' and '.join(needs) or 'no time'}")
+        if any(not isinstance(args[key], int) or isinstance(args[key], bool) or args[key] < 0 for key in needs): raise ValueError("slice times are whole sample frames")
+        moment, destination = args.get("time"), args.get("toTime")
+        if action == "insert" and moment in before: raise ValueError("a slice is already at that time")
+        if action in {"move", "remove"} and moment not in before: raise ValueError("no slice is at that time")
+        if action == "move" and destination in before and destination != moment: raise ValueError("a slice is already at the new time")
+        method = getattr(sample, {"insert": "insert_slice", "move": "move_slice", "remove": "remove_slice", "clear": "clear_slices", "reset": "reset_slices"}[action], None)
+        if not callable(method): raise ValueError(f"slice {action} is unavailable on this Live shape")
+        method(*(args[key] for key in needs))
+        after = self._slices(sample)
+        confirmed = {"insert": lambda: moment in after, "move": lambda: destination in after and (destination == moment or moment not in after), "remove": lambda: moment not in after}.get(action, lambda: True)()
+        if not confirmed:
+            try:
+                for extra in [value for value in after if value not in before]: sample.remove_slice(extra)
+                for missing in [value for value in before if value not in after]: sample.insert_slice(missing)
+                restored = self._slices(sample)
+            except BaseException: restored = None
+            if restored is None or sorted(restored) != sorted(before): raise ValueError(f"slice {action} failed and exact rollback failed")
+            raise ValueError(f"slice {action} was not confirmed")
+        return {"slices": after, "revision": self.refs.touch(str(args["ref"]))}
+
+    def _wavetable_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Wavetable's oscillator wavetables and effect modes, its filter routing and unison, by
+        wavetable.set's names, fenced on all of them as the wavetable row shows them. An oscillator's
+        category is set before its wavetable index: a new category lists other wavetables."""
+        self._family_device(args, "wavetable")
+        whole = lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100000
+        fields = {field: (attribute, whole) for field, attribute in self._WAVETABLE_FIELDS.items()}
+        ordered = {**{key: value for key, value in args.items() if key not in fields}, **{field: args[field] for field in fields if field in args}}
+        return self._specialized_set(str(args.get("ref")), ordered, fields, "wavetable")
+
+    def _wavetable_target_of(self, device: Any, parameter: Any) -> int | None:
+        """Where a parameter sits in Wavetable's modulation matrix: Live names each target by its
+        parameter (get_modulation_target_parameter_name)."""
+        name = self._read_attr(parameter, "name"); namer = getattr(device, "get_modulation_target_parameter_name", None)
+        targets = self._names(self._read_attr(device, "visible_modulation_target_names")) or []
+        for index, listed in enumerate(targets):
+            try: target_name = namer(index) if callable(namer) else listed
+            except Exception: target_name = listed
+            if isinstance(name, str) and target_name == name: return index
+        return None
+
+    def _wavetable_modulation_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        """How much a Wavetable modulation source moves a target (Live's set_modulation_value): the
+        one way Live's API routes a modulator to a parameter. The target is a matrix index, or one of
+        the device's parameters (added to the matrix first when it isn't in it). Fenced on the
+        matrix's targets as the wavetable row shows them ({"targets": [...]}); read back, or put back."""
+        if set(args) - {"ref", "targetIndex", "parameterRef", "source", "value", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("modulation arguments are invalid")
+        device = self._family_device(args, "wavetable")
+        targets = self._names(self._read_attr(device, "visible_modulation_target_names")) or []
+        self._check_state({"targets": targets}, args.get("expectedStateRevision"), "Wavetable modulation")
+        if ("targetIndex" in args) == ("parameterRef" in args): raise ValueError("name exactly one of targetIndex or parameterRef")
+        source, value = args.get("source"), args.get("value")
+        if not isinstance(source, int) or isinstance(source, bool) or not 0 <= source <= 1000: raise ValueError("source is invalid")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or not -1 <= float(value) <= 1: raise ValueError("value is invalid")
+        getter, setter = getattr(device, "get_modulation_value", None), getattr(device, "set_modulation_value", None)
+        if not callable(getter) or not callable(setter): raise ValueError("Wavetable's modulation matrix is unavailable on this Live shape")
+        if "targetIndex" in args:
+            target = args["targetIndex"]
+            if not isinstance(target, int) or isinstance(target, bool) or not 0 <= target < len(targets): raise ValueError("targetIndex is not one of the matrix's targets")
+        else:
+            parameter_ref = args["parameterRef"]
+            if not isinstance(parameter_ref, str) or not parameter_ref.startswith(f"{self.refs.epoch}:parameter:{args['ref']}:"): raise ValueError("parameterRef must name one of this Wavetable's parameters")
+            parameter = self.refs.get(parameter_ref)
+            modulatable = getattr(device, "is_parameter_modulatable", None)
+            if callable(modulatable) and modulatable(parameter) is not True: raise ValueError("Wavetable can't modulate that parameter")
+            found = self._wavetable_target_of(device, parameter)
+            if found is None:
+                adder = getattr(device, "add_parameter_to_modulation_matrix", None)
+                if not callable(adder): raise ValueError("adding a parameter to Wavetable's modulation matrix is unavailable on this Live shape")
+                added = adder(parameter)
+                found = added if isinstance(added, int) and not isinstance(added, bool) and added >= 0 else self._wavetable_target_of(device, parameter)
+                if found is None: raise ValueError("the parameter wasn't added to Wavetable's modulation matrix")
+            target = found
+        prior = getter(target, source)
+        if isinstance(prior, bool) or not isinstance(prior, (int, float)) or not math.isfinite(float(prior)): raise ValueError("the modulation amount is unreadable")
+        try:
+            setter(target, source, float(value)); observed = getter(target, source)
+            if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(float(observed)) or not _same_number(observed, value): raise ValueError("modulation change was not confirmed")
+        except BaseException as error:
+            try:
+                setter(target, source, float(prior)); restored = getter(target, source)
+            except BaseException: restored = None
+            if not isinstance(restored, (int, float)) or isinstance(restored, bool) or not _same_number(restored, prior): raise ValueError("modulation change failed and exact rollback failed") from error
+            raise
+        return {"changed": True, "revision": self.refs.touch(str(args["ref"])), "targetIndex": target, "value": max(-1.0, min(1.0, float(observed))), "prior": max(-1.0, min(1.0, float(prior)))}
 
     def _slot_state_fields(self, slot: Any) -> dict[str, Any]:
         def optional_bool(name: str) -> bool | None:
