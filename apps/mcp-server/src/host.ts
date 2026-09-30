@@ -416,14 +416,22 @@ class TransactionRetention {
   /** Bytes the kept records hold. */
   public get bytes(): number { return this.retained; }
   private id(map: object, key: string): string { let id = this.ids.get(map); if (id === undefined) { id = ++this.nextId; this.ids.set(map, id); } return `${id}:${key}`; }
+  /** Counts a record in. A new one that doesn't fit first evicts the oldest records nothing depends on, or is
+   * refused (evicting nothing) when they wouldn't make room; a record kept again is only counted again. */
   public admit(map: BoundedTransactionMap<{ expiresAt: number; state: string }>, key: string, bytes: number): void {
+    const id = this.id(map, key);
+    const kept = this.kept.has(id);
     this.release(map, key);
-    while (this.retained + bytes > this.capacity) {
-      const oldest = [...this.kept.values()].find((entry) => entry.map.evictable(entry.key));
-      if (!oldest) throw new Error("transaction capacity is exhausted by recovery-protected work");
-      oldest.map.delete(oldest.key); this.release(oldest.map, oldest.key);
+    if (!kept && this.retained + bytes > this.capacity) {
+      let room = this.capacity - this.retained; const victims: Array<{ map: BoundedTransactionMap<{ expiresAt: number; state: string }>; key: string }> = [];
+      for (const entry of this.kept.values()) {
+        if (room >= bytes) break;
+        if (entry.map.evictable(entry.key)) { victims.push(entry); room += entry.bytes; }
+      }
+      if (room < bytes) throw new Error("transaction capacity is exhausted by recovery-protected work");
+      for (const victim of victims) victim.map.delete(victim.key);
     }
-    this.kept.set(this.id(map, key), { map, key, bytes }); this.retained += bytes;
+    this.kept.set(id, { map, key, bytes }); this.retained += bytes;
   }
   public release(map: object, key: string): void {
     const id = this.id(map, key); const entry = this.kept.get(id);

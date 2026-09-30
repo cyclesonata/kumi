@@ -749,9 +749,10 @@ test("transactions are kept by the memory they hold: the oldest unprotected go f
   // An applied change keeps its undo: with only its own bytes of room, it stays and new previews are refused.
   assert.equal(body(await call(15, "live_tempo_apply", { transactionId: tempo3.transactionId, confirmation: "apply", idempotencyKey: "retention-apply" })).state, "applied");
   retention.capacity = retentionBytesOf(retention, tempos, tempo3.transactionId);
+  const keptBefore = [...tempos.keys()]; assert.ok(keptBefore.length > 1, "previews that could go are kept");
   const refused = await call(16, "live_tempo_preview", { tempo: 124 }) as any;
   assert.match(JSON.stringify(refused), /capacity is exhausted/);
-  assert.ok(tempos.has(tempo3.transactionId));
+  assert.deepEqual([...tempos.keys()], keptBefore, "a refused record evicts nothing: evicting couldn't have made room");
   // Releasing it gives its bytes back.
   const held = retention.bytes;
   assert.deepEqual(body(await call(17, "live_transaction_release", { transactionIds: [tempo3.transactionId] })), { released: 1 });
