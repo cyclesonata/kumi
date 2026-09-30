@@ -8072,3 +8072,34 @@ class SelectionWithoutRowsTests(unittest.TestCase):
         self.assertLessEqual(LeanDevice.parameter_reads, 9)
         answer = mapper.snapshot({"focus": [0], "parts": ["selection"]}, budgeted=True)
         self.assertEqual(answer["selection"], expected)
+
+
+class CreationScopeTests(unittest.TestCase):
+    """D: a creation's rollback check reads the contents of the tracks it names, not the Set's."""
+
+    def song(self, tracks=20):
+        song = FakeSong(); song.tracks = [lean_track(f"Track {index + 1}") for index in range(tracks)]
+        def duplicate_track(index): song.tracks.insert(index + 1, lean_track(song.tracks[index].name + " copy"))
+        song.duplicate_track = duplicate_track
+        return song
+
+    def test_a_track_duplicate_reads_below_the_track_it_names_alone(self):
+        song = self.song(); bridge = immediate_bridge(song, provenance="real-live"); mapper = bridge.mapper
+        row = mapper.discover("track", 20, None, None, None, ["objectIdentity"])["items"][7]
+        args = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}
+        counter = ReadCounter(song.tracks)
+        made = mutate_through(bridge, "track.duplicate", args, "duplicate-scope-0001", transaction="transaction-scope")
+        self.assertEqual(set(counter.reads), {7}); self.assertEqual(song.tracks[8].name, "Track 8 copy")
+        # Its transaction still undoes it exactly.
+        delete = {"ref": made["ref"], "expectedObjectIdentity": made["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()}
+        self.assertEqual(bridge._dispatch_with_holder("mutate", {"operation": "track.delete", "transactionId": "transaction-scope", "idempotencyKey": "undo-scope-0001", "ownershipToken": made["ownershipToken"], "args": delete}, {}), {"deleted": made["ref"]})
+        self.assertEqual(len(song.tracks), 20)
+
+    def test_the_topology_details_only_the_scope(self):
+        song = self.song(4); mapper = LiveObjectMapper(song)
+        whole = json.loads(mapper._creation_topology()); scoped = json.loads(mapper._creation_topology([2])); bare = json.loads(mapper._creation_topology(()))
+        self.assertEqual([sorted(row) for row in whole["tracks"]], [["arrangement", "devices", "identity", "slots"]] * 4)
+        self.assertEqual([sorted(row) for row in scoped["tracks"]], [["identity"], ["identity"], ["arrangement", "devices", "identity", "slots"], ["identity"]])
+        self.assertEqual(scoped["tracks"][2], whole["tracks"][2]); self.assertEqual([row["identity"] for row in bare["tracks"]], [row["identity"] for row in whole["tracks"]])
+        self.assertEqual(mapper._creation_scope("clip.duplicate", {"ref": f"{mapper.refs.epoch}:clip:1:0", "targetTrackRef": f"{mapper.refs.epoch}:track:3"}), [1, 3])
+        self.assertIsNone(mapper._creation_scope("scene.capture", {}))

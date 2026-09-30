@@ -3475,7 +3475,7 @@ class LiveObjectMapper:
                 if (ownership_token is not None and ownership_token != token) or not hmac.compare_digest(self._ownership_fingerprint(args["ref"]), row["fingerprint"]): raise ValueError("transaction-owned move lacks exact cleanup-authority consumption")
                 consumed_move_ownership = token
         creation_rollback: tuple[str, tuple[dict[str, Any], dict[str, int]], dict[str, dict[str, Any]]] | None = None
-        if enforce_ownership and operation in _TRANSACTION_CREATIONS: creation_rollback = (self._creation_topology(), self.refs.checkpoint(), {token: dict(row) for token, row in self._owned_cleanup_tokens.items()})
+        if enforce_ownership and operation in _TRANSACTION_CREATIONS: creation_rollback = (self._creation_topology(self._creation_scope(operation, args)), self.refs.checkpoint(), {token: dict(row) for token, row in self._owned_cleanup_tokens.items()})
         owned_content = None
         if enforce_ownership and operation in _OWNED_CONTENT_MUTATIONS and isinstance(args.get("ref"), str):
             matches = [row for row in self._owned_cleanup_tokens.values() if row.get("transactionId") == transaction_id and row.get("ref") == args["ref"] and row.get("deleted") is not True]
@@ -4264,7 +4264,7 @@ class LiveObjectMapper:
                 self._moved_ownership.pop(token, None); self._owned_cleanup_tokens[token] = {key: value for key, value in row.items() if key != "movedBy"}
 
     def _structure_create_atomic(self, kind: str, index: int, name: str, creator: Callable[[int], Any]) -> dict[str, Any]:
-        attribute = "tracks" if kind == "track" else "scenes"; before = self._items(getattr(self.song, attribute, [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology()
+        attribute = "tracks" if kind == "track" else "scenes"; before = self._items(getattr(self.song, attribute, [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology(())
         if len(set(before_identities)) != len(before_identities): raise ValueError(f"{kind} collection identity is ambiguous")
         checkpoint = self.refs.checkpoint(); creation_error: BaseException | None = None
         try: creator(index)
@@ -4287,7 +4287,7 @@ class LiveObjectMapper:
                 for position, _ in reversed(new_rows):
                     try: deleter(position)
                     except BaseException: pass
-            if [self._capture_object_identity(item) for item in self._items(getattr(self.song, attribute, []))] != before_identities or self._creation_topology() != baseline_topology: rollback_failed = True
+            if [self._capture_object_identity(item) for item in self._items(getattr(self.song, attribute, []))] != before_identities or self._creation_topology(()) != baseline_topology: rollback_failed = True
             if rollback_failed:
                 try: self.snapshot()
                 except BaseException: pass
@@ -4616,10 +4616,27 @@ class LiveObjectMapper:
             contents.append({"trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "slot": owned_slot, "clip": _without_fields(clip, _VOLATILE_CLIP_FIELDS)})
         return hashlib.sha256(self._bounded_canonical({"scene": scene_identity, "contents": contents}).encode("utf-8")).hexdigest()
 
-    def _creation_topology(self) -> str:
+    # Creations that put objects on many tracks at once: their cleanup is checked against every track's contents.
+    _SET_WIDE_CREATIONS = frozenset({"session.capture-midi", "scene.capture"})
+
+    def _creation_scope(self, operation: str, args: Any) -> list[int] | None:
+        """The tracks whose contents a creation's cleanup is checked on: those its arguments name (its
+        target, its source); every track (None) for a creation that fills many."""
+        if operation in self._SET_WIDE_CREATIONS: return None
+        return sorted({index for reference in _named_references(args) for index in [self._ref_track_index(reference)] if index is not None})
+
+    def _creation_topology(self, scope: Any = None) -> str:
+        """What a creation's cleanup must leave as it found it: every track, scene and locator by
+        identity, in order, and the slots (with their clips), Arrangement clips and devices of the
+        tracks in scope (every track's, without one). Only the tracks a creation names can hold
+        what it made, so its check reads the Set's contents no further than that."""
         tracks = self._items(getattr(self.song, "tracks", [])) + self._items(getattr(self.song, "return_tracks", [])); main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None)); tracks += [main_track] if main_track is not None else []; scenes = self._items(getattr(self.song, "scenes", [])); rows = []
-        for track in tracks:
-            slots = self._items(getattr(track, "clip_slots", [])); rows.append({"identity": self._capture_object_identity(track), "slots": [{"identity": self._capture_object_identity(slot), "clip": self._capture_object_identity(getattr(slot, "clip")) if getattr(slot, "clip", None) is not None else None} for slot in slots], "arrangement": [self._capture_object_identity(clip) for clip in self._items(self._read_attr(track, "arrangement_clips") or [])], "devices": [self._capture_object_identity(device) for device in self._items(getattr(track, "devices", []))]})
+        detail = None if scope is None else set(scope)
+        for index, track in enumerate(tracks):
+            row: dict[str, Any] = {"identity": self._capture_object_identity(track)}
+            if detail is None or index in detail:
+                slots = self._items(getattr(track, "clip_slots", [])); row.update({"slots": [{"identity": self._capture_object_identity(slot), "clip": self._capture_object_identity(getattr(slot, "clip")) if getattr(slot, "clip", None) is not None else None} for slot in slots], "arrangement": [self._capture_object_identity(clip) for clip in self._items(self._read_attr(track, "arrangement_clips") or [])], "devices": [self._capture_object_identity(device) for device in self._items(getattr(track, "devices", []))]})
+            rows.append(row)
         topology = {"tracks": rows, "scenes": [self._capture_object_identity(scene) for scene in scenes], "locators": [self._capture_object_identity(locator) for locator in self._items(getattr(self.song, "cue_points", []))]}
         return self._bounded_canonical(topology)
 
@@ -4665,7 +4682,7 @@ class LiveObjectMapper:
                 # A Live deleter may apply and then raise; the exact global
                 # topology check below is the acknowledgement-loss authority.
                 pass
-        if self._creation_topology() != baseline: raise ValueError("unattached creation cleanup did not restore exact topology")
+        if self._creation_topology(self._creation_scope(operation, args)) != baseline: raise ValueError("unattached creation cleanup did not restore exact topology")
         self.refs.restore(checkpoint)
 
     def _attach_cleanup_ownership(self, operation: str, result: Any, transaction_id: str) -> Any:
@@ -6428,7 +6445,7 @@ class LiveObjectMapper:
         if not callable(creator): raise ValueError("return-track creation is unavailable")
         name = args.get("name")
         if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("name is invalid")
-        before = self._items(getattr(self.song, "return_tracks", [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology()
+        before = self._items(getattr(self.song, "return_tracks", [])); before_identities = [self._capture_object_identity(item) for item in before]; baseline_topology = self._creation_topology(())
         if len(set(before_identities)) != len(before_identities): raise ValueError("return-track collection identity is ambiguous")
         # The LOM documents no return value for create_return_track, so the
         # creator's result is deliberately ignored: creation is confirmed
@@ -6469,7 +6486,7 @@ class LiveObjectMapper:
                 for position, _ in reversed(new_rows):
                     try: deleter(position)
                     except BaseException: pass
-            if [self._capture_object_identity(item) for item in self._items(getattr(self.song, "return_tracks", []))] != before_identities or self._creation_topology() != baseline_topology: rollback_failed = True
+            if [self._capture_object_identity(item) for item in self._items(getattr(self.song, "return_tracks", []))] != before_identities or self._creation_topology(()) != baseline_topology: rollback_failed = True
             if rollback_failed:
                 try: self.snapshot()
                 except BaseException: pass
@@ -11624,15 +11641,7 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
     name, place and length; no notes or markers) only for Arrangement operations, and then only on
     the tracks the arguments name. No collection's size refuses it. Without an operation, all of
     those parts are bound (a caller that doesn't say what it will do gets the widest fence)."""
-    references: list[str] = []
-    def collect(value: Any, key: str = "") -> None:
-        if isinstance(value, dict):
-            for child_key, child in value.items(): collect(child, child_key)
-        elif isinstance(value, list):
-            for child in value: collect(child, key)
-        elif isinstance(value, str) and (key == "ref" or key.endswith("Ref") or key.endswith("Refs")):
-            references.append(value)
-    collect(args)
+    references = _named_references(args)
     observed = []
     # Playing tempo automation moves the tempo every tick, as playing mixer automation moves its values.
     tempo_automated = _tempo_automation_playing(mapper)
@@ -11658,6 +11667,20 @@ def _reference_state_digest(mapper: LiveObjectMapper, args: dict[str, Any], oper
     if operation is None or operation.startswith("arrangement.") or operation in _ARRANGEMENT_BOUND_OPERATIONS:
         identity["arrangement"] = mapper._arrangement_identities(sorted({index for reference in references for index in [mapper._ref_track_index(reference)] if index is not None}))
     return _state_hash(identity)
+
+
+def _named_references(args: Any) -> list[str]:
+    """Every ref a request's arguments name: values under `ref`, `…Ref` and `…Refs`, at any depth."""
+    references: list[str] = []
+    def collect(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items(): collect(child, child_key)
+        elif isinstance(value, list):
+            for child in value: collect(child, key)
+        elif isinstance(value, str) and (key == "ref" or key.endswith("Ref") or key.endswith("Refs")):
+            references.append(value)
+    collect(args)
+    return references
 
 
 def _state_hash(value: Any) -> str:
