@@ -326,7 +326,29 @@ _REGISTRY_CANDIDATES = (
 )
 
 
+# The registry as loaded, its hash, and its operations by id. Loaded once: the file can't change
+# under a running Remote Script without breaking the hash the host checks, and reading, checking and
+# hashing it took milliseconds on every request (twice: its request and its result are validated).
+_REGISTRY_CACHE: tuple[dict[str, Any], str, dict[str, dict[str, Any]]] | None = None
+
+
 def operation_registry() -> tuple[dict[str, Any], str]:
+    """The registry (read-only: it's shared) and the hash of its canonical JSON."""
+    global _REGISTRY_CACHE
+    cached = _REGISTRY_CACHE
+    if cached is None:
+        registry, digest = _load_operation_registry()
+        cached = _REGISTRY_CACHE = (registry, digest, {item["id"]: item for item in registry["operations"]})
+    return cached[0], cached[1]
+
+
+def _registry_operation(operation_id: str) -> dict[str, Any] | None:
+    operation_registry()
+    cached = _REGISTRY_CACHE
+    return cached[2].get(operation_id) if cached is not None else None
+
+
+def _load_operation_registry() -> tuple[dict[str, Any], str]:
     """Load the registry and hash canonical JSON, independent of line endings."""
     try:
         registry_path = next(path for path in _REGISTRY_CANDIDATES if path.is_file())
@@ -432,8 +454,7 @@ def validate_registry_value(schema: dict[str, Any], value: Any, path: str = "$")
 
 
 def validate_operation_payload(operation_id: str, side: str, value: Any) -> None:
-    registry, _ = operation_registry()
-    operation = next((item for item in registry["operations"] if item["id"] == operation_id), None)
+    operation = _registry_operation(operation_id)
     if operation is None: raise ValueError("operation is not in canonical registry")
     validate_registry_value(operation[side], value, f"{operation_id}.{side}")
 
@@ -459,6 +480,8 @@ MAX_TRAVERSAL = 10_000_000
 # A discovery page, and how many fields one discovery may name.
 MAX_DISCOVERY_LIMIT = 100_000
 MAX_REQUESTED_FIELDS = 256
+# Browser search results per request, as the registry bounds them.
+MAX_BROWSER_RESULTS = 10_000
 # Top-level arguments of one request.
 MAX_REQUEST_ARGS = 64
 # Preflight and prepared-authority tokens one connection may hold at once.
@@ -7675,7 +7698,7 @@ class LiveObjectMapper:
         if query is not None and (not isinstance(query, str) or len(query) > 256):
             raise ValueError("browser query is invalid")
         limit = args.get("limit", 50)
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_BROWSER_RESULTS:
             raise ValueError("browser limit is invalid")
         needle = query.strip().lower() if isinstance(query, str) else ""
         items: list[dict[str, Any]] = []; seen_ids: set[str] = set(); traversal_count = 0
@@ -9503,20 +9526,36 @@ MAX_BRIDGE_CONNECTIONS = 64
 MAX_FRAMES_PER_PUMP = 1024
 PUMP_BUDGET_SECONDS = 0.05
 MAX_OUTBOUND_BYTES = 4 * MAX_WIRE_BYTES
+# How much one socket read takes, and one send hands the socket.
+RECEIVE_CHUNK_BYTES = 1 << 20
+SEND_CHUNK_BYTES = 1 << 20
 
 
 class _Connection:
-    """One authenticated client; touched only by the main-thread pump."""
+    """One authenticated client; touched only by the main-thread pump.
 
-    __slots__ = ("socket", "auth", "holder", "inbound", "outbound", "closing")
+    Buffers grow in place and are consumed by offset, compacted once per service: a big frame
+    arriving (or leaving) in pieces is copied a bounded number of times, not once per piece."""
+
+    __slots__ = ("socket", "auth", "holder", "inbound", "scanned", "outbound", "sent", "closing")
 
     def __init__(self, client: socket.socket, auth: "AuthenticatedRemoteScript", holder: dict[str, Any]) -> None:
         self.socket = client
         self.auth = auth
         self.holder = holder
-        self.inbound = b""
+        self.inbound = bytearray()
+        # Bytes of inbound already searched for a frame's end without finding one.
+        self.scanned = 0
         self.outbound = bytearray()
+        # Bytes of outbound already handed to the socket.
+        self.sent = 0
         self.closing = False
+
+    def pending_outbound(self) -> int:
+        return len(self.outbound) - self.sent
+
+    def has_complete_frame(self) -> bool:
+        return self.inbound.find(b"\n", self.scanned) >= 0
 
 
 class AbletonMcpBridge:
@@ -9651,29 +9690,43 @@ class AbletonMcpBridge:
                     frame: dict[str, Any] = {"version": PROTOCOL, "id": "event", "ok": True, "bridgeEpoch": connection.auth.bridge_epoch, "connectionChallenge": connection.auth.connection_challenge, "result": {"event": event}}
                     frame["mac"] = connection.auth.sign(frame)
                     connection.outbound += self._frame(frame)
+            inbound = connection.inbound
             while not connection.closing:
-                try: chunk = connection.socket.recv(65536)
+                try: chunk = connection.socket.recv(RECEIVE_CHUNK_BYTES)
                 except (BlockingIOError, InterruptedError): break
                 if not chunk: connection.closing = True; break
-                connection.inbound += chunk
-                if len(connection.inbound) > MAX_WIRE_BYTES: self._close(connection); return
-            frames = 0
-            while not connection.auth.invalid and b"\n" in connection.inbound and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.monotonic() < deadline):
-                line, connection.inbound = connection.inbound.split(b"\n", 1)
+                inbound += chunk
+                if len(inbound) > MAX_WIRE_BYTES: self._close(connection); return
+                # What's left waits in the socket for the next tick.
+                if time.monotonic() >= deadline: break
+            # Frames are taken by offset, searching only bytes not searched before, and the buffer is
+            # compacted once: a frame arriving in many pieces is scanned once, not once per piece.
+            frames = 0; start = 0; search = connection.scanned
+            while not connection.auth.invalid and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.monotonic() < deadline):
+                newline = inbound.find(b"\n", search)
+                if newline < 0:
+                    search = len(inbound); break
+                line = bytes(inbound[start:newline]); start = search = newline + 1
                 if not line: continue
                 frames += 1
                 try: request = json.loads(line.decode("utf-8")); response = connection.auth.dispatch(request)
                 except Exception: response = connection.auth.error_response()
                 connection.outbound += self._frame(response)
+            if start: del inbound[:start]
+            connection.scanned = max(0, search - start)
             if connection.auth.invalid: connection.closing = True
-            while connection.outbound:
-                try: sent = connection.socket.send(connection.outbound)
+            outbound = connection.outbound
+            while connection.sent < len(outbound):
+                try: sent = connection.socket.send(outbound[connection.sent:connection.sent + SEND_CHUNK_BYTES])
                 except (BlockingIOError, InterruptedError): break
-                del connection.outbound[:sent]
+                connection.sent += sent
+            # Compacted when all of it left, or once most did: each byte moves a bounded number of times.
+            if connection.sent >= len(outbound): outbound.clear(); connection.sent = 0
+            elif connection.sent > len(outbound) // 2: del outbound[:connection.sent]; connection.sent = 0
         except OSError:
             self._close(connection); return
-        finished = connection.auth.invalid or b"\n" not in connection.inbound
-        if (connection.closing and finished and not connection.outbound) or len(connection.outbound) > MAX_OUTBOUND_BYTES:
+        finished = connection.auth.invalid or not connection.has_complete_frame()
+        if (connection.closing and finished and not connection.pending_outbound()) or connection.pending_outbound() > MAX_OUTBOUND_BYTES:
             self._close(connection)
 
     def _close(self, connection: "_Connection") -> None:

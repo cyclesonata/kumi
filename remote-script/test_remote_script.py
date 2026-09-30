@@ -6027,6 +6027,15 @@ class SetScaleCapTests(unittest.TestCase):
             with self.assertRaises(ValueError): mapper.discover("track", **invalid)
         validate_operation_payload("discover", "request", {"kind": "track", "limit": 100000, "traversalBudget": 10_000_000})
 
+    def test_a_browser_search_returns_as_many_results_as_the_registry_allows(self):
+        folder = types.SimpleNamespace(name="Synths", is_loadable=False, is_device=False, children=[types.SimpleNamespace(name=f"Preset {index}", is_loadable=True, is_device=False, children=[]) for index in range(3000)])
+        browser = types.SimpleNamespace(instruments=types.SimpleNamespace(name="instruments", children=[folder]))
+        mapper = LiveObjectMapper(FakeSong()); mapper._browser = lambda: browser
+        request = {"category": "instruments", "query": "preset", "limit": 2500}
+        validate_operation_payload("browser.search", "request", request)
+        self.assertEqual(len(mapper.invoke("browser.search", request)["items"]), 2500)
+        with self.assertRaisesRegex(ValueError, "browser limit is invalid"): mapper.invoke("browser.search", {**request, "limit": 10001})
+
     def test_a_request_may_carry_sixty_four_arguments(self):
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: {"lanes": []})
         def invoke(sequence, count):
@@ -6051,3 +6060,103 @@ class SetScaleCapTests(unittest.TestCase):
         for index in range(5000): mapper._owned_cleanup_tokens[f"filler-token-{index}"] = {"transactionId": "filler", "ref": f"{mapper.refs.epoch + 1}:track:{index}", "objectIdentity": f"filler:{index}", "fingerprint": "0" * 64}
         created = mapper.invoke("track.create", {"name": "Owned past 4096", "kind": "midi", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, "transaction-ledgers")
         self.assertIn("ownershipToken", created)
+
+
+class _BridgeSocketFixture:
+    """A bridge on a real loopback socket, ticked by hand as Live's display does. Lines are read from
+    the raw socket while ticking: the bridge only writes during a tick."""
+    SECRET = "0123456789abcdef0123456789abcdef"
+
+    def setUp(self):
+        import socket as _socket
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM); probe.bind(("127.0.0.1", 0)); self.port = probe.getsockname()[1]; probe.close()
+        self.bridge = AbletonMcpBridge(FakeInstance(), {"host": "127.0.0.1", "port": self.port, "secret": self.SECRET})
+        self.clients = []; self.buffers = {}
+
+    def tearDown(self):
+        for client in self.clients: client.close()
+        self.bridge.disconnect()
+
+    def connect(self):
+        import socket as _socket
+        client = _socket.create_connection(("127.0.0.1", self.port), timeout=5); self.clients.append(client); self.buffers[client] = bytearray()
+        hello = self.read_lines(client, 1)[0]
+        channel = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, hello["bridgeEpoch"], hello["connectionChallenge"])
+        return client, channel
+
+    def read_lines(self, client, count, ticks=2000):
+        """Tick the bridge until count response lines arrived; return them parsed."""
+        import select
+        buffer = self.buffers[client]; lines = []
+        for _ in range(ticks):
+            self.bridge.update_display()
+            while select.select([client], [], [], 0)[0]:
+                chunk = client.recv(1 << 20)
+                if not chunk: break
+                buffer.extend(chunk)
+            while len(lines) < count:
+                index = buffer.find(b"\n")
+                if index < 0: break
+                lines.append(json.loads(bytes(buffer[:index]))); del buffer[:index + 1]
+            if len(lines) >= count: return lines
+        self.fail(f"only {len(lines)} of {count} lines after ticking")
+
+    def frame(self, channel, sequence, method="status", **fields):
+        unsigned = channel.bound({"version": PROTOCOL, "id": f"{method}-{sequence}", "method": method, "nonce": f"{sequence:016d}", "sequence": sequence, **fields})
+        return json.dumps({**unsigned, "mac": channel.sign(unsigned)}).encode("utf-8") + b"\n"
+
+
+class RegistryLoadTests(unittest.TestCase):
+    def test_the_registry_is_read_and_checked_once_not_per_request(self):
+        saved = remote_module._REGISTRY_CACHE
+        loads = []
+        original = remote_module._load_operation_registry
+        def counting():
+            loads.append(True); return original()
+        try:
+            remote_module._REGISTRY_CACHE = None
+            with patch.object(remote_module, "_load_operation_registry", counting):
+                for _ in range(50):
+                    validate_operation_payload("status", "request", {})
+                    validate_operation_payload("snapshot", "request", {"focus": [1]})
+                registry, digest = operation_registry()
+            self.assertEqual(len(loads), 1)
+            self.assertEqual(digest, hashlib.sha256(json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest())
+            with self.assertRaisesRegex(ValueError, "not in canonical registry"): validate_operation_payload("no.such-operation", "request", {})
+        finally:
+            remote_module._REGISTRY_CACHE = saved
+
+
+class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
+    def test_a_big_frame_arriving_in_pieces_is_scanned_once_and_answered(self):
+        client, channel = self.connect()
+        connection = self.bridge._connections[0]
+        body = b"x" * (8 * 1024 * 1024)
+        for offset in range(0, len(body), 256 * 1024):
+            client.sendall(body[offset:offset + 256 * 1024])
+            self.bridge.update_display()
+        deadline = time.time() + 5
+        while len(connection.inbound) < len(body) and time.time() < deadline: self.bridge.update_display()
+        # Everything that came is searched once: the next piece is searched from where this one ended.
+        self.assertEqual(len(connection.inbound), len(body)); self.assertEqual(connection.scanned, len(body))
+        client.sendall(b"\n" + self.frame(channel, 1))
+        malformed, answered = self.read_lines(client, 2)
+        self.assertEqual(malformed["error"], "malformed request"); self.assertTrue(answered["ok"])
+        self.assertEqual((len(connection.inbound), connection.scanned), (0, 0))
+
+    def test_many_pipelined_frames_are_all_answered_in_order(self):
+        client, channel = self.connect()
+        client.sendall(b"".join(self.frame(channel, sequence) for sequence in range(1, 201)))
+        answered = self.read_lines(client, 200)
+        self.assertEqual([response["id"] for response in answered], [f"status-{sequence}" for sequence in range(1, 201)])
+        self.assertTrue(all(response["ok"] for response in answered))
+
+    def test_a_big_response_leaves_in_pieces_and_the_buffer_empties(self):
+        song = self.bridge.mapper.song; song.tracks = [FakeTrack() for _ in range(300)]
+        for track in song.tracks: track.devices = [FakeDevice() for _ in range(8)]
+        client, channel = self.connect()
+        client.sendall(self.frame(channel, 1, method="snapshot"))
+        response = self.read_lines(client, 1)[0]
+        self.assertTrue(response["ok"]); self.assertEqual(len(response["result"]["tracks"]), 300)
+        connection = self.bridge._connections[0]
+        self.assertEqual((connection.pending_outbound(), len(connection.outbound), connection.sent), (0, 0, 0))
