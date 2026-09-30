@@ -20,7 +20,11 @@ export const UPDATE_ONLY_TRANSFORMS: readonly MidiTransformType[] = ["transpose"
  * per-note expression the canonical schema cannot represent). */
 export const GENERATIVE_TRANSFORMS: readonly MidiTransformType[] = ["repeat", "ratchet", "arpeggiate", "euclidean", "chord-progression", "drum-pattern", "bassline"];
 
-export const MIDI_TRANSFORM_MAX_NOTES = 2048;
+/** Notes a transform takes and returns: no cap below what one wire array carries (a clip's notes are the Set's own). */
+export const MIDI_TRANSFORM_MAX_NOTES = 10_000_000;
+/** Notes a generator (arpeggiate, euclidean, bassline) may create in one go, checked before any is made: past a
+ * million a generated clip is a mistake, and the notes alone would take hundreds of MiB of the host's memory. */
+export const MIDI_TRANSFORM_MAX_GENERATED_NOTES = 1_000_000;
 export const MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD = 128;
 
 export const SCALE_INTERVALS: Record<string, readonly number[]> = {
@@ -367,7 +371,7 @@ function arpeggiate(notes: readonly Note[], params: Readonly<Record<string, unkn
     const start = key * epsilon;
     const span = Math.max(...group.map((note) => note.start + note.duration)) - start;
     prospective += Math.max(1, Math.floor(span / rate));
-    if (prospective > MIDI_TRANSFORM_MAX_NOTES) throw new RangeError(`arpeggiate would generate more than the bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit at rate ${rate}; increase the rate or shorten the onset-group span`);
+    if (prospective > MIDI_TRANSFORM_MAX_GENERATED_NOTES) throw new RangeError(`arpeggiate would generate more than the bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit at rate ${rate}; increase the rate or shorten the onset-group span`);
   }
   for (const [key, group] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
     if (group.length < 2) { result.push(...group.map((note) => ({ ...note }))); continue; }
@@ -477,7 +481,7 @@ function euclideanRhythm(_notes: readonly Note[], params: Readonly<Record<string
   const stepLength = finiteParam(params, "stepLength", 1 / 1024, 16, 0.25);
   const noteLength = finiteParam(params, "noteLength", 1 / 1024, 64, Math.min(0.9 * stepLength, stepLength));
   const bars = integerParam(params, "bars", 1, 64, 1);
-  if (pulses * bars > MIDI_TRANSFORM_MAX_NOTES) throw new RangeError(`euclidean would exceed the bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit`);
+  if (pulses * bars > MIDI_TRANSFORM_MAX_GENERATED_NOTES) throw new RangeError(`euclidean would exceed the bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit`);
   const pattern = bjorklund(pulses, steps);
   const shift = ((rotation % steps) + steps) % steps;
   const result: Note[] = [];
@@ -754,7 +758,7 @@ function bassline(_notes: readonly Note[], params: Readonly<Record<string, unkno
   const octave = integerParam(params, "octave", 0, 6, 2);
   const startBeat = finiteParam(params, "startBeat", 0, 1000000, 0);
   const steps = Math.max(1, Math.ceil(chordDuration / stepBeats));
-  if (steps * chords.length > MIDI_TRANSFORM_MAX_NOTES) throw new RangeError(`bassline would exceed the bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit; increase stepBeats or shorten the progression`);
+  if (steps * chords.length > MIDI_TRANSFORM_MAX_GENERATED_NOTES) throw new RangeError(`bassline would exceed the bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit; increase stepBeats or shorten the progression`);
   const result: Note[] = [];
   chords.forEach((chord, chordIndex) => {
     const rootPitch = 12 * (octave + 1) + chord.rootPc;
@@ -883,7 +887,7 @@ export function midiExpressionProbe(): { noteSchemaFields: string[]; exposesPerN
   };
 }
 
-/** Content digest for note sets, with the transform bounds (2048 notes) rather
+/** Content digest for note sets, with the transform bounds (MIDI_TRANSFORM_MAX_NOTES) rather
  * than the mutation-authority canonicalizer's tighter wire bounds. Ignores
  * server-assigned note ids so content comparisons survive re-creation. */
 export function noteContentDigest(notes: readonly Record<string, unknown>[]): string {

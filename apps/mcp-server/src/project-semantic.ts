@@ -7,12 +7,15 @@ export const SEMANTIC_PROJECT_SNAPSHOT_SCHEMA = "ableton-mcp-semantic-set-snapsh
 export const SEMANTIC_PROJECT_MAX_RECORDS = 12_000;
 export const SEMANTIC_PROJECT_MAX_PAGE_RECORDS = 200;
 export const SEMANTIC_PROJECT_MAX_PAGE_BYTES = 512 * 1024;
-export const SEMANTIC_PROJECT_MAX_BUNDLE_BYTES = 24 * 1024 * 1024;
-export const SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES = 50 * 1024 * 1024;
-const MAX_PAGES = 512;
+// A big Set's snapshot, and a diff of two of them, are as large as the Set makes them: these bounds only
+// keep memory finite. What one MCP message carries (500 MiB, see framing.ts) is the tighter bound on a
+// single diff request. Pages stay 512 KiB; a whole bundle of them fits the page count.
+export const SEMANTIC_PROJECT_MAX_BUNDLE_BYTES = 1024 * 1024 * 1024;
+export const SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES = 1024 * 1024 * 1024;
+export const SEMANTIC_PROJECT_MAX_PAGES = 2048;
 const MAX_CANONICAL_DEPTH = 24;
-const MAX_CANONICAL_NODES = 2_000_000;
-const MAX_CANONICAL_ARRAY = 24_000;
+const MAX_CANONICAL_NODES = 100_000_000;
+const MAX_CANONICAL_ARRAY = 10_000_000;
 const MAX_CANONICAL_FIELDS = 64;
 const MAX_CANONICAL_KEY_LENGTH = 128;
 const MAX_STRING_LENGTH = 4096;
@@ -506,13 +509,13 @@ export function pageSemanticProjectSnapshot(artifact: SemanticProjectArtifact, o
   // every page and the aggregate limits independently.
   if (!options.cursor) {
     let plannedOffset = 0; let plannedPages = 0; let plannedBytes = 2;
-    while (plannedOffset < artifact.records.length && plannedPages <= MAX_PAGES && plannedBytes <= SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) {
+    while (plannedOffset < artifact.records.length && plannedPages <= SEMANTIC_PROJECT_MAX_PAGES && plannedBytes <= SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) {
       const plannedCount = boundedCount(plannedOffset); if (plannedCount === 0) break;
       const plannedComplete = plannedOffset + plannedCount === artifact.records.length;
       const plannedPage = { ...header, page: { offset: plannedOffset, returned: plannedCount, total: artifact.records.length, complete: plannedComplete, ...(!plannedComplete ? { nextCursor: encodeCursor(artifact.artifact.id, artifact.policy.profile, plannedOffset + plannedCount) } : {}) }, records: artifact.records.slice(plannedOffset, plannedOffset + plannedCount) };
       plannedBytes += Buffer.byteLength(canonicalSemanticJson(plannedPage)) + (plannedPages > 0 ? 1 : 0); plannedOffset += plannedCount; plannedPages += 1;
     }
-    if (plannedOffset !== artifact.records.length || plannedPages > MAX_PAGES || plannedBytes > SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) throw new Error("semantic snapshot page limit is too small for an assemblable bounded plan");
+    if (plannedOffset !== artifact.records.length || plannedPages > SEMANTIC_PROJECT_MAX_PAGES || plannedBytes > SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) throw new Error("semantic snapshot page limit is too small for an assemblable bounded plan");
   }
   const count = boundedCount(offset);
   if (artifact.records.length > offset && count === 0) throw new Error("one semantic record exceeds the page byte bound");
@@ -658,7 +661,7 @@ export function validateSemanticProjectArtifact(artifact: SemanticProjectArtifac
 }
 
 export function assembleSemanticProjectPages(pages: SemanticProjectPage[]): SemanticProjectArtifact {
-  if (!Array.isArray(pages) || pages.length < 1 || pages.length > MAX_PAGES || Buffer.byteLength(canonicalSemanticJson(pages)) > SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) throw new Error("semantic snapshot page bundle is empty or exceeds bounds");
+  if (!Array.isArray(pages) || pages.length < 1 || pages.length > SEMANTIC_PROJECT_MAX_PAGES || Buffer.byteLength(canonicalSemanticJson(pages)) > SEMANTIC_PROJECT_MAX_BUNDLE_BYTES) throw new Error("semantic snapshot page bundle is empty or exceeds bounds");
   const ordered = [...pages];
   const first = ordered[0]!; let expectedOffset = 0; const records: SemanticProjectRecord[] = [];
   const header = (page: SemanticProjectPage): unknown => ({ schema: page.schema, artifact: page.artifact, policy: page.policy, provenance: page.provenance, set: page.set, manifest: page.manifest, safety: page.safety });

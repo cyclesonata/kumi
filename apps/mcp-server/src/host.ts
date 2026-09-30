@@ -9,10 +9,10 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
-import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
+import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
 import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project-semantic-diff.js";
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
@@ -21,7 +21,7 @@ import { defaultUserLibrary, drumSamplerPreset, findDrumSamplerTemplate, liveRes
 import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
 import { SqliteReader } from "./sqlite-reader.js";
 import { LIBRARY_KINDS, LIBRARY_SEARCH_SCHEMA, LibraryUnavailable, SUPPORTED_FILES_SCHEMA_VERSIONS, SUPPORTED_PLUGINS_SCHEMA_VERSIONS, assertSupportedFilesSchema, assertSupportedPluginsSchema, queryLibraryFiles, queryLibraryPlugins, queryLibraryTagVocabulary, type LibraryQuery } from "./library-search.js";
-import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD, MIDI_TRANSFORM_TYPES, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, type MidiTransformType } from "./midi-transforms.js";
+import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD, MIDI_TRANSFORM_MAX_NOTES, MIDI_TRANSFORM_TYPES, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, type MidiTransformType } from "./midi-transforms.js";
 import { estimateKey } from "./key-estimation.js";
 import { JOURNEY_IDS, JOURNEY_PROMPTS, journeyResource, planUserJourney, renderJourneyPrompt, type ExperienceLevel, type JourneyId } from "./journeys.js";
 import type { AsyncLiveAdapter } from "./live.js";
@@ -33,9 +33,9 @@ import { LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VE
 /** Kept as the legacy initialize version for existing embedded callers. */
 export const PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSION;
 export { MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS };
-export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+// The framer's bound (framing.ts): about the largest string V8 makes (~512 MiB).
+export const MAX_MESSAGE_BYTES = 500 * 1024 * 1024;
 const MAX_TRACKED_REQUEST_IDS = 4096;
-const MAX_TOOL_CALLS_PER_MINUTE = 120;
 
 type JsonObject = Record<string, unknown>;
 type RequestId = string | number;
@@ -227,17 +227,18 @@ interface ClipLifecycleTransaction {
 
 const REQUEST_ID_MAX_LENGTH = 128;
 const SERVER_VERSION = PACKAGE_VERSION;
-const TRANSACTION_TTL_MS = 30_000;
-/** Pads one load-samples change fills: a Drum Rack shows 16 at a time. */
-const MAX_DRUM_PAD_LOADS = 16;
+// How long a preview stays applicable: a streamed plan's preview may wait on the steps before it.
+const TRANSACTION_TTL_MS = 600_000;
+/** Pads one load-samples change fills: a whole Drum Rack. */
+const MAX_DRUM_PAD_LOADS = 128;
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 /** A pad's note as Live labels it: 36 is C1. */
 const noteLabel = (note: number): string => `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 2}`;
-const MAX_TRANSACTIONS = 256;
-const AUDITION_TTL_MS = 30_000;
+const AUDITION_TTL_MS = 600_000;
 // Real-Live snapshot reads take seconds on populated sets, and launch/stop
 // state propagates asynchronously at quantization boundaries; the deadline
-// must cover snapshot + dispatch + polled verification.
+// must cover snapshot + dispatch + polled verification. Every deadline is its
+// base plus 20 ms per track in the Set (see McpHost.deadline).
 const AUDITION_DEADLINE_MS = 15_000;
 // Mirrors the Remote Script's _LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS: a
 // momentary jump can land a few milliseconds off the cue-point time, so the
@@ -254,14 +255,34 @@ const SESSION_MIDI_TRANSACTION_DEADLINE_MS = 30_000;
 // Ranked browser search re-fetches a bounded candidate traversal per root at
 // most once per TTL window (or per Live connection epoch); the cache is
 // in-memory only, bounded, and never persisted across restarts.
-const BROWSER_SEARCH_CANDIDATE_LIMIT = 100;
+const BROWSER_SEARCH_CANDIDATE_LIMIT = 10_000;
 const BROWSER_SEARCH_CACHE_TTL_MS = 60_000;
 const BROWSER_SEARCH_CACHE_MAX_ENTRIES = 16;
 const BROWSER_SEARCH_MAX_TOKENS = 8;
 // Applied transactions keep their undo until released or undone: room for a long session's changes (a
 // search renders hundreds of times; its own steps are released as it goes, see live_transaction_release).
-const MAX_AUDITION_TRANSACTIONS = 512;
+// What bounds them is the memory they hold, not how many there are: 1 GiB of records, each counted by its
+// JSON length when it is kept (its prior state is most of it).
+const MAX_RETAINED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
 const MONITORABLE_TRACK_KINDS = new Set(["regular", "audio", "midi"]);
+/** No count cap on what mirrors a Set's content (notes, points, markers, parameters, devices, pads,
+ * targets): this only stops a request past what one wire array carries (the Remote Script's
+ * MAX_WIRE_ARRAY_LENGTH). */
+const MAX_SET_COLLECTION = 10_000_000;
+/** The largest track, scene or device index the registry accepts. */
+const MAX_SET_INDEX = 100_000;
+/** Parameter values that go to Live in one request (all or none): no device has more. */
+const MAX_PARAMETER_VALUES = 10_000;
+/** Notifications queued for a slow client before the rest are counted as dropped. */
+const MAX_QUEUED_EVENTS = 65_536;
+// Deadlines grow with the Set: what reads every track on Live's thread takes longer on a big one. Each
+// deadline is its base plus this per track (the count at the last read), within the Remote Script's 60 s.
+const DEADLINE_MS_PER_TRACK = 20;
+const MAX_REMOTE_DEADLINE_MS = 60_000;
+/** Parts a whole-Set read of tracks' contents needs, without the Arrangement and selection it doesn't. */
+const TRACK_CONTENT_PARTS: readonly LiveSnapshotPart[] = ["set", "tracks", "scenes", "playback"];
+/** Parts a structure revision reads: every track and scene, light. */
+const STRUCTURE_PARTS: readonly LiveSnapshotPart[] = ["tracks", "scenes"];
 
 const resources = [
   { uri: "ableton://capabilities", name: "Capability catalog", description: "Implemented and unavailable host capabilities.", mimeType: "application/json" },
@@ -338,12 +359,12 @@ function isDiscoveryFilter(value: unknown): value is Record<string, string | num
 function isIdempotencyKey(value: unknown): value is string { return typeof value === "string" && value.length >= 8 && value.length <= 128; }
 
 function canonicalMutationIdentity(value: unknown, depth = 0): string {
-  if (depth > 64) throw new Error("mutation authority is too deeply nested");
+  if (depth > 256) throw new Error("mutation authority is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("mutation authority contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-  if (typeof value === "string") { if (value.length > 16_384) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
-  if (Array.isArray(value)) { if (value.length > 256) throw new Error("mutation authority array is too large"); return `[${value.map((item) => canonicalMutationIdentity(item, depth + 1)).join(",")}]`; }
-  if (isObject(value)) { const keys = Object.keys(value).sort(); if (keys.length > 256) throw new Error("mutation authority object is too large"); return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalMutationIdentity(value[key], depth + 1)}`).join(",")}}`; }
+  if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("mutation authority string is too large"); return JSON.stringify(value); }
+  if (Array.isArray(value)) { if (value.length > MAX_SET_COLLECTION) throw new Error("mutation authority array is too large"); return `[${value.map((item) => canonicalMutationIdentity(item, depth + 1)).join(",")}]`; }
+  if (isObject(value)) { const keys = Object.keys(value).sort(); if (keys.length > MAX_SET_COLLECTION) throw new Error("mutation authority object is too large"); return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalMutationIdentity(value[key], depth + 1)}`).join(",")}}`; }
   throw new Error("mutation authority contains an unsupported value");
 }
 
@@ -376,10 +397,55 @@ function isRetirableAppliedTransaction(candidate: unknown): boolean {
     default: return false;
   }
 }
+/** What a kept record costs: its JSON length when it is kept, an estimate (64 KiB when it can't be written). */
+function retainedBytes(value: unknown): number {
+  try { return JSON.stringify(value)?.length ?? 0; } catch { return 64 * 1024; }
+}
+
+/**
+ * One byte budget for every transaction map. A record that doesn't fit makes room by evicting the oldest
+ * records nothing depends on, whichever map holds them; recovery-protected records (applied, uncertain or in
+ * flight) are never evicted, so a budget full of them refuses the new record instead.
+ */
+class TransactionRetention {
+  private readonly kept = new Map<string, { map: BoundedTransactionMap<{ expiresAt: number; state: string }>; key: string; bytes: number }>();
+  private readonly ids = new WeakMap<object, number>();
+  private nextId = 0;
+  private retained = 0;
+  public constructor(private readonly capacity = MAX_RETAINED_TRANSACTION_BYTES) {}
+  /** Bytes the kept records hold. */
+  public get bytes(): number { return this.retained; }
+  private id(map: object, key: string): string { let id = this.ids.get(map); if (id === undefined) { id = ++this.nextId; this.ids.set(map, id); } return `${id}:${key}`; }
+  /** Counts a record in. A new one that doesn't fit first evicts the oldest records nothing depends on, or is
+   * refused (evicting nothing) when they wouldn't make room; a record kept again is only counted again. */
+  public admit(map: BoundedTransactionMap<{ expiresAt: number; state: string }>, key: string, bytes: number): void {
+    const id = this.id(map, key);
+    const kept = this.kept.has(id);
+    this.release(map, key);
+    if (!kept && this.retained + bytes > this.capacity) {
+      let room = this.capacity - this.retained; const victims: Array<{ map: BoundedTransactionMap<{ expiresAt: number; state: string }>; key: string }> = [];
+      for (const entry of this.kept.values()) {
+        if (room >= bytes) break;
+        if (entry.map.evictable(entry.key)) { victims.push(entry); room += entry.bytes; }
+      }
+      if (room < bytes) throw new Error("transaction capacity is exhausted by recovery-protected work");
+      for (const victim of victims) victim.map.delete(victim.key);
+    }
+    this.kept.set(id, { map, key, bytes }); this.retained += bytes;
+  }
+  public release(map: object, key: string): void {
+    const id = this.id(map, key); const entry = this.kept.get(id);
+    if (entry) { this.retained -= entry.bytes; this.kept.delete(id); }
+  }
+}
+
 class BoundedTransactionMap<T extends { expiresAt: number; state: string }> extends Map<string, T> {
-  public constructor(private readonly capacity = MAX_AUDITION_TRANSACTIONS, private readonly onDelete?: (value: T) => void) { super(); }
+  public constructor(private readonly retention: TransactionRetention, private readonly onDelete?: (value: T) => void) { super(); }
+  /** Whether a record may go to make room: no recovery depends on it and nothing is applying it. */
+  public evictable(key: string): boolean { const value = this.get(key); return value !== undefined && !RECOVERY_PROTECTED_STATES.has(value.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key); }
   public override delete(key: string): boolean {
     const value = this.get(key);
+    this.retention.release(this, key);
     if (!super.delete(key)) return false;
     // Terminal cleanup hook (staged-file release); never let cleanup break bookkeeping.
     if (value !== undefined) { try { this.onDelete?.(value); } catch { /* best-effort transaction cleanup hook */ } }
@@ -392,11 +458,7 @@ class BoundedTransactionMap<T extends { expiresAt: number; state: string }> exte
     // permanently; undoable applied records keep their replay/undo authority,
     // and uncertain records stay protected until explicit recovery.
     for (const [candidateKey, candidate] of this) if (candidate.expiresAt <= now && (!RECOVERY_PROTECTED_STATES.has(candidate.state) || isRetirableAppliedTransaction(candidate)) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey)) this.delete(candidateKey);
-    if (!this.has(key)) while (this.size >= this.capacity) {
-      const oldest = [...this].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error("transaction capacity is exhausted by recovery-protected work");
-      this.delete(oldest[0]);
-    }
+    this.retention.admit(this as unknown as BoundedTransactionMap<{ expiresAt: number; state: string }>, key, retainedBytes(value));
     return super.set(key, value);
   }
 }
@@ -480,23 +542,24 @@ export class McpHost {
   private shuttingDown = false;
   private readonly seenIds = new Set<string>();
   private readonly idOrder: string[] = [];
-  private readonly toolCallTimes: number[] = [];
   private readonly analysisRunner = new AnalysisRunner();
-  private readonly audioCaptureTransactions = new BoundedTransactionMap<AudioCaptureTransaction>();
-  private readonly transactions = new BoundedTransactionMap<TempoTransaction>(MAX_TRANSACTIONS);
-  private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>();
-  private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>();
-  private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>();
-  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>();
+  /** The memory every transaction map below shares (see TransactionRetention). */
+  private readonly retention = new TransactionRetention();
+  private readonly audioCaptureTransactions = new BoundedTransactionMap<AudioCaptureTransaction>(this.retention);
+  private readonly transactions = new BoundedTransactionMap<TempoTransaction>(this.retention);
+  private readonly arrangementTransactions = new BoundedTransactionMap<ArrangementTransaction>(this.retention);
+  private readonly sessionStructureTransactions = new BoundedTransactionMap<SessionStructureTransaction>(this.retention);
+  private readonly deviceParameterTransactions = new BoundedTransactionMap<DeviceParameterTransaction>(this.retention);
+  private readonly deviceParametersTransactions = new BoundedTransactionMap<DeviceParametersTransaction>(this.retention);
   private readonly midiTransactions: SessionMidiTransactionManager;
   private readonly batchTransactions: BatchTransactionManager;
   private readonly deviceStateTransactions: DeviceStateTransactionManager;
   private readonly inFlightMutations = new Map<string, { idempotencyKey: string; argumentDigest: string; promise: Promise<JsonObject | null>; controller: AbortController; waiters: number; settled: boolean }>();
-  private readonly auditionTransactions = new BoundedTransactionMap<SessionAuditionTransaction>();
-  private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>();
-  private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>();
-  private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>();
-  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(MAX_AUDITION_TRANSACTIONS, (value) => {
+  private readonly auditionTransactions = new BoundedTransactionMap<SessionAuditionTransaction>(this.retention);
+  private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>(this.retention);
+  private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>(this.retention);
+  private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>(this.retention);
+  private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(this.retention, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
     if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
     if (value.kind === "drum-pad" && Array.isArray(value.payload?.pads)) for (const pad of value.payload.pads as unknown[]) if (isObject(pad)) this.releaseStagedImportFile(pad.samplePath);
@@ -511,16 +574,20 @@ export class McpHost {
   private activeAsyncOperations = 0;
   private toolPolicy: ToolPolicySpec;
   private toolListFingerprint: string | undefined;
+  /** Reads shaped to what each operation touches, shared with the transaction managers. */
+  private readonly views: LiveViews;
 
   public constructor(private readonly adapter: LiveAdapter = new UnavailableLiveAdapter(), options: { toolPolicy?: ToolPolicySpec | unknown; importStagingDir?: string; userLibraryDir?: string; liveResourcesDir?: string } = {}) {
-    this.midiTransactions = new SessionMidiTransactionManager(adapter);
+    // The transaction managers read through these views too, over adapters that may offer no discovery.
+    this.views = new LiveViews(() => { const value = this.adapter as Partial<AsyncLiveAdapter>; if (typeof value.snapshotAsync !== "function") throw new Error("live adapter does not support asynchronous operations"); return this.adapter as AsyncLiveAdapter; });
+    this.midiTransactions = new SessionMidiTransactionManager(adapter, this.views);
     this.batchTransactions = new BatchTransactionManager(adapter, (kinds) => {
       for (const kind of kinds) {
         const ownerTool = BATCH_OPERATION_POLICY_TOOLS[kind];
         if (!this.policyAllowsTool(ownerTool)) throw new Error(`transaction batch contains an operation denied by the deployment policy (${ownerTool})`);
       }
-    });
-    this.deviceStateTransactions = new DeviceStateTransactionManager(adapter);
+    }, this.views);
+    this.deviceStateTransactions = new DeviceStateTransactionManager(adapter, this.views);
     this.toolPolicy = options.toolPolicy === undefined ? DEFAULT_TOOL_POLICY : parseToolPolicySpec(options.toolPolicy);
     this.importStagingDirOption = options.importStagingDir;
     this.userLibraryDirOption = options.userLibraryDir;
@@ -851,18 +918,9 @@ export class McpHost {
     };
   }
 
-  private consumeAnalysisRateLimit(): boolean {
-    const now = Date.now();
-    while (this.toolCallTimes.length > 0 && now - (this.toolCallTimes[0] ?? now) >= 60_000) this.toolCallTimes.shift();
-    if (this.toolCallTimes.length >= MAX_TOOL_CALLS_PER_MINUTE) return false;
-    this.toolCallTimes.push(now);
-    return true;
-  }
-
   private async audioAnalyzeAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
     const parsed = this.encodedAnalysisSource(params, 32, true);
     if (!parsed || parsed.sampleCount > 10_000_000) return error(id, -32602, "audio_analyze requires bounded normalized float32 pcmBase64, sampleRate, and matching channel metadata");
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
       const result = await this.analysisRunner.run({ mode: "analyze", source: parsed.source }, signal);
       if (signal?.aborted) return null;
@@ -884,7 +942,6 @@ export class McpHost {
       if (!isObject(params.alignment) || !hasOnly(params.alignment, ["mode", "maxLagSeconds", "manualOffsetSeconds"]) || (params.alignment.mode !== undefined && !["auto", "manual", "disabled"].includes(String(params.alignment.mode))) || (params.alignment.maxLagSeconds !== undefined && (typeof params.alignment.maxLagSeconds !== "number" || !Number.isFinite(params.alignment.maxLagSeconds) || params.alignment.maxLagSeconds < 0 || params.alignment.maxLagSeconds > 10)) || (params.alignment.manualOffsetSeconds !== undefined && (typeof params.alignment.manualOffsetSeconds !== "number" || !Number.isFinite(params.alignment.manualOffsetSeconds) || Math.abs(params.alignment.manualOffsetSeconds) > 10))) return error(id, -32602, "audio comparison alignment is invalid");
       alignment = params.alignment as typeof alignment;
     }
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
       const result = await this.analysisRunner.run({ mode: "compare", project: project.source, reference: reference.source, ...(alignment ? { alignment } : {}) }, signal);
       if (signal?.aborted) return null;
@@ -931,11 +988,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["pcmBase64", "sampleRate", "channels", "channelLayout", "trackRef", "provenance"]) || !isNonEmptyString(params.trackRef, 256) || !isObject(params.provenance) || !hasOnly(params.provenance, ["observedAt", "description"]) || !isNonEmptyString(params.provenance.observedAt, 128) || !isNonEmptyString(params.provenance.description, 512)) return error(id, -32602, "bounded PCM, trackRef, and explicit source provenance are required");
     const parsed = this.encodedAnalysisSource({ pcmBase64: params.pcmBase64, sampleRate: params.sampleRate, ...(params.channels === undefined ? {} : { channels: params.channels }), ...(params.channelLayout === undefined ? {} : { channelLayout: params.channelLayout }) }, 2, false);
     if (!parsed || parsed.sampleCount > 4_000_000) return error(id, -32602, "diagnosis PCM metadata is invalid or exceeds the bounded source limit");
-    if (!this.consumeAnalysisRateLimit()) return error(id, -32029, "Tool invocation rate limit exceeded");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.epoch === null || !(status.capabilities ?? []).includes("session.read")) throw new Error("fresh Live context is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const snapshot = await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.trackRef]);
       const analysis = await this.analysisRunner.run({ mode: "analyze", source: parsed.source }, signal) as PcmAnalysis;
       if (signal?.aborted) return null;
       const diagnosis = diagnoseAudioWithLiveContext(analysis, snapshot, status.epoch, params.trackRef as LiveRef, { kind: "caller-supplied-pcm", observedAt: params.provenance.observedAt, description: params.provenance.description });
@@ -950,10 +1006,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["setName", "sourceSlotRef", "destinationSlotRef", "durationSeconds", "consent", "outputSafety"]) || !isNonEmptyString(params.setName, 256) || !isNonEmptyString(params.sourceSlotRef, 256) || !isNonEmptyString(params.destinationSlotRef, 256) || typeof params.durationSeconds !== "number" || !Number.isFinite(params.durationSeconds) || params.durationSeconds < 1 || params.durationSeconds > 9 || params.consent !== "ephemeral-analysis-and-delete") return error(id, -32602, "exact Set/slots, 1-9 second duration, consent, and output safety are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status);
       const adapter = this.asyncAdapter();
-      const plan = await adapter.invokeAsync({ operation: "audio.capture.inspect", args: { setName: params.setName, sourceSlotRef: params.sourceSlotRef, destinationSlotRef: params.destinationSlotRef } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+      const plan = await adapter.invokeAsync({ operation: "audio.capture.inspect", args: { setName: params.setName, sourceSlotRef: params.sourceSlotRef, destinationSlotRef: params.destinationSlotRef } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
       if (plan.supported !== true || !isNonEmptyString(plan.fence, 64) || !isNonEmptyString(plan.destinationTrackRef, 256) || !isObject(plan.prior)) throw new Error("capture mapper did not return a complete authoritative plan");
       const transaction: AudioCaptureTransaction = {
         id: `audio_capture_${randomBytes(18).toString("base64url")}`,
@@ -977,7 +1033,7 @@ export class McpHost {
   }
 
   private async captureMapperStatus(adapter: AsyncLiveAdapter): Promise<JsonObject> {
-    return await adapter.invokeAsync({ operation: "audio.capture.status", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+    return await adapter.invokeAsync({ operation: "audio.capture.status", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
   }
 
   private async waitForCapturedMedia(adapter: AsyncLiveAdapter, signal?: AbortSignal, deadline = Date.now() + 5_000): Promise<JsonObject> {
@@ -1020,7 +1076,7 @@ export class McpHost {
       includeMapperResidual(status, "mapper");
       if (status.active === true || status.playbackStopped !== true || status.state === "active" || status.state === "failed") {
         try {
-          await adapter.invokeAsync({ operation: "audio.capture.emergency-stop", args: { captureId: transaction.captureId, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+          await adapter.invokeAsync({ operation: "audio.capture.emergency-stop", args: { captureId: transaction.captureId, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
         } catch { residual.push("capture-emergency-stop-unverified"); }
         status = await this.captureMapperStatus(adapter);
         if (status.captureId !== transaction.captureId) {
@@ -1050,7 +1106,7 @@ export class McpHost {
       const token = transaction.mapperToken ?? (typeof status.recoveryToken === "string" ? status.recoveryToken : undefined);
       if (!media && clip && isNonEmptyString(clip.filePath, 4_096)) {
         try {
-          const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+          const snapshot = await this.viewAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [], ["set"]);
           if (typeof snapshot.set.filePath === "string" && snapshot.set.filePath) {
             transaction.projectFilePath = snapshot.set.filePath;
             media = await decodeOwnedWaveFile(clip.filePath, snapshot.set.filePath, transaction.startedAt ?? Date.now());
@@ -1058,7 +1114,7 @@ export class McpHost {
           else residual.push("saved-project-path-unavailable");
         } catch {
           try {
-            const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+            const snapshot = await this.viewAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [], ["set"]);
             if (typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0) transaction.projectFilePath = snapshot.set.filePath;
             rawConfirmedAbsent = typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0 && await captureMediaIsAbsent(clip.filePath as string, snapshot.set.filePath);
             if (!rawConfirmedAbsent) residual.push("raw-media-could-not-be-verified-for-unlink");
@@ -1077,7 +1133,7 @@ export class McpHost {
       let liveCleanupSafe = status.state === "cleaned";
       if (clip && isNonEmptyString(clip.ref, 256) && token && rawCleanupSafe) {
         try {
-          const cleaned = await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token, expectedClipRef: clip.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as JsonObject;
+          const cleaned = await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token, expectedClipRef: clip.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
           includeMapperResidual(cleaned, "mapper-cleanup");
           liveCleanupSafe = true;
         } catch { residual.push("transaction-owned-live-clip-not-cleaned"); }
@@ -1097,7 +1153,7 @@ export class McpHost {
       if (isObject(finalStatus.clip)) residual.push("capture-clip-remains-present");
 
       try {
-        const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+        const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [finalStatus.destinationTrackRef, transaction.destinationTrackRef, transaction.destinationSlotRef]);
         const transport = snapshot.playback.transport;
         if (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || snapshot.playback.firedTargets.length > 0 || snapshot.playback.playingTargets.length > 0) residual.push("fresh-playback-readback-not-stopped");
         const destinationTrackRef = isNonEmptyString(finalStatus.destinationTrackRef, 256) ? finalStatus.destinationTrackRef : transaction.destinationTrackRef;
@@ -1168,23 +1224,23 @@ export class McpHost {
     let acquired: DecodedCaptureFile | undefined;
     try {
       this.validateOutputSafety(transaction.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status);
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; capture must be previewed again");
       const adapter = this.asyncAdapter();
       if (signal?.aborted) throw new Error("audio capture cancelled before audible dispatch");
       transaction.startedAt = Date.now();
       transaction.startDispatched = true;
-      const started = await adapter.invokeAsync({ operation: "audio.capture.start", args: { captureId: transaction.captureId, setName: transaction.setName, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef, fence: transaction.fence, maxDurationMs: Math.min(10_000, transaction.durationMs + 3_000), outputSafety: transaction.outputSafety } }, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as JsonObject;
+      const started = await adapter.invokeAsync({ operation: "audio.capture.start", args: { captureId: transaction.captureId, setName: transaction.setName, sourceSlotRef: transaction.sourceSlotRef, destinationSlotRef: transaction.destinationSlotRef, fence: transaction.fence, maxDurationMs: Math.min(10_000, transaction.durationMs + 3_000), outputSafety: transaction.outputSafety } }, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as JsonObject;
       if (!isNonEmptyString(started.token, 128) || started.state !== "active") throw new Error("capture mapper did not confirm bounded authority");
       transaction.mapperToken = started.token;
       transaction.state = "capturing";
       await this.waitFor(transaction.durationMs, signal);
-      await adapter.invokeAsync({ operation: "audio.capture.stop", args: { captureId: transaction.captureId, token: transaction.mapperToken } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id });
+      await adapter.invokeAsync({ operation: "audio.capture.stop", args: { captureId: transaction.captureId, token: transaction.mapperToken } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id });
       const captureStatus = await this.waitForCapturedMedia(adapter, signal);
       if (Array.isArray(captureStatus.residual) && captureStatus.residual.length > 0) throw new Error("capture mapper reported residual state");
       const clip = captureStatus.clip as JsonObject;
-      const snapshot = await adapter.snapshotAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id });
+      const snapshot = await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }, [transaction.sourceSlotRef]);
       if (typeof snapshot.set.filePath !== "string" || !snapshot.set.filePath) throw new Error("capture requires an authoritatively saved Live Set path");
       transaction.projectFilePath = snapshot.set.filePath;
       acquired = await decodeOwnedWaveFile(clip.filePath as string, snapshot.set.filePath, transaction.startedAt);
@@ -1198,12 +1254,12 @@ export class McpHost {
       // descriptor-fenced raw media has been quarantined and unlinked.
       await unlinkOwnedCaptureFile(acquired);
       transaction.rawPrimaryUnlinked = true;
-      await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token: transaction.mapperToken, expectedClipRef: clip.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id });
+      await adapter.invokeAsync({ operation: "audio.capture.cleanup", args: { captureId: transaction.captureId, token: transaction.mapperToken, expectedClipRef: clip.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id });
       await unlinkLateCaptureCompanions(acquired);
       if (!await captureMediaIsAbsent(acquired.realPath, transaction.projectFilePath)) throw new Error("capture media did not verify absent after Live clip cleanup");
       acquired = undefined;
       const finalStatus = await this.captureMapperStatus(adapter);
-      const finalSnapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const finalSnapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [transaction.destinationTrackRef]);
       const transport = finalSnapshot.playback.transport;
       const destination = finalSnapshot.tracks.find((track) => track.ref === transaction.destinationTrackRef);
       if (finalStatus.state !== "cleaned" || finalStatus.active !== false || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || !destination || destination.armed !== transaction.prior.arm || destination.monitoringState !== transaction.prior.monitoring || destination.routing?.inputType !== transaction.prior.route) throw new Error("capture teardown did not verify the exact stopped baseline");
@@ -1239,7 +1295,7 @@ export class McpHost {
   private async liveAudioCaptureStatusAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!this.utilityParams(params)) return error(id, -32602, "capture status takes no arguments");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       this.requireCaptureCapability(status, true);
       const capture = await this.captureMapperStatus(this.asyncAdapter());
       return this.successText(id, this.captureStatusRedacted(capture));
@@ -1250,7 +1306,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["confirmation", "captureId", "sourceSlotRef", "destinationSlotRef"]) || params.confirmation !== "emergency-stop-and-clean" || !isNonEmptyString(params.captureId, 128) || !isNonEmptyString(params.sourceSlotRef, 256) || !isNonEmptyString(params.destinationSlotRef, 256)) return error(id, -32602, "exact fresh capture identities and confirmation are required");
     const synthetic: AudioCaptureTransaction = { id: `recovery_${params.captureId}`, captureId: params.captureId, epoch: 0, setName: "recovery", sourceSlotRef: params.sourceSlotRef as LiveRef, destinationSlotRef: params.destinationSlotRef as LiveRef, destinationTrackRef: params.destinationSlotRef as LiveRef, fence: "", prior: {}, durationMs: 0, outputSafety: {}, confirmation: "", expiresAt: Date.now() + 10_000, state: "uncertain" };
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); this.requireCaptureCapability(status, true);
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); this.requireCaptureCapability(status, true);
       const observed = await this.captureMapperStatus(this.asyncAdapter());
       if (observed.captureId !== params.captureId || observed.sourceSlotRef !== params.sourceSlotRef || observed.destinationSlotRef !== params.destinationSlotRef) throw new Error("capture emergency observation is stale or inexact");
       synthetic.epoch = status.epoch!; synthetic.startedAt = typeof observed.startedAt === "number" ? observed.startedAt : Date.now(); synthetic.mapperToken = typeof observed.recoveryToken === "string" ? observed.recoveryToken : undefined;
@@ -1263,6 +1319,34 @@ export class McpHost {
     const value = this.adapter as Partial<AsyncLiveAdapter>;
     if (typeof value.snapshotAsync !== "function" || typeof value.discoverAsync !== "function" || typeof value.getAsync !== "function" || typeof value.invokeAsync !== "function") throw new Error("live adapter does not support asynchronous operations");
     return this.adapter as AsyncLiveAdapter;
+  }
+
+  /** When one operation's Live work must be done: `base` from now, plus 20 ms per track in the Set (the
+   * count at the last read), within the Remote Script's 60 s deadline maximum. */
+  private deadline(base: number): number { return Date.now() + Math.min(MAX_REMOTE_DEADLINE_MS, base + DEADLINE_MS_PER_TRACK * this.views.trackCount); }
+
+  /** A view of the Set, whole for `tracks` (their combined indices) and light for every other track;
+   * "all" reads every track whole, paged. `parts` limits the top-level parts read. */
+  private viewAsync(context: LiveOperationContext | undefined, tracks: LiveViewScope, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> { return this.views.view(context, tracks, parts); }
+
+  /** A view whole for the tracks that hold `refs` (a track, clip, slot, device, parameter, chain, pad or
+   * lane reference: its owner track) and for the tracks at `indices`, light for the rest. */
+  private viewForAsync(context: LiveOperationContext | undefined, refs: readonly unknown[], parts?: readonly LiveSnapshotPart[], indices?: readonly number[]): Promise<LiveSnapshot> { return this.views.viewFor(context, refs, parts, indices); }
+
+  /** The whole Set, for what genuinely reads every track: paged through track windows and assembled. */
+  private wholeSetAsync(context: LiveOperationContext | undefined, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> { return this.views.wholeSet(context, parts); }
+
+  /** Every track and scene as a light row: enough for a structure revision, names and order. */
+  private structureViewAsync(context: LiveOperationContext | undefined): Promise<LiveSnapshot> { return this.views.view(context, [], STRUCTURE_PARTS); }
+
+  /** Session playback alone, for playback polls. */
+  private playbackAsync(context?: LiveOperationContext): Promise<SessionPlaybackState> { return this.views.playback(context); }
+
+  /** A view for checking transaction-owned tracks and scenes: every track and scene listed, the owned tracks
+   * whole. A scene's content is every track's slot at it, so owned scenes read the whole Set. */
+  private structureOwnedViewAsync(context: LiveOperationContext | undefined, items: ReadonlyArray<{ kind: "track" | "scene"; ref: LiveRef; index?: number }>): Promise<LiveSnapshot> {
+    if (items.some((item) => item.kind === "scene")) return this.wholeSetAsync(context);
+    return this.viewForAsync(context, items.map((item) => item.ref), undefined, items.flatMap((item) => typeof item.index === "number" ? [item.index] : []));
   }
 
   /** Status fresh at call time; operation/capability gates must not rely on a
@@ -1278,7 +1362,7 @@ export class McpHost {
   }
 
   private validateStructureItems(params: unknown): { tracks: SessionStructureItem[]; scenes: SessionStructureItem[] } | undefined {
-    if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 16 || params.scenes.length > 32) return undefined;
+    if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 1000 || params.scenes.length > 1000) return undefined;
     const names = new Set<string>();
     const parse = (items: unknown[], kind: "track" | "scene"): SessionStructureItem[] | undefined => {
       const result: SessionStructureItem[] = [];
@@ -1287,7 +1371,7 @@ export class McpHost {
         names.add(item.name);
         if (kind === "track" && item.kind !== "audio" && item.kind !== "midi") return undefined;
         const index = item.index === undefined ? position : item.index;
-        if (!isIntegerInRange(index, 0, kind === "track" ? 1024 : 1024)) return undefined;
+        if (!isIntegerInRange(index, 0, MAX_SET_INDEX)) return undefined;
         result.push({ kind, name: item.name, ...(kind === "track" ? { trackKind: item.kind as "audio" | "midi" } : {}), index });
       }
       return result;
@@ -1320,7 +1404,7 @@ export class McpHost {
     const proposed = this.validateStructureItems(params);
     if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, unique, valid entries");
     try {
-      const status = this.requireConnected("session.structure"); const snapshot = await this.asyncAdapter().snapshotAsync();
+      const status = this.requireConnected("session.structure"); const snapshot = await this.structureViewAsync(undefined);
       const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
       const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
       if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
@@ -1341,12 +1425,12 @@ export class McpHost {
 
   private async compensateSessionStructureAsync(transaction: SessionStructureTransaction, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
     const created = transaction.created ?? []; transaction.compensationSteps ??=[]; transaction.recoveryMode = "compensate";
-    const boundedContext = (): LiveOperationContext => ({ ...context, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS });
+    const boundedContext = (): LiveOperationContext => ({ ...context, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS) });
     for (let index = 0; index < [...created].reverse().length; index += 1) { const item = [...created].reverse()[index]!; let step = transaction.compensationSteps[index];
-      if (!step) { const snapshot = await adapter.snapshotAsync(boundedContext()); const row = this.sessionStructureOwnedRow(snapshot, item); if (!row) continue; if (this.sessionStructureCreatedFingerprint(snapshot, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before compensation"); step = { operation: item.kind === "track" ? "track.delete" : "scene.delete", args: { ref: item.ref, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: item.objectIdentity }, completed: false }; transaction.compensationSteps[index] = step; }
+      if (!step) { const snapshot = await this.structureOwnedViewAsync(boundedContext(), [item]); const row = this.sessionStructureOwnedRow(snapshot, item); if (!row) continue; if (this.sessionStructureCreatedFingerprint(snapshot, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before compensation"); step = { operation: item.kind === "track" ? "track.delete" : "scene.delete", args: { ref: item.ref, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: item.objectIdentity }, completed: false }; transaction.compensationSteps[index] = step; }
       if (!step.completed) { await adapter.invokeAsync({ operation: step.operation, args: step.args }, boundedContext()); step.completed = true; }
     }
-    const after = await adapter.snapshotAsync(boundedContext()); if (created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure compensation left transaction-owned objects");
+    const after = await this.structureViewAsync(boundedContext()); if (created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure compensation left transaction-owned objects");
   }
 
   private async liveSessionStructureApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
@@ -1357,11 +1441,11 @@ export class McpHost {
     const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Session-structure preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.structure"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       if (reconciliation && transaction.recoveryMode === "compensate") { try { await this.compensateSessionStructureAsync(transaction, adapter, context()); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "compensated", residuals: [], idempotent: false }); } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure compensation remains uncertain; inspect authoritative structure."); } }
-      const current = await adapter.snapshotAsync(context());
+      const current = await this.structureViewAsync(context());
       if (!reconciliation && this.structureRevision(current) !== transaction.revision) return this.transactionError(id, "Session structure changed since preview");
       const created: NonNullable<SessionStructureTransaction["created"]> = transaction.created ? [...transaction.created] : []; let dispatchAmbiguous = false;
       transaction.recoverySteps ??= []; transaction.recoveryMode = "apply"; transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -1369,16 +1453,16 @@ export class McpHost {
         for (let stepIndex = 0; stepIndex < transaction.proposed.length; stepIndex += 1) {
           const item = transaction.proposed[stepIndex]!; const operation = item.kind === "track" ? "track.create" : "scene.create";
           let step = transaction.recoverySteps[stepIndex];
-          if (!step) { const expectedStructureRevision = this.structureRevision(await adapter.snapshotAsync(context())); step = { operation, args: { name: item.name, ...(item.kind === "track" ? { kind: item.trackKind } : {}), index: item.index, expectedStructureRevision } }; transaction.recoverySteps[stepIndex] = step; }
+          if (!step) { const expectedStructureRevision = this.structureRevision(await this.structureViewAsync(context())); step = { operation, args: { name: item.name, ...(item.kind === "track" ? { kind: item.trackKind } : {}), index: item.index, expectedStructureRevision } }; transaction.recoverySteps[stepIndex] = step; }
           let result = step.result;
           if (!result) { dispatchAmbiguous = true; result = await adapter.invokeAsync({ operation: step.operation, args: step.args }, context()) as { ref: LiveRef; objectIdentity: string; name: string; index: number; createdFingerprint: string }; dispatchAmbiguous = false; }
           if (!result?.ref || typeof result.objectIdentity !== "string" || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error(`Live did not return atomic created ${item.kind} ownership evidence`);
           step.result = { ref: result.ref, objectIdentity: result.objectIdentity, name: result.name, index: result.index ?? item.index, createdFingerprint: result.createdFingerprint };
           if (!created.some((entry) => entry.ref === result.ref)) created.push({ ref: result.ref, objectIdentity: result.objectIdentity, kind: item.kind, name: result.name, index: result.index ?? item.index, fingerprint: result.createdFingerprint });
-          transaction.created = created; const owned = created.find((entry) => entry.ref === result!.ref)!; const observed = await adapter.snapshotAsync(context()); const row = owned.kind === "track" ? observed.tracks.find((candidate) => candidate.ref === owned.ref) : observed.scenes.find((candidate) => candidate.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.sessionStructureCreatedFingerprint(observed, owned.kind, owned.ref) !== owned.fingerprint) throw new Error("created Session structure changed after atomic creation");
+          transaction.created = created; const owned = created.find((entry) => entry.ref === result!.ref)!; const observed = await this.structureOwnedViewAsync(context(), [owned]); const row = owned.kind === "track" ? observed.tracks.find((candidate) => candidate.ref === owned.ref) : observed.scenes.find((candidate) => candidate.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.sessionStructureCreatedFingerprint(observed, owned.kind, owned.ref) !== owned.fingerprint) throw new Error("created Session structure changed after atomic creation");
           if (result.name !== item.name) throw new Error(`Live did not confirm created ${item.kind}`);
         }
-        const verified = await adapter.snapshotAsync(context());
+        const verified = await this.structureOwnedViewAsync(context(), created);
         if (!created.every((item) => (item.kind === "track" ? verified.tracks.some((track) => track.ref === item.ref && track.objectIdentity === item.objectIdentity && track.name === item.name) : verified.scenes.some((scene) => scene.ref === item.ref && scene.objectIdentity === item.objectIdentity && scene.name === item.name)) && this.sessionStructureCreatedFingerprint(verified, item.kind, item.ref) === item.fingerprint)) throw new Error("Live did not confirm unchanged atomically owned Session structure");
       } catch (cause) {
         if (dispatchAmbiguous) { transaction.created = created; transaction.recoveryMode = "apply"; throw cause; }
@@ -1415,9 +1499,9 @@ export class McpHost {
     try {
       this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
       const status = await this.requireOperation(operation);
-      const adapter = this.asyncAdapter(); const snapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const adapter = this.asyncAdapter(); const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.ref]);
       if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
-      const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
+      const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       if (!current || current.ref !== params.ref || !isNonEmptyString(current.objectIdentity, 256) || typeof current.name !== "string") throw new Error("rename target lacks exact authoritative object identity");
       // Live shows return tracks with their letter ("A-Reverb") and prepends it to any name it is given,
       // so the name to expect afterwards carries that prefix whether or not the caller included it.
@@ -1439,8 +1523,8 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Uncertain rename apply requires the exact original idempotency key");
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Rename transaction is no longer applicable");
     try {
-      const status = reconciliation ? await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) : this.requireConnected("session.read"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const status = reconciliation ? await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) : this.requireConnected("session.read"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const current = await adapter.getAsync(transaction.clipRef, context) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
       const exactIdentity = current?.ref === transaction.clipRef && current?.objectIdentity === transaction.prior?.objectIdentity;
       const priorState = exactIdentity && current?.name === transaction.prior?.name; const appliedState = exactIdentity && current?.name === transaction.payload.name;
@@ -1459,12 +1543,12 @@ export class McpHost {
   private async liveSnapshotAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!this.utilityParams(params)) return error(id, -32602, "Invalid live_snapshot parameters");
     const status = this.requireConnected("session.read");
-    return this.successText(id, { epoch: status.epoch, snapshot: await this.asyncAdapter().snapshotAsync() });
+    return this.successText(id, { epoch: status.epoch, snapshot: await this.wholeSetAsync(undefined) });
   }
 
   private async liveDiscoverAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const kinds = ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] as const;
-    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 32 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
+    if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 256 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100_000)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
     return this.successText(id, await this.asyncAdapter().discoverAsync({ kind: params.kind as import("./live.js").LiveDiscoveryKind, parent: params.parent as string | undefined, filter: params.filter as Record<string, unknown> | undefined, fields: params.fields as string[] | undefined, budget: (params.budget as number | undefined) ?? 1000, limit: (params.limit as number | undefined) ?? 50, cursor: params.cursor as string | undefined }));
   }
 
@@ -1506,9 +1590,9 @@ export class McpHost {
   private async liveSessionAuditionPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["sceneRef", "setName", "outputSafety"]) || !isNonEmptyString(params.sceneRef, 256) || !isNonEmptyString(params.setName, 256) || !isObject(params.outputSafety)) return error(id, -32602, "sceneRef, setName, and outputSafety are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.wholeSetAsync(undefined, TRACK_CONTENT_PARTS);
       const state = this.auditionSnapshot(snapshot, params.sceneRef as LiveRef);
       this.validateAuditionSafety(status, state.set, state.tracks, state.playback, params.outputSafety, params.setName);
       if (state.eligibleTargetKeys.length === 0) throw new Error("audition scene has no authoritative playable clip slots");
@@ -1520,14 +1604,7 @@ export class McpHost {
   }
 
   private retainAuditionTransaction(transaction: SessionAuditionTransaction): void {
-    const now = Date.now();
-    for (const [key, candidate] of this.auditionTransactions) if (candidate.expiresAt <= now && !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key)) this.auditionTransactions.delete(key);
-    while (this.auditionTransactions.size >= MAX_AUDITION_TRANSACTIONS) {
-      const oldest = [...this.auditionTransactions].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error("audition transaction capacity is exhausted by in-flight auditions");
-      this.auditionTransactions.delete(oldest[0]);
-    }
-    this.auditionTransactions.set(transaction.id, transaction);
+    this.retainBoundedTransaction(this.auditionTransactions, transaction, "audition");
   }
 
   private async liveSessionAuditionApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -1572,12 +1649,12 @@ export class McpHost {
     // preview (mirroring the capture apply path).
     let dispatched = reconciliation;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id };
-      const before = await adapter.snapshotAsync(context); const state = this.auditionSnapshot(before, transaction.sceneRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id };
+      const before = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS); const state = this.auditionSnapshot(before, transaction.sceneRef);
       // Reconciliation after a real acknowledgement loss: if every active
       // target belongs to this transaction (matching scene, subset of the
       // eligible targets), the unacked launch did dispatch — reconcile to
@@ -1607,8 +1684,8 @@ export class McpHost {
       // evidence until the operation deadline.
       let verified = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const after = await adapter.snapshotAsync(context);
-        const activeTargets = [...after.playback.firedTargets, ...after.playback.playingTargets];
+        const after = await this.playbackAsync(context);
+        const activeTargets = [...after.firedTargets, ...after.playingTargets];
         if (activeTargets.some((target) => target.sceneRef !== transaction.sceneRef || !transaction.eligibleTargetKeys.includes(`${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}`))) throw new Error("external playback appeared during launch verification");
         if (activeTargets.length > 0) { verified = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1663,8 +1740,8 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; stop refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.stopKey, transactionId: transaction.id };
-      const beforeSnapshot = await adapter.snapshotAsync(context); const before = this.auditionSnapshot(beforeSnapshot, transaction.sceneRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.stopKey, transactionId: transaction.id };
+      const beforeSnapshot = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS); const before = this.auditionSnapshot(beforeSnapshot, transaction.sceneRef);
       if (JSON.stringify(before.scene) !== transaction.sceneRevision || before.set.name !== transaction.setName || before.set.objectIdentity !== transaction.setIdentity || this.auditionAuthorityRevision(beforeSnapshot, transaction.sceneRef, transaction.eligibleTargetKeys) !== transaction.authorityRevision || before.playback.transport.arrangementRecord !== false || before.playback.transport.sessionRecord !== false || before.tracks.some((track) => MONITORABLE_TRACK_KINDS.has(String(track.kind)) ? (track.armed !== false || !["off", "auto"].includes(String(track.monitoringState))) : (track.armed === true || track.monitoringState === "in"))) throw new Error("audition ownership or safety state changed; stop refused");
       const activeTargets = [...before.playback.firedTargets, ...before.playback.playingTargets];
       if (activeTargets.length > 0) {
@@ -1677,8 +1754,8 @@ export class McpHost {
       // reads until the transport and every slot is verifiably stopped.
       let confirmed = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const state = await adapter.snapshotAsync(context);
-        if (state.playback.transport.playing === false && state.playback.firedTargets.length === 0 && state.playback.playingTargets.length === 0) { confirmed = true; break; }
+        const state = await this.playbackAsync(context);
+        if (state.transport.playing === false && state.firedTargets.length === 0 && state.playingTargets.length === 0) { confirmed = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (!confirmed) throw new Error("stop acknowledged without fresh stopped verification");
@@ -1693,15 +1770,15 @@ export class McpHost {
   }
 
   private async liveSessionEmergencyStopAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
-    if (!isObject(params) || !hasOnly(params, ["confirmation", "expectedTargets", "expectedRecording", "idempotencyKey"]) || params.confirmation !== "emergency-stop" || !["stopped", "session", "arrangement", "both"].includes(String(params.expectedRecording)) || !Array.isArray(params.expectedTargets) || params.expectedTargets.length > 256 || new Set(params.expectedTargets).size !== params.expectedTargets.length || !params.expectedTargets.every((item) => isNonEmptyString(item, 1024)) || (params.idempotencyKey !== undefined && !isIdempotencyKey(params.idempotencyKey))) return error(id, -32602, "confirmation=emergency-stop plus exact freshly observed active playback targets and recording mode are required");
+    if (!isObject(params) || !hasOnly(params, ["confirmation", "expectedTargets", "expectedRecording", "idempotencyKey"]) || params.confirmation !== "emergency-stop" || !["stopped", "session", "arrangement", "both"].includes(String(params.expectedRecording)) || !Array.isArray(params.expectedTargets) || params.expectedTargets.length > MAX_SET_INDEX || new Set(params.expectedTargets).size !== params.expectedTargets.length || !params.expectedTargets.every((item) => isNonEmptyString(item, 1024)) || (params.idempotencyKey !== undefined && !isIdempotencyKey(params.idempotencyKey))) return error(id, -32602, "confirmation=emergency-stop plus exact freshly observed active playback targets and recording mode are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("session.emergency-stop")) throw new Error("emergency stop operation is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = await adapter.snapshotAsync(context);
-      const playback = snapshot.playback;
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const playback = await this.playbackAsync(context);
+      // Session playback alone: the targets and recording to stop.
       if (!playback || !Array.isArray(playback.firedTargets) || !Array.isArray(playback.playingTargets)) throw new Error("authoritative Session playback is unavailable");
       const activeKeys = [...new Set([...playback.firedTargets, ...playback.playingTargets].map((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}`))].sort();
       const expectedKeys = [...(params.expectedTargets as string[])].sort();
@@ -1713,8 +1790,8 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation: "session.emergency-stop", args: { expectedTargets: activeKeys, expectedRecording } }, context) as { stopped?: unknown; stoppedTargets?: unknown; recordingStopped?: unknown };
       let confirmed = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const after = await adapter.snapshotAsync(context);
-        if (after.playback.transport.playing === false && after.playback.transport.sessionRecord === false && after.playback.transport.arrangementRecord === false && after.playback.firedTargets.length === 0 && after.playback.playingTargets.length === 0) { confirmed = true; break; }
+        const after = await this.playbackAsync(context);
+        if (after.transport.playing === false && after.transport.sessionRecord === false && after.transport.arrangementRecord === false && after.firedTargets.length === 0 && after.playingTargets.length === 0) { confirmed = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (!confirmed) throw new Error("emergency stop was not confirmed by fresh authoritative state");
@@ -1737,7 +1814,7 @@ export class McpHost {
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one transport field is required");
     try {
       const status = this.requireConnected("transport");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set", "playback"]);
       const transport = snapshot.playback?.transport;
       if (!transport || !transport.loop || !isNonEmptyString(snapshot.set.objectIdentity, 256)) return this.transactionError(id, "authoritative transport Set identity is unavailable");
       const transaction: TransportTransaction = { id: `transport_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, setRef: snapshot.set.ref, setIdentity: snapshot.set.objectIdentity, prior: structuredClone({ position: transport.position, loop: transport.loop, punchIn: transport.punchIn, punchOut: transport.punchOut, metronome: transport.metronome }), proposed, playbackRevision: snapshot.playback.revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -1761,10 +1838,10 @@ export class McpHost {
   /** Live applies transport writes on its next tick (the playhead always; the loop and metronome on
    * current builds), so the bridge accepts them as pending. Confirm every written field in fresh
    * playback state, and return that state, whose revision is the one the change left. */
-  private async confirmTransportFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, fields: Record<string, number | boolean>): Promise<LiveSnapshot> {
+  private async confirmTransportFields(context: { signal?: AbortSignal; deadlineMs: number }, fields: Record<string, number | boolean>): Promise<SessionPlaybackState> {
     while (true) {
-      const after = await adapter.snapshotAsync(context);
-      if (Object.entries(fields).every(([field, value]) => McpHost.transportFieldIs(after.playback.transport, field, value))) return after;
+      const after = await this.playbackAsync(context);
+      if (Object.entries(fields).every(([field, value]) => McpHost.transportFieldIs(after.transport, field, value))) return after;
       if (Date.now() >= context.deadlineMs - 250) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -1780,18 +1857,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("transport");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
       if (!reconciliation && (snapshot.set.ref !== transaction.setRef || snapshot.set.objectIdentity !== transaction.setIdentity || snapshot.playback.revision !== transaction.playbackRevision)) return this.transactionError(id, "transport Set identity or state changed since preview; preview again");
       const result = await adapter.invokeAsync({ operation: "transport.set", args: { ...transaction.proposed, expectedRevision: transaction.playbackRevision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity } }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true || typeof result.revision !== "string") throw new Error("transport change was not confirmed");
-      const confirmed = await this.confirmTransportFields(adapter, context, transaction.proposed);
+      const confirmed = await this.confirmTransportFields(context, transaction.proposed);
       // The revision of the state the change left, once Live applied it (undo checks nothing changed since).
-      transaction.appliedRevision = confirmed.playback.revision;
+      transaction.appliedRevision = confirmed.revision;
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -1813,9 +1890,9 @@ export class McpHost {
       const status = this.requireConnected("transport");
       if (status.epoch !== transaction.epoch) return refuse("Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
       const prior = transaction.prior;
       const restore: Record<string, number | boolean> = {};
       for (const field of Object.keys(transaction.proposed)) {
@@ -1835,28 +1912,25 @@ export class McpHost {
       if (!reconciliation && current.playing === true) delete restore.position;
       if (!reconciliation && Object.keys(restore).length === 0) return refuse("transport undo refused while playing: only the playhead changed; stop playback first");
       if (reconciliation) {
-        await this.confirmTransportFields(adapter, context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
+        await this.confirmTransportFields(context, restore).catch(() => { throw new Error("transport undo replay did not restore the exact prior state"); });
       } else {
         for (const [field, proposed] of Object.entries(transaction.proposed)) if (field !== "position" && !McpHost.transportFieldIs({ ...current, playing: false }, field, proposed)) return refuse("transport field changed after apply; undo refused");
         const result = await this.invokeUndoRecovery(transaction, adapter, "transport.set", { ...restore, expectedRevision: snapshot.playback.revision, setRef: transaction.setRef, expectedObjectIdentity: transaction.setIdentity }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("transport undo was not confirmed");
       }
-      await this.confirmTransportFields(adapter, context, restore);
+      await this.confirmTransportFields(context, restore);
       transaction.undoKey = params.idempotencyKey as string;
       transaction.state = "undone";
       return this.successText(id, { transactionId: transaction.id, state: "undone", restored: restore, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport undo is uncertain; perform fresh discovery."); }
   }
 
-  private retainBoundedTransaction<T extends { id: string; expiresAt: number; state: string }>(map: Map<string, T>, transaction: T, kind: string): void {
+  /** Keeps a new transaction: expired previews go, and the shared byte budget makes room (see TransactionRetention). */
+  private retainBoundedTransaction<T extends { id: string; expiresAt: number; state: string }>(map: BoundedTransactionMap<T>, transaction: T, kind: string): void {
     const now = Date.now();
     for (const [key, candidate] of map) if (candidate.expiresAt <= now && !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(key)) map.delete(key);
-    while (map.size >= MAX_AUDITION_TRANSACTIONS) {
-      const oldest = [...map].find(([candidateKey, candidate]) => !RECOVERY_PROTECTED_STATES.has(candidate.state) && !IN_FLIGHT_TRANSACTION_IDS.has(candidateKey));
-      if (!oldest) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`);
-      map.delete(oldest[0]);
-    }
-    map.set(transaction.id, transaction);
+    try { map.set(transaction.id, transaction); }
+    catch (cause) { if (cause instanceof Error && /capacity is exhausted/.test(cause.message)) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`); throw cause; }
   }
 
   private validateOutputSafety(outputSafety: unknown): void {
@@ -1867,10 +1941,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["slotRef", "outputSafety"]) || !isNonEmptyString(params.slotRef, 256)) return error(id, -32602, "slotRef and outputSafety evidence are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("session.clip-launch")) throw new Error("clip launch operation is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.slotRef]);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       if (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || snapshot.playback.firedTargets.length > 0 || snapshot.playback.playingTargets.length > 0) throw new Error("clip launch requires a stopped, non-recording baseline with no active Session targets");
@@ -1907,7 +1981,7 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Uncertain clip-launch apply requires the exact original confirmation and idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || transaction.confirmation !== params.confirmation) return this.transactionError(id, "Exact clip-launch confirmation is required");
     if (signal?.aborted) return null;
-    if (reconciliation) { const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; clip-launch reconciliation refused"); }
+    if (reconciliation) { const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; clip-launch reconciliation refused"); }
     transaction.state = "applying";
     transaction.applyKey = params.idempotencyKey as string;
     const inflight = this.dispatchClipLaunchApply(transaction, signal, reconciliation);
@@ -1926,8 +2000,8 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id };
+      const snapshot = await this.viewForAsync(context, [transaction.trackRef, transaction.slotRef]);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       const activeTargets = [...snapshot.playback.firedTargets, ...snapshot.playback.playingTargets]; const oursAlreadyActive = activeTargets.some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
@@ -1945,10 +2019,10 @@ export class McpHost {
       if (result.launched !== transaction.slotRef) throw new Error("clip launch result does not match the previewed slot");
       let verified = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const after = await adapter.snapshotAsync(context);
-        const activeTargets = [...after.playback.firedTargets, ...after.playback.playingTargets];
+        const after = await this.playbackAsync(context);
+        const activeTargets = [...after.firedTargets, ...after.playingTargets];
         if (activeTargets.some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey)) { verified = true; break; }
-        if (reconciliation && after.playback.transport.playing === false && after.playback.transport.arrangementRecord === false && after.playback.transport.sessionRecord === false && activeTargets.length === 0) { transaction.state = "stopped"; delete transaction.uncertainPhase; return { transactionId: transaction.id, state: "stopped", verified: { targetKey: transaction.targetKey, firedOrPlaying: false, launchEnded: true }, stopConfirmation: transaction.stopConfirmation, reconciled: true }; }
+        if (reconciliation && after.transport.playing === false && after.transport.arrangementRecord === false && after.transport.sessionRecord === false && activeTargets.length === 0) { transaction.state = "stopped"; delete transaction.uncertainPhase; return { transactionId: transaction.id, state: "stopped", verified: { targetKey: transaction.targetKey, firedOrPlaying: false, launchEnded: true }, stopConfirmation: transaction.stopConfirmation, reconciled: true }; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (!verified) throw new Error("clip launch was not confirmed by fresh fired or playing target evidence");
@@ -2001,8 +2075,8 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) throw new Error("Live connection epoch changed; stop refused");
       if (!(status.operations ?? []).includes("session.clip-stop")) throw new Error("track stop operation is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.stopKey, transactionId: transaction.id };
-      const before = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.stopKey, transactionId: transaction.id };
+      const before = await this.viewForAsync(context, [transaction.trackRef, transaction.slotRef]);
       const ours = [...before.playback.firedTargets, ...before.playback.playingTargets].some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
       if (ours) {
         const currentTrack = (before.tracks as unknown as JsonObject[]).find((track) => track.ref === transaction.trackRef && track.objectIdentity === transaction.trackIdentity);
@@ -2016,8 +2090,8 @@ export class McpHost {
       }
       let confirmed = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const after = await adapter.snapshotAsync(context);
-        const still = [...after.playback.firedTargets, ...after.playback.playingTargets].some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
+        const after = await this.playbackAsync(context);
+        const still = [...after.firedTargets, ...after.playingTargets].some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
         if (!still) { confirmed = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -2060,6 +2134,24 @@ export class McpHost {
     return [...edges.keys()].some(cycle);
   }
 
+  /** A view for a routing change: its track whole, and every track whole when the change points an input or
+   * output somewhere, since a feedback loop can run through any track. */
+  private routingViewAsync(context: LiveOperationContext | undefined, trackRef: unknown, proposed: Record<string, unknown>): Promise<LiveSnapshot> {
+    const retargets = Object.prototype.hasOwnProperty.call(proposed, "inputType") || Object.prototype.hasOwnProperty.call(proposed, "outputType");
+    return retargets ? this.wholeSetAsync(context, ["tracks"]) : this.viewForAsync(context, [trackRef]);
+  }
+
+  /** A view for putting a routing change back: its track found by identity (its positional reference moves
+   * when tracks are added or removed before it) and read whole, or every track when the restoration points
+   * an input or output somewhere. */
+  private async routingIdentityViewAsync(context: LiveOperationContext | undefined, identity: unknown, restored: Record<string, unknown>): Promise<LiveSnapshot> {
+    const retargets = Object.prototype.hasOwnProperty.call(restored, "inputType") || Object.prototype.hasOwnProperty.call(restored, "outputType");
+    if (retargets) return this.wholeSetAsync(context, ["tracks"]);
+    const listed = await this.viewAsync(context, [], ["tracks"]);
+    const indices = (listed.tracks ?? []).flatMap((track, index) => track.objectIdentity === identity ? [index] : []);
+    return indices.length === 1 && listed.tracks[indices[0]!]!.light === true ? this.viewAsync(context, indices) : listed;
+  }
+
   private routingStateRevision(track: JsonObject): string {
     if (!isObject(track.routing)) throw new Error("routing state is unavailable");
     const state = { inputType: track.routing.inputType ?? null, inputSubRouting: track.routing.inputSubRouting ?? null, outputType: track.routing.outputType ?? null, outputSubRouting: track.routing.outputSubRouting ?? null, arm: track.armed ?? null, monitoring: track.monitoringState ?? null };
@@ -2080,10 +2172,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one routing field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("routing.set")) throw new Error("routing editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.routingViewAsync(undefined, params.trackRef, proposed);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.trackRef);
       if (!track || !isObject(track.routing) || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track with exact authoritative routing identity is required");
       if (this.routingWouldCreateCycle(snapshot, params.trackRef as string, proposed)) throw new Error("routing would create a direct or transitive feedback loop");
@@ -2105,19 +2197,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.clipRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.routingViewAsync(context, transaction.clipRef, transaction.payload); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.clipRef);
         if (!track || JSON.stringify({ ref: transaction.clipRef, objectIdentity: track.objectIdentity, routing: track.routing, armed: track.armed, monitoringState: track.monitoringState }) !== transaction.fence) return this.transactionError(id, "routing target or state changed since preview; preview again");
         if (this.routingWouldCreateCycle(snapshot, transaction.clipRef as string, transaction.payload)) return this.transactionError(id, "routing would create a direct or transitive feedback loop"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "routing.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("routing change was not confirmed");
       const expected = Object.fromEntries(Object.keys(transaction.prior ?? {}).map((key) => [key, transaction.payload[key]]));
-      const appliedTrack = await this.confirmRoutingFields(adapter, context, transaction.clipRef as LiveRef, transaction.payload.expectedObjectIdentity as string, expected, "routing postcondition was not confirmed");
+      const appliedTrack = await this.confirmRoutingFields(context, transaction.clipRef as LiveRef, transaction.payload.expectedObjectIdentity as string, expected, "routing postcondition was not confirmed");
       transaction.created = this.observedRouting(appliedTrack);
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -2138,9 +2230,9 @@ export class McpHost {
 
   /** Live arms a track and switches its monitoring on its next tick on current builds, so the bridge
    * accepts those writes as pending: confirm the routing fields in fresh state, and return that track. */
-  private async confirmRoutingFields(adapter: AsyncLiveAdapter, context: { signal?: AbortSignal; deadlineMs: number }, trackRef: LiveRef, identity: string, expected: Record<string, unknown>, failure: string): Promise<JsonObject> {
+  private async confirmRoutingFields(context: { signal?: AbortSignal; deadlineMs: number }, trackRef: LiveRef, identity: string, expected: Record<string, unknown>, failure: string): Promise<JsonObject> {
     while (true) {
-      const track = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackRef);
+      const track = ((await this.viewForAsync(context, [trackRef])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackRef);
       if (!track || track.objectIdentity !== identity) throw new Error("routing target identity changed after apply");
       const observed = this.observedRouting(track);
       if (Object.entries(expected).every(([key, value]) => observed[key] === value)) return track;
@@ -2196,7 +2288,7 @@ export class McpHost {
   private onLiveEvent(event: LiveEvent): void {
     if (this.protocolEra !== "legacy") return;
     const line = JSON.stringify({ jsonrpc: "2.0", method: "notifications/live_event", params: event });
-    if (this.eventQueue.length >= 256) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
+    if (this.eventQueue.length >= MAX_QUEUED_EVENTS) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(line);
     if (event.type === "reset") this.noteToolListChanged();
     this.scheduleEventFlush();
@@ -2215,7 +2307,7 @@ export class McpHost {
     const prior = this.toolListFingerprint;
     this.toolListFingerprint = fingerprint;
     if (prior === undefined || prior === fingerprint) return;
-    if (this.eventQueue.length >= 256) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
+    if (this.eventQueue.length >= MAX_QUEUED_EVENTS) this.eventOverflow = Math.min(Number.MAX_SAFE_INTEGER, this.eventOverflow + 1);
     else this.eventQueue.push(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }));
     this.scheduleEventFlush();
   }
@@ -2259,7 +2351,7 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.read");
       if (!(status.operations ?? []).includes("snapshot")) throw new Error("snapshot operation is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.wholeSetAsync(undefined);
       const projectPath = typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0 ? snapshot.set.filePath : undefined;
       const artifact = createSemanticProjectSnapshot(snapshot, { profile: (params.profile ?? "collaboration") as SemanticPrivacyProfile, exporterVersion: SERVER_VERSION, live: { protocol: status.protocol, adapter: status.adapter, provenance: status.provenance, registryHash: status.registryHash }, ...(projectPath ? { projectPath } : {}) });
       return this.successText(id, pageSemanticProjectSnapshot(artifact, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) }));
@@ -2267,7 +2359,7 @@ export class McpHost {
   }
 
   private liveProjectSnapshotDiff(id: RequestId, params: unknown): JsonObject {
-    if (!isObject(params) || !hasOnly(params, ["beforePages", "afterPages", "limit", "cursor"]) || !Array.isArray(params.beforePages) || params.beforePages.length < 1 || params.beforePages.length > 512 || !Array.isArray(params.afterPages) || params.afterPages.length < 1 || params.afterPages.length > 512 || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "complete bounded beforePages and afterPages plus optional limit/cursor are required");
+    if (!isObject(params) || !hasOnly(params, ["beforePages", "afterPages", "limit", "cursor"]) || !Array.isArray(params.beforePages) || params.beforePages.length < 1 || params.beforePages.length > SEMANTIC_PROJECT_MAX_PAGES || !Array.isArray(params.afterPages) || params.afterPages.length < 1 || params.afterPages.length > SEMANTIC_PROJECT_MAX_PAGES || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 200)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 4096))) return error(id, -32602, "complete bounded beforePages and afterPages plus optional limit/cursor are required");
     try {
       if (Buffer.byteLength(JSON.stringify({ beforePages: params.beforePages, afterPages: params.afterPages }), "utf8") > SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES) throw new Error("combined semantic snapshot bundles exceed the bounded diff input size");
       const before = assembleSemanticProjectPages(params.beforePages as SemanticProjectPage[]); const after = assembleSemanticProjectPages(params.afterPages as SemanticProjectPage[]);
@@ -2341,7 +2433,7 @@ export class McpHost {
         const { source, model } = readAlsModel(authority.canonicalPath);
         return createOfflineAlsArtifact(source, model, { profile: this.alsProfileParam(alsArgs.profile, otherProfile ?? "collaboration"), exporterVersion: PACKAGE_VERSION });
       }
-      if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 512) throw new Error("a pages side requires 1-512 complete pages");
+      if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > SEMANTIC_PROJECT_MAX_PAGES) throw new Error(`a pages side requires 1-${SEMANTIC_PROJECT_MAX_PAGES} complete pages`);
       return assembleSemanticProjectPages(value.pages as SemanticProjectPage[]);
     };
     try {
@@ -2357,7 +2449,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "no arguments accepted");
     try {
       this.requireConnected("session.read");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       const filePath = snapshot.set.filePath;
       if (typeof filePath !== "string" || filePath.length === 0) return this.successText(id, { exists: false, note: "the current set has never been saved to disk" });
       return this.successText(id, projectInfo(filePath));
@@ -2368,7 +2460,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["confirmation", "allowedRoot"]) || params.confirmation !== "backup" || !isNonEmptyString(params.allowedRoot, 4096)) return error(id, -32602, "confirmation=backup and an explicit absolute allowedRoot are required");
     try {
       this.requireConnected("session.read");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       const filePath = snapshot.set.filePath;
       if (typeof filePath !== "string" || filePath.length === 0) return this.transactionError(id, "the current set has never been saved to disk; save it through Live's UI first (save is a negotiated API limitation)");
       const manifest = projectInfo(filePath); if (!manifest.sha256 || manifest.size === undefined || manifest.mtimeMs === undefined) throw new Error("current Set manifest is unavailable");
@@ -2387,7 +2479,7 @@ export class McpHost {
     if (transaction.state !== "previewed") return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       if (snapshot.set.filePath !== transaction.payload.path) return this.transactionError(id, "the current set path changed since preview; preview again");
       const current = projectInfo(transaction.payload.path as string); const currentFence = JSON.stringify({ path: current.path, size: current.size, mtimeMs: current.mtimeMs, sha256: current.sha256 });
       if (currentFence !== transaction.fence) return this.transactionError(id, "the current Set content changed since preview; preview again");
@@ -2405,13 +2497,13 @@ export class McpHost {
     const validTypes = !isObject(params) || params.types === undefined || (Array.isArray(params.types) && params.types.length <= types.length && new Set(params.types).size === params.types.length && params.types.every((item: unknown) => typeof item === "string" && types.includes(item)));
     if (!isObject(params) || !hasOnly(params, ["types"]) || !validTypes) return error(id, -32602, "types must be a unique bounded subset of transport, object, reset");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("subscriptions")) throw new Error("subscriptions are unavailable");
       if (!(status.operations ?? []).includes("subscribe")) throw new Error("subscription operation is unavailable");
       const adapter = this.asyncAdapter();
       const subscribeArgs: Record<string, unknown> = {};
       if (params.types !== undefined) subscribeArgs.types = params.types;
-      const result = await adapter.invokeAsync({ operation: "subscribe", args: subscribeArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { subscribed?: unknown; subscriptionId?: unknown };
+      const result = await adapter.invokeAsync({ operation: "subscribe", args: subscribeArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { subscribed?: unknown; subscriptionId?: unknown };
       if (result.subscribed !== true || typeof result.subscriptionId !== "string") throw new Error("subscription was not confirmed");
       return this.successText(id, { subscribed: true, subscriptionId: result.subscriptionId, epoch: status.epoch, resnapshot: "use live_snapshot for a fresh authoritative state at any point" });
     } catch (cause) { return this.adapterToolError(id, cause, "Subscription requires a connected Live adapter."); }
@@ -2421,7 +2513,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "no arguments accepted");
     try {
       const adapter = this.asyncAdapter();
-      const result = await adapter.invokeAsync({ operation: "subscribe", args: { types: [] } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { subscribed?: unknown };
+      const result = await adapter.invokeAsync({ operation: "subscribe", args: { types: [] } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { subscribed?: unknown };
       return this.successText(id, { subscribed: result.subscribed === true });
     } catch (cause) { return this.adapterToolError(id, cause, "Unsubscribe failed."); }
   }
@@ -2431,11 +2523,11 @@ export class McpHost {
       || (params.alsoTrackRefs !== undefined && (params.action !== "start" || !Array.isArray(params.alsoTrackRefs) || params.alsoTrackRefs.length > 7 || !params.alsoTrackRefs.every((ref) => isNonEmptyString(ref, 256)) || new Set([params.destinationTrackRef, ...params.alsoTrackRefs]).size !== params.alsoTrackRefs.length + 1)) || (params.lane !== "session" && params.lane !== "arrangement") || !isNonEmptyString(params.intent, 256)) return error(id, -32602, "action, lane, and intent are required");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.lane === "session" ? "recording.session" : "recording.arrangement";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} control is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, []);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       let destinationTrackIdentity: string | null = null;
@@ -2475,12 +2567,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = await this.viewAsync(context, []);
       const transport = snapshot.playback?.transport;
       if (!reconciliation && (!transport || JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing }) !== transaction.fence)) { transaction.state = "uncertain"; return this.transactionError(id, "recording state changed since preview; preview again"); }
       if (!reconciliation && transaction.payload.action === "start") {
@@ -2509,8 +2601,8 @@ export class McpHost {
       const recordField = transaction.payload.lane === "session" ? "sessionRecord" : "arrangementRecord";
       let confirmed = false;
       while (Date.now() < context.deadlineMs - 250) {
-        const after = await adapter.snapshotAsync(context);
-        if (after.playback.transport[recordField] === expected) { confirmed = true; break; }
+        const after = await this.playbackAsync(context);
+        if (after.transport[recordField] === expected) { confirmed = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (!confirmed) throw new Error("recording change was not confirmed by fresh playback state");
@@ -2536,7 +2628,7 @@ export class McpHost {
     let authorityBudget = 0;
     let exhausted = false;
     const consumeAuthority = (amount: number): boolean => {
-      if (authorityBudget + amount > 16_384) { exhausted = true; return false; }
+      if (authorityBudget + amount > MAX_SET_COLLECTION) { exhausted = true; return false; }
       authorityBudget += amount;
       return true;
     };
@@ -2562,13 +2654,13 @@ export class McpHost {
           mixerRows.push({ ref, objectIdentity: sendIdentities[index], value: sends[index], kind: "mixer-send", sendIndex: index });
         });
         const holdsMixer = mixerRows.some((row) => wanted.has(row.ref));
-        if (holdsMixer && (!complete || mixerRows.length > 256 || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
+        if (holdsMixer && (!complete || mixerRows.length > MAX_SET_COLLECTION || !consumeAuthority(mixerRows.length))) { exhausted = true; break; }
         const siblings = mixerRows.map(({ ref, objectIdentity }) => ({ ref, objectIdentity }));
         if (holdsMixer) for (const row of mixerRows) add(row.ref, row.value, { kind: row.kind, parameterIdentity: row.objectIdentity, trackRef, trackIdentity, ...(row.sendIndex === undefined ? {} : { sendIndex: row.sendIndex }) }, { ref: row.ref, parameterIdentity: row.objectIdentity, ownerRef: trackRef, ownerIdentity: trackIdentity, trackRef, trackIdentity, siblings });
       }
       const visitDevices = (candidate: unknown): void => {
         if (exhausted) return;
-        if (!Array.isArray(candidate) || candidate.length > 256 || !candidate.every(isObject)) { exhausted = true; return; }
+        if (!Array.isArray(candidate) || candidate.length > MAX_SET_COLLECTION || !candidate.every(isObject)) { exhausted = true; return; }
         for (const device of candidate) {
           if (!consumeAuthority(1)) return;
           const deviceRef = typeof device.ref === "string" ? device.ref : undefined;
@@ -2576,7 +2668,7 @@ export class McpHost {
           const rawParameters = Array.isArray(device.parameters) ? device.parameters : [];
           const rawMacros = Array.isArray(device.macros) ? device.macros : [];
           const holds = [...rawParameters, ...rawMacros].some((row) => isObject(row) && typeof row.ref === "string" && wanted.has(row.ref));
-          const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= 256;
+          const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= MAX_SET_COLLECTION;
           if (holds && !rowsComplete) { exhausted = true; return; }
           const parameters = rawParameters as JsonObject[];
           const rows = holds ? [...parameters, ...rawMacros as JsonObject[]] : [];
@@ -2590,14 +2682,14 @@ export class McpHost {
             add(parameterRef, parameter.value, { kind, parameterIdentity, deviceRef, deviceIdentity, trackRef, trackIdentity, ...(kind === "device-parameter" ? { min: parameter.min ?? null, max: parameter.max ?? null, enabled: parameter.enabled ?? null, automatable: parameter.automatable ?? null, revision: parameter.revision ?? null } : {}) }, { ref: parameterRef, parameterIdentity, ownerRef: deviceRef, ownerIdentity: deviceIdentity, trackRef, trackIdentity, siblings });
           }
           const chains = Array.isArray(device.chains) ? device.chains : [];
-          if (chains.length > 256 || !chains.every(isObject)) { exhausted = true; return; }
+          if (chains.length > MAX_SET_COLLECTION || !chains.every(isObject)) { exhausted = true; return; }
           for (const chain of chains) { if (!consumeAuthority(1)) return; visitDevices(chain.devices); if (exhausted) return; }
           const drumPads = Array.isArray(device.drumPads) ? device.drumPads : [];
-          if (drumPads.length > 256 || !drumPads.every(isObject)) { exhausted = true; return; }
+          if (drumPads.length > MAX_SET_COLLECTION || !drumPads.every(isObject)) { exhausted = true; return; }
           for (const pad of drumPads) {
             if (!consumeAuthority(1)) return;
             const padChains = Array.isArray(pad.chains) ? pad.chains : [];
-            if (padChains.length > 256 || !padChains.every(isObject)) { exhausted = true; return; }
+            if (padChains.length > MAX_SET_COLLECTION || !padChains.every(isObject)) { exhausted = true; return; }
             for (const chain of padChains) { if (!consumeAuthority(1)) return; visitDevices(chain.devices); if (exhausted) return; }
           }
         }
@@ -2619,12 +2711,12 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["ttlMs", "channels", "parameterRefs", "sourcePorts", "outputSafety"]) || !validChannels || !validParameterRefs || !validSourcePorts || (params.ttlMs !== undefined && !isIntegerInRange(params.ttlMs, 1000, 30000))) return error(id, -32602, "channels, parameterRefs, optional ttlMs/sourcePorts, and outputSafety are invalid");
     try {
       this.validateOutputSafety(params.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.provenance !== "real-live") throw new Error("realtime control requires authoritative real-Live provenance");
       for (const operation of ["realtime.arm", "realtime.disarm", "realtime.stats"]) if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
       const ttlMs = (params.ttlMs as number | undefined) ?? 10_000;
       const parameterRefs = [...(params.parameterRefs as string[])];
-      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.asyncAdapter().snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }), parameterRefs) : [];
+      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, parameterRefs), parameterRefs) : [];
       const targetAuthorities = targets.map((target) => structuredClone(target.authority));
       const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: structuredClone(params.outputSafety as JsonObject) };
       if (params.sourcePorts !== undefined) payload.sourcePorts = structuredClone(params.sourcePorts);
@@ -2663,15 +2755,15 @@ export class McpHost {
   private async dispatchRealtimeArmApply(transaction: ClipLifecycleTransaction, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
       this.validateOutputSafety(transaction.payload.outputSafety);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || status.provenance !== "real-live" || status.epoch !== transaction.epoch) throw new Error("Live connection or provenance changed; preview again");
       const parameterRefs = transaction.payload.parameterRefs as string[];
-      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.asyncAdapter().snapshotAsync({ signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }), parameterRefs) : [];
+      const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }, parameterRefs), parameterRefs) : [];
       if (JSON.stringify({ epoch: status.epoch, registryHash: status.registryHash, operations: ["realtime.arm", "realtime.disarm", "realtime.stats"], targets }) !== transaction.fence) throw new Error("realtime control contract or parameter targets changed; preview again");
       if (signal?.aborted) throw new Error("realtime arm cancelled before dispatch");
       const args: Record<string, unknown> = { ttlMs: transaction.payload.ttlMs, channels: transaction.payload.channels, parameterRefs, targetAuthorities: targets.map((target) => target.authority), outputSafety: transaction.payload.outputSafety };
       if (transaction.payload.sourcePorts !== undefined) args.sourcePorts = transaction.payload.sourcePorts;
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.arm", args }, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.arm", args }, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: transaction.applyKey, transactionId: transaction.id }) as Record<string, unknown>;
       if (!isIntegerInRange(result.port, 1, 65535) || !isNonEmptyString(result.host, 64) || !isNonEmptyString(result.token, 128) || !Number.isInteger(result.expiresAt) || (result.expiresAt as number) <= Date.now() || !Array.isArray(result.channels) || JSON.stringify(result.channels) !== JSON.stringify(transaction.payload.channels) || !Array.isArray(result.parameterRefs) || JSON.stringify(result.parameterRefs) !== JSON.stringify(parameterRefs)) throw new Error("realtime arming was not confirmed with the requested bounded endpoint and exact targets");
       transaction.created = structuredClone(result);
       transaction.state = "applied";
@@ -2686,9 +2778,9 @@ export class McpHost {
   private async liveRealtimeDisarmAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["confirmation"]) || params.confirmation !== "disarm") return error(id, -32602, "confirmation=disarm is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.operations ?? []).includes("realtime.disarm")) throw new Error("realtime disarm is unavailable");
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.disarm", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.disarm", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as Record<string, unknown>;
       if (result.armed !== false) throw new Error("realtime disarm was not confirmed");
       return this.successText(id, { armed: false, disarmed: true });
     } catch (cause) { return this.adapterToolError(id, cause, "Realtime disarm failed; use the separately authorized emergency-stop path if playback may be active."); }
@@ -2697,9 +2789,9 @@ export class McpHost {
   private async liveRealtimeStatsAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "no arguments accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.operations ?? []).includes("realtime.stats")) throw new Error("realtime stats are unavailable");
-      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as Record<string, unknown>;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as Record<string, unknown>;
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Realtime stats require the configured loopback control plane."); }
   }
@@ -2707,7 +2799,7 @@ export class McpHost {
   private flattenDeviceRows(values: unknown): JsonObject[] {
     const flattened: JsonObject[] = [];
     const visit = (value: unknown): void => {
-      if (!isObject(value) || flattened.length >= 512) return;
+      if (!isObject(value) || flattened.length >= MAX_SET_COLLECTION) return;
       flattened.push(value);
       if (Array.isArray(value.chains)) for (const chain of value.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
       if (Array.isArray(value.drumPads)) for (const pad of value.drumPads) if (isObject(pad) && Array.isArray(pad.chains)) for (const chain of pad.chains) if (isObject(chain) && Array.isArray(chain.devices)) for (const device of chain.devices) visit(device);
@@ -2761,7 +2853,7 @@ export class McpHost {
 
   /** A chain's device authority, for loading into it: the track, the chain, and the chain's devices in order. */
   private chainDeviceAuthority(track: JsonObject, chain: JsonObject): { expectedTrackIdentity: string; chainRef: string; expectedChainIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
-    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? []) || ((chain.devices as unknown[] | undefined) ?? []).length > 256) throw new Error("chain device authority is incomplete");
+    if (!isNonEmptyString(track.objectIdentity, 256) || !isNonEmptyString(chain.ref, 256) || !isNonEmptyString(chain.objectIdentity, 256) || !Array.isArray(chain.devices ?? [])) throw new Error("chain device authority is incomplete");
     const siblings = ((chain.devices as unknown[] | undefined) ?? []).map((device) => {
       if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
       return { ref: device.ref, objectIdentity: device.objectIdentity };
@@ -2778,7 +2870,7 @@ export class McpHost {
   }
 
   private trackDeviceAuthority(track: JsonObject): { expectedTrackIdentity: string; expectedSiblings: Array<{ ref: string; objectIdentity: string }> } {
-    if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices) || track.devices.length > 256) throw new Error("track device authority is incomplete");
+    if (!isNonEmptyString(track.objectIdentity, 256) || !Array.isArray(track.devices)) throw new Error("track device authority is incomplete");
     const siblings = (track.devices as unknown[]).map((device) => {
       if (!isObject(device) || !isNonEmptyString(device.ref, 256) || !isNonEmptyString(device.objectIdentity, 256)) throw new Error("device sibling identity is incomplete");
       return { ref: device.ref, objectIdentity: device.objectIdentity };
@@ -2787,14 +2879,14 @@ export class McpHost {
   }
 
   private async deleteOwnedDeviceAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false): Promise<void> {
-    const snapshot = await adapter.snapshotAsync(context); let located: ReturnType<McpHost["deviceRow"]>;
+    const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["deviceRow"]>;
     try { located = this.deviceRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
     if (located.device.objectIdentity !== objectIdentity) throw new Error("owned device identity changed before cleanup");
     if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
     // Gone, or another device slid into its place: either way this one isn't there any more.
-    try { if (this.deviceRow(await adapter.snapshotAsync(context), reference).device.objectIdentity !== objectIdentity) return; } catch { return; }
+    try { if (this.deviceRow(await this.viewForAsync(context, [located.track.ref]), reference).device.objectIdentity !== objectIdentity) return; } catch { return; }
     throw new Error("owned device cleanup was not confirmed");
   }
 
@@ -2830,7 +2922,7 @@ export class McpHost {
     const categories = ["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"];
     if (!isObject(params) || !hasOnly(params, ["category", "query", "limit", "matchMode", "refresh"]) || (params.category !== undefined && !categories.includes(String(params.category))) || (params.query !== undefined && !isNonEmptyString(params.query, 256) && params.query !== "") || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100)) || (params.matchMode !== undefined && params.matchMode !== "ranked" && params.matchMode !== "substring") || (params.refresh !== undefined && typeof params.refresh !== "boolean")) return error(id, -32602, "category, query, limit, matchMode, and refresh are invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.search")) throw new Error("the Live Browser is unavailable");
       const adapter = this.asyncAdapter();
@@ -2839,7 +2931,7 @@ export class McpHost {
         if (params.category !== undefined) searchArgs.category = params.category;
         if (params.query !== undefined) searchArgs.query = params.query;
         if (params.limit !== undefined) searchArgs.limit = params.limit;
-        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { items?: unknown };
         return this.successText(id, { items: Array.isArray(result.items) ? result.items : [] });
       }
       const epoch = (status.epoch ?? 0) as number;
@@ -2855,7 +2947,7 @@ export class McpHost {
       } else {
         const searchArgs: Record<string, unknown> = { query: "", limit: BROWSER_SEARCH_CANDIDATE_LIMIT };
         if (params.category !== undefined) searchArgs.category = params.category;
-        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { items?: unknown };
+        const result = await adapter.invokeAsync({ operation: "browser.search", args: searchArgs }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { items?: unknown };
         if (!Array.isArray(result.items) || result.items.length > BROWSER_SEARCH_CANDIDATE_LIMIT) throw new Error("browser search returned an unbounded or malformed candidate set");
         const rows = result.items.filter(isObject).map((item) => ({ id: item.id, objectIdentity: item.objectIdentity, name: item.name, category: item.category, path: item.path, isDevice: item.isDevice }));
         if (rows.length !== result.items.length || rows.some((item) => !isNonEmptyString(item.id, 256) || !isNonEmptyString(item.objectIdentity, 256) || typeof item.name !== "string" || item.name.length > 256 || !isNonEmptyString(item.category, 64) || typeof item.path !== "string" || item.path.length > 512 || typeof item.isDevice !== "boolean")) throw new Error("browser search returned a malformed candidate set");
@@ -2912,7 +3004,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     if (signal?.aborted) return null;
     try {
-      const result = await this.batchTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const result = await this.batchTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Batch apply may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
   }
@@ -2995,7 +3087,7 @@ export class McpHost {
       const status = this.requireConnected("devices");
       if (!(status.capabilities ?? []).includes("parameters")) throw new Error("parameter capability is unavailable");
       if (!(status.operations ?? []).includes("snapshot")) throw new Error("snapshot operation is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
       const file = buildDeviceStateFile(snapshot, params.deviceRef, params.name);
       const directory = this.deviceStateDirectory(params.directory);
       const target = joinPath(directory, `${params.name}${McpHost.DEVICE_STATE_FILE_SUFFIX}`);
@@ -3014,7 +3106,7 @@ export class McpHost {
       const status = this.requireConnected("device.parameter.write");
       if (!(status.capabilities ?? []).includes("parameters")) throw new Error("parameter capability is unavailable");
       if (!(status.operations ?? []).includes("device.parameter.set")) throw new Error("device parameter writes are unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.targetDeviceRef]);
       const mode = morphKinds === 1 ? "morph" : "recall";
       const plan = planDeviceStateRecall(snapshot, file, params.targetDeviceRef, { allowPartialLayout: params.allowPartialLayout === true, ...(morphFile ? { morphFrom: { kind: "file", file: morphFile } } : params.morphFromLive === true ? { morphFrom: { kind: "live" } } : {}), ...(params.amount === undefined ? {} : { amount: params.amount }) });
       const record = await this.deviceStateTransactions.previewAsync(plan, mode, params.amount as number | undefined) as { transactionId: string; epoch: number; expiresAt: number };
@@ -3030,7 +3122,7 @@ export class McpHost {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
     if (signal?.aborted) return null;
     try {
-      const result = await this.deviceStateTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
+      const result = await this.deviceStateTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string });
       return this.successText(id, result);
     } catch (cause) { return this.adapterToolError(id, cause, "Device-state recall may be uncertain; reconcile with the exact original idempotency key and do not retry blindly."); }
   }
@@ -3158,18 +3250,18 @@ export class McpHost {
   private async liveArrangementAutomationReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "parameterRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256) || !isNonEmptyString(params.parameterRef, 256)) return error(id, -32602, "clipRef and parameterRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("arrangement.read")) throw new Error("arrangement read capability is unavailable");
       if (!(status.operations ?? []).includes("arrangement.automation.read")) throw new Error("arrangement automation read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
+      const snapshot = await this.viewForAsync(context, [params.clipRef, params.parameterRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (!located.arrangement) throw new Error("arrangement automation requires an exact Arrangement clip reference");
       if (!isNonEmptyString(located.clip.objectIdentity, 256)) throw new Error("arrangement clip identity is not authoritative");
       const parameter = this.parameterRow(snapshot, params.parameterRef as LiveRef);
       const read = await adapter.invokeAsync({ operation: "arrangement.automation.read", args: { clipRef: params.clipRef, parameterRef: params.parameterRef } }, context) as { available?: unknown; exists?: unknown; points?: unknown };
-      if (typeof read.available !== "boolean" || typeof read.exists !== "boolean" || !Array.isArray(read.points) || read.points.length > 512) throw new Error("arrangement automation read returned an unbounded or malformed result");
+      if (typeof read.available !== "boolean" || typeof read.exists !== "boolean" || !Array.isArray(read.points) || read.points.length > MAX_SET_COLLECTION) throw new Error("arrangement automation read returned an unbounded or malformed result");
       const points = read.points.filter(isObject).map((point) => ({ time: point.time, value: point.value })).filter((point) => typeof point.time === "number" && Number.isFinite(point.time) && typeof point.value === "number" && Number.isFinite(point.value)).sort((a, b) => (a.time as number) - (b.time as number));
       if (points.length !== read.points.length) throw new Error("arrangement automation points are unreadable");
       const revision = createHash("sha256").update(canonicalMutationIdentity({ clipRef: params.clipRef, clipIdentity: located.clip.objectIdentity, parameterRef: params.parameterRef, points })).digest("hex");
@@ -3198,16 +3290,16 @@ export class McpHost {
   private async liveTakeLaneReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["trackRef", "limit", "cursor"]) || !isNonEmptyString(params.trackRef, 256)) return error(id, -32602, "trackRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("takes")) throw new Error("take-lane read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.take-lane.read")) throw new Error("take-lane read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "audio.take-lane.read", args: { trackRef: params.trackRef } }, context) as { lanes?: unknown };
-      if (!Array.isArray(read.lanes) || read.lanes.length > 128) throw new Error("take-lane read returned an unbounded or malformed result");
+      if (!Array.isArray(read.lanes) || read.lanes.length > MAX_SET_COLLECTION) throw new Error("take-lane read returned an unbounded or malformed result");
       const advertised = read.lanes.filter(isObject).map((lane) => ({ ref: lane.ref, name: lane.name }));
       if (advertised.some((lane) => !isNonEmptyString(lane.ref, 256) || typeof lane.name !== "string")) throw new Error("take-lane identity is malformed");
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.viewForAsync(context, [params.trackRef]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("take-lane track identity is not authoritative");
       const laneRows = ((track.takeLanes as unknown[]) ?? []).filter(isObject);
@@ -3234,16 +3326,16 @@ export class McpHost {
   private async liveCompReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("takes")) throw new Error("comp read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.comp.read")) throw new Error("comp read is unavailable on this Live shape (the public LOM exposes no comp-region API)");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
+      const snapshot = await this.viewForAsync(context, [params.clipRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (!isNonEmptyString(located.clip.objectIdentity, 256)) throw new Error("comp read requires exact clip identity");
       const read = await adapter.invokeAsync({ operation: "audio.comp.read", args: { clipRef: params.clipRef } }, context) as { segments?: unknown };
-      if (!Array.isArray(read.segments) || read.segments.length > 512) throw new Error("comp read returned an unbounded or malformed result");
+      if (!Array.isArray(read.segments) || read.segments.length > MAX_SET_COLLECTION) throw new Error("comp read returned an unbounded or malformed result");
       const track = located.track as JsonObject | undefined;
       const laneRows = ((track?.takeLanes as unknown[]) ?? []).filter(isObject);
       const segments = read.segments.filter(isObject).map((segment) => {
@@ -3268,16 +3360,16 @@ export class McpHost {
   private async liveWarpMarkerReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "limit", "cursor"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("warp")) throw new Error("warp capability is unavailable");
       if (!(status.operations ?? []).includes("audio.warp-marker.read")) throw new Error("warp-marker read is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
+      const snapshot = await this.viewForAsync(context, [params.clipRef]);
       const located = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (located.clip.kind !== "audio" && located.clip.isAudio !== true) throw new Error("warp markers require an audio clip");
       const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: params.clipRef } }, context) as { revision?: unknown; markers?: unknown };
-      if (!isNonEmptyString(read.revision, 64) || !Array.isArray(read.markers) || read.markers.length > 256) throw new Error("warp-marker read returned an unbounded or malformed result");
+      if (!isNonEmptyString(read.revision, 64) || !Array.isArray(read.markers) || read.markers.length > MAX_SET_COLLECTION) throw new Error("warp-marker read returned an unbounded or malformed result");
       const markers = read.markers.filter(isObject).map((marker) => ({ beatTime: marker.beatTime, sampleTime: marker.sampleTime })).filter((marker) => typeof marker.beatTime === "number" && Number.isFinite(marker.beatTime) && typeof marker.sampleTime === "number" && Number.isFinite(marker.sampleTime)).sort((a, b) => (a.beatTime as number) - (b.beatTime as number));
       if (markers.length !== read.markers.length) throw new Error("warp markers are unreadable");
       const beatMonotonic = markers.every((marker, index) => index === 0 || (marker.beatTime as number) > (markers[index - 1]!.beatTime as number));
@@ -3305,11 +3397,11 @@ export class McpHost {
   private async liveBrowserInspectAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["itemId"]) || !isNonEmptyString(params.itemId, 256)) return error(id, -32602, "itemId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("browser")) throw new Error("browser capability is unavailable");
       if (!(status.operations ?? []).includes("browser.inspect")) throw new Error("browser item inspection is unavailable");
       const adapter = this.asyncAdapter();
-      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; category?: unknown; path?: unknown; isDevice?: unknown };
+      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; category?: unknown; path?: unknown; isDevice?: unknown };
       if (item.id !== params.itemId || !isNonEmptyString(item.objectIdentity, 256) || typeof item.name !== "string" || typeof item.category !== "string" || typeof item.isDevice !== "boolean") throw new Error("browser item lacks exact authoritative identity");
       // The browser-internal path (e.g. "instruments/Drum Rack") is metadata, not
       // a filesystem path; raw private paths are never returned by this surface.
@@ -3329,13 +3421,13 @@ export class McpHost {
   private async liveBrowserLoadPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["itemId", "trackRef", "chainRef"]) || !isNonEmptyString(params.itemId, 256) || (params.trackRef === undefined && params.chainRef === undefined) || (params.trackRef !== undefined && !isNonEmptyString(params.trackRef, 256)) || (params.chainRef !== undefined && !isNonEmptyString(params.chainRef, 256))) return error(id, -32602, "itemId and a trackRef or chainRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.load") || !(status.operations ?? []).includes("browser.inspect")) throw new Error("browser loading or item inspection is unavailable");
       const adapter = this.asyncAdapter();
-      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
+      const item = await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId: params.itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { id?: unknown; objectIdentity?: unknown; name?: unknown; isDevice?: unknown; path?: unknown; category?: unknown };
       if (item.id !== params.itemId || item.isDevice !== true || typeof item.name !== "string" || !isNonEmptyString(item.objectIdentity, 256)) throw new Error("browser item lacks exact track-loadable identity");
-      const snapshot = await adapter.snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.chainRef, params.trackRef]);
       // Into a rack's chain: the chain's track is the one checked, and the chain's devices are the siblings.
       const target = params.chainRef !== undefined ? this.chainOnTrack(snapshot, params.chainRef as LiveRef) : undefined;
       if (target && params.trackRef !== undefined && target.track.ref !== params.trackRef) throw new Error("browser target chain isn't on that track");
@@ -3359,19 +3451,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef, transaction.payload.chainRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
         let current: string | undefined;
         try { current = track ? JSON.stringify({ track: transaction.payload.trackRef, ...(typeof transaction.payload.chainRef === "string" ? this.chainDeviceAuthority(track, this.chainOnTrack(snapshot, transaction.payload.chainRef as LiveRef).chain) : this.trackDeviceAuthority(track)) }) : undefined; } catch { current = undefined; }
         if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || current !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "browser.load", args: transaction.payload }, context) as { loaded?: unknown; deviceRef?: unknown; deviceObjectIdentity?: unknown; createdFingerprint?: unknown };
       if (result.loaded !== true || !isNonEmptyString(result.deviceRef, 256) || !isNonEmptyString(result.deviceObjectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("browser load did not return exact created device identity");
-      const loadedSnapshot = await adapter.snapshotAsync(context);
+      const loadedSnapshot = await this.viewForAsync(context, [result.deviceRef, transaction.payload.trackRef, transaction.payload.chainRef]);
       const createdDevice = this.deviceRow(loadedSnapshot, result.deviceRef as LiveRef); if (createdDevice.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
       if (typeof transaction.payload.chainRef === "string" && createdDevice.ownerRef !== transaction.payload.chainRef) throw new Error("browser-loaded device is not in the requested chain");
       let fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device));
@@ -3381,7 +3473,7 @@ export class McpHost {
         let previous = fingerprint; let settled = false;
         for (let attempt = 0; attempt < 12 && !settled; attempt++) {
           await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-          const again = this.deviceRow(await adapter.snapshotAsync(context), result.deviceRef as LiveRef);
+          const again = this.deviceRow(await this.viewForAsync(context, [result.deviceRef, transaction.payload.trackRef]), result.deviceRef as LiveRef);
           if (again.device.objectIdentity !== result.deviceObjectIdentity) throw new Error("browser-loaded device identity was not confirmed");
           fingerprint = this.captureObjectFingerprint(ownedDeviceFingerprintRow(again.device));
           settled = fingerprint === previous; previous = fingerprint;
@@ -3407,15 +3499,15 @@ export class McpHost {
     if ((params.filePath !== undefined || params.allowedRoot !== undefined) && (params.action !== "insert" || params.deviceName !== "Simpler")) return error(id, -32602, "a sample file goes only with inserting a Simpler");
     let stagingPath: string | undefined;
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.trackRef, params.deviceRef]);
       const payload: Record<string, unknown> = { action: params.action };
       let fence = ""; let prior: Record<string, unknown> | undefined;
       if (params.action === "insert") {
         if (!(status.operations ?? []).includes("device.insert")) throw new Error("device insertion is unavailable");
         if (!isNonEmptyString(params.trackRef, 256) || !isNonEmptyString(params.deviceName, 256)) return error(id, -32602, "trackRef and deviceName are required for insert");
-        if (params.index !== undefined && (!Number.isInteger(params.index) || (params.index as number) < -1 || (params.index as number) > 256)) return error(id, -32602, "index is invalid");
+        if (params.index !== undefined && (!Number.isInteger(params.index) || (params.index as number) < -1 || (params.index as number) > MAX_SET_INDEX)) return error(id, -32602, "index is invalid");
         const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.trackRef);
         if (!track) throw new Error("track is not authoritative");
         const authority = this.trackDeviceAuthority(track);
@@ -3435,7 +3527,7 @@ export class McpHost {
         const located = this.deviceRow(snapshot, params.deviceRef as LiveRef); const { device } = located;
         if (!isNonEmptyString(device.objectIdentity, 256)) throw new Error("device object identity is unavailable");
         if (params.action === "enable" && typeof params.enabled !== "boolean") return error(id, -32602, "enabled must be boolean");
-        if (params.action === "move" && (!Number.isInteger(params.index) || (params.index as number) < 0 || (params.index as number) > 256)) return error(id, -32602, "index is invalid");
+        if (params.action === "move" && (!Number.isInteger(params.index) || (params.index as number) < 0 || (params.index as number) > MAX_SET_INDEX)) return error(id, -32602, "index is invalid");
         payload.ref = params.deviceRef; payload.expectedObjectIdentity = device.objectIdentity; payload.expectedOwnerRef = located.ownerRef; payload.expectedOwnerIdentity = located.ownerIdentity; payload.expectedSiblings = located.siblings; payload.expectedTrackRef = located.track.ref; payload.expectedTrackIdentity = located.track.objectIdentity;
         if (params.action === "enable") { if (typeof device.enabled !== "boolean") throw new Error("device enable state is unavailable"); payload.enabled = params.enabled; payload.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity({ enabled: device.enabled })).digest("hex"); prior = { enabled: device.enabled }; }
         if (params.action === "move") { payload.index = params.index; prior = { index: located.siblings.findIndex((sibling) => sibling.ref === device.ref) }; }
@@ -3458,13 +3550,13 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context);
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef, transaction.payload.ref]);
         if (action === "insert") { const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
           if (!track || JSON.stringify({ track: transaction.payload.trackRef, ...this.trackDeviceAuthority(track) }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
           if (typeof transaction.payload.samplePath === "string") {
@@ -3482,7 +3574,7 @@ export class McpHost {
       if ((action === "insert" || action === "move") && (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || (action === "insert" && !isNonEmptyString(result.createdFingerprint, 64)))) throw new Error(`device ${action} did not return exact identity`);
       if (action === "move" && result.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("device move returned a different object identity");
       transaction.created = result;
-      if (action === "insert") { const createdDevice = this.deviceRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
+      if (action === "insert") { const createdDevice = this.deviceRow(await this.viewForAsync(context, [result.ref, transaction.payload.trackRef]), result.ref as LiveRef); if (createdDevice.device.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(ownedDeviceFingerprintRow(createdDevice.device)) !== result.createdFingerprint) throw new Error("inserted device identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
@@ -3513,16 +3605,16 @@ export class McpHost {
       const value = params[field];
       if (value === undefined) continue;
       if (field === "mute" || field === "solo") { if (typeof value !== "boolean") return error(id, -32602, `${field} must be boolean`); }
-      else if (field === "sends") { if (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) return error(id, -32602, "sends must be 0-1 values"); }
+      else if (field === "sends") { if (!Array.isArray(value) || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1)) return error(id, -32602, "sends must be 0-1 values"); }
       else if (typeof value !== "number" || !Number.isFinite(value) || (field === "pan" ? Math.abs(value) > 1 : (value < 0 || value > 1))) return error(id, -32602, `${field} is out of bounds`);
       proposed[field] = value;
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("mixer.set")) throw new Error("mixer editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
       const target = this.mixerTarget(snapshot, params.trackRef as LiveRef); const mixer = target.mixer;
       if (Array.isArray(proposed.sends) && (proposed.sends as unknown[]).length > (mixer.sends as unknown[]).length) throw new Error("track has fewer sends than proposed");
       if (proposed.cueVolume !== undefined && mixer.cueRef === null) throw new Error("cue volume is unavailable on this track");
@@ -3545,7 +3637,7 @@ export class McpHost {
     for (const field of fields) {
       const value = source[field];
       if (typeof value === "string" && value.length <= 32) display[field] = value;
-      else if (Array.isArray(value) && value.length <= 64 && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
+      else if (Array.isArray(value) && value.every((item) => item === null || (typeof item === "string" && item.length <= 32))) display[field] = value;
     }
     return Object.keys(display).length ? display : undefined;
   }
@@ -3559,17 +3651,17 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const target = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); const mixer = target.mixer;
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const target = this.mixerTarget(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!); const mixer = target.mixer;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: target.track.objectIdentity, mixer }) !== transaction.fence) return this.transactionError(id, "mixer target or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("mixer change was not confirmed");
-      const verified = this.mixerTarget(await adapter.snapshotAsync(context), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
+      const verified = this.mixerTarget(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       const display = this.mixerDisplays(verified.mixer, Object.keys(transaction.prior ?? {}));
@@ -3585,7 +3677,7 @@ export class McpHost {
     if (params.view !== undefined && !isNonEmptyString(params.view, 64)) return error(id, -32602, "view must be a 1-64 character string");
     if (params.action !== undefined && !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = (params.view !== undefined && params.action === undefined) ? "view.set" : "view.control";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
@@ -3596,12 +3688,12 @@ export class McpHost {
         proposed.action = params.action;
         if (params.action === "collapse-track" || params.action === "expand-track") {
           if (!isNonEmptyString(params.trackRef, 256)) return error(id, -32602, "trackRef is required for track collapse actions");
-          const snapshot = await this.asyncAdapter().snapshotAsync();
+          const snapshot = await this.viewAsync(undefined, [], ["tracks"]);
           if (!(snapshot.tracks as unknown as JsonObject[]).some((candidate) => candidate.ref === params.trackRef)) throw new Error("track reference is unknown");
           proposed.trackRef = params.trackRef;
         }
       }
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       const prior = { view: snapshot.view ?? null };
       const fence = JSON.stringify({ operation, proposed, epoch: status.epoch });
       const transaction: ClipLifecycleTransaction = { id: `view_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "view", fence, payload: { operation, ...proposed }, prior, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -3619,11 +3711,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const operation = transaction.payload.operation;
       if (operation !== "view.set" && operation !== "view.control") return this.transactionError(id, "view transaction payload is invalid");
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "operation"));
@@ -3643,11 +3735,11 @@ export class McpHost {
     if (params.direction !== undefined && params.direction !== "next" && params.direction !== "previous") return error(id, -32602, "direction must be next or previous");
     if (params.ref !== undefined && !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (params.ref !== undefined) {
         if (!(status.operations ?? []).includes("locator.jump-to")) throw new Error("locator jump-to is unavailable");
-        const snapshot = await this.asyncAdapter().snapshotAsync();
+        const snapshot = await this.viewAsync(undefined, [], ["arrangement", "playback"]);
         const locator = (snapshot.arrangement.locators ?? []).find((candidate) => candidate.ref === params.ref);
         if (!locator || !isNonEmptyString(locator.objectIdentity, 256)) return this.transactionError(id, "locator reference is unknown");
         const collectionRevision = createHash("sha256").update(canonicalMutationIdentity(snapshot.arrangement.locators)).digest("hex");
@@ -3658,7 +3750,7 @@ export class McpHost {
         return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, ref: params.ref, target: locator.position, impact: "moves-playhead", confirmation: "apply", expiresAt: transaction.expiresAt });
       }
       if (!(status.operations ?? []).includes("locator.jump")) throw new Error("locator jump is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["arrangement", "playback"]);
       const position = (snapshot.playback.transport.position ?? 0) as number;
       const times = ((snapshot.arrangement.locators ?? []) as Array<{ position?: unknown }>).map((locator) => locator.position).filter((value): value is number => typeof value === "number" && Number.isFinite(value)).sort((a, b) => a - b);
       const target = params.direction === "next" ? times.find((time) => time > position + 1e-9) ?? null : [...times].reverse().find((time) => time < position - 1e-9) ?? null;
@@ -3678,13 +3770,13 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewAsync(context, [], ["arrangement", "playback"]);
         if (transaction.payload.jumpTo === true) {
           const locator = (snapshot.arrangement.locators ?? []).find((candidate) => candidate.ref === transaction.payload.ref);
           const fence = JSON.stringify({ ref: transaction.payload.ref, objectIdentity: locator?.objectIdentity, locators: (snapshot.arrangement.locators ?? []).map((item) => item.position) });
@@ -3733,10 +3825,10 @@ export class McpHost {
     if (params.grooveRef !== undefined) proposed.grooveRef = params.grooveRef;
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one clip field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.set")) throw new Error("clip editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio === true && Object.keys(proposed).some((field) => field === "looping" || field === "loopStart" || field === "loopEnd")) return this.transactionError(id, "audio clip loop editing uses live_audio_clip_preview");
       if (row.clip.isAudio === true && proposed.velocityAmount !== undefined) return this.transactionError(id, "velocityAmount is only available on MIDI clips");
@@ -3765,18 +3857,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["muted", "colorIndex", "looping", "loopStart", "loopEnd", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount"] as const;
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "clip identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "clip.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("clip change was not confirmed");
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && verified[field] !== transaction.payload[field]) throw new Error("clip postcondition was not confirmed");
+      const verified = this.clipRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && verified[field] !== transaction.payload[field]) throw new Error("clip postcondition was not confirmed");
       if (Object.prototype.hasOwnProperty.call(transaction.payload, "grooveRef")) { const observedRef = (verified.groove as { ref?: unknown } | null | undefined)?.ref ?? null; if (observedRef !== transaction.payload.grooveRef) throw new Error("clip groove assignment was not confirmed"); }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -3892,7 +3984,7 @@ export class McpHost {
     const adapter = this.asyncAdapter(); const deadline = Date.now() + 8_000;
     for (const itemId of itemIds) {
       for (;;) {
-        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); break; }
+        try { await adapter.invokeAsync({ operation: "browser.inspect", args: { itemId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); break; }
         catch (cause) { if (Date.now() > deadline) throw new Error("drum pad loading into Drum Sampler timed out waiting for Live's Browser to see the preset; try again or use Simpler", { cause }); }
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -4034,7 +4126,7 @@ export class McpHost {
   private async liveAudioImportPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["filePath", "allowedRoot", "trackRef", "sceneIndex", "takeLaneRef", "position", "name"])) return error(id, -32602, "filePath and allowedRoot plus a Session (trackRef, sceneIndex) or take-lane (takeLaneRef, position) destination are required");
     if (params.takeLaneRef !== undefined && (params.trackRef !== undefined || params.sceneIndex !== undefined)) return error(id, -32602, "takeLaneRef is mutually exclusive with trackRef/sceneIndex");
-    if (params.takeLaneRef === undefined && (!Number.isInteger(params.sceneIndex) || (params.sceneIndex as number) < 0 || (params.sceneIndex as number) > 10000)) return error(id, -32602, "sceneIndex is invalid");
+    if (params.takeLaneRef === undefined && (!Number.isInteger(params.sceneIndex) || (params.sceneIndex as number) < 0 || (params.sceneIndex as number) > MAX_SET_INDEX)) return error(id, -32602, "sceneIndex is invalid");
     if (params.takeLaneRef !== undefined && (!isNonEmptyString(params.takeLaneRef, 256) || typeof params.position !== "number" || !Number.isFinite(params.position) || params.position < 0)) return error(id, -32602, "takeLaneRef and position are required for a take-lane import");
     if (params.name !== undefined && !isNonEmptyString(params.name, 256)) return error(id, -32602, "name is invalid");
     try {
@@ -4043,11 +4135,11 @@ export class McpHost {
       // The staged copy is transaction-owned: every preview exit that does not
       // retain a transaction must release it, or the bytes leak in $TMPDIR.
       try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (params.takeLaneRef !== undefined) {
         if (!(status.operations ?? []).includes("take-lane.audio-clip.create")) throw new Error("take-lane audio import is unavailable");
-        const snapshot = await this.asyncAdapter().snapshotAsync();
+        const snapshot = await this.viewForAsync(undefined, [params.takeLaneRef]);
         const lane = this.takeLaneRow(snapshot, params.takeLaneRef as LiveRef);
         if (!isNonEmptyString(lane.lane.objectIdentity, 256)) throw new Error("take-lane identity is not authoritative");
         const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity }));
@@ -4058,7 +4150,7 @@ export class McpHost {
         return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, takeLaneRef: params.takeLaneRef, position: params.position, file: { path: authority.canonicalPath, size: authority.size, sha256: authority.sha256 }, impact: "creates-take-lane-audio-clip-no-undo", confirmation: "apply", expiresAt: transaction.expiresAt });
       }
       if (!(status.operations ?? []).includes("session.audio-clip.create")) throw new Error("session audio import is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
       const slot = (track.clipSlots as unknown[] ?? []).filter(isObject).find((candidate) => candidate.sceneIndex === params.sceneIndex);
@@ -4083,7 +4175,7 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const previewFile = (transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string } }).file;
@@ -4093,15 +4185,15 @@ export class McpHost {
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, previewFile);
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation && transaction.payload.takeLaneRef !== undefined) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewForAsync(context, [transaction.payload.takeLaneRef]);
         const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef);
         const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity }));
         if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "take lane or its clips changed since preview; preview again"); }
       }
       if (!reconciliation && transaction.payload.takeLaneRef === undefined) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef]);
         const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.trackRef);
         const slot = track && ((track.clipSlots as unknown[]) ?? []).filter(isObject).find((candidate) => candidate.sceneIndex === transaction.payload.sceneIndex);
         const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.index === transaction.payload.sceneIndex);
@@ -4114,7 +4206,7 @@ export class McpHost {
       // Verify the returned ref, destination, identity, and file in a fresh
       // snapshot (and that the ref resolves mapper-side) before marking the
       // transaction applied; the created fingerprint is fenced again at undo.
-      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      const verifiedSnapshot = await this.viewForAsync(context, [result.ref, transaction.payload.trackRef, transaction.payload.takeLaneRef]);
       const located = this.clipRow(verifiedSnapshot, result.ref as LiveRef);
       if (located.clip.objectIdentity !== result.objectIdentity) throw new Error("created clip identity was not confirmed by a fresh snapshot");
       if (!isNonEmptyString(located.clip.filePath, 1024)) throw new Error("created clip file was not confirmed by a fresh snapshot");
@@ -4144,15 +4236,15 @@ export class McpHost {
     if (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime)) return error(id, -32602, "beatTime is invalid");
     if (params.action === "move" && (typeof params.distance !== "number" || !Number.isFinite(params.distance))) return error(id, -32602, "distance is required for move");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "add" ? "audio.warp-marker.add" : params.action === "move" ? "audio.warp-marker.move" : "audio.warp-marker.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.kind !== "audio" && row.clip.isAudio !== true) return this.transactionError(id, "warp markers require an audio clip");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: params.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }>; revision?: string };
       const markers = Array.isArray(read.markers) ? read.markers : [];
       const beats = new Set(markers.map((marker) => marker.beatTime));
@@ -4183,14 +4275,14 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
         const before = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: transaction.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewForAsync(context, [transaction.clipRef]);
         if (JSON.stringify({ ref: transaction.clipRef, markers: before.markers ?? [], authorityDigest: this.clipAuthorityDigest(snapshot, transaction.clipRef!), collectionRevision: this.warpMarkerCollectionRevision(before.markers ?? []) }) !== transaction.fence) return this.transactionError(id, "warp markers or clip hierarchy changed since preview; preview again");
       }
       const action = transaction.payload.action as string;
@@ -4214,10 +4306,10 @@ export class McpHost {
     const actions = ["crop", "duplicate-loop", "duplicate-region", "scrub-start", "scrub-stop", "move-playing-position"] as const;
     if (!isObject(params) || !hasOnly(params, ["clipRef", "action", "regionStart", "regionEnd", "destination", "offset"]) || !isNonEmptyString(params.clipRef, 256) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "clipRef and a valid action are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.action")) throw new Error("clip actions are unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       const payload: Record<string, unknown> = { ref: params.clipRef, action: params.action };
       if (params.action === "duplicate-region") {
@@ -4252,19 +4344,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         const state = { isPlaying: row.clip.isPlaying ?? null, length: row.clip.length ?? null, loopStart: row.clip.loopStart ?? null, loopEnd: row.clip.loopEnd ?? null };
         const contentFingerprint = ["crop", "duplicate-loop", "duplicate-region"].includes(transaction.payload.action as string) ? this.captureObjectFingerprint(row.clip) : null;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, state, contentFingerprint }) !== transaction.fence) return this.transactionError(id, "clip identity, state, or content changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "clip.action", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("clip action was not confirmed");
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip;
+      const verified = this.clipRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).clip;
       const action = transaction.payload.action as string; const verifiedLength = verified.length as number; const prior = transaction.prior as { length: number; playingPosition: number | null; loopStart: number | null; loopEnd: number | null };
       // Verify the documented outcome of each action instead of an assumed
       // length formula: cropping lands on the loop extent (a full-loop crop
@@ -4293,16 +4385,16 @@ export class McpHost {
     const actions = ["quantize", "quantize-pitch", "duplicate"] as const;
     if (!isObject(params) || !hasOnly(params, ["clipRef", "action", "noteIds", "grid", "amount", "pitch"]) || !isNonEmptyString(params.clipRef, 256) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "clipRef and a valid action are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "duplicate" ? "note.duplicate" : "note.quantize";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const clip = this.noteClip(snapshot, params.clipRef as LiveRef);
       const present = new Set(clip.notes.map((note) => note.id).filter((value) => typeof value === "number"));
       const payload: Record<string, unknown> = { ref: params.clipRef, expectedClipAuthority: clip.authority, expectedNotesRevision: clip.notesRevision };
       if (params.action === "duplicate") {
-        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 512 || new Set(params.noteIds).size !== params.noteIds.length || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-512 unique non-negative integers");
+        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || new Set(params.noteIds).size !== params.noteIds.length || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more unique non-negative integers");
         if ((params.noteIds as number[]).some((noteId) => !present.has(noteId))) return this.transactionError(id, "note id is not present in the clip");
         payload.noteIds = [...(params.noteIds as number[])];
       } else {
@@ -4330,20 +4422,20 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const beforeCount = (transaction.prior as { notes: unknown[] }).notes.length;
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const current = this.noteClip(snapshot, transaction.clipRef!);
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const current = this.noteClip(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, notes: current.notes, notesRevision: current.notesRevision, authority: current.authority }) !== transaction.fence) return this.transactionError(id, "clip identity or notes changed since preview; preview again"); }
       const action = transaction.payload.action as string;
       const operation = action === "duplicate" ? "note.duplicate" : "note.quantize";
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
       const result = await adapter.invokeAsync({ operation, args }, context) as Record<string, unknown>;
-      const verified = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef!);
+      const verified = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!);
       if (action === "duplicate") {
         if (result.duplicated !== (transaction.payload.noteIds as number[]).length || verified.notes.length !== beforeCount + (transaction.payload.noteIds as number[]).length) throw new Error("note duplication postcondition was not confirmed");
         transaction.created = { duplicatedIds: verified.notes.map((note) => note.id).filter((noteId) => typeof noteId === "number" && !(transaction.prior as { notes: Array<{ id?: unknown }> }).notes.some((prior) => prior.id === noteId)) };
@@ -4380,12 +4472,12 @@ export class McpHost {
    * Byte-identical to captureObjectFingerprint within its limits. */
   private captureBoundedFingerprint(value: unknown): string {
     const canonical = (item: unknown, depth: number): string => {
-      if (depth > 16) throw new Error("clip content is too deeply nested");
+      if (depth > 256) throw new Error("clip content is too deeply nested");
       if (item === null || typeof item === "boolean") return JSON.stringify(item);
       if (typeof item === "number") { if (!Number.isFinite(item)) throw new Error("clip content contains a non-finite number"); return JSON.stringify(Object.is(item, -0) ? 0 : item); }
-      if (typeof item === "string") { if (item.length > 16384) throw new Error("clip content string is too large"); return JSON.stringify(item); }
-      if (Array.isArray(item)) { if (item.length > 4096) throw new Error("clip content array exceeds its authoritative bound"); return `[${item.map((entry) => canonical(entry, depth + 1)).join(",")}]`; }
-      if (isObject(item)) { const keys = Object.keys(item); if (keys.length > 256) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
+      if (typeof item === "string") { if (item.length > 1_048_576) throw new Error("clip content string is too large"); return JSON.stringify(item); }
+      if (Array.isArray(item)) { if (item.length > MAX_SET_COLLECTION) throw new Error("clip content array exceeds its authoritative bound"); return `[${item.map((entry) => canonical(entry, depth + 1)).join(",")}]`; }
+      if (isObject(item)) { const keys = Object.keys(item); if (keys.length > MAX_SET_COLLECTION) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical((item as Record<string, unknown>)[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
     return createHash("sha256").update(canonical(withoutPlaybackState(value), 0)).digest("hex");
@@ -4401,9 +4493,9 @@ export class McpHost {
       if (depth > 8) throw new Error("clip content is too deeply nested");
       if (value === null || typeof value === "boolean") return JSON.stringify(value);
       if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("clip content contains a non-finite number"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-      if (typeof value === "string") { if (value.length > 16384) throw new Error("clip content string is too large"); return JSON.stringify(value); }
-      if (Array.isArray(value)) { if (value.length > 4096) throw new Error("clip content array exceeds its authoritative bound"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
-      if (typeof value === "object" && value !== null) { const record = value as Record<string, unknown>; const keys = Object.keys(record); if (keys.length > 64) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key], depth + 1)}`).join(",")}}`; }
+      if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("clip content string is too large"); return JSON.stringify(value); }
+      if (Array.isArray(value)) { if (value.length > MAX_SET_COLLECTION) throw new Error("clip content array exceeds its authoritative bound"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
+      if (typeof value === "object" && value !== null) { const record = value as Record<string, unknown>; const keys = Object.keys(record); if (keys.length > 1_000_000) throw new Error("clip content object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key], depth + 1)}`).join(",")}}`; }
       throw new Error("clip content contains an unsupported value");
     };
     return createHash("sha256").update(canonical({
@@ -4472,7 +4564,7 @@ export class McpHost {
       const field = step.operation === "note.delete" ? "noteIds" : "notes";
       const recorded = plan !== undefined && plan.length > index && plan[index]!.operation === step.operation && JSON.stringify(plan[index]!.args[field]) === JSON.stringify(step.items) ? plan[index] : undefined;
       if (recorded?.completed) continue;
-      const fresh = this.noteClip(await adapter.snapshotAsync(context), clipRef);
+      const fresh = this.noteClip(await this.viewForAsync(context, [clipRef]), clipRef);
       const currentDigest = digestOf(fresh.notes);
       if (currentDigest === this.notePlanInterimDigest(initialNotes, steps, index + 1, idBound)) {
         if (recorded) recorded.completed = true;
@@ -4568,13 +4660,14 @@ export class McpHost {
     const generative = GENERATIVE_TRANSFORMS.includes(transform);
     const probe = midiExpressionProbe();
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.midi_note.write") || !(status.capabilities ?? []).includes("session.midi_note.read")) throw new Error("midi note read/write capability is unavailable");
       for (const operation of ["snapshot", "note.update", "note.delete", "note.add-batch"]) if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
       const scope = params.scope === undefined ? undefined : params.scope as "in-place" | "duplicate";
       if (scope === "in-place" && generative && !probe.deleteRecreatePreservesExpression) return this.transactionError(id, "Generative transforms delete and recreate notes, which cannot preserve per-note expression the canonical schema does not expose; use duplicate scope so the source clip is preserved");
       if (scope === "duplicate" && !isObject(params.target)) return error(id, -32602, "duplicate scope requires an exact target {trackRef, sceneIndex} naming an empty Session slot");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      // A drum pattern without a mapping finds one from the drum racks anywhere in the Set.
+      const snapshot = transform === "drum-pattern" && (params.params as Record<string, unknown>).mapping === undefined ? await this.wholeSetAsync(undefined, TRACK_CONTENT_PARTS) : await this.viewForAsync(undefined, [params.clipRef, isObject(params.target) ? params.target.trackRef : undefined]);
       const clip = this.noteClip(snapshot, params.clipRef as LiveRef);
       if (clip.notes.some((note) => typeof note.id !== "number")) throw new Error("stable note identity is unavailable for this clip");
       let resolvedParams = params.params as Record<string, unknown>;
@@ -4589,7 +4682,7 @@ export class McpHost {
       catch (cause) { return error(id, -32602, cause instanceof Error ? cause.message : "invalid transform parameters"); }
       const diff = diffNotes(clip.notes as never, outcome.notes as never);
       if (diff.add.length + diff.update.length + diff.delete.length === 0) return this.transactionError(id, "transform produced no changes");
-      if (diff.add.length + clip.notes.length - diff.delete.length > 2048) return this.transactionError(id, "transform result exceeds the bounded 2048-note limit");
+      if (diff.add.length + clip.notes.length - diff.delete.length > MIDI_TRANSFORM_MAX_NOTES) return this.transactionError(id, `transform result exceeds the bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit`);
       const largeEdit = diff.update.length > MIDI_TRANSFORM_LARGE_UPDATE_THRESHOLD;
       const effectiveScope = scope ?? (generative || largeEdit ? "duplicate" : "in-place");
       if (effectiveScope === "in-place" && generative) return this.transactionError(id, "Generative transforms default to duplicate scope; request an exact duplicate target");
@@ -4638,21 +4731,21 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.midi_note.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const scope = transaction.payload.scope as string;
       const diff = transaction.payload.diff as { add: Array<Record<string, unknown>>; update: Array<Record<string, unknown>>; delete: number[] };
       if (scope === "in-place") {
-        if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const current = this.noteClip(snapshot, transaction.clipRef!);
+        if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const current = this.noteClip(snapshot, transaction.clipRef!);
           if (JSON.stringify({ ref: transaction.clipRef, notes: current.notes, notesRevision: current.notesRevision, authority: current.authority }) !== JSON.stringify({ ref: transaction.clipRef, notes: (transaction.prior as { notes: unknown[] }).notes, notesRevision: transaction.payload.sourceRevision, authority: transaction.payload.authority })) return this.transactionError(id, "clip identity or notes changed since preview; preview again"); }
         transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
         const initialNotes = (transaction.prior as { notes: Array<Record<string, unknown>> }).notes;
         const steps = this.buildNotePlanFromDiff(diff);
         await this.executeNotePlan(transaction, adapter, context, transaction.clipRef!, steps, initialNotes, true);
-        const verified = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef!);
+        const verified = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!);
         if (noteIdentityDigest(verified.notes) !== transaction.payload.expectedResultIdentity) throw new Error("MIDI transform postcondition was not confirmed");
         this.undoRecoveryPlans.delete(transaction);
         transaction.state = "applied";
@@ -4660,7 +4753,7 @@ export class McpHost {
       }
       const target = transaction.payload.target as Record<string, unknown> | null;
       if (!target) return this.transactionError(id, "Duplicate-scope transform lacks exact target authority");
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.viewForAsync(context, [transaction.clipRef, target.trackRef, target.slotRef]);
       if (!reconciliation) {
         const current = this.noteClip(snapshot, transaction.clipRef!);
         const targetTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === target.trackRef);
@@ -4676,9 +4769,9 @@ export class McpHost {
         duplicateRef = duplicate.ref; duplicateIdentity = duplicate.objectIdentity;
         transaction.created = { ref: duplicateRef, objectIdentity: duplicateIdentity, fingerprint: typeof duplicate.createdFingerprint === "string" ? duplicate.createdFingerprint : undefined };
       }
-      const duplicateRow = this.clipRow(await adapter.snapshotAsync(context), duplicateRef as LiveRef);
+      const duplicateRow = this.clipRow(await this.viewForAsync(context, [duplicateRef, target.trackRef, target.slotRef]), duplicateRef as LiveRef);
       if (duplicateRow.clip.objectIdentity !== duplicateIdentity) throw new Error("transform duplicate identity changed since creation");
-      const duplicateClip = this.noteClip(await adapter.snapshotAsync(context), duplicateRef as LiveRef);
+      const duplicateClip = this.noteClip(await this.viewForAsync(context, [duplicateRef, target.trackRef, target.slotRef]), duplicateRef as LiveRef);
       // Persist the duplicate's initial note set exactly once: reconciliation
       // resumes the ORIGINAL plan against it instead of re-transforming partial
       // output.
@@ -4688,7 +4781,7 @@ export class McpHost {
       const plan = this.buildNotePlanFromDiff(diffNotes(initial as never, transformed.notes as never) as never);
       try {
         await this.executeNotePlan(transaction, adapter, context, duplicateRef as LiveRef, plan, initial, false);
-        const verifiedSnapshot = await adapter.snapshotAsync(context);
+        const verifiedSnapshot = await this.viewForAsync(context, [duplicateRef, target.trackRef, target.slotRef]);
         const verified = this.noteClip(verifiedSnapshot, duplicateRef as LiveRef);
         if (this.canonicalNoteContent(verified.notes) !== transaction.payload.expectedResultContent) throw new Error("duplicate transform postcondition was not confirmed");
         // Cleanup authority fingerprints the verified post-transform content: the
@@ -4712,15 +4805,15 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "noteIds", "selected"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     if (params.noteIds !== undefined && params.selected === true) return error(id, -32602, "noteIds and selected are mutually exclusive");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const adapter = this.asyncAdapter();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       if (params.selected === true) {
         if (!(status.operations ?? []).includes("note.read-selected")) throw new Error("selected note reads are unavailable");
         return this.successText(id, await adapter.invokeAsync({ operation: "note.read-selected", args: { ref: params.clipRef } }, context));
       }
-      if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 1024 || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-1024 non-negative integers (or selected=true)");
+      if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more non-negative integers (or selected=true)");
       if (!(status.operations ?? []).includes("note.read-by-id")) throw new Error("targeted note reads are unavailable");
       return this.successText(id, await adapter.invokeAsync({ operation: "note.read-by-id", args: { ref: params.clipRef, noteIds: params.noteIds } }, context));
     } catch (cause) { return this.adapterToolError(id, cause, "Note read requires fresh authoritative state."); }
@@ -4732,13 +4825,13 @@ export class McpHost {
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one tuning field is required");
     if (params.noteTunings !== undefined && (!Array.isArray(params.noteTunings) || params.noteTunings.length !== 128 || !params.noteTunings.every((row) => isObject(row) && hasOnly(row, ["note", "deviation"]) && Number.isInteger(row.note) && (row.note as number) >= 0 && (row.note as number) <= 127 && typeof row.deviation === "number" && Number.isFinite(row.deviation) && Math.abs(row.deviation) <= 1200))) return error(id, -32602, "noteTunings must contain exactly 128 valid entries");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("tuning.read") || !(status.operations ?? []).includes("tuning.set")) throw new Error("tuning editing is unavailable");
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "tuning.read", args: { setRef: snapshot.set.ref } }, context) as { tuningSystem?: unknown; scale?: unknown; revision?: unknown };
       if (!isNonEmptyString(read.revision, 64)) throw new Error("tuning revision is unavailable");
       const proposed: Record<string, unknown> = {};
@@ -4760,13 +4853,13 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewAsync(context, [], ["set"]);
         const before = await adapter.invokeAsync({ operation: "tuning.read", args: { setRef: transaction.payload.setRef } }, context) as { revision?: unknown };
         if (JSON.stringify({ setRef: transaction.payload.setRef, identity: snapshot.set.objectIdentity, revision: before.revision }) !== transaction.fence) return this.transactionError(id, "tuning or scale state changed since preview; preview again");
       }
@@ -4789,14 +4882,14 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "grooveAmount", "grooveRef", "name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"])) return error(id, -32602, "action is required");
     if (params.action !== "set-amount" && params.action !== "edit") return error(id, -32602, "action must be set-amount or edit");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "set-amount" ? "groove.set" : "groove.edit";
       if (!(status.operations ?? []).includes(operation) || !(status.operations ?? []).includes("groove.read")) throw new Error(`${operation} is unavailable`);
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const read = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>>; revision?: unknown };
       if (!isNonEmptyString(read.revision, 64)) throw new Error("groove revision is unavailable");
       let payload: Record<string, unknown>;
@@ -4840,13 +4933,13 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewAsync(context, [], ["set"]);
         const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown };
         if (JSON.stringify({ action: transaction.payload.action, payload: transaction.payload, revision: before.revision }) !== transaction.fence) return this.transactionError(id, "groove state changed since preview; preview again");
       }
@@ -4856,7 +4949,7 @@ export class McpHost {
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
       const result = await adapter.invokeAsync({ operation, args }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("groove change was not confirmed");
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.viewAsync(context, [], ["set"]);
       const verified = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { grooveAmount?: unknown; grooves?: Array<Record<string, unknown>>; revision?: unknown };
       if (action === "set-amount") {
         if (!sameLiveValue(verified.grooveAmount, transaction.payload.grooveAmount)) throw new Error("groove amount postcondition was not confirmed");
@@ -4896,10 +4989,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one scene field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("scene.set")) throw new Error("scene editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["scenes"]);
       const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
       const prior: Record<string, unknown> = {};
@@ -4925,18 +5018,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["colorIndex", "tempo", "tempoEnabled", "signatureNumerator", "signatureDenominator", "timeSignatureEnabled"];
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["scenes"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!scene || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: scene.objectIdentity, state: fields.map((field) => scene[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "scene identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "scene.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("scene change was not confirmed");
-      const verified = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === transaction.payload.ref);
+      const verified = (await this.viewAsync(context, [], ["scenes"])).scenes.find((candidate) => candidate.ref === transaction.payload.ref);
       if (!verified) throw new Error("edited scene disappeared after apply");
       for (const field of fields) if (transaction.payload[field] !== undefined && (verified as unknown as JsonObject)[field] !== transaction.payload[field]) throw new Error("scene postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
@@ -4948,10 +5041,10 @@ export class McpHost {
   private async liveSceneFirePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("scene.fire-selected")) throw new Error("scene fire-as-selected is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["scenes", "playback"]);
       const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is not authoritative");
       // An empty scene (Live's Scene.is_empty) plays nothing: launching it only stops what's playing, so there'd be no launch to confirm.
@@ -4976,12 +5069,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["scenes", "playback"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const fireState = { isTriggered: scene?.isTriggered ?? null, playing: snapshot.playback.transport.playing };
         if (!scene || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: scene.objectIdentity, fireState }) !== transaction.fence) return this.transactionError(id, "scene identity or fire state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -4995,7 +5088,7 @@ export class McpHost {
       // Live applies the launch on its next tick (about 100 ms), after the bridge has answered.
       for (let attempt = 0; attempt < 8 && !confirmed; attempt += 1) {
         if (attempt > 0) await this.waitFor(200);
-        const verified = await adapter.snapshotAsync(context);
+        const verified = await this.viewAsync(context, [], ["scenes", "playback"]);
         const scene = (verified.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const targets = [...(verified.playback.firedTargets ?? []), ...(verified.playback.playingTargets ?? [])] as unknown as JsonObject[];
         confirmed = scene?.isTriggered === true || verified.playback.transport.playing === true || targets.some((target) => target.sceneRef === transaction.payload.ref);
@@ -5014,12 +5107,12 @@ export class McpHost {
     if (params.conversion !== undefined && !conversions.includes(params.conversion as typeof conversions[number])) return error(id, -32602, "conversion is invalid");
     if (params.smpteFormat !== undefined && !smpteFormats.includes(params.smpteFormat as typeof smpteFormats[number])) return error(id, -32602, "smpteFormat is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("song.read")) throw new Error("song state reads are unavailable");
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const state = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as Record<string, unknown>;
       if (params.conversion !== undefined && (status.operations ?? []).includes("song.time-convert")) {
         const args: Record<string, unknown> = { setRef: snapshot.set.ref, query: params.conversion };
@@ -5033,12 +5126,12 @@ export class McpHost {
   private async livePerformanceReadAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (params !== undefined && (!isObject(params) || Object.keys(params).length > 0)) return error(id, -32602, "no arguments are accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("performance.read")) throw new Error("performance reads are unavailable");
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
-      return this.successText(id, await adapter.invokeAsync({ operation: "performance.read", args: { setRef: snapshot.set.ref } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
+      return this.successText(id, await adapter.invokeAsync({ operation: "performance.read", args: { setRef: snapshot.set.ref } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Performance read requires a fresh connection."); }
   }
 
@@ -5048,10 +5141,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "beatTime"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     if ((params.action === "force-link-beat-time" || params.action === "scrub") && (typeof params.beatTime !== "number" || !Number.isFinite(params.beatTime))) return error(id, -32602, `beatTime is required for ${params.action === "scrub" ? "the scrub distance" : "force-link-beat-time"}`);
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("transport.action")) throw new Error("transport actions are unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set", "playback"]);
       if (!isNonEmptyString(snapshot.set.objectIdentity, 256) || !isNonEmptyString(snapshot.playback.revision, 128)) throw new Error("transport identity is not authoritative");
       const payload: Record<string, unknown> = { setRef: snapshot.set.ref, action: params.action, ...(params.beatTime !== undefined ? { beatTime: params.beatTime } : {}), expectedObjectIdentity: snapshot.set.objectIdentity, expectedRevision: snapshot.playback.revision };
       const fence = JSON.stringify({ setRef: snapshot.set.ref, identity: snapshot.set.objectIdentity, playbackRevision: snapshot.playback.revision });
@@ -5070,12 +5163,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["set", "playback"]);
         if (JSON.stringify({ setRef: transaction.payload.setRef, identity: snapshot.set.objectIdentity, playbackRevision: snapshot.playback.revision }) !== transaction.fence) return this.transactionError(id, "transport state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "transport.action", args: transaction.payload }, context) as { done?: unknown; revision?: unknown };
@@ -5091,11 +5184,11 @@ export class McpHost {
     const actions = ["create-return", "delete-return", "duplicate-track", "duplicate-scene"] as const;
     if (!actions.includes(params.action as typeof actions[number])) return error(id, -32602, "action is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "create-return" ? "track.create-return" : params.action === "delete-return" ? "track.delete-return" : params.action === "duplicate-track" ? "track.duplicate" : "scene.duplicate";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.structureViewAsync(undefined);
       const structureRevision = this.structureRevision(snapshot);
       let payload: Record<string, unknown>;
       if (params.action === "create-return") {
@@ -5135,12 +5228,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const structureRevision = this.structureRevision(await adapter.snapshotAsync(context));
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const structureRevision = this.structureRevision(await this.structureViewAsync(context));
         if (JSON.stringify({ action: transaction.payload.action, payload: transaction.payload, structureRevision }) !== transaction.fence) return this.transactionError(id, "structure changed since preview; preview again"); }
       const action = transaction.payload.action as string;
       const operation = action === "create-return" ? "track.create-return" : action === "delete-return" ? "track.delete-return" : action === "duplicate-track" ? "track.duplicate" : "scene.duplicate";
@@ -5153,7 +5246,7 @@ export class McpHost {
         if (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("track-structure creation did not return exact identity");
         // Bind the complete applied content (devices, clips, mixer, routing)
         // so cleanup cannot delete a creation after nested content changed.
-        const appliedSnapshot = await adapter.snapshotAsync(context);
+        const appliedSnapshot = await this.structureOwnedViewAsync(context, [{ kind: action === "duplicate-scene" ? "scene" : "track", ref: result.ref as LiveRef, ...(typeof result.index === "number" ? { index: result.index } : {}) }]);
         const appliedKind = action === "duplicate-scene" ? "scene" : "track";
         const contentFingerprint = this.sessionStructureCreatedFingerprint(appliedSnapshot, appliedKind, result.ref as LiveRef);
         transaction.created = { ...result, contentFingerprint };
@@ -5167,10 +5260,10 @@ export class McpHost {
   private async liveDeviceDeletePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("device.delete")) throw new Error("device deletion is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const row = this.deviceRow(snapshot, params.ref as LiveRef);
       // An explicit deletion of an existing device (never a cleanup): the bridge holds it to these exact
       // identity, owner, sibling and track fences instead of a creating transaction's ownership token.
@@ -5191,17 +5284,17 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, trackRef: row.track.ref, trackIdentity: row.track.objectIdentity }) !== transaction.fence) return this.transactionError(id, "device or sibling hierarchy changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "device.delete", args: transaction.payload }, context) as { deleted?: unknown };
       if (result.deleted !== transaction.payload.ref) throw new Error("device deletion was not confirmed");
-      const after = await adapter.snapshotAsync(context);
+      const after = await this.viewForAsync(context, [transaction.payload.ref, transaction.payload.expectedTrackRef]);
       try { this.deviceRow(after, transaction.payload.ref as LiveRef); throw new Error("deleted device remains discoverable after apply"); } catch (cause) { if (cause instanceof Error && cause.message === "deleted device remains discoverable after apply") throw cause; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -5213,9 +5306,9 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["ref", "collapsed", "deviceInsertMode", "selectInstrument"]) || !isNonEmptyString(params.ref, 256)) return error(id, -32602, "ref is required");
     if (params.collapsed === undefined && params.deviceInsertMode === undefined && params.selectInstrument !== true) return error(id, -32602, "at least one view field or selectInstrument is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
       const viewState = { collapsed: (track.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track.view as JsonObject | undefined)?.deviceInsertMode ?? null };
@@ -5243,12 +5336,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const viewState = { collapsed: (track?.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (track?.view as JsonObject | undefined)?.deviceInsertMode ?? null };
         if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, viewState }) !== transaction.fence) return this.transactionError(id, "track identity or view state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -5259,14 +5352,14 @@ export class McpHost {
         if (result.changed !== true) throw new Error("track view change was not confirmed");
       }
       if (transaction.payload.selectInstrument === true) {
-        const freshSnapshot = await adapter.snapshotAsync(context);
+        const freshSnapshot = await this.viewForAsync(context, [transaction.payload.ref]);
         const freshTrack = (freshSnapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const freshState = { collapsed: (freshTrack?.view as JsonObject | undefined)?.isCollapsed ?? null, deviceInsertMode: (freshTrack?.view as JsonObject | undefined)?.deviceInsertMode ?? null };
         const freshRevision = createHash("sha256").update(canonicalMutationIdentity(freshState)).digest("hex");
         const result = await adapter.invokeAsync({ operation: "track.select-instrument", args: { ref: transaction.payload.ref, expectedObjectIdentity: freshTrack?.objectIdentity, expectedStateRevision: freshRevision } }, context) as { done?: unknown };
         if (result.done !== true) throw new Error("instrument selection was not confirmed");
       }
-      if (hasViewEdits) { const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      if (hasViewEdits) { const verified = ((await this.viewForAsync(context, [transaction.payload.ref])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         const view = verified?.view as JsonObject | undefined;
         if (transaction.payload.collapsed !== undefined && view?.isCollapsed !== transaction.payload.collapsed) throw new Error("track view postcondition was not confirmed");
         if (transaction.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== transaction.payload.deviceInsertMode) throw new Error("track view postcondition was not confirmed"); }
@@ -5285,10 +5378,10 @@ export class McpHost {
     if (params.colorIndex === undefined) return error(id, -32602, "at least one track property is required");
     if (!Number.isInteger(params.colorIndex) || (params.colorIndex as number) < 0 || (params.colorIndex as number) > 69) return error(id, -32602, "colorIndex is out of bounds");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("track.set")) throw new Error("track property editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.ref);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
       const prior = { colorIndex: track.colorIndex ?? null };
@@ -5309,17 +5402,17 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
         if (!track || JSON.stringify({ ref: transaction.payload.ref, objectIdentity: track.objectIdentity, state: [track.colorIndex ?? null] }) !== transaction.fence) return this.transactionError(id, "track identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "track.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("track properties change was not confirmed");
-      const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
+      const verified = ((await this.viewForAsync(context, [transaction.payload.ref])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.payload.ref);
       if (!verified || verified.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("edited track identity changed after apply");
       if ((verified as unknown as JsonObject).colorIndex !== transaction.payload.colorIndex) throw new Error("track properties postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
@@ -5355,11 +5448,11 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one song settings field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("song.set")) throw new Error("song settings editing is unavailable");
       const adapter = this.asyncAdapter();
-      const snapshot = await adapter.snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set"]);
       const song = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }) as JsonObject;
       const settings = this.songSettingsFields(song);
       if (Object.keys(proposed).some((field) => settings[field] === null)) return this.transactionError(id, "one or more requested song settings are unavailable on this shape");
@@ -5383,12 +5476,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = await this.viewAsync(context, [], ["set"]);
       if (snapshot.set.ref !== transaction.payload.setRef || snapshot.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed since preview");
       const fields = ["signatureNumerator", "signatureDenominator", "swingAmount", "clipTriggerQuantization", "midiRecordingQuantization"];
       if (!reconciliation) { const song = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject;
@@ -5397,7 +5490,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "song.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("song settings change was not confirmed");
-      const after = await adapter.snapshotAsync(context);
+      const after = await this.viewAsync(context, [], ["set"]);
       if (after.set.ref !== transaction.payload.setRef || after.set.objectIdentity !== transaction.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply");
       const verified = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
       // Swing is a 32-bit float in Live: numeric settings compare within its precision.
@@ -5412,7 +5505,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "notes", "expectedNotesRevision"])) return error(id, -32602, "key estimate arguments are invalid");
     if (params.notes !== undefined) {
       if (params.clipRef !== undefined || params.expectedNotesRevision !== undefined) return error(id, -32602, "notes is mutually exclusive with clipRef and expectedNotesRevision");
-      if (!Array.isArray(params.notes) || params.notes.length > 4096) return error(id, -32602, "notes must be an array of at most 4096 note objects");
+      if (!Array.isArray(params.notes) || params.notes.length > MAX_SET_COLLECTION) return error(id, -32602, "notes must be an array of note objects");
       const notes: Array<{ pitch: number; start: number; duration: number; velocity?: number }> = [];
       for (const entry of params.notes) {
         if (!isObject(entry) || !hasOnly(entry, ["pitch", "start", "duration", "velocity"])) return error(id, -32602, "note objects may only carry pitch, start, duration, and velocity");
@@ -5427,9 +5520,9 @@ export class McpHost {
     if (!isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef or notes are required");
     if (params.expectedNotesRevision !== undefined && (typeof params.expectedNotesRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedNotesRevision))) return error(id, -32602, "expectedNotesRevision must be a 64-character hex digest");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio === true || row.clip.kind === "audio") return this.transactionError(id, "key estimation requires a MIDI clip");
       const notes = ((row.clip.notes as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>) ?? []).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
@@ -5451,9 +5544,9 @@ export class McpHost {
     if (fields.every((field) => params[field] === undefined) && params.drawMode === undefined) return error(id, -32602, "at least one selection field or drawMode is required");
     if (params.drawMode !== undefined && typeof params.drawMode !== "boolean") return error(id, -32602, "drawMode must be boolean");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["set", "selection"]);
       const proposed: Record<string, unknown> = {};
       for (const field of fields) {
         const value = params[field];
@@ -5484,12 +5577,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewAsync(context, [], ["set", "selection"]);
         const proposed = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => !["expectedStateRevision", "drawMode"].includes(key)));
         if (JSON.stringify({ proposed, selectionRevision: this.selectionRevision(snapshot), drawMode: snapshot.view?.drawMode ?? null }) !== transaction.fence) return this.transactionError(id, "selection state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -5514,12 +5607,12 @@ export class McpHost {
           if (selectionApplied && transaction.prior) {
             // The mapper's selection.set rejects drawMode; compensation must carry only exact prior selection fields.
             const compensation = Object.fromEntries(Object.entries(transaction.prior as Record<string, unknown>).filter(([key]) => key !== "drawMode"));
-            try { await adapter.invokeAsync({ operation: "selection.set", args: { ...compensation, expectedStateRevision: this.selectionRevision(await adapter.snapshotAsync(context)) } }, context); } catch { throw new Error("draw-mode change failed and selection compensation failed"); }
+            try { await adapter.invokeAsync({ operation: "selection.set", args: { ...compensation, expectedStateRevision: this.selectionRevision(await this.viewAsync(context, [], ["set", "selection"])) } }, context); } catch { throw new Error("draw-mode change failed and selection compensation failed"); }
           }
           throw cause;
         }
       }
-      const verified = await adapter.snapshotAsync(context);
+      const verified = await this.viewAsync(context, [], ["set", "selection"]);
       for (const [field, value] of Object.entries(transaction.payload)) {
         if (["expectedStateRevision", "drawMode"].includes(field)) continue;
         if (field.endsWith("Ref") && ((verified.selection as Record<string, unknown> | undefined)?.[field] ?? null) !== value) throw new Error("selection postcondition was not confirmed");
@@ -5536,10 +5629,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "showLoop", ...fields]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     if (fields.every((field) => params[field] === undefined) && params.showLoop !== true) return error(id, -32602, "at least one clip view field or showLoop is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.view.set")) throw new Error("clip view editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       const viewState = { gridQuantization: (row.clip.clipView as JsonObject | undefined)?.gridQuantization ?? null, gridIsTriplet: (row.clip.clipView as JsonObject | undefined)?.gridIsTriplet ?? null };
       const proposed: Record<string, unknown> = {};
@@ -5568,18 +5661,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         const viewState = { gridQuantization: (row.clip.clipView as JsonObject | undefined)?.gridQuantization ?? null, gridIsTriplet: (row.clip.clipView as JsonObject | undefined)?.gridIsTriplet ?? null };
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, viewState }) !== transaction.fence) return this.transactionError(id, "clip identity or view state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "clip.view.set", args: transaction.payload }, context) as { changed?: unknown };
       if (result.changed !== true) throw new Error("clip view change was not confirmed");
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip;
+      const verified = this.clipRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).clip;
       const view = verified.clipView as JsonObject | undefined;
       for (const field of ["gridQuantization", "gridIsTriplet"]) if (transaction.payload[field] !== undefined && view?.[field] !== transaction.payload[field]) throw new Error("clip view postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
@@ -5591,10 +5684,10 @@ export class McpHost {
   private async liveDeviceViewPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["ref", "collapsed"]) || !isNonEmptyString(params.ref, 256) || typeof params.collapsed !== "boolean") return error(id, -32602, "ref and collapsed are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("device.view.set")) throw new Error("device view editing is unavailable on this Live shape");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.ref]);
       const row = this.deviceRow(snapshot, params.ref as LiveRef);
       const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
       if (current === null) return this.transactionError(id, "device collapsed state is unavailable on this exact device");
@@ -5615,18 +5708,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, collapsed: current }) !== transaction.fence) return this.transactionError(id, "device identity or view state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "device.view.set", args: transaction.payload }, context) as { changed?: unknown };
       if (result.changed !== true) throw new Error("device view change was not confirmed");
-      const verified = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device;
+      const verified = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device;
       if ((verified.view as JsonObject | undefined)?.isCollapsed !== transaction.payload.collapsed) throw new Error("device view postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -5638,11 +5731,11 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["button"])) return error(id, -32602, "button is optional; omit for a read-only dialog state check");
     if (params.button !== undefined && (!Number.isInteger(params.button) || (params.button as number) < 0 || (params.button as number) > 16)) return error(id, -32602, "button is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("application.dialog")) throw new Error("application dialog surface is unavailable");
       const adapter = this.asyncAdapter();
-      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
+      const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
       const dialogState = { buttonCount: read.buttonCount ?? null, message: read.message ?? null, openDialogCount: read.openDialogCount ?? null };
       const done = read.done === undefined ? true : read.done === true;
       if (params.button === undefined) return this.successText(id, { ...dialogState, done });
@@ -5666,11 +5759,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const read = await adapter.invokeAsync({ operation: "application.dialog", args: { action: "read" } }, context) as { buttonCount?: unknown; message?: unknown; openDialogCount?: unknown; done?: unknown };
       const done = read.done === undefined ? true : read.done === true;
       if (!done) return this.adapterToolError(id, new Error("dialog observation is incomplete; the press was refused"), "Wait for a complete dialog observation, then request a fresh preview.");
@@ -5699,10 +5792,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one extended mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("mixer.extended.set")) throw new Error("extended mixer editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
       const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is not authoritative");
       const mixer = track.mixer as JsonObject | undefined;
@@ -5727,19 +5820,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef);
         const mixer = track?.mixer as JsonObject | undefined;
         const state = { crossfadeAssign: mixer?.crossfadeAssign ?? null, panningMode: mixer?.panningMode ?? null };
         if (!track || !mixer || JSON.stringify({ ref: transaction.clipRef, objectIdentity: track.objectIdentity, mixerIdentity: mixer.mixerIdentity, state }) !== transaction.fence) return this.transactionError(id, "track, mixer, or extended state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "mixer.extended.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("extended mixer change was not confirmed");
-      const verified = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef)?.mixer as JsonObject | undefined;
+      const verified = ((await this.viewForAsync(context, [transaction.clipRef])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === transaction.clipRef)?.mixer as JsonObject | undefined;
       for (const field of ["trackActivator", "crossfader", "crossfadeAssign", "panningMode", "panningLeft", "panningRight"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("extended mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -5757,15 +5850,15 @@ export class McpHost {
       if (field === "chainActivator" && typeof value !== "boolean") return error(id, -32602, "chainActivator must be boolean");
       if (field === "volume" && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)) return error(id, -32602, "volume must be 0-1");
       if (field === "pan" && (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 1)) return error(id, -32602, "pan must be -1 to 1");
-      if (field === "sends" && (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1))) return error(id, -32602, "sends must be 0-1 values");
+      if (field === "sends" && (!Array.isArray(value) || !value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1))) return error(id, -32602, "sends must be 0-1 values");
       proposed[field] = value;
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one chain mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("chain-mixer.set")) throw new Error("chain mixer editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.chainRef]);
       const found = this.chainRow(snapshot, params.chainRef as LiveRef);
       const mixer = found.chain.mixer as JsonObject | undefined;
       if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer identity is not authoritative");
@@ -5789,18 +5882,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, transaction.clipRef!);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const found = this.chainRow(snapshot, transaction.clipRef!);
         const mixer = found.chain.mixer as JsonObject | undefined;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: found.chain.objectIdentity, mixerIdentity: mixer?.mixerIdentity, sends: mixer?.sends ?? [] }) !== transaction.fence) return this.transactionError(id, "chain or mixer state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "chain-mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("chain mixer change was not confirmed");
-      const verified = this.chainRow(await adapter.snapshotAsync(context), transaction.clipRef!).chain.mixer as JsonObject | undefined;
+      const verified = this.chainRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).chain.mixer as JsonObject | undefined;
       for (const field of ["volume", "pan", "sends", "chainActivator"]) if (transaction.payload[field] !== undefined && !sameLiveValue(verified?.[field], transaction.payload[field])) throw new Error("chain mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -5836,11 +5929,11 @@ export class McpHost {
     if (params.action !== "routing" && params.action !== "sidechain") return error(id, -32602, "action must be routing or sidechain");
     if (params.action === "routing" && params.routingChannel !== undefined && !isNonEmptyString(params.routingChannel, 128)) return error(id, -32602, "routingChannel is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.action === "routing" ? "device-io.set" : "compressor.sidechain.set";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
       let state: Record<string, unknown>;
       if (params.action === "routing") {
@@ -5870,12 +5963,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const device = row.device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
         const state = transaction.payload.action === "routing" ? { routingType: device.deviceIo?.routingType ?? null, routingChannel: device.deviceIo?.routingChannel ?? null } : { routingType: device.sidechainRoutingType };
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, state }) !== transaction.fence) return this.transactionError(id, "device or routing state changed since preview; preview again"); }
@@ -5884,7 +5977,7 @@ export class McpHost {
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
       const result = await adapter.invokeAsync({ operation, args }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("device routing change was not confirmed");
-      const verified = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
+      const verified = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
       if (transaction.payload.action === "routing") {
         if (verified.deviceIo?.routingType !== transaction.payload.routingType) throw new Error("device routing postcondition was not confirmed");
         if (transaction.payload.routingChannel !== undefined && verified.deviceIo?.routingChannel !== transaction.payload.routingChannel) throw new Error("device channel postcondition was not confirmed");
@@ -5899,9 +5992,9 @@ export class McpHost {
     const actions = ["set-bank", "re-enable-automation", "save-comparison", "insert-chain", "move-cross"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "ref", "bank", "slot", "trackRef", "chainRef", "deviceName", "index", "targetTrackRef", "targetChainRef"]) || !actions.includes(params.action as typeof actions[number])) return error(id, -32602, "a valid action is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.ref, params.trackRef, params.chainRef, params.targetTrackRef, params.targetChainRef]);
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown> = {};
       let impact = "edits-device";
@@ -5976,11 +6069,11 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => !["action", "priorOwnerRef", "priorIndex"].includes(key)));
@@ -6021,10 +6114,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one chain field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("chain.set")) throw new Error("chain editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.chainRef]);
       const found = this.chainRow(snapshot, params.chainRef as LiveRef);
       const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
       const prior: Record<string, unknown> = {};
@@ -6046,18 +6139,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, transaction.clipRef!);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const found = this.chainRow(snapshot, transaction.clipRef!);
         const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: found.chain.objectIdentity, state }) !== transaction.fence) return this.transactionError(id, "chain identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "chain.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("chain change was not confirmed");
-      const verified = this.chainRow(await adapter.snapshotAsync(context), transaction.clipRef!).chain;
+      const verified = this.chainRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).chain;
       for (const field of ["colorIndex", "autoColor", "mute", "solo"]) if (transaction.payload[field] !== undefined && verified[field] !== transaction.payload[field]) throw new Error("chain postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -6068,7 +6161,7 @@ export class McpHost {
   /** A Drum Rack pad by reference, at any depth: preview finds nested racks (drumRackPad), so apply and undo must too. */
   private drumPadRow(snapshot: LiveSnapshot, padRef: LiveRef): JsonObject {
     const visit = (devices: unknown, depth: number): JsonObject | undefined => {
-      if (!Array.isArray(devices) || depth > 16) return undefined;
+      if (!Array.isArray(devices) || depth > 256) return undefined;
       for (const device of devices.filter(isObject)) {
         const pads = ((device.drumPads as unknown[]) ?? []).filter(isObject);
         const pad = pads.find((candidate) => candidate.ref === padRef);
@@ -6104,9 +6197,9 @@ export class McpHost {
     if (!loading && (params.deviceRef !== undefined || params.filePath !== undefined || params.allowedRoot !== undefined)) return error(id, -32602, "deviceRef and a sample file go only with load-sample");
     let stagingPath: string | undefined;
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.padRef]);
       const pad = loading ? this.drumRackPad(snapshot, params.deviceRef as LiveRef, params.note as number) : this.drumPadRow(snapshot, params.padRef as LiveRef);
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown> = {};
@@ -6159,10 +6252,10 @@ export class McpHost {
     if (new Set(notes).size !== notes.length) return error(id, -32602, "each pad takes one sample");
     const staged: string[] = []; const presets: string[] = [];
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("drum-pad.load-samples")) throw new Error("drum pad sample loading is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
       const pads: Array<Record<string, unknown>> = []; const files: Array<Record<string, unknown>> = [];
       for (const item of requested as JsonObject[]) {
         const pad = this.drumRackPad(snapshot, params.deviceRef as LiveRef, item.note as number);
@@ -6211,14 +6304,14 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       if (action === "load-sample" && !reconciliation) {
-        const current = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const current = this.drumPadRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef);
         if (current.objectIdentity !== transaction.payload.expectedObjectIdentity || ((current.chains as unknown[]) ?? []).length !== 0) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "drum pad changed since preview; preview again"); }
         const file = (transaction.prior as { file?: { size: number; sha256: string } } | undefined)?.file;
         if (!file) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "sample file authority is missing; preview again"); }
@@ -6226,7 +6319,7 @@ export class McpHost {
       }
       const batch = action === "load-samples" ? transaction.payload.pads as Array<Record<string, unknown>> : [];
       if (action === "load-samples" && !reconciliation) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewForAsync(context, [transaction.payload.deviceRef, ...batch.map((pad) => pad.ref)]);
         for (const pad of batch) {
           const current = this.drumPadRow(snapshot, pad.ref as LiveRef);
           if (current.objectIdentity !== pad.expectedObjectIdentity || ((current.chains as unknown[]) ?? []).length !== 0) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "a drum pad changed since preview; preview again"); }
@@ -6241,7 +6334,7 @@ export class McpHost {
         const result = await adapter.invokeAsync({ operation: "drum-pad.load-samples", args: { pads: batch.map((pad) => this.drumPadLoadArgs(pad)) } }, context) as { pads?: unknown };
         const loaded = Array.isArray(result.pads) ? result.pads.filter(isObject) : [];
         if (loaded.length !== batch.length || loaded.some((item, index) => item.ref !== batch[index]!.ref || !isNonEmptyString(item.chainIdentity, 256) || !isNonEmptyString(item.deviceIdentity, 256))) throw new Error("drum pad sample loads did not return exact identities");
-        const verified = await adapter.snapshotAsync(context);
+        const verified = await this.viewForAsync(context, [transaction.payload.deviceRef, ...batch.map((pad) => pad.ref)]);
         for (const [index, item] of loaded.entries()) {
           const chains = (this.drumPadRow(verified, batch[index]!.ref as LiveRef).chains as JsonObject[] | undefined) ?? [];
           if (chains.length !== 1 || chains[0]!.objectIdentity !== item.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
@@ -6252,7 +6345,7 @@ export class McpHost {
       } else if (action === "load-sample") {
         const result = await adapter.invokeAsync({ operation: "drum-pad.load-sample", args: this.drumPadLoadArgs(transaction.payload) }, context) as JsonObject;
         if (!isNonEmptyString(result.chainIdentity, 256) || !isNonEmptyString(result.deviceIdentity, 256)) throw new Error("drum pad sample load did not return exact identities");
-        const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const verified = this.drumPadRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef);
         const chains = (verified.chains as JsonObject[] | undefined) ?? [];
         if (chains.length !== 1 || chains[0]!.objectIdentity !== result.chainIdentity) throw new Error("drum pad sample load postcondition was not confirmed");
         transaction.created = result;
@@ -6260,12 +6353,12 @@ export class McpHost {
       } else if (action === "set") {
         const result = await adapter.invokeAsync({ operation: "drum-pad.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("drum pad change was not confirmed");
-        const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const verified = this.drumPadRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef);
         if (transaction.payload.solo !== undefined && verified.solo !== transaction.payload.solo) throw new Error("drum pad postcondition was not confirmed");
       } else {
         const result = await adapter.invokeAsync({ operation: "drum-pad.delete-all-chains", args }, context) as { deleted?: unknown };
         if (result.deleted !== (transaction.prior as { chainCount: number }).chainCount) throw new Error("delete-all-chains count was not confirmed");
-        const verified = this.drumPadRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef);
+        const verified = this.drumPadRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef);
         if (((verified.chains as unknown[]) ?? []).length !== 0) throw new Error("delete-all-chains postcondition was not confirmed");
       }
       transaction.applyKey = params.idempotencyKey as string;
@@ -6278,9 +6371,9 @@ export class McpHost {
     const actions = ["set", "add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "rackRef", "selectedVariationIndex", "index", "sourceIndex", "targetIndex"]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.rackRef, 256)) return error(id, -32602, "action and rackRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.rackRef]);
       const row = this.deviceRow(snapshot, params.rackRef as LiveRef);
       if (row.device.canHaveChains !== true) return this.transactionError(id, "rack operations require a rack device");
       const stateRevision = this.rackStateRevision(row.device);
@@ -6290,7 +6383,7 @@ export class McpHost {
         if (!(status.operations ?? []).includes("rack.set")) throw new Error("rack editing is unavailable");
         const proposed: Record<string, unknown> = {};
         if (params.visibleMacroCount !== undefined) return error(id, -32602, "visibleMacroCount is read-only in the public LOM; use add-macro/remove-macro actions to change it");
-        if (params.selectedVariationIndex !== undefined) { if (!Number.isInteger(params.selectedVariationIndex) || (params.selectedVariationIndex as number) < -1 || (params.selectedVariationIndex as number) > 256) return error(id, -32602, "selectedVariationIndex is invalid"); proposed.selectedVariationIndex = params.selectedVariationIndex; }
+        if (params.selectedVariationIndex !== undefined) { if (!Number.isInteger(params.selectedVariationIndex) || (params.selectedVariationIndex as number) < -1 || (params.selectedVariationIndex as number) > MAX_SET_INDEX) return error(id, -32602, "selectedVariationIndex is invalid"); proposed.selectedVariationIndex = params.selectedVariationIndex; }
         if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one rack field is required");
         prior = { selectedVariationIndex: row.device.selectedVariationIndex ?? null };
         payload = { action: params.action, ref: params.rackRef, ...proposed, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: stateRevision };
@@ -6317,12 +6410,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         if (JSON.stringify({ action: transaction.payload.action, ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, stateRevision: this.rackStateRevision(row.device) }) !== transaction.fence) return this.transactionError(id, "rack identity or state changed since preview; preview again"); }
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -6331,17 +6424,17 @@ export class McpHost {
       if (action === "set") {
         result = await adapter.invokeAsync({ operation: "rack.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("rack change was not confirmed");
-        const verified = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device;
+        const verified = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device;
         if (transaction.payload.selectedVariationIndex !== undefined && verified.selectedVariationIndex !== transaction.payload.selectedVariationIndex) throw new Error("rack postcondition was not confirmed");
       } else {
         result = await adapter.invokeAsync({ operation: "rack.action", args }, context) as { done?: unknown; revision?: unknown; chainRef?: unknown };
         if (result.done !== true) throw new Error("rack action was not confirmed");
         // What undo checks is still so: the macro count this left.
-        if (action === "add-macro" || action === "remove-macro") transaction.created = { visibleMacroCount: this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device.visibleMacroCount ?? null };
+        if (action === "add-macro" || action === "remove-macro") transaction.created = { visibleMacroCount: this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device.visibleMacroCount ?? null };
         if (action === "insert-chain" && isNonEmptyString(result.chainRef, 256)) {
           transaction.created = { chainRef: result.chainRef };
           try {
-            const rack = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device; const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
+            const rack = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device; const chains = (Array.isArray(rack.chains) ? rack.chains : []).filter(isObject);
             transaction.created.placement = { owner: "rack", rack: String(rack.name ?? "").slice(0, 64), chain: chains.findIndex((chain) => chain.ref === result.chainRef), chains: chains.slice(0, 8).map((chain) => ({ name: String(chain.name ?? "").slice(0, 64), devices: (Array.isArray(chain.devices) ? chain.devices : []).filter(isObject).slice(0, 16).map((device) => String(device.name ?? "").slice(0, 64)) })) };
           } catch { /* the chain is there either way; only the picture is missing */ }
         }
@@ -6357,10 +6450,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["rackRef", ...fields]) || !isNonEmptyString(params.rackRef, 256)) return error(id, -32602, "rackRef is required");
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one rack view field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("rack.view.set")) throw new Error("rack view editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.rackRef]);
       const row = this.deviceRow(snapshot, params.rackRef as LiveRef);
       if (row.device.canHaveChains !== true) return this.transactionError(id, "rack view requires a rack device");
       const view = row.device.rackView as JsonObject | undefined;
@@ -6388,12 +6481,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const view = row.device.rackView as JsonObject | undefined;
         const state = { padScrollPosition: view?.padScrollPosition ?? null, showChainDevices: view?.showChainDevices ?? null };
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, state }) !== transaction.fence) return this.transactionError(id, "rack identity or view state changed since preview; preview again"); }
@@ -6434,11 +6527,11 @@ export class McpHost {
     if (!hasOnly(params, ["family", "deviceRef", ...fields])) return error(id, -32602, `only ${params.family} fields are accepted`);
     if (fields.every((field) => params[field] === undefined)) return error(id, -32602, "at least one field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = `${params.family}.set`;
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
       const proposed: Record<string, unknown> = {};
       for (const field of fields) {
@@ -6472,14 +6565,14 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const family = transaction.payload.family as string;
       const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const familyRow = ((row.device as unknown as Record<string, unknown>)[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>;
         const state = Object.fromEntries(fields.map((field) => [field, familyRow[field] ?? null]));
         if (JSON.stringify({ family, ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, state }) !== transaction.fence) return this.transactionError(id, "device identity or state changed since preview; preview again"); }
@@ -6487,7 +6580,7 @@ export class McpHost {
       const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "family"));
       const result = await adapter.invokeAsync({ operation: `${family}.set` as "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "meld.set" | "plugin.set", args }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("specialized device change was not confirmed");
-      const verifiedDevice = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
+      const verifiedDevice = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
       const verified = ((verifiedDevice[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>);
       for (const field of fields) if (transaction.payload[field] !== undefined && JSON.stringify(verified[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("specialized device postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
@@ -6501,11 +6594,11 @@ export class McpHost {
     const fields = ["overdubAfterRecord", "recordLengthIndex"] as const;
     if (!isObject(params) || !hasOnly(params, ["action", "deviceRef", "slotRef", ...fields]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "action and deviceRef are required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.slotRef]);
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
-      const looperRow = (((row.device as unknown as Record<string, unknown>).looper) ?? {}) as Record<string, unknown>;
+      const looperRow =(((row.device as unknown as Record<string, unknown>).looper) ?? {}) as Record<string, unknown>;
       let payload: Record<string, unknown>;
       let prior: Record<string, unknown> = {};
       const writableState = () => ({ overdubAfterRecord: looperRow.overdubAfterRecord ?? null, recordLengthIndex: looperRow.recordLengthIndex ?? null });
@@ -6544,18 +6637,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       if (action === "set") {
         const args = Object.fromEntries(Object.entries(transaction.payload).filter(([key]) => key !== "action"));
         const result = await adapter.invokeAsync({ operation: "looper.set", args }, context) as { changed?: unknown; revision?: unknown };
         if (result.changed !== true) throw new Error("looper change was not confirmed");
-        const verifiedDevice = this.deviceRow(await adapter.snapshotAsync(context), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
+        const verifiedDevice = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
         const verified = ((verifiedDevice.looper ?? {}) as Record<string, unknown>);
         for (const field of ["overdubAfterRecord", "recordLengthIndex"]) if (transaction.payload[field] !== undefined && verified[field] !== transaction.payload[field]) throw new Error("looper postcondition was not confirmed");
       } else {
@@ -6572,10 +6665,10 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["deviceRef", "filePath", "allowedRoot"]) || !isNonEmptyString(params.deviceRef, 256)) return error(id, -32602, "deviceRef, filePath, and allowedRoot are required");
     try {
       const authority = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("simpler.replace-sample")) throw new Error("sample replacement is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef]);
       const row = this.deviceRow(snapshot, params.deviceRef as LiveRef);
       const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
       const stagingPath = await this.stageVerifiedImportFile(authority.canonicalPath, authority);
@@ -6598,7 +6691,7 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "Live connection epoch changed; preview again"); }
       const prior = transaction.prior as { file?: { canonicalPath: string; size: number; mtimeMs: number; sha256: string }; samplePath: string };
@@ -6608,8 +6701,8 @@ export class McpHost {
       // preview; the source path is never re-trusted after staging.
       await this.verifyStagedImportFile(transaction.payload.filePath as string, prior.file);
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.ref]); const row = this.deviceRow(snapshot, transaction.payload.ref as LiveRef);
         const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
         if (JSON.stringify({ ref: transaction.payload.ref, objectIdentity: row.device.objectIdentity, filePath: currentPath }) !== transaction.fence) { this.releaseStagedImportFor(transaction); return this.transactionError(id, "device identity or sample state changed since preview; preview again"); } }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -6635,43 +6728,43 @@ export class McpHost {
     }
     if (params.minIntervalMs !== undefined && (!Number.isInteger(params.minIntervalMs) || (params.minIntervalMs as number) < 100 || (params.minIntervalMs as number) > 60000)) return error(id, -32602, "minIntervalMs is invalid");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.subscribe")) throw new Error("observer subscriptions are unavailable");
       const adapter = this.asyncAdapter();
       const args: Record<string, unknown> = { topics: params.topics };
       if (params.minIntervalMs !== undefined) args.minIntervalMs = params.minIntervalMs;
-      return this.successText(id, await adapter.invokeAsync({ operation: "observe.subscribe", args }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await adapter.invokeAsync({ operation: "observe.subscribe", args }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer subscription requires a fresh connection."); }
   }
 
   private async liveObservePollAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["subscriptionId"]) || !isNonEmptyString(params.subscriptionId, 128)) return error(id, -32602, "subscriptionId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.poll")) throw new Error("observer polling is unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.poll", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.poll", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer poll requires a fresh connection."); }
   }
 
   private async liveObserveUnsubscribeAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["subscriptionId"]) || !isNonEmptyString(params.subscriptionId, 128)) return error(id, -32602, "subscriptionId is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("observe.unsubscribe")) throw new Error("observer unsubscribe is unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.unsubscribe", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "observe.unsubscribe", args: { subscriptionId: params.subscriptionId } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Observer unsubscribe requires a fresh connection."); }
   }
 
   private async liveBrowserRootsAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (params !== undefined && (!isObject(params) || Object.keys(params).length > 0)) return error(id, -32602, "no arguments are accepted");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("browser.roots")) throw new Error("browser roots are unavailable");
-      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "browser.roots", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }));
+      return this.successText(id, await this.asyncAdapter().invokeAsync({ operation: "browser.roots", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Browser roots requires a fresh connection."); }
   }
 
@@ -6703,12 +6796,12 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["action", "clipRef", "parameterRef", "points", "from", "to"]) || !actions.includes(params.action as typeof actions[number]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "action and clipRef are required");
     if (params.action === "clear-envelopes" ? params.parameterRef !== undefined : !isNonEmptyString(params.parameterRef, 256)) return error(id, -32602, params.action === "clear-envelopes" ? "clear-envelopes takes no parameterRef" : "parameterRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const adapter = this.asyncAdapter();
       if (params.action === "clear-envelopes") {
         if (!(status.operations ?? []).includes("automation.envelope.clear")) throw new Error("automation.envelope.clear is unavailable");
-        const snapshot = await adapter.snapshotAsync();
+        const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
         const authorityDigest = this.clipAuthorityDigest(snapshot, params.clipRef as LiveRef);
         const presence = this.envelopePresenceRevision(snapshot, params.clipRef as LiveRef);
         const fence = JSON.stringify({ clipRef: params.clipRef, presence: presence.revision, authorityDigest });
@@ -6719,16 +6812,16 @@ export class McpHost {
       }
       const operation = params.action === "insert" ? "automation.point.insert" : params.action === "delete-range" ? "automation.point.delete" : params.action === "create-envelope" ? "automation.envelope.create" : "automation.envelope.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const context = { deadlineMs: Date.now() + AUDITION_DEADLINE_MS };
-      const before = await adapter.snapshotAsync(context); const authorityDigest = this.automationAuthorityDigest(before, params.clipRef as LiveRef, params.parameterRef as LiveRef);
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
+      const before = await this.viewForAsync(context, [params.clipRef, params.parameterRef]); const authorityDigest = this.automationAuthorityDigest(before, params.clipRef as LiveRef, params.parameterRef as LiveRef);
       const read = await adapter.invokeAsync({ operation: "automation.envelope.read", args: { clipRef: params.clipRef, parameterRef: params.parameterRef } }, context) as { available?: unknown; exists?: unknown; points?: unknown; revision?: unknown };
       if (read.available !== true || !isNonEmptyString(read.revision, 64)) throw new Error("clip envelope revision is unavailable");
-      if (this.automationAuthorityDigest(await adapter.snapshotAsync(context), params.clipRef as LiveRef, params.parameterRef as LiveRef) !== authorityDigest) throw new Error("automation target identity changed during preview");
+      if (this.automationAuthorityDigest(await this.viewForAsync(context, [params.clipRef, params.parameterRef]), params.clipRef as LiveRef, params.parameterRef as LiveRef) !== authorityDigest) throw new Error("automation target identity changed during preview");
       const points = Array.isArray(read.points) ? read.points : [];
       const fence = JSON.stringify({ clipRef: params.clipRef, parameterRef: params.parameterRef, exists: read.exists, points, revision: read.revision, authorityDigest });
       const payload: Record<string, unknown> = { clipRef: params.clipRef, parameterRef: params.parameterRef, expectedAuthorityDigest: authorityDigest, expectedEnvelopeRevision: read.revision };
       if (params.action === "insert") {
-        if (!Array.isArray(params.points) || params.points.length < 1 || params.points.length > 512) return error(id, -32602, "points must be 1-512 point objects");
+        if (!Array.isArray(params.points) || params.points.length < 1 || params.points.length > MAX_SET_COLLECTION) return error(id, -32602, "points must be one or more point objects");
         for (const point of params.points) if (!isObject(point) || !hasOnly(point, ["time", "value"]) || typeof point.time !== "number" || !Number.isFinite(point.time) || point.time < 0 || typeof point.value !== "number" || !Number.isFinite(point.value)) return error(id, -32602, "points are invalid");
         payload.points = structuredClone(params.points);
       }
@@ -6752,18 +6845,18 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const action = transaction.payload.action as string;
       if (action === "clear-envelopes") {
-        if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const authorityDigest = this.clipAuthorityDigest(snapshot, transaction.payload.clipRef as LiveRef); const presence = this.envelopePresenceRevision(snapshot, transaction.payload.clipRef as LiveRef);
+        if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.clipRef]); const authorityDigest = this.clipAuthorityDigest(snapshot, transaction.payload.clipRef as LiveRef); const presence = this.envelopePresenceRevision(snapshot, transaction.payload.clipRef as LiveRef);
           if (JSON.stringify({ clipRef: transaction.payload.clipRef, presence: presence.revision, authorityDigest }) !== transaction.fence) return this.transactionError(id, "envelope collection or clip hierarchy changed since preview; preview again"); }
         transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
         const cleared = await adapter.invokeAsync({ operation: "automation.envelope.clear", args: { clipRef: transaction.payload.clipRef, expectedAuthorityDigest: transaction.payload.expectedAuthorityDigest, expectedEnvelopesRevision: transaction.payload.expectedEnvelopesRevision } }, context) as { cleared?: unknown; envelopesRevision?: unknown };
-        const after = this.envelopePresenceRevision(await adapter.snapshotAsync(context), transaction.payload.clipRef as LiveRef);
+        const after = this.envelopePresenceRevision(await this.viewForAsync(context, [transaction.payload.clipRef]), transaction.payload.clipRef as LiveRef);
         if (cleared.cleared !== (transaction.prior as { cleared: number }).cleared || after.cleared !== 0 || cleared.envelopesRevision !== after.revision) throw new Error("envelope clear postcondition was not confirmed");
         transaction.applyKey = params.idempotencyKey as string;
         transaction.state = "applied";
@@ -6771,7 +6864,7 @@ export class McpHost {
       }
       let read: { exists?: unknown; points?: unknown; revision?: unknown } = { revision: transaction.payload.expectedEnvelopeRevision }; let authorityDigest = transaction.payload.expectedAuthorityDigest as string;
       if (!reconciliation) { read = await adapter.invokeAsync({ operation: "automation.envelope.read", args: { clipRef: transaction.payload.clipRef, parameterRef: transaction.payload.parameterRef } }, context) as typeof read;
-        authorityDigest = this.automationAuthorityDigest(await adapter.snapshotAsync(context), transaction.payload.clipRef as LiveRef, transaction.payload.parameterRef as LiveRef);
+        authorityDigest = this.automationAuthorityDigest(await this.viewForAsync(context, [transaction.payload.clipRef, transaction.payload.parameterRef]), transaction.payload.clipRef as LiveRef, transaction.payload.parameterRef as LiveRef);
         if (JSON.stringify({ clipRef: transaction.payload.clipRef, parameterRef: transaction.payload.parameterRef, exists: read.exists, points: read.points ?? [], revision: read.revision, authorityDigest }) !== transaction.fence) return this.transactionError(id, "envelope or target identity changed since preview; preview again"); }
       const operation = action === "insert" ? "automation.point.insert" : action === "delete-range" ? "automation.point.delete" : action === "create-envelope" ? "automation.envelope.create" : "automation.envelope.delete";
       const args: Record<string, unknown> = { clipRef: transaction.payload.clipRef, parameterRef: transaction.payload.parameterRef, expectedAuthorityDigest: transaction.payload.expectedAuthorityDigest, expectedEnvelopeRevision: transaction.payload.expectedEnvelopeRevision };
@@ -6804,7 +6897,7 @@ export class McpHost {
 
   private arrangementCollectionRevision(snapshot: LiveSnapshot, trackRef: LiveRef): string {
     const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).filter((item) => item.trackRef === trackRef).map((item) => ({ ref: item.ref, objectIdentity: item.objectIdentity }));
-    if (clips.some((item) => !isNonEmptyString(item.ref, 256) || !isNonEmptyString(item.objectIdentity, 256)) || clips.length > 256) throw new Error("Arrangement clip collection authority is incomplete");
+    if (clips.some((item) => !isNonEmptyString(item.ref, 256) || !isNonEmptyString(item.objectIdentity, 256))) throw new Error("Arrangement clip collection authority is incomplete");
     return createHash("sha256").update(canonicalMutationIdentity(clips)).digest("hex");
   }
 
@@ -6835,18 +6928,20 @@ export class McpHost {
   }
 
   private async deleteOwnedClipAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false): Promise<void> {
-    const snapshot = await adapter.snapshotAsync(context); let located: ReturnType<McpHost["clipRow"]>;
+    const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["clipRow"]>;
     try { located = this.clipRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
     if (located.clip.objectIdentity !== objectIdentity) throw new Error("owned clip identity changed before cleanup");
     if (expectedFingerprint && this.captureBoundedFingerprint(located.clip) !== expectedFingerprint) throw new Error("transaction-owned clip was modified after creation; cleanup refused");
     const operation = located.arrangement ? "arrangement.clip.delete" : "clip.delete"; const args = located.arrangement ? { ref: reference, ...this.arrangementClipAuthority(snapshot, reference) } : { ref: reference, ...this.clipAuthority(snapshot, reference) };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, operation, args, context); else await adapter.invokeAsync({ operation, args }, context);
-    try { this.clipRow(await adapter.snapshotAsync(context), reference); } catch { return; }
+    try { this.clipRow(await this.viewForAsync(context, [located.track?.ref ?? reference]), reference); } catch { return; }
     throw new Error("owned clip cleanup was not confirmed");
   }
 
-  private arrangementFence(snapshot: LiveSnapshot): string {
-    const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).map((clip) => `${clip.ref}:${String(clip.objectIdentity)}:${String(clip.trackRef)}:${String(clip.name)}:${String(clip.start)}:${String(clip.length)}`);
+  /** The Arrangement clips of the tracks an operation touches, as a fence: what a clip made there lands among. */
+  private arrangementFence(snapshot: LiveSnapshot, trackRefs: readonly unknown[]): string {
+    const tracks = new Set(trackRefs.filter((ref): ref is string => typeof ref === "string"));
+    const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).filter((clip) => tracks.has(String(clip.trackRef))).map((clip) => `${clip.ref}:${String(clip.objectIdentity)}:${String(clip.trackRef)}:${String(clip.name)}:${String(clip.start)}:${String(clip.length)}`);
     return JSON.stringify(clips);
   }
 
@@ -6854,12 +6949,12 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "targetTrackRef", "targetSceneIndex", "arrangementPosition"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     const toArrangement = params.arrangementPosition !== undefined;
     if (toArrangement && (typeof params.arrangementPosition !== "number" || !Number.isFinite(params.arrangementPosition) || params.arrangementPosition < 0)) return error(id, -32602, "arrangementPosition is out of bounds");
-    if (!toArrangement && (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > 10000)) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for Session duplication");
+    if (!toArrangement && (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > MAX_SET_INDEX)) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for Session duplication");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("clip.duplicate")) throw new Error("clip duplication is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef, params.targetTrackRef]);
       const source = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (source.arrangement && toArrangement) throw new Error("arrangement clips cannot duplicate to the Arrangement");
       let fence: string;
@@ -6870,7 +6965,7 @@ export class McpHost {
       if (toArrangement) {
         payload.arrangementPosition = params.arrangementPosition;
         payload.expectedTargetCollectionRevision = this.arrangementCollectionRevision(snapshot, source.track!.ref as LiveRef);
-        fence = JSON.stringify({ arrangement: this.arrangementFence(snapshot), sourceAuthority, sourceFingerprint });
+        fence = JSON.stringify({ arrangement: this.arrangementFence(snapshot, [source.track?.ref]), sourceAuthority, sourceFingerprint });
       } else {
         const targetTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === params.targetTrackRef);
         if (!targetTrack || !isNonEmptyString(targetTrack.objectIdentity, 256)) throw new Error("target track identity is not authoritative");
@@ -6903,15 +6998,15 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = await this.viewForAsync(context, [transaction.clipRef, transaction.payload.targetTrackRef]);
       if (!reconciliation && transaction.payload.arrangementPosition !== null) {
         const source = this.clipRow(snapshot, transaction.clipRef!);
-        if (JSON.stringify({ arrangement: this.arrangementFence(snapshot), sourceAuthority: this.clipAuthority(snapshot, transaction.clipRef!), sourceFingerprint: this.captureObjectFingerprint(source.clip) }) !== transaction.fence) return this.transactionError(id, "Arrangement or source clip identity or content changed since preview; preview again");
+        if (JSON.stringify({ arrangement: this.arrangementFence(snapshot, [source.track?.ref]), sourceAuthority: this.clipAuthority(snapshot, transaction.clipRef!), sourceFingerprint: this.captureObjectFingerprint(source.clip) }) !== transaction.fence) return this.transactionError(id, "Arrangement or source clip identity or content changed since preview; preview again");
       } else if (!reconciliation) {
         const sourceAuthority = this.clipAuthority(snapshot, transaction.clipRef!);
         const source = this.clipRow(snapshot, transaction.clipRef!);
@@ -6923,7 +7018,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const created = await adapter.invokeAsync({ operation: "clip.duplicate", args: transaction.payload }, context) as { ref?: unknown; objectIdentity?: unknown; name?: unknown; createdFingerprint?: unknown };
       if (typeof created?.ref !== "string" || !isNonEmptyString(created.objectIdentity, 256) || !isNonEmptyString(created.createdFingerprint, 64)) throw new Error("clip duplication did not return exact created identity");
-      const createdClip = this.clipRow(await adapter.snapshotAsync(context), created.ref as LiveRef); if (createdClip.clip.objectIdentity !== created.objectIdentity || this.captureObjectFingerprint(createdClip.clip) !== created.createdFingerprint) throw new Error("duplicated clip identity or creation fingerprint was not confirmed");
+      const createdClip = this.clipRow(await this.viewForAsync(context, [created.ref, transaction.clipRef, transaction.payload.targetTrackRef]), created.ref as LiveRef); if (createdClip.clip.objectIdentity !== created.objectIdentity || this.captureObjectFingerprint(createdClip.clip) !== created.createdFingerprint) throw new Error("duplicated clip identity or creation fingerprint was not confirmed");
       transaction.created = { ...(created as Record<string, unknown>), fingerprint: created.createdFingerprint };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
@@ -6938,11 +7033,11 @@ export class McpHost {
     if (createKind !== "midi" && createKind !== "audio") return error(id, -32602, "kind must be midi or audio");
     if (params.takeLaneRef !== undefined && (createKind !== "midi" || !isNonEmptyString(params.takeLaneRef, 256))) return error(id, -32602, "takeLaneRef requires kind=midi");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = params.takeLaneRef !== undefined ? "take-lane.clip.create" : createKind === "audio" ? "arrangement.audio-clip.create" : "arrangement.clip.create";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync(); const fence = this.arrangementFence(snapshot);
+      const snapshot = await this.viewForAsync(undefined, [params.trackRef, params.takeLaneRef]); const fence = this.arrangementFence(snapshot, [params.trackRef]);
       if (params.takeLaneRef !== undefined) {
         if (typeof params.position !== "number" || !Number.isFinite(params.position) || params.position < 0 || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || !isNonEmptyString(params.name, 256)) return error(id, -32602, "position, length, and name are required for a take-lane clip create");
         const lane = this.takeLaneRow(snapshot, params.takeLaneRef as LiveRef);
@@ -6977,20 +7072,20 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation && transaction.kind !== "arrangement-take-lane-create" && this.arrangementFence(await adapter.snapshotAsync(context)) !== transaction.fence) return this.transactionError(id, "Arrangement changed since preview; preview again");
-      if (!reconciliation && transaction.kind === "arrangement-take-lane-create") { const snapshot = await adapter.snapshotAsync(context); const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef); const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity })); if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) return this.transactionError(id, "take lane or its clips changed since preview; preview again"); }
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation && transaction.kind !== "arrangement-take-lane-create" && this.arrangementFence(await this.viewForAsync(context, [transaction.payload.trackRef]), [transaction.payload.trackRef]) !== transaction.fence) return this.transactionError(id, "Arrangement changed since preview; preview again");
+      if (!reconciliation && transaction.kind === "arrangement-take-lane-create") { const snapshot = await this.viewForAsync(context, [transaction.payload.takeLaneRef]); const lane = this.takeLaneRow(snapshot, transaction.payload.takeLaneRef as LiveRef); const laneSiblings = lane.lane.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity })); if (JSON.stringify({ takeLaneRef: transaction.payload.takeLaneRef, laneIdentity: lane.lane.objectIdentity, siblings: laneSiblings }) !== transaction.fence) return this.transactionError(id, "take lane or its clips changed since preview; preview again"); }
       const operation = transaction.kind === "arrangement-create" ? "arrangement.clip.create" : transaction.kind === "arrangement-audio-create" ? "arrangement.audio-clip.create" : transaction.kind === "arrangement-take-lane-create" ? "take-lane.clip.create" : "arrangement.clip.delete";
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation, args: transaction.payload }, context) as Record<string, unknown>;
       const createsClip = transaction.kind === "arrangement-create" || transaction.kind === "arrangement-audio-create" || transaction.kind === "arrangement-take-lane-create";
       if (createsClip && (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64))) throw new Error("Arrangement clip creation did not return exact identity");
       transaction.created = result;
-      if (createsClip) { const createdClip = this.clipRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (createdClip.clip.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(createdClip.clip) !== result.createdFingerprint) throw new Error("created Arrangement clip identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
+      if (createsClip) { const createdClip = this.clipRow(await this.viewForAsync(context, [result.ref, transaction.payload.trackRef, transaction.payload.takeLaneRef]), result.ref as LiveRef); if (createdClip.clip.objectIdentity !== result.objectIdentity || this.captureObjectFingerprint(createdClip.clip) !== result.createdFingerprint) throw new Error("created Arrangement clip identity or creation fingerprint was not confirmed"); transaction.created.fingerprint = result.createdFingerprint; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, idempotent: false });
@@ -7000,9 +7095,9 @@ export class McpHost {
   private async liveClipMovePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["clipRef", "position", "targetTrackRef", "targetSceneIndex"]) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, "clipRef is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef, params.targetTrackRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       let fence: string;
       const payload: Record<string, unknown> = {};
@@ -7016,7 +7111,7 @@ export class McpHost {
         fence = JSON.stringify({ ref: params.clipRef, objectIdentity: row.clip.objectIdentity, start: row.clip.start, contentFingerprint: payload.expectedContentFingerprint });
       } else {
         if (!(status.operations ?? []).includes("clip.move")) throw new Error("atomic Session clip move is unavailable");
-        if (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > 10000) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for a Session slot move");
+        if (!isNonEmptyString(params.targetTrackRef, 256) || !Number.isInteger(params.targetSceneIndex) || (params.targetSceneIndex as number) < 0 || (params.targetSceneIndex as number) > MAX_SET_INDEX) return error(id, -32602, "targetTrackRef and targetSceneIndex are required for a Session slot move");
         const targetTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === params.targetTrackRef);
         const target = targetTrack && (targetTrack.clipSlots as unknown[]).filter(isObject).find((slot) => slot.sceneIndex === params.targetSceneIndex);
         if (!target) throw new Error("target scene index is invalid");
@@ -7029,7 +7124,7 @@ export class McpHost {
         payload.deleteRef = params.clipRef;
         payload.deleteAuthority = sourceAuthority;
         payload.sourceSceneIndex = (row.track?.clipSlots as unknown[]).filter(isObject).find((slot) => slot.clipRef === params.clipRef)?.sceneIndex;
-        if (!isIntegerInRange(payload.sourceSceneIndex, 0, 10000)) throw new Error("Session move source scene identity is incomplete");
+        if (!isIntegerInRange(payload.sourceSceneIndex, 0, MAX_SET_INDEX)) throw new Error("Session move source scene identity is incomplete");
         fence = JSON.stringify({ sourceAuthority, sourceFingerprint, target: target.ref, targetIdentity: target.objectIdentity, targetTrackIdentity: targetTrack.objectIdentity, targetSceneIdentity: targetScene.objectIdentity, empty: target.empty });
       }
       const transaction: ClipLifecycleTransaction = { id: `clipmove_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind, fence, clipRef: params.clipRef as LiveRef, payload, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -7047,19 +7142,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const snapshot = reconciliation ? undefined : await adapter.snapshotAsync(context);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const snapshot = reconciliation ? undefined : await this.viewForAsync(context, [transaction.clipRef, (transaction.payload.duplicate as JsonObject | undefined)?.targetTrackRef]);
       if (transaction.payload.position !== undefined) {
         const row = reconciliation ? undefined : this.clipRow(snapshot!, transaction.clipRef!);
         if (!reconciliation && (!row?.arrangement || JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, start: row.clip.start, contentFingerprint: this.captureObjectFingerprint(row.clip) }) !== transaction.fence)) return this.transactionError(id, "Arrangement clip identity, position, or content changed since preview; preview again");
         transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
         const result = await adapter.invokeAsync({ operation: "arrangement.clip.move", args: { ref: transaction.clipRef, position: transaction.payload.position, expectedObjectIdentity: transaction.payload.expectedObjectIdentity, expectedAuthorityRevision: transaction.payload.expectedAuthorityRevision, expectedContentFingerprint: transaction.payload.expectedContentFingerprint } }, context) as Record<string, unknown>;
         if (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("Arrangement clip move did not return exact created identity");
-        const after = await adapter.snapshotAsync(context); const moved = this.clipRow(after, result.ref as LiveRef); if (!moved.arrangement || moved.clip.objectIdentity !== result.objectIdentity || moved.clip.start !== transaction.payload.position || this.captureObjectFingerprint(moved.clip) !== result.createdFingerprint) throw new Error("Arrangement clip move result identity was not confirmed");
+        const after = await this.viewForAsync(context, [result.ref, row?.track?.ref]); const moved = this.clipRow(after, result.ref as LiveRef); if (!moved.arrangement || moved.clip.objectIdentity !== result.objectIdentity || moved.clip.start !== transaction.payload.position || this.captureObjectFingerprint(moved.clip) !== result.createdFingerprint) throw new Error("Arrangement clip move result identity was not confirmed");
         transaction.created = { ...result, fingerprint: result.createdFingerprint };
       } else {
         const sourceAuthority = reconciliation ? undefined : this.clipAuthority(snapshot!, transaction.clipRef!);
@@ -7072,7 +7167,7 @@ export class McpHost {
         transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
         const moved = await adapter.invokeAsync({ operation: "clip.move", args: duplicateArgs }, context) as { ref?: unknown; objectIdentity?: unknown; createdFingerprint?: unknown };
         if (typeof moved?.ref !== "string" || !isNonEmptyString(moved.objectIdentity, 256) || !isNonEmptyString(moved.createdFingerprint, 64)) throw new Error("Session clip move did not return exact destination identity");
-        const after = await adapter.snapshotAsync(context);
+        const after = await this.viewForAsync(context, [moved.ref, duplicateArgs.targetTrackRef, (transaction.payload.deleteAuthority as JsonObject | undefined)?.expectedTrackRef]);
         try { this.clipRow(after, transaction.clipRef!); throw new Error("Session clip move source still exists"); } catch (cause) { if (cause instanceof Error && cause.message === "Session clip move source still exists") throw cause; }
         const destination = this.clipRow(after, moved.ref as LiveRef); if (destination.clip.objectIdentity !== moved.objectIdentity || this.captureObjectFingerprint(destination.clip) !== moved.createdFingerprint) throw new Error("Session clip move destination identity or creation fingerprint changed");
         transaction.created = { ref: moved.ref, objectIdentity: moved.objectIdentity, fingerprint: moved.createdFingerprint, deleted: transaction.clipRef };
@@ -7096,10 +7191,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one audio clip field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       if (!(status.operations ?? []).includes("audio.clip.set")) throw new Error("audio clip editing is unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio !== true) return this.transactionError(id, "audio properties require an audio clip");
       const available = Array.isArray(row.clip.availableAudioFields) ? row.clip.availableAudioFields : fields.filter((field) => row.clip[field] !== null && row.clip[field] !== undefined);
@@ -7123,19 +7218,19 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = ["gain", "pitchCoarse", "pitchFine", "loopStart", "loopEnd", "warpMode", "warping", "fadeInLength", "fadeOutLength"] as const;
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, transaction.clipRef!);
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "audio clip identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "audio.clip.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("audio clip change was not confirmed");
       // Live keeps gain and the rest as 32-bit floats: numbers compare within that precision.
-      const verified = this.clipRow(await adapter.snapshotAsync(context), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("audio clip postcondition was not confirmed");
+      const verified = this.clipRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("audio clip postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -7162,18 +7257,18 @@ export class McpHost {
     const requiredKeys = kind === "update" ? ["clipRef", "notes"] : ["clipRef", "noteIds"];
     if (!isObject(params) || !hasOnly(params, requiredKeys) || !isNonEmptyString(params.clipRef, 256)) return error(id, -32602, `${requiredKeys.join(" and ")} are required`);
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
       const operation = kind === "update" ? "note.update" : "note.delete";
       if (!(status.operations ?? []).includes(operation)) throw new Error(`${operation} is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const clip = this.noteClip(snapshot, params.clipRef as LiveRef);
       const fence = this.noteFence(clip.notes);
       const present = new Set(clip.notes.map((note) => note.id).filter((value) => typeof value === "number"));
       let patches: Array<Record<string, unknown>> | undefined;
       let noteIds: number[] | undefined;
       if (kind === "update") {
-        if (!Array.isArray(params.notes) || params.notes.length < 1 || params.notes.length > 512) return error(id, -32602, "notes must be 1-512 patch objects");
+        if (!Array.isArray(params.notes) || params.notes.length < 1 || params.notes.length > MAX_SET_COLLECTION) return error(id, -32602, "notes must be one or more patch objects");
         const seen = new Set<number>();
         for (const patch of params.notes) {
           if (!isObject(patch) || Object.keys(patch).length < 2 || !Number.isInteger(patch.id) || (patch.id as number) < 0 || !hasOnly(patch, ["id", "pitch", "start", "duration", "velocity", "mute", "probability", "velocityDeviation", "releaseVelocity"])) return error(id, -32602, "note patches require an id, at least one edit, and only supported fields");
@@ -7192,7 +7287,7 @@ export class McpHost {
         patches = structuredClone(params.notes) as Array<Record<string, unknown>>;
         noteIds = [...seen];
       } else {
-        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > 512 || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be 1-512 non-negative integers");
+        if (!Array.isArray(params.noteIds) || params.noteIds.length < 1 || params.noteIds.length > MAX_SET_COLLECTION || !params.noteIds.every((value) => Number.isInteger(value) && (value as number) >= 0)) return error(id, -32602, "noteIds must be one or more non-negative integers");
         if (new Set(params.noteIds).size !== params.noteIds.length) return error(id, -32602, "duplicate note id");
         if ((params.noteIds as number[]).some((noteId) => !present.has(noteId))) return this.transactionError(id, "note id is not present in the clip");
         noteIds = [...(params.noteIds as number[])];
@@ -7216,12 +7311,12 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if (signal?.aborted) return null;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const snapshot = await adapter.snapshotAsync(context); const current = this.noteClip(snapshot, transaction.clipRef);
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const current = this.noteClip(snapshot, transaction.clipRef);
         if (this.noteFence(current.notes) !== transaction.fence || current.notesRevision !== transaction.notesRevision || JSON.stringify(current.authority) !== JSON.stringify(transaction.authority)) return this.transactionError(id, "clip identity or notes changed since preview; preview again"); }
       const operation = kind === "update" ? "note.update" : "note.delete";
       const args = kind === "update" ? { ref: transaction.clipRef, notes: transaction.patches, expectedClipAuthority: transaction.authority, expectedNotesRevision: transaction.notesRevision } : { ref: transaction.clipRef, noteIds: transaction.noteIds, expectedClipAuthority: transaction.authority, expectedNotesRevision: transaction.notesRevision };
@@ -7229,7 +7324,7 @@ export class McpHost {
       const result = await adapter.invokeAsync({ operation, args }, context) as { updated?: unknown; deleted?: unknown };
       const expectedCount = kind === "update" ? transaction.patches?.length : transaction.noteIds?.length;
       if ((kind === "update" ? result.updated : result.deleted) !== expectedCount) throw new Error("Live did not confirm the complete note edit");
-      const applied = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef); transaction.appliedFence = this.noteFence(applied.notes); if (transaction.appliedFence !== transaction.expectedAppliedFence) throw new Error("Live note edit changed, clamped, or omitted unexpected note state");
+      const applied = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef); transaction.appliedFence = this.noteFence(applied.notes); if (transaction.appliedFence !== transaction.expectedAppliedFence) throw new Error("Live note edit changed, clamped, or omitted unexpected note state");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", ...(kind === "update" ? { updated: result.updated } : { deleted: result.deleted }), idempotent: false });
@@ -7245,16 +7340,16 @@ export class McpHost {
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter();
-      const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context);
-      const current = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef);
+      const current = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef);
       if (applyRecovery) {
         if (JSON.stringify(current.authority) !== JSON.stringify(transaction.authority)) throw new Error("uncertain note deletion clip hierarchy changed");
         const original = new Map(transaction.priorAllNotes.map((note) => [note.id, note])); const currentById = new Map(current.notes.map((note) => [note.id, note]));
         for (const [noteId, note] of currentById) { const prior = original.get(noteId); if (!prior || this.noteFence([note]) !== this.noteFence([prior])) throw new Error("uncertain note deletion conflicts with external note changes"); }
         const missing = transaction.priorAllNotes.filter((note) => !currentById.has(note.id)); transaction.undoExpectedFence = this.noteContentFence(transaction.priorAllNotes); transaction.undoKey = params.idempotencyKey as string;
         if (missing.length > 0) { const notes = missing.map((note) => ({ pitch: note.pitch, start: note.start, duration: note.duration, velocity: note.velocity, channel: note.channel ?? 1, mute: note.mute ?? false, probability: note.probability ?? 1, velocityDeviation: note.velocityDeviation ?? 0, releaseVelocity: note.releaseVelocity ?? 64 })); await this.invokeUndoRecovery(transaction, adapter, "note.add-batch", { ref: transaction.clipRef, notes, expectedClipAuthority: current.authority, expectedNotesRevision: current.notesRevision }, context); }
-        const verified = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef); if (this.noteContentFence(verified.notes) !== transaction.undoExpectedFence) throw new Error("uncertain note deletion recovery did not restore exact prior content"); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "undone", restored: missing.length, recoveredFromUncertainApply: true, idempotent: false });
+        const verified = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef); if (this.noteContentFence(verified.notes) !== transaction.undoExpectedFence) throw new Error("uncertain note deletion recovery did not restore exact prior content"); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "undone", restored: missing.length, recoveredFromUncertainApply: true, idempotent: false });
       }
       if (reconciliation) {
         const restoredFence = transaction.kind === "update" ? this.noteFence(current.notes) : this.noteContentFence(current.notes);
@@ -7267,7 +7362,7 @@ export class McpHost {
         const restore = transaction.priorNotes.map((note) => ({ id: note.id, pitch: note.pitch, start: note.start, duration: note.duration, velocity: note.velocity, mute: note.mute ?? false, probability: note.probability ?? 1, velocityDeviation: note.velocityDeviation ?? 0, releaseVelocity: note.releaseVelocity ?? 64 }));
         transaction.undoExpectedFence = transaction.fence;
         await this.invokeUndoRecovery(transaction, adapter, "note.update", { ref: transaction.clipRef, notes: restore, expectedClipAuthority: current.authority, expectedNotesRevision: current.notesRevision }, context);
-        const verified = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef); if (this.noteFence(verified.notes) !== transaction.undoExpectedFence) throw new Error("note update undo did not restore exact prior notes");
+        const verified = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef); if (this.noteFence(verified.notes) !== transaction.undoExpectedFence) throw new Error("note update undo did not restore exact prior notes");
         transaction.state = "undone";
         transaction.undoKey = params.idempotencyKey as string;
         return this.successText(id, { transactionId: transaction.id, state: "undone", restored: restore.length, idempotent: false });
@@ -7276,7 +7371,7 @@ export class McpHost {
       transaction.undoExpectedFence = this.noteContentFence([...current.notes, ...transaction.priorNotes]);
       const result = await this.invokeUndoRecovery(transaction, adapter, "note.add-batch", { ref: transaction.clipRef, notes, expectedClipAuthority: current.authority, expectedNotesRevision: current.notesRevision }, context) as { added?: unknown; noteIds?: unknown };
       if (result.added !== notes.length || !Array.isArray(result.noteIds) || result.noteIds.length !== notes.length) throw new Error("note delete undo did not re-add the complete batch");
-      const verified = this.noteClip(await adapter.snapshotAsync(context), transaction.clipRef);
+      const verified = this.noteClip(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef);
       if (this.noteContentFence(verified.notes) !== transaction.undoExpectedFence) throw new Error("note delete undo content verification failed");
       transaction.state = "undone";
       transaction.undoKey = params.idempotencyKey as string;
@@ -7306,11 +7401,11 @@ export class McpHost {
   private async liveCapturePreviewAsync(id: RequestId, params: unknown, kind: "capture-midi" | "scene-capture"): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, [])) return error(id, -32602, "capture preview accepts no arguments");
     try {
-      const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const operation = kind === "capture-midi" ? "session.capture-midi" : "scene.capture";
       const recoveryOperation = kind === "capture-midi" ? "clip.delete" : "scene.delete";
       if (!status.connected || !(status.capabilities ?? []).includes("session.read") || !(status.operations ?? []).includes(operation) || !(status.operations ?? []).includes(recoveryOperation)) throw new Error(`${kind} is unavailable`);
-      const snapshot = await this.asyncAdapter().snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      const snapshot = await this.wholeSetAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, TRACK_CONTENT_PARTS);
       const transaction: ClipLifecycleTransaction = { id: `${kind === "capture-midi" ? "capturemidi" : "scenecapture"}_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind, fence: this.captureFence(snapshot), payload: { expectedStateRevision: this.captureAuthorityRevision(snapshot) }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, kind);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, impact: kind === "capture-midi" ? "creates-session-midi-clips" : "creates-one-session-scene", confirmation: "apply", expiresAt: transaction.expiresAt });
@@ -7327,24 +7422,24 @@ export class McpHost {
     if (signal?.aborted) return null;
     transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string; let dispatched = reconciliation;
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("session.read");
       if (status.epoch !== transaction.epoch) { transaction.state = "previewed"; delete transaction.applyKey; return this.transactionError(id, "Live connection epoch changed; preview again"); }
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const before = await adapter.snapshotAsync(context);
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) { const before = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS);
         if (this.captureFence(before) !== transaction.fence) { transaction.state = "previewed"; delete transaction.applyKey; return this.transactionError(id, "Session state changed since capture preview; preview again"); } }
       dispatched = true;
       if (kind === "capture-midi") {
         const result = await adapter.invokeAsync({ operation: "session.capture-midi", args: transaction.payload }, context) as { captured?: unknown; clips?: unknown; clipIdentities?: unknown };
         const clips = Array.isArray(result.clips) ? result.clips.filter((ref): ref is string => typeof ref === "string") : [];
         const identities = Array.isArray(result.clipIdentities) ? result.clipIdentities.filter(isObject) : [];
-        const after = await adapter.snapshotAsync(context); const authoritative = new Map(after.tracks.flatMap((track) => track.clips.map((clip) => [clip.ref, clip] as const)));
+        const after = await this.viewForAsync(context, clips); const authoritative = new Map(after.tracks.flatMap((track) => track.clips.map((clip) => [clip.ref, clip] as const)));
         if (result.captured !== (clips.length > 0) || identities.length !== clips.length || clips.some((ref) => !authoritative.has(ref as LiveRef))) throw new Error("MIDI capture postcondition was not confirmed");
         const owned = clips.map((ref) => { const identity = identities.find((row) => row.ref === ref); const clip = authoritative.get(ref as LiveRef); if (!identity || !isNonEmptyString(identity.objectIdentity, 256) || !isNonEmptyString(identity.createdFingerprint, 64) || !clip || this.captureObjectFingerprint(clip) !== identity.createdFingerprint) throw new Error("captured MIDI object identity or creation fingerprint is unavailable"); return { ref, objectIdentity: identity.objectIdentity, fingerprint: identity.createdFingerprint }; });
         transaction.created = { clips: owned };
       } else {
         const result = await adapter.invokeAsync({ operation: "scene.capture", args: transaction.payload }, context) as { captured?: unknown; ref?: unknown; objectIdentity?: unknown; createdFingerprint?: unknown };
-        const after = await adapter.snapshotAsync(context); const scene = after.scenes.find((row) => row.ref === result.ref);
+        const after = await this.wholeSetAsync(context, TRACK_CONTENT_PARTS); const scene = after.scenes.find((row) => row.ref === result.ref);
         if (result.captured !== true || typeof result.ref !== "string" || !isNonEmptyString(result.objectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64) || !scene || this.sessionStructureCreatedFingerprint(after, "scene", result.ref as LiveRef) !== result.createdFingerprint) throw new Error("scene capture postcondition was not confirmed");
         transaction.created = { sceneRef: result.ref, objectIdentity: result.objectIdentity, fingerprint: result.createdFingerprint };
       }
@@ -7387,7 +7482,7 @@ export class McpHost {
     if (!this.validateDeviceParameterPreview(params)) return error(id, -32602, "deviceRef, parameterRef, and finite value are required");
     try {
       const status = this.requireConnected("device.parameter.write");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.parameterRef]);
       const target = this.parameterTarget(snapshot, params.deviceRef, params.parameterRef);
       const authority = this.parameterAuthority(snapshot, target.parameter.ref);
       const revision = this.parameterRevision(target.parameter);
@@ -7407,13 +7502,13 @@ export class McpHost {
    */
   private async liveDeviceParametersPreviewAsync(id: RequestId, params: JsonObject): Promise<JsonObject> {
     const values = params.values;
-    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > 64 || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 64 values, each a parameterRef and a finite value, are required");
+    if (!hasOnly(params, ["deviceRef", "values"]) || !isNonEmptyString(params.deviceRef, 256) || !Array.isArray(values) || values.length < 1 || values.length > MAX_PARAMETER_VALUES || !values.every((item) => isObject(item) && hasOnly(item, ["parameterRef", "value"]) && isNonEmptyString(item.parameterRef, 256) && typeof item.value === "number" && Number.isFinite(item.value))) return error(id, -32602, "deviceRef and 1 to 10000 values, each a parameterRef and a finite value, are required");
     const requested = values as Array<{ parameterRef: string; value: number }>;
     if (new Set(requested.map((item) => item.parameterRef)).size !== requested.length) return error(id, -32602, "each parameter takes one value");
     try {
       const status = this.requireConnected("device.parameter.write");
       if (!(status.operations ?? []).includes("device.parameters.set")) throw new Error("parameter changes on several parameters at once are unavailable");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, ...requested.map((item) => item.parameterRef)]);
       const parameters: DeviceParametersTransaction["parameters"] = []; const shown: JsonObject[] = [];
       let device: ReturnType<McpHost["parameterTarget"]> | undefined;
       for (const item of requested) {
@@ -7451,12 +7546,12 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("device.parameter.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
-        const current = await adapter.snapshotAsync(context);
+        const current = await this.viewForAsync(context, [transaction.deviceRef, ...transaction.parameters.map((parameter) => parameter.ref)]);
         for (const parameter of transaction.parameters) {
           const target = this.parameterTarget(current, transaction.deviceRef, parameter.ref).parameter;
           if (this.parameterRevision(target) !== parameter.priorRevision || target.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(current, parameter.ref)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after preview; preview again");
@@ -7464,7 +7559,7 @@ export class McpHost {
       }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       await adapter.invokeAsync({ operation: "device.parameters.set", args: this.parametersMutationArgs(transaction, (parameter) => ({ value: parameter.proposedValue, revision: parameter.priorRevision })) }, context);
-      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      const verifiedSnapshot = await this.viewForAsync(context, [transaction.deviceRef, ...transaction.parameters.map((parameter) => parameter.ref)]);
       for (const parameter of transaction.parameters) {
         const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, parameter.ref).parameter;
         const kept = sameLiveValue(verified.value, parameter.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, parameter.proposedValue, verified);
@@ -7493,17 +7588,17 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Device-parameter state is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Device-parameter preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("device.parameter.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const currentSnapshot = await adapter.snapshotAsync(context);
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const currentSnapshot = await this.viewForAsync(context, [transaction.deviceRef, transaction.parameterRef]);
       const target = this.parameterTarget(currentSnapshot, transaction.deviceRef, transaction.parameterRef);
       const currentRevision = reconciliation ? transaction.priorRevision : this.parameterRevision(target.parameter);
       if (!reconciliation && (currentRevision !== transaction.priorRevision || target.parameter.value !== transaction.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority))) return this.transactionError(id, "Device parameter identity or value changed since preview");
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       await adapter.invokeAsync({ operation: "device.parameter.set", args: this.parameterMutationArgs(transaction, transaction.proposedValue, currentRevision) }, context);
-      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      const verifiedSnapshot = await this.viewForAsync(context, [transaction.deviceRef, transaction.parameterRef]);
       const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
       const kept = sameLiveValue(verified.value, transaction.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, transaction.proposedValue, verified);
       if (kept !== undefined) transaction.proposedValue = kept;
@@ -7519,13 +7614,13 @@ export class McpHost {
   }
 
   private async liveMidiPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, 1023) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
+    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, MAX_SET_INDEX) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
     return this.successText(id, await this.midiTransactions.previewAsync(params));
   }
 
   private async liveMidiApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
-    return this.successText(id, await this.midiTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + SESSION_MIDI_TRANSACTION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    return this.successText(id, await this.midiTransactions.applyAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(SESSION_MIDI_TRANSACTION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
   }
 
   private locatorRevision(snapshot: LiveSnapshot): string {
@@ -7545,7 +7640,7 @@ export class McpHost {
     if (!isObject(params) || !hasOnly(params, ["start", "end", "startName", "endName"]) || typeof params.start !== "number" || !Number.isFinite(params.start) || params.start < 0 || params.start > 100_000 || typeof params.end !== "number" || !Number.isFinite(params.end) || params.end <= params.start || params.end > 100_000 || !isNonEmptyString(params.startName, 128) || !isNonEmptyString(params.endName, 128) || params.startName === params.endName) return error(id, -32602, "Arrangement section range and distinct names are required");
     try {
       const status = this.requireConnected("arrangement.read");
-      const snapshot = await this.asyncAdapter().snapshotAsync();
+      const snapshot = await this.viewAsync(undefined, [], ["arrangement"]);
       const prior = snapshot.arrangement.locators.map((locator) => ({ ...locator }));
       if (prior.some((locator) => !isNonEmptyString(locator.objectIdentity, 256))) throw new Error("locator object identity is unavailable");
       if (prior.some((locator) => locator.name === params.startName || locator.name === params.endName || locator.position === params.start || locator.position === params.end)) throw new Error("Arrangement locator target collides with existing state");
@@ -7558,10 +7653,10 @@ export class McpHost {
   private async compensateArrangementAsync(transaction: ArrangementTransaction, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
     const created = transaction.created ?? []; transaction.compensationSteps ??= []; transaction.recoveryMode = "compensate"; const reversed = [...created].reverse();
     for (let index = 0; index < reversed.length; index += 1) { const locator = reversed[index]!; let step = transaction.compensationSteps[index];
-      if (!step) { const snapshot = await adapter.snapshotAsync(context); const row = snapshot.arrangement.locators.find((candidate) => candidate.ref === locator.ref); if (!row) continue; if (row.objectIdentity !== locator.objectIdentity || !locator.fingerprint || this.captureObjectFingerprint(row) !== locator.fingerprint) throw new Error("transaction-owned locator changed before compensation"); step = { args: this.locatorDeleteArgs(snapshot, locator.ref, locator.objectIdentity), completed: false }; transaction.compensationSteps[index] = step; }
+      if (!step) { const snapshot = await this.viewAsync(context, [], ["arrangement"]); const row = snapshot.arrangement.locators.find((candidate) => candidate.ref === locator.ref); if (!row) continue; if (row.objectIdentity !== locator.objectIdentity || !locator.fingerprint || this.captureObjectFingerprint(row) !== locator.fingerprint) throw new Error("transaction-owned locator changed before compensation"); step = { args: this.locatorDeleteArgs(snapshot, locator.ref, locator.objectIdentity), completed: false }; transaction.compensationSteps[index] = step; }
       if (!step.completed) { await adapter.invokeAsync({ operation: "locator.delete", args: step.args }, context); step.completed = true; }
     }
-    const after = (await adapter.snapshotAsync(context)).arrangement.locators; if (created.some((locator) => after.some((row) => row.ref === locator.ref))) throw new Error("Arrangement compensation left transaction-owned locators");
+    const after = (await this.viewAsync(context, [], ["arrangement"])).arrangement.locators; if (created.some((locator) => after.some((row) => row.ref === locator.ref))) throw new Error("Arrangement compensation left transaction-owned locators");
   }
 
   private async liveArrangementApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
@@ -7574,12 +7669,12 @@ export class McpHost {
     if (transaction.state === "uncertain" && !reconciliation) return this.transactionError(id, "Arrangement apply is uncertain; reconcile with the exact original idempotency key");
     if ((transaction.state !== "previewed" && !reconciliation) || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Arrangement preview expired or is no longer applicable");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("arrangement.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (reconciliation && transaction.recoveryMode === "compensate") { try { await this.compensateArrangementAsync(transaction, adapter, context); transaction.state = "undone"; return this.successText(id, { transactionId: transaction.id, state: "compensated", residuals: [], idempotent: false }); } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Arrangement compensation remains uncertain; inspect authoritative locators."); } }
-      let currentSnapshot = await adapter.snapshotAsync(context);
+      let currentSnapshot = await this.viewAsync(context, [], ["arrangement"]);
       if (!reconciliation && this.locatorRevision(currentSnapshot) !== transaction.revision) return this.transactionError(id, "Arrangement locators changed since preview");
       const created: NonNullable<ArrangementTransaction["created"]> = transaction.created ? [...transaction.created] : []; let dispatchAmbiguous = false;
       transaction.recoverySteps ??= []; transaction.recoveryMode = "apply"; transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -7589,7 +7684,7 @@ export class McpHost {
           if (!step) { step = { args: { ...proposed, expectedCollectionRevision: this.locatorRevision(currentSnapshot) } }; transaction.recoverySteps[stepIndex] = step; }
           let result = step.result; if (!result) { dispatchAmbiguous = true; result = await adapter.invokeAsync({ operation: "locator.add", args: step.args }, context) as typeof step.result; dispatchAmbiguous = false; }
           if (!result?.ref || !isNonEmptyString(result.objectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("Live did not return atomic created locator ownership evidence");
-          step.result = result; if (!created.some((item) => item.ref === result!.ref)) created.push({ ...result, fingerprint: result.createdFingerprint }); transaction.created = created; currentSnapshot = await adapter.snapshotAsync(context); const owned = created.find((item) => item.ref === result!.ref)!; const row = currentSnapshot.arrangement.locators.find((item) => item.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.captureObjectFingerprint(row) !== owned.fingerprint) throw new Error("created locator changed after atomic creation"); if (result.name !== proposed.name || result.position !== proposed.position) throw new Error("Live did not confirm exact created locator state");
+          step.result = result; if (!created.some((item) => item.ref === result!.ref)) created.push({ ...result, fingerprint: result.createdFingerprint }); transaction.created = created; currentSnapshot = await this.viewAsync(context, [], ["arrangement"]); const owned = created.find((item) => item.ref === result!.ref)!; const row = currentSnapshot.arrangement.locators.find((item) => item.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.captureObjectFingerprint(row) !== owned.fingerprint) throw new Error("created locator changed after atomic creation"); if (result.name !== proposed.name || result.position !== proposed.position) throw new Error("Live did not confirm exact created locator state");
         }
       } catch (cause) {
         if (dispatchAmbiguous && !nothingChanged(cause)) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
@@ -7598,7 +7693,7 @@ export class McpHost {
         catch { transaction.state = "uncertain"; transaction.recoveryMode = "compensate"; throw new Error("Arrangement apply compensation failed; retry the exact key to reconcile cleanup"); }
         throw cause;
       }
-      const authoritative = (await adapter.snapshotAsync(context)).arrangement.locators;
+      const authoritative = (await this.viewAsync(context, [], ["arrangement"])).arrangement.locators;
       if (!created.every((locator) => authoritative.some((item) => item.ref === locator.ref && item.objectIdentity === locator.objectIdentity && item.name === locator.name && item.position === locator.position && this.captureObjectFingerprint(item) === locator.fingerprint))) { transaction.state = "uncertain"; transaction.created = created; throw new Error("Live did not confirm unchanged atomically owned Arrangement locators; read authoritative state before retrying"); }
       transaction.created = created; transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", locators: created, epoch: transaction.epoch, idempotent: false });
@@ -7612,7 +7707,7 @@ export class McpHost {
 
   private async liveTempoPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["tempo"]) || typeof params.tempo !== "number" || !Number.isFinite(params.tempo) || params.tempo < 20 || params.tempo > 999) return error(id, -32602, "tempo must be a finite number from 20 to 999");
-    const status = this.requireConnected("transport"); const snapshot = await this.asyncAdapter().snapshotAsync();
+    const status = this.requireConnected("transport"); const snapshot = await this.viewAsync(undefined, [], ["set"]);
     if (typeof snapshot.set.tempo !== "number" || !Number.isFinite(snapshot.set.tempo) || !isNonEmptyString(snapshot.set.objectIdentity, 256)) return this.adapterToolError(id, new Error("authoritative Set tempo identity is unavailable"), "Tempo preview requires fresh authoritative tempo evidence.");
     const transactionId = this.newTransactionId();
     const transaction: TempoTransaction = { id: transactionId, setRef: snapshot.set.ref, setIdentity: snapshot.set.objectIdentity, priorTempo: snapshot.set.tempo, proposedTempo: params.tempo, epoch: status.epoch as number, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -7629,9 +7724,9 @@ export class McpHost {
     if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
     if ((transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, "Tempo preview expired; preview again");
     try {
-      if (reconciliation) await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!reconciliation && (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== transaction.priorTempo)) return this.transactionError(id, "Set identity or tempo changed since preview; preview again");
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
@@ -7689,9 +7784,9 @@ export class McpHost {
       const deviceStateFinalizable = !owner && !midiFinalizable && !batchFinalizable && this.deviceStateTransactions.isFinalizable(transactionId);
       if (!owner && !midiFinalizable && !batchFinalizable && !deviceStateFinalizable) return this.recoveryFinalizeError(id, "Recovery transaction was not found or is not finalizable.");
       const retireRemote = async (): Promise<boolean> => { const retire = (this.adapter as Partial<{ retireTransactionAsync(transactionId: string, context?: LiveOperationContext, terminal?: boolean): Promise<unknown> }>).retireTransactionAsync; if (typeof retire !== "function") return true; try { await retire.call(this.adapter, transactionId, { deadlineMs: Date.now() + 5_000 }, true); return true; } catch { return false; } };
-      const adapter = this.asyncAdapter(); const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const safetySnapshot = await adapter.snapshotAsync({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS }); const transport = safetySnapshot.playback?.transport;
-      if (!transport || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || safetySnapshot.playback.playingTargets.length > 0 || safetySnapshot.playback.firedTargets.length > 0) return this.recoveryFinalizeError(id, "Recovery finalization requires authoritative stopped playback and recording with no active Session targets.");
-      if (status.operations?.includes("realtime.stats")) { const realtime = await adapter.invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: Date.now() + AUDITION_DEADLINE_MS }) as { armed?: unknown; pending?: unknown }; if (realtime.armed !== false || realtime.pending !== 0) return this.recoveryFinalizeError(id, "Recovery finalization requires realtime authority to be disarmed with no pending writes."); }
+      const adapter = this.asyncAdapter(); const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); const safety = await this.playbackAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }); const transport = safety.transport;
+      if (!transport || transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || safety.playingTargets.length > 0 || safety.firedTargets.length > 0) return this.recoveryFinalizeError(id, "Recovery finalization requires authoritative stopped playback and recording with no active Session targets.");
+      if (status.operations?.includes("realtime.stats")) { const realtime = await adapter.invokeAsync({ operation: "realtime.stats", args: {} }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { armed?: unknown; pending?: unknown }; if (realtime.armed !== false || realtime.pending !== 0) return this.recoveryFinalizeError(id, "Recovery finalization requires realtime authority to be disarmed with no pending writes."); }
       if (midiFinalizable) {
         if (!await retireRemote()) return this.recoveryFinalizeError(id, "Remote replay authority could not be retired; finalization refused.");
         const finalized = this.midiTransactions.finalize(transactionId); return this.successText(id, { ...finalized, resolution: params.resolution, evidence: params.evidence, liveMutated: false, recoveryAuthorityRetired: true });
@@ -7732,9 +7827,9 @@ export class McpHost {
     const undoOwnerTool = this.transactionOwnerTool(String(params.transactionId));
     if (undoOwnerTool !== undefined && !this.policyAllowsTool(undoOwnerTool)) return this.transactionError(id, "The current deployment policy no longer allows this transaction's tool domain; reconcile manually or restore the policy before undo.");
     const transaction = this.transactions.get(params.transactionId as string);
-    if (!transaction && String(params.transactionId).startsWith("midi_")) return this.successText(id, await this.midiTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + SESSION_MIDI_TRANSACTION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
-    if (!transaction && String(params.transactionId).startsWith("batch_")) return this.successText(id, await this.batchTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
-    if (!transaction && String(params.transactionId).startsWith("devstate_")) return this.successText(id, await this.deviceStateTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("midi_")) return this.successText(id, await this.midiTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(SESSION_MIDI_TRANSACTION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("batch_")) return this.successText(id, await this.batchTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
+    if (!transaction && String(params.transactionId).startsWith("devstate_")) return this.successText(id, await this.deviceStateTransactions.undoAsync(params.transactionId as string, params.confirmation, params.idempotencyKey as string, { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }));
     if (!transaction && String(params.transactionId).startsWith("transport_")) {
       const transport = this.transportTransactions.get(params.transactionId as string);
       if (!transport) return this.transactionError(id, "Unknown or expired transport transaction");
@@ -7753,17 +7848,17 @@ export class McpHost {
       if (capture.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain capture transaction can be undone");
       try {
         this.beginUndoRecovery(capture, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== capture.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; capture.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(capture, adapter, context); let snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; capture.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(capture, adapter, context); let snapshot = capture.kind === "capture-midi" ? await this.viewForAsync(context, (Array.isArray(capture.created?.clips) ? capture.created.clips : []).filter(isObject).map((owned) => owned.ref)) : await this.wholeSetAsync(context, TRACK_CONTENT_PARTS);
         capture.state = "undoing";
         if (capture.kind === "capture-midi") {
           const clips = Array.isArray(capture.created?.clips) ? capture.created.clips.filter(isObject) : []; const current = new Map(snapshot.tracks.flatMap((track) => track.clips.map((clip) => [clip.ref, clip] as const)));
           for (const owned of clips) { const clip = typeof owned.ref === "string" ? current.get(owned.ref as LiveRef) : undefined; if (clip && (!isNonEmptyString(owned.objectIdentity, 256) || owned.fingerprint !== this.captureObjectFingerprint(clip))) throw new Error("captured MIDI clip identity or content changed before undo"); }
           for (const owned of clips) if (typeof owned.ref === "string" && isNonEmptyString(owned.objectIdentity, 256)) await this.deleteOwnedClipAsync(adapter, owned.ref as LiveRef, owned.objectIdentity, context, owned.fingerprint as string, capture, true);
-          const after = await adapter.snapshotAsync(context); const remaining = new Set(after.tracks.flatMap((track) => track.clips.map((clip) => clip.ref))); if (clips.some((owned) => typeof owned.ref === "string" && remaining.has(owned.ref as LiveRef))) throw new Error("captured MIDI clip deletion was not confirmed");
+          const after = await this.viewForAsync(context, clips.map((owned) => owned.ref)); const remaining = new Set(after.tracks.flatMap((track) => track.clips.map((clip) => clip.ref))); if (clips.some((owned) => typeof owned.ref === "string" && remaining.has(owned.ref as LiveRef))) throw new Error("captured MIDI clip deletion was not confirmed");
         } else {
           const sceneRef = capture.created?.sceneRef; const scene = typeof sceneRef === "string" ? snapshot.scenes.find((row) => row.ref === sceneRef) : undefined;
           if (scene) { if (!isNonEmptyString(capture.created?.objectIdentity, 256) || capture.created?.fingerprint !== this.sessionStructureCreatedFingerprint(snapshot, "scene", sceneRef as LiveRef)) throw new Error("captured scene identity or content changed before undo"); await this.invokeUndoRecovery(capture, adapter, "scene.delete", { ref: sceneRef, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: capture.created.objectIdentity }, context); }
-          if (typeof sceneRef === "string" && (await adapter.snapshotAsync(context)).scenes.some((candidate) => candidate.ref === sceneRef)) throw new Error("captured scene deletion was not confirmed");
+          if (typeof sceneRef === "string" && (await this.viewAsync(context, [], ["scenes"])).scenes.some((candidate) => candidate.ref === sceneRef)) throw new Error("captured scene deletion was not confirmed");
         }
         capture.state = "undone";
         return this.successText(id, { transactionId: capture.id, state: "undone", idempotent: false });
@@ -7777,7 +7872,7 @@ export class McpHost {
       if ((duplicate.state !== "applied" && !reconciliation) || !isNonEmptyString(duplicate.created?.ref, 256) || !isNonEmptyString(duplicate.created?.objectIdentity, 256)) return this.transactionError(id, "Only an applied or exact-key uncertain identity-bound clip duplicate can be undone");
       try {
         this.beginUndoRecovery(duplicate, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== duplicate.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; duplicate.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(duplicate, adapter, context); duplicate.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; duplicate.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(duplicate, adapter, context); duplicate.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, duplicate.created.ref as LiveRef, duplicate.created.objectIdentity as string, context, duplicate.created.fingerprint as string, duplicate, reconciliation);
         duplicate.state = "undone"; return this.successText(id, { transactionId: duplicate.id, state: "undone", deleted: duplicate.created.ref, idempotent: false });
       } catch (cause) { duplicate.state = "uncertain"; return this.adapterToolError(id, cause, "Clip-duplicate undo is uncertain; inspect the exact destination."); }
@@ -7791,7 +7886,7 @@ export class McpHost {
       if ((arrangementClip.state !== "applied" && !reconciliation) || !isNonEmptyString(arrangementClip.created?.ref, 256) || !isNonEmptyString(arrangementClip.created?.objectIdentity, 256)) return this.transactionError(id, "Arrangement clip creation lacks exact undo identity");
       try {
         this.beginUndoRecovery(arrangementClip, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== arrangementClip.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; arrangementClip.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(arrangementClip, adapter, context); arrangementClip.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; arrangementClip.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(arrangementClip, adapter, context); arrangementClip.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, arrangementClip.created.ref as LiveRef, arrangementClip.created.objectIdentity as string, context, arrangementClip.created.fingerprint as string, arrangementClip, reconciliation);
         arrangementClip.state = "undone"; return this.successText(id, { transactionId: arrangementClip.id, state: "undone", idempotent: false });
       } catch (cause) { arrangementClip.state = "uncertain"; return this.adapterToolError(id, cause, "Arrangement clip undo is uncertain; inspect the exact created clip."); }
@@ -7804,17 +7899,17 @@ export class McpHost {
       if ((move.state !== "applied" && !reconciliation) || !isNonEmptyString(move.created?.ref, 256) || !isNonEmptyString(move.created?.objectIdentity, 256) || !isNonEmptyString(move.created?.fingerprint, 64)) return this.transactionError(id, "Clip move lacks exact applied identity and content fingerprint");
       try {
         const plan = this.beginUndoRecovery(move, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== move.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; move.undoKey = params.idempotencyKey as string; move.payload.appliedRef ??= move.created.ref; if (reconciliation) await this.replayUndoRecovery(move, adapter, context); move.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; move.undoKey = params.idempotencyKey as string; move.payload.appliedRef ??= move.created.ref; if (reconciliation) await this.replayUndoRecovery(move, adapter, context); move.state = "undoing";
         if (move.payload.position !== undefined) {
           let result: JsonObject;
           if (reconciliation) { const replayed = plan.steps.at(-1)?.result; if (!isObject(replayed)) throw new Error("Arrangement clip move replay result is unavailable"); result = replayed; }
-          else { const currentSnapshot = await adapter.snapshotAsync(context); const current = this.clipRow(currentSnapshot, move.created.ref as LiveRef); if (!current.arrangement || current.clip.objectIdentity !== move.created.objectIdentity || current.clip.start !== move.payload.position || this.captureObjectFingerprint(current.clip) !== move.created.fingerprint) throw new Error("Arrangement clip identity, position, or content changed after apply; undo refused"); result = await this.invokeUndoRecovery(move, adapter, "arrangement.clip.move", { ref: move.created.ref, position: move.payload.priorPosition, ...this.arrangementClipAuthority(currentSnapshot, move.created.ref as LiveRef), expectedContentFingerprint: move.created.fingerprint }, context) as JsonObject; }
-          if (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || result.start !== move.payload.priorPosition) throw new Error("Arrangement clip move restoration was not confirmed"); const restoredRow = this.clipRow(await adapter.snapshotAsync(context), result.ref as LiveRef); if (restoredRow.clip.objectIdentity !== result.objectIdentity || restoredRow.clip.start !== move.payload.priorPosition) throw new Error("Arrangement clip move prior location was not verified"); move.created = result;
+          else { const currentSnapshot = await this.viewForAsync(context, [move.created.ref]); const current = this.clipRow(currentSnapshot, move.created.ref as LiveRef); if (!current.arrangement || current.clip.objectIdentity !== move.created.objectIdentity || current.clip.start !== move.payload.position || this.captureObjectFingerprint(current.clip) !== move.created.fingerprint) throw new Error("Arrangement clip identity, position, or content changed after apply; undo refused"); result = await this.invokeUndoRecovery(move, adapter, "arrangement.clip.move", { ref: move.created.ref, position: move.payload.priorPosition, ...this.arrangementClipAuthority(currentSnapshot, move.created.ref as LiveRef), expectedContentFingerprint: move.created.fingerprint }, context) as JsonObject; }
+          if (!isNonEmptyString(result.ref, 256) || !isNonEmptyString(result.objectIdentity, 256) || result.start !== move.payload.priorPosition) throw new Error("Arrangement clip move restoration was not confirmed"); const restoredRow = this.clipRow(await this.viewForAsync(context, [result.ref, move.created.ref]), result.ref as LiveRef); if (restoredRow.clip.objectIdentity !== result.objectIdentity || restoredRow.clip.start !== move.payload.priorPosition) throw new Error("Arrangement clip move prior location was not verified"); move.created = result;
         } else {
           let restored: JsonObject;
           if (reconciliation) { const replayed = plan.steps.at(-1)?.result; if (!isObject(replayed)) throw new Error("Session clip move replay result is unavailable"); restored = replayed; }
-          else { const currentSnapshot = await adapter.snapshotAsync(context); const currentRow = this.clipRow(currentSnapshot, move.created.ref as LiveRef); if (currentRow.clip.objectIdentity !== move.created.objectIdentity || this.captureObjectFingerprint(currentRow.clip) !== move.created.fingerprint) throw new Error("Session clip identity or content changed after apply; undo refused"); const currentAuthority = this.clipAuthority(currentSnapshot, move.created.ref as LiveRef); const original = move.payload.deleteAuthority as JsonObject; restored = await this.invokeUndoRecovery(move, adapter, "clip.move", { ref: move.created.ref, targetTrackRef: original.expectedTrackRef, targetSceneIndex: move.payload.sourceSceneIndex, arrangementPosition: null, ...currentAuthority, expectedContentFingerprint: move.created.fingerprint, expectedTargetTrackIdentity: original.expectedTrackIdentity, expectedTargetSlotRef: original.expectedSlotRef, expectedTargetSlotIdentity: original.expectedSlotIdentity, expectedTargetSceneRef: original.expectedSceneRef, expectedTargetSceneIdentity: original.expectedSceneIdentity, expectedTargetCollectionRevision: null }, context) as JsonObject; }
-          if (!isNonEmptyString(restored.ref, 256) || !isNonEmptyString(restored.objectIdentity, 256)) throw new Error("Session clip move restoration did not return exact identity"); const restoredSnapshot = await adapter.snapshotAsync(context); const restoredRow = this.clipRow(restoredSnapshot, restored.ref as LiveRef); if (restoredRow.clip.objectIdentity !== restored.objectIdentity) throw new Error("Session clip restoration identity changed"); try { this.clipRow(restoredSnapshot, move.payload.appliedRef as LiveRef); throw new Error("moved destination remains after restoration"); } catch (cause) { if (cause instanceof Error && cause.message === "moved destination remains after restoration") throw cause; } move.created = restored;
+          else { const currentSnapshot = await this.viewForAsync(context, [move.created.ref, (move.payload.deleteAuthority as JsonObject | undefined)?.expectedTrackRef]); const currentRow = this.clipRow(currentSnapshot, move.created.ref as LiveRef); if (currentRow.clip.objectIdentity !== move.created.objectIdentity || this.captureObjectFingerprint(currentRow.clip) !== move.created.fingerprint) throw new Error("Session clip identity or content changed after apply; undo refused"); const currentAuthority = this.clipAuthority(currentSnapshot, move.created.ref as LiveRef); const original = move.payload.deleteAuthority as JsonObject; restored = await this.invokeUndoRecovery(move, adapter, "clip.move", { ref: move.created.ref, targetTrackRef: original.expectedTrackRef, targetSceneIndex: move.payload.sourceSceneIndex, arrangementPosition: null, ...currentAuthority, expectedContentFingerprint: move.created.fingerprint, expectedTargetTrackIdentity: original.expectedTrackIdentity, expectedTargetSlotRef: original.expectedSlotRef, expectedTargetSlotIdentity: original.expectedSlotIdentity, expectedTargetSceneRef: original.expectedSceneRef, expectedTargetSceneIdentity: original.expectedSceneIdentity, expectedTargetCollectionRevision: null }, context) as JsonObject; }
+          if (!isNonEmptyString(restored.ref, 256) || !isNonEmptyString(restored.objectIdentity, 256)) throw new Error("Session clip move restoration did not return exact identity"); const restoredSnapshot = await this.viewForAsync(context, [restored.ref, move.payload.appliedRef, (move.payload.deleteAuthority as JsonObject | undefined)?.expectedTrackRef]); const restoredRow = this.clipRow(restoredSnapshot, restored.ref as LiveRef); if (restoredRow.clip.objectIdentity !== restored.objectIdentity) throw new Error("Session clip restoration identity changed"); try { this.clipRow(restoredSnapshot, move.payload.appliedRef as LiveRef); throw new Error("moved destination remains after restoration"); } catch (cause) { if (cause instanceof Error && cause.message === "moved destination remains after restoration") throw cause; } move.created = restored;
         }
         move.state = "undone"; return this.successText(id, { transactionId: move.id, state: "undone", restored: move.created, idempotent: false });
       } catch (cause) { move.state = "uncertain"; return this.adapterToolError(id, cause, "Clip-move undo is uncertain; inspect both source and destination slots."); }
@@ -7828,7 +7923,7 @@ export class McpHost {
       if ((audioImport.state !== "applied" && !reconciliation) || !isNonEmptyString(audioImport.created?.ref, 256) || !isNonEmptyString(audioImport.created?.objectIdentity, 256)) return this.transactionError(id, "Session audio import lacks exact undo identity");
       try {
         this.beginUndoRecovery(audioImport, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audioImport.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audioImport.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audioImport, adapter, context); audioImport.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audioImport.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audioImport, adapter, context); audioImport.state = "undoing";
         await this.deleteOwnedClipAsync(adapter, audioImport.created.ref as LiveRef, audioImport.created.objectIdentity as string, context, audioImport.created.createdFingerprint as string, audioImport, reconciliation);
         this.releaseStagedImportFile(audioImport.payload.filePath);
         audioImport.state = "undone"; return this.successText(id, { transactionId: audioImport.id, state: "undone", deleted: audioImport.created.ref, idempotent: false });
@@ -7842,8 +7937,8 @@ export class McpHost {
       if ((warp.state !== "applied" && !reconciliation) || !warp.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain warp-marker transaction can be undone");
       try {
         this.beginUndoRecovery(warp, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== warp.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; warp.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(warp, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: warp.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; warp.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(warp, adapter, context);
+        const snapshot = await this.viewForAsync(context, [warp.clipRef]); const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: warp.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
         const action = warp.payload.action as string;
         const inverse = action === "add" ? { operation: "audio.warp-marker.delete", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : action === "delete" ? { operation: "audio.warp-marker.add", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : { operation: "audio.warp-marker.move", args: { ref: warp.clipRef, beatTime: (warp.payload.beatTime as number) + (warp.payload.distance as number), distance: -(warp.payload.distance as number) } };
         const priorMarkers = (warp.prior as { markers: Array<{ beatTime: number }> }).markers;
@@ -7870,8 +7965,8 @@ export class McpHost {
       if ((noteTarget.state !== "applied" && !reconciliation) || !noteTarget.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain note-edit transaction can be undone");
       try {
         this.beginUndoRecovery(noteTarget, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== noteTarget.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; noteTarget.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(noteTarget, adapter, context);
-        const current = this.noteClip(await adapter.snapshotAsync(context), noteTarget.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; noteTarget.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(noteTarget, adapter, context);
+        const current = this.noteClip(await this.viewForAsync(context, [noteTarget.clipRef]), noteTarget.clipRef);
         const prior = (noteTarget.prior as { notes: Array<Record<string, unknown>> }).notes;
         const action = noteTarget.payload.action as string;
         if (action === "duplicate") {
@@ -7882,7 +7977,7 @@ export class McpHost {
           noteTarget.state = "undoing";
           const result = await this.invokeUndoRecovery(noteTarget, adapter, "note.delete", { ref: noteTarget.clipRef, noteIds: createdIds, expectedClipAuthority: current.authority, expectedNotesRevision: current.notesRevision }, context) as { deleted?: unknown };
           if (result.deleted !== createdIds.length) throw new Error("note duplication undo did not delete the exact created batch");
-          const verified = this.noteClip(await adapter.snapshotAsync(context), noteTarget.clipRef);
+          const verified = this.noteClip(await this.viewForAsync(context, [noteTarget.clipRef]), noteTarget.clipRef);
           if (this.noteContentFence(verified.notes) !== this.noteContentFence(prior)) throw new Error("note duplication undo did not restore exact prior content");
         } else {
           const currentIds = new Set(current.notes.map((note) => note.id));
@@ -7890,7 +7985,7 @@ export class McpHost {
           noteTarget.state = "undoing";
           const restore = prior.map((note) => ({ id: note.id, pitch: note.pitch, start: note.start, duration: note.duration, velocity: note.velocity, mute: note.mute ?? false, probability: note.probability ?? 1, velocityDeviation: note.velocityDeviation ?? 0, releaseVelocity: note.releaseVelocity ?? 64 }));
           await this.invokeUndoRecovery(noteTarget, adapter, "note.update", { ref: noteTarget.clipRef, notes: restore, expectedClipAuthority: current.authority, expectedNotesRevision: current.notesRevision }, context);
-          const verified = this.noteClip(await adapter.snapshotAsync(context), noteTarget.clipRef);
+          const verified = this.noteClip(await this.viewForAsync(context, [noteTarget.clipRef]), noteTarget.clipRef);
           if (this.noteFence(verified.notes) !== this.noteFence(prior)) throw new Error("quantization undo did not restore exact prior notes");
         }
         noteTarget.state = "undone"; return this.successText(id, { transactionId: noteTarget.id, state: "undone", idempotent: false });
@@ -7904,7 +7999,7 @@ export class McpHost {
       if ((transform.state !== "applied" && !reconciliation) || !transform.clipRef) return this.transactionError(id, "Only an applied or exact-key uncertain MIDI-transform transaction can be undone");
       try {
         const status = this.requireConnected("session.read"); if (status.epoch !== transform.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
         // Refusal-only checks run before any state change: a refused undo keeps
         // the record applied so the operator can retry after restoring the
         // transformed state (never wedged in an active state).
@@ -7916,7 +8011,7 @@ export class McpHost {
           await this.deleteOwnedClipAsync(adapter, transform.created.ref as LiveRef, transform.created.objectIdentity as string, context, typeof transform.created.fingerprint === "string" ? transform.created.fingerprint : undefined, transform, reconciliation);
         } else {
           if (!reconciliation) {
-            const current = this.noteClip(await adapter.snapshotAsync(context), transform.clipRef);
+            const current = this.noteClip(await this.viewForAsync(context, [transform.clipRef]), transform.clipRef);
             const currentIds = new Set(current.notes.map((note) => note.id));
             if (currentIds.size !== prior.length || prior.some((note) => !currentIds.has(note.id))) return this.transactionError(id, "notes changed after apply; undo refused");
             // The exact verified post-transform state (identity-bound) must
@@ -7933,7 +8028,7 @@ export class McpHost {
           const steps: Array<{ operation: "note.update"; items: Array<Record<string, unknown>> }> = [];
           for (let offset = 0; offset < restoreRows.length; offset += 256) steps.push({ operation: "note.update", items: restoreRows.slice(offset, offset + 256) });
           await this.executeNotePlan(transform, adapter, context, transform.clipRef!, steps, appliedNotes, true);
-          const verified = this.noteClip(await adapter.snapshotAsync(context), transform.clipRef);
+          const verified = this.noteClip(await this.viewForAsync(context, [transform.clipRef]), transform.clipRef);
           if (noteIdentityDigest(verified.notes) !== noteIdentityDigest(prior)) throw new Error("MIDI-transform undo did not restore exact prior notes");
         }
         transform.state = "undone"; return this.successText(id, { transactionId: transform.id, state: "undone", idempotent: false });
@@ -7947,8 +8042,8 @@ export class McpHost {
       if ((sceneset.state !== "applied" && !reconciliation) || !sceneset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain scene transaction can be undone");
       try {
         this.beginUndoRecovery(sceneset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== sceneset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === sceneset.payload.ref);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; sceneset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(sceneset, adapter, context);
+        const snapshot = await this.viewAsync(context, [], ["scenes"]); const scene = (snapshot.scenes as unknown as JsonObject[]).find((candidate) => candidate.ref === sceneset.payload.ref);
         if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene identity is unavailable");
         if (scene.objectIdentity !== sceneset.payload.expectedObjectIdentity) return this.transactionError(id, "scene identity changed after apply; undo refused");
         if (!reconciliation) { for (const [field, value] of Object.entries(sceneset.payload)) { if (["ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(scene[field], value)) return this.transactionError(id, "scene changed after apply; undo refused"); } }
@@ -7957,7 +8052,7 @@ export class McpHost {
         sceneset.state = "undoing";
         const result = await this.invokeUndoRecovery(sceneset, adapter, "scene.set", { ref: sceneset.payload.ref, ...restore, expectedObjectIdentity: scene.objectIdentity, expectedAuthorityRevision: this.sceneCollectionRevision(snapshot), expectedStateRevision: this.sceneStateRevision(scene) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("scene restoration was not confirmed");
-        const restored = (await adapter.snapshotAsync(context)).scenes.find((candidate) => candidate.ref === sceneset.payload.ref) as unknown as JsonObject | undefined;
+        const restored = (await this.viewAsync(context, [], ["scenes"])).scenes.find((candidate) => candidate.ref === sceneset.payload.ref) as unknown as JsonObject | undefined;
         if (!restored) throw new Error("scene disappeared after undo");
         for (const [field, value] of Object.entries(prior)) { if (!sceneFieldRestored(restored, field, value, prior)) throw new Error("scene exact prior state was not restored"); }
         sceneset.state = "undone"; return this.successText(id, { transactionId: sceneset.id, state: "undone", idempotent: false });
@@ -7971,14 +8066,14 @@ export class McpHost {
       if ((trackset.state !== "applied" && !reconciliation) || !trackset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain track-properties transaction can be undone");
       try {
         this.beginUndoRecovery(trackset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackset, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackset, adapter, context);
+        const snapshot = await this.viewForAsync(context, [trackset.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
         if (!track || track.objectIdentity !== trackset.payload.expectedObjectIdentity) throw new Error("track identity changed after apply; undo refused");
         if (!reconciliation && (track.colorIndex ?? null) !== trackset.payload.colorIndex) return this.transactionError(id, "track changed after apply; undo refused");
         trackset.state = "undoing";
         const result = await this.invokeUndoRecovery(trackset, adapter, "track.set", { ref: trackset.payload.ref, ...(trackset.prior as Record<string, unknown>), expectedObjectIdentity: track.objectIdentity, expectedStateRevision: this.trackPropertiesStateRevision(track) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("track restoration was not confirmed");
-        const restored = ((await adapter.snapshotAsync(context)).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
+        const restored = ((await this.viewForAsync(context, [trackset.payload.ref])).tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackset.payload.ref);
         if (!restored || restored.objectIdentity !== trackset.payload.expectedObjectIdentity) throw new Error("track identity changed after undo");
         for (const [field, value] of Object.entries(trackset.prior)) if ((restored as unknown as JsonObject)[field] !== value) throw new Error("track exact prior state was not restored");
         trackset.state = "undone"; return this.successText(id, { transactionId: trackset.id, state: "undone", idempotent: false });
@@ -7992,15 +8087,15 @@ export class McpHost {
       if ((songset.state !== "applied" && !reconciliation) || !songset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain song-settings transaction can be undone");
       try {
         this.beginUndoRecovery(songset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== songset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; songset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(songset, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; songset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(songset, adapter, context);
+        const snapshot = await this.viewAsync(context, [], ["set"]);
         if (snapshot.set.ref !== songset.payload.setRef || snapshot.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after apply; undo refused");
         const rawSong = await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject; const song = this.songSettingsFields(rawSong);
         if (!reconciliation) { for (const [field, value] of Object.entries(songset.payload)) { if (["setRef", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(song[field], value)) return this.transactionError(id, "song settings changed after apply; undo refused"); } }
         songset.state = "undoing";
         const result = await this.invokeUndoRecovery(songset, adapter, "song.set", { ...(songset.prior as Record<string, unknown>), setRef: songset.payload.setRef, expectedObjectIdentity: songset.payload.expectedObjectIdentity, expectedStateRevision: this.songSettingsRevision(rawSong) }, context) as JsonObject;
         if (result.changed !== true) throw new Error("song settings restoration was not confirmed");
-        const after = await adapter.snapshotAsync(context);
+        const after = await this.viewAsync(context, [], ["set"]);
         if (after.set.ref !== songset.payload.setRef || after.set.objectIdentity !== songset.payload.expectedObjectIdentity) throw new Error("song settings Set identity changed after undo");
         const restored = this.songSettingsFields(await adapter.invokeAsync({ operation: "song.read", args: { setRef: snapshot.set.ref } }, context) as JsonObject);
         for (const [field, value] of Object.entries(songset.prior)) if (!sameLiveValue(restored[field], value)) throw new Error("song settings exact prior state was not restored");
@@ -8016,9 +8111,9 @@ export class McpHost {
       if ((trackstruct.state !== "applied" && !reconciliation) || !isNonEmptyString(trackstruct.created?.ref, 256) || !isNonEmptyString(trackstruct.created?.objectIdentity, 256)) return this.transactionError(id, "Only an applied track-structure creation has automatic undo authority");
       try {
         this.beginUndoRecovery(trackstruct, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackstruct.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackstruct.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackstruct, adapter, context); trackstruct.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackstruct.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackstruct, adapter, context); trackstruct.state = "undoing";
         const action = trackstruct.payload.action as string;
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.structureOwnedViewAsync(context, [{ kind: action === "duplicate-scene" ? "scene" : "track", ref: trackstruct.created.ref as LiveRef }]);
         const structureRevision = this.structureRevision(snapshot);
         const currentFingerprint = this.sessionStructureCreatedFingerprint(snapshot, action === "duplicate-scene" ? "scene" : "track", trackstruct.created.ref as LiveRef);
         if (!reconciliation && currentFingerprint !== (trackstruct.created as unknown as { contentFingerprint?: unknown }).contentFingerprint) return this.transactionError(id, "created structure content changed after apply; cleanup refused");
@@ -8042,8 +8137,8 @@ export class McpHost {
       if (trackview.payload.collapsed === undefined && trackview.payload.deviceInsertMode === undefined) return this.transactionError(id, "Instrument selection is momentary and not undoable");
       try {
         this.beginUndoRecovery(trackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== trackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackview.payload.ref);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
+        const snapshot = await this.viewForAsync(context, [trackview.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackview.payload.ref);
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is unavailable");
         if (!reconciliation) { const view = track.view as JsonObject | undefined;
           if (trackview.payload.collapsed !== undefined && view?.isCollapsed !== trackview.payload.collapsed) return this.transactionError(id, "track view changed after apply; undo refused");
@@ -8067,8 +8162,8 @@ export class McpHost {
       if ((selection.state !== "applied" && !reconciliation) || !selection.prior) return this.transactionError(id, "Only an applied or exact-key uncertain selection transaction can be undone");
       try {
         this.beginUndoRecovery(selection, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== selection.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; selection.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(selection, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; selection.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(selection, adapter, context);
+        const snapshot = await this.viewAsync(context, [], ["set", "selection"]);
         if (!reconciliation) { for (const [field, value] of Object.entries(selection.payload)) { if (["expectedStateRevision", "drawMode"].includes(field)) continue; if (((snapshot.selection as Record<string, unknown> | undefined)?.[field] ?? null) !== value) return this.transactionError(id, "selection changed after apply; undo refused"); }
           if (selection.payload.drawMode !== undefined && snapshot.view?.drawMode !== selection.payload.drawMode) return this.transactionError(id, "draw mode changed after apply; undo refused"); }
         selection.state = "undoing";
@@ -8076,7 +8171,7 @@ export class McpHost {
         const result = await this.invokeUndoRecovery(selection, adapter, "selection.set", { ...priorFields, expectedStateRevision: this.selectionRevision(snapshot) }, context) as { changed?: unknown };
         if (result.changed !== true) throw new Error("selection restoration was not confirmed");
         if (selection.payload.drawMode !== undefined) {
-          const currentMode = (await adapter.snapshotAsync(context)).view?.drawMode ?? null;
+          const currentMode = (await this.viewAsync(context, [], ["set", "selection"])).view?.drawMode ?? null;
           const priorMode = (selection.prior as { drawMode?: unknown }).drawMode;
           const drawResult = await this.invokeUndoRecovery(selection, adapter, "song.view.set", { drawMode: priorMode, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity({ drawMode: currentMode })).digest("hex") }, context) as { changed?: unknown };
           if (drawResult.changed !== true) throw new Error("draw-mode restoration was not confirmed");
@@ -8093,8 +8188,8 @@ export class McpHost {
       if (clipview.payload.gridQuantization === undefined && clipview.payload.gridIsTriplet === undefined) return this.transactionError(id, "show-loop and envelope visibility are momentary and not undoable");
       try {
         this.beginUndoRecovery(clipview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipview, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, clipview.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipview, adapter, context);
+        const snapshot = await this.viewForAsync(context, [clipview.clipRef]); const row = this.clipRow(snapshot, clipview.clipRef);
         if (!reconciliation) { const view = row.clip.clipView as JsonObject | undefined;
           for (const field of ["gridQuantization", "gridIsTriplet"]) if (clipview.payload[field] !== undefined && view?.[field] !== clipview.payload[field]) return this.transactionError(id, "clip view changed after apply; undo refused"); }
         const viewState = { gridQuantization: (row.clip.clipView as JsonObject | undefined)?.gridQuantization ?? null, gridIsTriplet: (row.clip.clipView as JsonObject | undefined)?.gridIsTriplet ?? null };
@@ -8115,8 +8210,8 @@ export class McpHost {
       if ((devview.state !== "applied" && !reconciliation) || !devview.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-view transaction can be undone");
       try {
         this.beginUndoRecovery(devview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devview, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, devview.payload.ref as LiveRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devview, adapter, context);
+        const snapshot = await this.viewForAsync(context, [devview.payload.ref]); const row = this.deviceRow(snapshot, devview.payload.ref as LiveRef);
         const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
         if (!reconciliation && current !== devview.payload.collapsed) return this.transactionError(id, "device view changed after apply; undo refused");
         const prior = (devview.prior as { collapsed: boolean | null }).collapsed;
@@ -8135,8 +8230,8 @@ export class McpHost {
       if ((mixerext.state !== "applied" && !reconciliation) || !mixerext.prior) return this.transactionError(id, "Only an applied or exact-key uncertain extended-mixer transaction can be undone");
       try {
         this.beginUndoRecovery(mixerext, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== mixerext.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
+        const snapshot = await this.viewForAsync(context, [mixerext.clipRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
         if (!track || !mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("extended mixer authority is unavailable");
         if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
         const state = { crossfadeAssign: mixer.crossfadeAssign ?? null, panningMode: mixer.panningMode ?? null };
@@ -8155,8 +8250,8 @@ export class McpHost {
       if ((chainmix.state !== "applied" && !reconciliation) || !chainmix.clipRef || !chainmix.prior) return this.transactionError(id, "Only an applied or exact-key uncertain chain-mixer transaction can be undone");
       try {
         this.beginUndoRecovery(chainmix, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== chainmix.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
+        const snapshot = await this.viewForAsync(context, [chainmix.clipRef]); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
         if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer authority is unavailable");
         if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
         chainmix.state = "undoing";
@@ -8174,8 +8269,8 @@ export class McpHost {
       if ((devio.state !== "applied" && !reconciliation) || !devio.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-IO transaction can be undone");
       try {
         this.beginUndoRecovery(devio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devio, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, devio.payload.ref as LiveRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devio, adapter, context);
+        const snapshot = await this.viewForAsync(context, [devio.payload.ref]); const row = this.deviceRow(snapshot, devio.payload.ref as LiveRef);
         const device = row.device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
         const operation = devio.payload.action === "routing" ? "device-io.set" : "compressor.sidechain.set";
         const current = devio.payload.action === "routing" ? { routingType: device.deviceIo?.routingType ?? null, routingChannel: device.deviceIo?.routingChannel ?? null } : { routingType: device.sidechainRoutingType };
@@ -8201,7 +8296,7 @@ export class McpHost {
         if ((devadv.state !== "applied" && !reconciling) || !made || !isNonEmptyString(made.ref as string, 256) || !isNonEmptyString(made.objectIdentity as string, 256)) return this.transactionError(id, "Chain insertion lacks exact created device identity");
         try {
           this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
+          const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciling) await this.replayUndoRecovery(devadv, adapter, context); devadv.state = "undoing";
           await this.deleteOwnedDeviceAsync(adapter, made.ref as LiveRef, made.objectIdentity as string, context, typeof made.createdFingerprint === "string" ? made.createdFingerprint : undefined, devadv, reconciling);
           devadv.state = "undone"; return this.successText(id, { transactionId: devadv.id, state: "undone", idempotent: false });
         } catch (cause) { devadv.state = "uncertain"; return this.adapterToolError(id, cause, "Chain-insertion undo is uncertain; inspect the exact created device."); }
@@ -8210,8 +8305,8 @@ export class McpHost {
       if ((devadv.state !== "applied" && !reconciliation) || !devadv.prior) return this.transactionError(id, "Only an applied or exact-key uncertain device-advanced transaction can be undone");
       try {
         this.beginUndoRecovery(devadv, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devadv.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devadv, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devadv.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devadv, adapter, context);
+        const snapshot = await this.viewForAsync(context, [(devadv.created as JsonObject | undefined)?.ref, (devadv.prior as JsonObject | undefined)?.ownerRef]);
         const created = devadv.created as Record<string, unknown> | undefined;
         if (!created || !isNonEmptyString(created.ref as string, 256) || !isNonEmptyString(created.objectIdentity as string, 256)) return this.transactionError(id, "device move lacks exact applied identity");
         const row = this.deviceRow(snapshot, created.ref as LiveRef);
@@ -8237,8 +8332,8 @@ export class McpHost {
       if ((chainset.state !== "applied" && !reconciliation) || !chainset.clipRef || !chainset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain chain transaction can be undone");
       try {
         this.beginUndoRecovery(chainset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== chainset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainset, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const found = this.chainRow(snapshot, chainset.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainset, adapter, context);
+        const snapshot = await this.viewForAsync(context, [chainset.clipRef]); const found = this.chainRow(snapshot, chainset.clipRef);
         if (!reconciliation) { for (const [field, value] of Object.entries(chainset.payload)) { if (["ref", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (found.chain[field] !== value) return this.transactionError(id, "chain changed after apply; undo refused"); } }
         const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
         chainset.state = "undoing";
@@ -8256,8 +8351,8 @@ export class McpHost {
       if ((drumpad.state !== "applied" && !reconciliation) || !drumpad.prior) return this.transactionError(id, "Only an applied or exact-key uncertain drum-pad transaction can be undone");
       try {
         this.beginUndoRecovery(drumpad, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== drumpad.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; drumpad.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(drumpad, adapter, context);
+        const snapshot = await this.viewForAsync(context, [drumpad.payload.ref, drumpad.payload.deviceRef, ...(Array.isArray(drumpad.payload.pads) ? drumpad.payload.pads : []).filter(isObject).map((pad) => pad.ref)]);
         if (drumpad.payload.action === "load-samples") {
           // Each pad back to empty, last loaded first; only while each still holds just what the change put there.
           const batch = drumpad.payload.pads as Array<Record<string, unknown>>;
@@ -8307,8 +8402,8 @@ export class McpHost {
       if ((rackview.state !== "applied" && !reconciliation) || !rackview.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack-view transaction can be undone");
       try {
         this.beginUndoRecovery(rackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rackview, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, rackview.payload.ref as LiveRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rackview, adapter, context);
+        const snapshot = await this.viewForAsync(context, [rackview.payload.ref]); const row = this.deviceRow(snapshot, rackview.payload.ref as LiveRef);
         const view = row.device.rackView as JsonObject | undefined;
         if (!reconciliation) { for (const field of ["padScrollPosition", "showChainDevices"]) if (rackview.payload[field] !== undefined && view?.[field] !== rackview.payload[field]) return this.transactionError(id, "rack view changed after apply; undo refused"); }
         const state = { padScrollPosition: view?.padScrollPosition ?? null, showChainDevices: view?.showChainDevices ?? null };
@@ -8331,8 +8426,8 @@ export class McpHost {
       if ((rack.state !== "applied" && !reconciliation) || !rack.prior) return this.transactionError(id, "Only an applied or exact-key uncertain rack transaction can be undone");
       try {
         this.beginUndoRecovery(rack, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rack.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
+        const snapshot = await this.viewForAsync(context, [rack.payload.ref]); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
         if (!reconciliation) { if (rack.payload.selectedVariationIndex !== undefined && row.device.selectedVariationIndex !== rack.payload.selectedVariationIndex) return this.transactionError(id, "rack changed after apply; undo refused"); }
         if (macroAction) {
           const left = (rack.created as { visibleMacroCount?: unknown } | undefined)?.visibleMacroCount; const prior = (rack.prior as { visibleMacroCount?: unknown }).visibleMacroCount;
@@ -8340,7 +8435,7 @@ export class McpHost {
           rack.state = "undoing";
           const opposite = rack.payload.action === "add-macro" ? "remove-macro" : "add-macro";
           const done = await this.invokeUndoRecovery(rack, adapter, "rack.action", { ref: rack.payload.ref, action: opposite, expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: this.rackStateRevision(row.device) }, context) as { done?: unknown };
-          if (done.done !== true || this.deviceRow(await adapter.snapshotAsync(context), rack.payload.ref as LiveRef).device.visibleMacroCount !== prior) throw new Error("rack macro restoration was not confirmed");
+          if (done.done !== true || this.deviceRow(await this.viewForAsync(context, [rack.payload.ref]), rack.payload.ref as LiveRef).device.visibleMacroCount !== prior) throw new Error("rack macro restoration was not confirmed");
           rack.state = "undone"; return this.successText(id, { transactionId: rack.id, state: "undone", idempotent: false });
         }
         rack.state = "undoing";
@@ -8357,10 +8452,10 @@ export class McpHost {
       if ((devspec.state !== "applied" && !reconciliation) || !devspec.prior) return this.transactionError(id, "Only an applied or exact-key uncertain specialized-device transaction can be undone");
       try {
         this.beginUndoRecovery(devspec, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devspec.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devspec.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devspec, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devspec.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devspec, adapter, context);
         const family = devspec.payload.family as string;
         const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
+        const snapshot = await this.viewForAsync(context, [devspec.payload.ref]); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
         const undoFamilyRow = ((row.device as unknown as Record<string, unknown>)[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>;
         if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && JSON.stringify(undoFamilyRow[field]) !== JSON.stringify(devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
         const state = Object.fromEntries(fields.map((field) => [field, undoFamilyRow[field] ?? null]));
@@ -8378,10 +8473,10 @@ export class McpHost {
       if ((simpler.state !== "applied" && !reconciliation) || !simpler.prior) return this.transactionError(id, "Only an applied or exact-key uncertain simpler transaction can be undone");
       try {
         this.beginUndoRecovery(simpler, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== simpler.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; simpler.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(simpler, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; simpler.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(simpler, adapter, context);
         const prior = simpler.prior as { samplePath: string };
         if (typeof prior.samplePath !== "string" || prior.samplePath.length < 1) return this.transactionError(id, "prior sample path is unavailable");
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, simpler.payload.ref as LiveRef);
+        const snapshot = await this.viewForAsync(context, [simpler.payload.ref]); const row = this.deviceRow(snapshot, simpler.payload.ref as LiveRef);
         const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
         if (!reconciliation && currentPath !== (simpler.created?.samplePath ?? simpler.payload.filePath)) return this.transactionError(id, "simpler sample changed after apply; undo refused");
         simpler.state = "undoing";
@@ -8400,8 +8495,8 @@ export class McpHost {
       if ((looper.state !== "applied" && !reconciliation) || !looper.prior) return this.transactionError(id, "Only an applied or exact-key uncertain looper transaction can be undone");
       try {
         this.beginUndoRecovery(looper, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== looper.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; looper.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(looper, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context); const row = this.deviceRow(snapshot, looper.payload.ref as LiveRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; looper.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(looper, adapter, context);
+        const snapshot = await this.viewForAsync(context, [looper.payload.ref]); const row = this.deviceRow(snapshot, looper.payload.ref as LiveRef);
         const looperRow = (((row.device as unknown as Record<string, unknown>).looper) ?? {}) as Record<string, unknown>;
         if (!reconciliation) { for (const field of ["overdubAfterRecord", "recordLengthIndex"]) if (looper.payload[field] !== undefined && looperRow[field] !== looper.payload[field]) return this.transactionError(id, "looper changed after apply; undo refused"); }
         const state = { overdubAfterRecord: looperRow.overdubAfterRecord ?? null, recordLengthIndex: looperRow.recordLengthIndex ?? null };
@@ -8420,8 +8515,8 @@ export class McpHost {
       if ((groove.state !== "applied" && !reconciliation) || !groove.prior) return this.transactionError(id, "Only an applied or exact-key uncertain groove transaction can be undone");
       try {
         this.beginUndoRecovery(groove, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== groove.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; groove.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(groove, adapter, context);
-        const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; groove.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(groove, adapter, context);
+        const snapshot = await this.viewAsync(context, [], ["set"]);
         if (!isNonEmptyString(snapshot.set.objectIdentity, 256)) throw new Error("Set identity is not authoritative");
         const action = groove.payload.action as string;
         if (!reconciliation) {
@@ -8461,9 +8556,9 @@ export class McpHost {
       if ((tuning.state !== "applied" && !reconciliation) || !tuning.prior) return this.transactionError(id, "Only an applied or exact-key uncertain tuning transaction can be undone");
       try {
         this.beginUndoRecovery(tuning, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== tuning.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; tuning.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(tuning, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; tuning.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(tuning, adapter, context);
         const prior = tuning.prior as { tuningSystem: Record<string, unknown>; scale: Record<string, unknown> };
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.viewAsync(context, [], ["set"]);
         if (!reconciliation) {
           const proposed = Object.fromEntries(Object.entries(tuning.payload).filter(([key]) => !["setRef", "expectedObjectIdentity", "expectedRevision"].includes(key)));
           const current = await adapter.invokeAsync({ operation: "tuning.read", args: { setRef: tuning.payload.setRef } }, context) as { tuningSystem?: unknown; scale?: unknown };
@@ -8490,10 +8585,10 @@ export class McpHost {
       if ((clipset.state !== "applied" && !reconciliation) || !clipset.clipRef || !clipset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain clip-properties edit can be undone");
       try {
         this.beginUndoRecovery(clipset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, clipset.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.viewForAsync(context, [clipset.clipRef]); const row = this.clipRow(snapshot, clipset.clipRef);
         const expected = reconciliation ? clipset.prior : clipset.payload; for (const [field, value] of Object.entries(expected)) { if (field === "ref" || field.startsWith("expected")) continue; if (field === "grooveRef") { const observedRef = (row.clip.groove as { ref?: unknown } | null | undefined)?.ref ?? null; if (observedRef !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (field === "groove") { if (JSON.stringify(row.clip.groove ?? null) !== JSON.stringify(value)) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (row.clip[field] !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); }
         if (!reconciliation) { clipset.state = "undoing"; const priorFields = { ...(clipset.prior as Record<string, unknown>) }; if (Object.prototype.hasOwnProperty.call(priorFields, "groove")) { const priorGroove = priorFields.groove as { ref?: unknown } | null; delete priorFields.groove; priorFields.grooveRef = priorGroove?.ref ?? null; } const result = await this.invokeUndoRecovery(clipset, adapter, "clip.set", { ref: clipset.clipRef, ...priorFields, ...this.clipPropertiesMutationAuthority(snapshot, clipset.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Clip-properties restoration was not confirmed"); }
-        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), clipset.clipRef); for (const [field, value] of Object.entries(clipset.prior)) { if (field === "groove") { if (JSON.stringify(restoredRow.clip.groove ?? null) !== JSON.stringify(value)) throw new Error("Clip exact prior state was not restored"); } else if (restoredRow.clip[field] !== value) throw new Error("Clip exact prior state was not restored"); }
+        const restoredRow = this.clipRow(await this.viewForAsync(context, [clipset.clipRef]), clipset.clipRef); for (const [field, value] of Object.entries(clipset.prior)) { if (field === "groove") { if (JSON.stringify(restoredRow.clip.groove ?? null) !== JSON.stringify(value)) throw new Error("Clip exact prior state was not restored"); } else if (restoredRow.clip[field] !== value) throw new Error("Clip exact prior state was not restored"); }
         clipset.state = "undone"; return this.successText(id, { transactionId: clipset.id, state: "undone", restored: clipset.prior, idempotent: false });
       } catch (cause) { clipset.state = "uncertain"; return this.adapterToolError(id, cause, "Clip-properties undo is uncertain; inspect the exact clip."); }
     }
@@ -8505,10 +8600,10 @@ export class McpHost {
       if ((audio.state !== "applied" && !reconciliation) || !audio.clipRef || !audio.prior) return this.transactionError(id, "Only an applied or exact-key uncertain audio-clip edit can be undone");
       try {
         this.beginUndoRecovery(audio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await adapter.snapshotAsync(context); const row = this.clipRow(snapshot, audio.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await this.viewForAsync(context, [audio.clipRef]); const row = this.clipRow(snapshot, audio.clipRef);
         const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && !sameLiveValue(row.clip[field], value)) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
         if (!reconciliation) { audio.state = "undoing"; const result = await this.invokeUndoRecovery(audio, adapter, "audio.clip.set", { ref: audio.clipRef, ...audio.prior, ...this.audioClipMutationAuthority(snapshot, audio.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Audio clip restoration was not confirmed"); }
-        const restoredRow = this.clipRow(await adapter.snapshotAsync(context), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
+        const restoredRow = this.clipRow(await this.viewForAsync(context, [audio.clipRef]), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
         audio.state = "undone"; return this.successText(id, { transactionId: audio.id, state: "undone", restored: audio.prior, idempotent: false });
       } catch (cause) { audio.state = "uncertain"; return this.adapterToolError(id, cause, "Audio-clip undo is uncertain; inspect the exact clip."); }
     }
@@ -8520,7 +8615,7 @@ export class McpHost {
       if ((browser.state !== "applied" && !reconciliation) || !isNonEmptyString(browser.created?.deviceRef, 256) || !isNonEmptyString(browser.created?.objectIdentity, 256)) return this.transactionError(id, "Browser load lacks exact created device identity");
       try {
         this.beginUndoRecovery(browser, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== browser.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; browser.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(browser, adapter, context); browser.state = "undoing";
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; browser.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(browser, adapter, context); browser.state = "undoing";
         await this.deleteOwnedDeviceAsync(adapter, browser.created.deviceRef as LiveRef, browser.created.objectIdentity as string, context, browser.created.fingerprint as string, browser, reconciliation); browser.state = "undone";
         return this.successText(id, { transactionId: browser.id, state: "undone", idempotent: false });
       } catch (cause) { browser.state = "uncertain"; return this.adapterToolError(id, cause, "Browser-load undo is uncertain; inspect the exact created device."); }
@@ -8533,18 +8628,18 @@ export class McpHost {
       if (device.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain device transaction can be undone");
       try {
         const plan = this.beginUndoRecovery(device, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== device.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; const action = device.payload.action; device.undoKey = params.idempotencyKey as string; if (reconciliation) { await this.replayUndoRecovery(device, adapter, context); const replayed = plan.steps.at(-1)?.result; if (action === "move" && isObject(replayed) && isNonEmptyString(replayed.ref, 256)) device.created = replayed; }
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; const action = device.payload.action; device.undoKey = params.idempotencyKey as string; if (reconciliation) { await this.replayUndoRecovery(device, adapter, context); const replayed = plan.steps.at(-1)?.result; if (action === "move" && isObject(replayed) && isNonEmptyString(replayed.ref, 256)) device.created = replayed; }
         device.state = "undoing";
         if (action === "insert") {
           if (!isNonEmptyString(device.created?.ref, 256) || !isNonEmptyString(device.created?.objectIdentity, 256)) throw new Error("inserted device identity is unavailable");
           await this.deleteOwnedDeviceAsync(adapter, device.created.ref as LiveRef, device.created.objectIdentity as string, context, device.created.createdFingerprint as string, device, reconciliation);
           this.releaseStagedImportFor(device);
         } else {
-          const reference = (action === "move" ? device.created?.ref : device.payload.ref) as LiveRef; const located = this.deviceRow(await adapter.snapshotAsync(context), reference);
+          const reference = (action === "move" ? device.created?.ref : device.payload.ref) as LiveRef; const located = this.deviceRow(await this.viewForAsync(context, [reference]), reference);
           if (reconciliation) { if (action === "enable" && located.device.enabled !== device.prior?.enabled) throw new Error("device-enable undo replay did not restore prior state"); if (action === "move" && located.siblings.findIndex((sibling) => sibling.ref === reference) !== device.prior?.index) throw new Error("device-move undo replay did not restore prior location"); }
           else { const args: JsonObject = { ref: reference, expectedObjectIdentity: located.device.objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
             if (action === "enable") { if (located.device.enabled !== device.payload.enabled || typeof device.prior?.enabled !== "boolean") throw new Error("device enable state changed after apply"); args.enabled = device.prior.enabled; args.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity({ enabled: located.device.enabled })).digest("hex"); }
-            else if (action === "move") { const currentIndex = located.siblings.findIndex((sibling) => sibling.ref === reference); if (located.device.objectIdentity !== device.payload.expectedObjectIdentity || currentIndex !== device.created?.index || !isIntegerInRange(device.prior?.index, 0, 256)) throw new Error("moved device identity or location changed after apply"); args.index = device.prior.index; }
+            else if (action === "move") { const currentIndex = located.siblings.findIndex((sibling) => sibling.ref === reference); if (located.device.objectIdentity !== device.payload.expectedObjectIdentity || currentIndex !== device.created?.index || !isIntegerInRange(device.prior?.index, 0, MAX_SET_INDEX)) throw new Error("moved device identity or location changed after apply"); args.index = device.prior.index; }
             else throw new Error("arbitrary device deletion has no automatic undo authority");
             const result = await this.invokeUndoRecovery(device, adapter, action === "enable" ? "device.enable" : "device.move", args, context) as JsonObject; if (result.changed !== true && !isNonEmptyString(result.ref, 256)) throw new Error("device restoration was not confirmed"); if (action === "move") device.created = result;
           }
@@ -8560,7 +8655,7 @@ export class McpHost {
       if ((routing.state !== "applied" && !reconciliation) || !routing.clipRef || !routing.prior) return this.transactionError(id, "Only an applied or exact-key uncertain routing transaction can be undone");
       try {
         this.beginUndoRecovery(routing, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== routing.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; routing.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(routing, adapter, context); const snapshot = await this.routingIdentityViewAsync(context, routing.payload.expectedObjectIdentity, routing.prior ?? {});
         // The track by identity: its positional reference changes when tracks are added or removed before it.
         const matches = (snapshot.tracks as unknown as JsonObject[]).filter((candidate) => candidate.objectIdentity === routing.payload.expectedObjectIdentity); const track = matches.length === 1 ? matches[0] : undefined;
         if (!track || !isNonEmptyString(track.ref, 256)) return this.transactionError(id, "routing track identity changed after apply; undo refused");
@@ -8568,7 +8663,7 @@ export class McpHost {
         const current = { inputType: (track.routing as JsonObject).inputType, inputSubRouting: (track.routing as JsonObject).inputSubRouting, outputType: (track.routing as JsonObject).outputType, outputSubRouting: (track.routing as JsonObject).outputSubRouting, arm: track.armed, monitoring: track.monitoringState };
         const expected = reconciliation ? routing.prior : routing.created; for (const key of Object.keys(routing.prior)) if (current[key as keyof typeof current] !== expected?.[key]) return this.transactionError(id, reconciliation ? "routing undo replay did not restore prior state" : "routing changed after apply; undo refused");
         if (!reconciliation) { const restore: JsonObject = { ref: trackRef, ...McpHost.writableRouting(routing.prior), expectedObjectIdentity: routing.payload.expectedObjectIdentity, expectedStateRevision: this.routingStateRevision(track) }; if (this.routingWouldCreateCycle(snapshot, trackRef, restore)) return this.transactionError(id, "routing restoration would create a feedback loop"); routing.state = "undoing"; const result = await this.invokeUndoRecovery(routing, adapter, "routing.set", restore, context) as JsonObject; if (result.changed !== true) throw new Error("routing restoration was not confirmed"); }
-        await this.confirmRoutingFields(adapter, context, trackRef, routing.payload.expectedObjectIdentity as string, routing.prior, "routing exact prior state was not restored"); routing.state = "undone";
+        await this.confirmRoutingFields(context, trackRef, routing.payload.expectedObjectIdentity as string, routing.prior, "routing exact prior state was not restored"); routing.state = "undone";
         return this.successText(id, { transactionId: routing.id, state: "undone", restored: routing.prior, idempotent: false });
       } catch (cause) { routing.state = "uncertain"; return this.adapterToolError(id, cause, "Routing undo is uncertain; inspect routing and feedback state."); }
     }
@@ -8585,11 +8680,11 @@ export class McpHost {
       if (rename.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain rename transaction can be undone");
       try {
         this.beginUndoRecovery(rename, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rename.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
         const current = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
         if (!current || current.objectIdentity !== rename.prior?.objectIdentity || current.name !== (reconciliation ? rename.prior?.name : rename.payload.name)) return this.transactionError(id, reconciliation ? "Rename undo replay did not restore prior name" : "Renamed object identity or name changed after apply; undo refused");
         const operation = (rename.payload.kind === "takeLane" ? "take-lane.rename" : `${rename.payload.kind}.rename`) as LiveInvocation["operation"];
-        if (!reconciliation) { rename.state = "undoing"; await this.invokeUndoRecovery(rename, adapter, operation, { ref: rename.clipRef, name: rename.prior?.name, expectedName: rename.payload.name, expectedObjectIdentity: rename.prior?.objectIdentity, expectedAuthorityRevision: this.renameAuthorityRevision(await adapter.snapshotAsync(context), rename.payload.kind as string, rename.clipRef) }, context); }
+        if (!reconciliation) { rename.state = "undoing"; await this.invokeUndoRecovery(rename, adapter, operation, { ref: rename.clipRef, name: rename.prior?.name, expectedName: rename.payload.name, expectedObjectIdentity: rename.prior?.objectIdentity, expectedAuthorityRevision: this.renameAuthorityRevision(await this.viewForAsync(context, [rename.clipRef]), rename.payload.kind as string, rename.clipRef) }, context); }
         const restored = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
         if (!restored || restored.objectIdentity !== rename.prior?.objectIdentity || restored.name !== rename.prior?.name) throw new Error("rename undo was not confirmed for the exact target");
         rename.state = "undone";
@@ -8604,12 +8699,12 @@ export class McpHost {
       if (mixer.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain mixer transaction can be undone");
       try {
         this.beginUndoRecovery(mixer, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== mixer.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
-        let currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
+        let currentTarget = this.mixerTarget(await this.viewForAsync(context, [mixer.clipRef]), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
         for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
         if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
-        currentTarget = this.mixerTarget(await adapter.snapshotAsync(context), mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
+        currentTarget = this.mixerTarget(await this.viewForAsync(context, [mixer.clipRef]), mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
         return this.successText(id, { transactionId: mixer.id, state: "undone", restored: mixer.prior, idempotent: false });
       } catch (cause) { mixer.state = "uncertain"; return this.adapterToolError(id, cause, "Mixer undo is uncertain; perform fresh discovery."); }
@@ -8623,19 +8718,19 @@ export class McpHost {
       if (automation.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain automation transaction can be undone");
       try {
         const plan = this.beginUndoRecovery(automation, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== automation.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; automation.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(automation, adapter, context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; automation.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(automation, adapter, context);
         const action = automation.payload.action as string;
         const prior = automation.prior as { exists?: unknown; points?: unknown };
         const guarded = async (extra: Record<string, unknown>): Promise<Record<string, unknown>> => {
           const clipRef = automation.payload.clipRef as LiveRef; const parameterRef = automation.payload.parameterRef as LiveRef;
           const read = await adapter.invokeAsync({ operation: "automation.envelope.read", args: { clipRef, parameterRef } }, context) as { revision?: unknown };
-          const authorityDigest = this.automationAuthorityDigest(await adapter.snapshotAsync(context), clipRef, parameterRef);
+          const authorityDigest = this.automationAuthorityDigest(await this.viewForAsync(context, [clipRef, parameterRef]), clipRef, parameterRef);
           if (!isNonEmptyString(read.revision, 64)) throw new Error("automation undo revision is unavailable");
           return { clipRef, parameterRef, expectedAuthorityDigest: authorityDigest, expectedEnvelopeRevision: read.revision, ...extra };
         };
         const current = await adapter.invokeAsync({ operation: "automation.envelope.read", args: { clipRef: automation.payload.clipRef, parameterRef: automation.payload.parameterRef } }, context) as { exists?: unknown; points?: unknown; revision?: unknown };
         if (reconciliation && current.exists === prior.exists && canonicalMutationIdentity(current.points ?? []) === canonicalMutationIdentity(prior.points ?? [])) { automation.state = "undone"; return this.successText(id, { transactionId: automation.id, state: "undone", idempotent: false }); }
-        const currentAuthority = this.automationAuthorityDigest(await adapter.snapshotAsync(context), automation.payload.clipRef as LiveRef, automation.payload.parameterRef as LiveRef);
+        const currentAuthority = this.automationAuthorityDigest(await this.viewForAsync(context, [automation.payload.clipRef, automation.payload.parameterRef]), automation.payload.clipRef as LiveRef, automation.payload.parameterRef as LiveRef);
         if (!reconciliation && (!automation.created || current.revision !== automation.created.revision || currentAuthority !== automation.created.authorityDigest)) return this.transactionError(id, "automation target changed after apply; undo refused");
         if (reconciliation && plan.steps.length > 0) { const priorPoints = Array.isArray(prior.points) ? prior.points : []; if (action === "insert") { const inserted = automation.payload.points as Array<{ time: number }>; const times = inserted.map((point) => point.time); const from = Math.max(0, Math.min(...times) - 0.001); const to = Math.max(...times) + 0.001; const intermediate = priorPoints.filter((point) => !isObject(point) || typeof point.time !== "number" || point.time < from || point.time > to); if (current.exists !== prior.exists || canonicalMutationIdentity(current.points ?? []) !== canonicalMutationIdentity(intermediate)) throw new Error("automation undo partial state conflicts with exact prior content"); } else if (action === "delete-envelope") { if (current.exists !== true || canonicalMutationIdentity(current.points ?? []) !== "[]") throw new Error("automation envelope recreation has conflicting content"); } else throw new Error("automation undo replay did not restore exact prior content"); }
         if (action === "insert") {
@@ -8664,14 +8759,14 @@ export class McpHost {
       if (structure?.state === "undone" && structure.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: structure.id, state: "undone", idempotent: true });
       if (!structure || (structure.state !== "applied" && !reconciliation) || !structure.created) return this.transactionError(id, "Only an applied or exact-key uncertain Session-structure transaction can be undone");
       const status = this.requireConnected("session.structure"); if (status.epoch !== structure.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: Date.now() + STRUCTURE_STEP_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
-      try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await adapter.snapshotAsync(context());
+      const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
+      try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await this.structureOwnedViewAsync(context(), structure.created);
         // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
         const discard = params.discard === true;
         for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !(discard && item.kind === "track") && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
-        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await adapter.snapshotAsync(context()); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
+        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await this.structureOwnedViewAsync(context(), [item]); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
 if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
-        const after = await adapter.snapshotAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
+        const after = await this.structureViewAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
       catch (cause) {
         // Refused because what it made has changed since: nothing was touched, so it stays applied (a later undo, with discard, can still go).
         if (structure.state === "applied" && cause instanceof Error && /was modified after apply/.test(cause.message)) { this.undoRecoveryPlans.delete(structure); return this.adapterToolError(id, cause, "Session-structure undo refused; nothing changed."); }
@@ -8687,11 +8782,11 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!arrangement || (arrangement.state !== "applied" && !reconciliation) || !arrangement.created) return this.transactionError(id, "Only an applied or exact-key uncertain Arrangement transaction can be undone");
       try {
         const status = this.requireConnected("arrangement.write"); if (status.epoch !== arrangement.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; this.beginUndoRecovery(arrangement, params.idempotencyKey as string); arrangement.undoKey = params.idempotencyKey as string;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; this.beginUndoRecovery(arrangement, params.idempotencyKey as string); arrangement.undoKey = params.idempotencyKey as string;
         if (reconciliation) await this.replayUndoRecovery(arrangement, adapter, context);
-        let current = (await adapter.snapshotAsync(context)).arrangement.locators;
+        let current = (await this.viewAsync(context, [], ["arrangement"])).arrangement.locators;
         for (const locator of arrangement.created) { const found = current.find((item) => item.ref === locator.ref); if (found && (found.objectIdentity !== locator.objectIdentity || found.name !== locator.name || found.position !== locator.position)) return this.transactionError(id, "Arrangement locator identity or content changed after apply; undo refused"); }
-        try { arrangement.state = "undoing"; for (const locator of [...arrangement.created].reverse()) { const snapshot = await adapter.snapshotAsync(context); if (!snapshot.arrangement.locators.some((item) => item.ref === locator.ref)) continue; await this.invokeUndoRecovery(arrangement, adapter, "locator.delete", this.locatorDeleteArgs(snapshot, locator.ref, locator.objectIdentity), context); } current = (await adapter.snapshotAsync(context)).arrangement.locators; if (arrangement.created.some((locator) => current.some((item) => item.ref === locator.ref))) throw new Error("Arrangement undo left transaction-owned locators"); }
+        try { arrangement.state = "undoing"; for (const locator of [...arrangement.created].reverse()) { const snapshot = await this.viewAsync(context, [], ["arrangement"]); if (!snapshot.arrangement.locators.some((item) => item.ref === locator.ref)) continue; await this.invokeUndoRecovery(arrangement, adapter, "locator.delete", this.locatorDeleteArgs(snapshot, locator.ref, locator.objectIdentity), context); } current = (await this.viewAsync(context, [], ["arrangement"])).arrangement.locators; if (arrangement.created.some((locator) => current.some((item) => item.ref === locator.ref))) throw new Error("Arrangement undo left transaction-owned locators"); }
         catch (cause) { arrangement.state = "uncertain"; throw cause; }
         arrangement.state = "undone";
         return this.successText(id, { transactionId: arrangement.id, state: "undone", restored: arrangement.prior, idempotent: false });
@@ -8704,8 +8799,8 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!batch || (batch.state !== "applied" && !reconciliation) || batch.parameters.some((parameter) => parameter.appliedRevision === undefined)) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
       try {
         this.beginUndoRecovery(batch, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== batch.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
-        const currentSnapshot = await adapter.snapshotAsync(context);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
+        const currentSnapshot = await this.viewForAsync(context, [batch.deviceRef, ...batch.parameters.map((item) => item.ref)]);
         const currents = batch.parameters.map((parameter) => this.parameterTarget(currentSnapshot, batch.deviceRef, parameter.ref).parameter);
         const unchanged = (index: number) => JSON.stringify(this.parameterAuthority(currentSnapshot, batch.parameters[index]!.ref)) === JSON.stringify(batch.parameters[index]!.authority);
         if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
@@ -8714,7 +8809,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
           batch.state = "undoing";
           await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
         }
-        const restoredSnapshot = await adapter.snapshotAsync(context);
+        const restoredSnapshot = await this.viewForAsync(context, [batch.deviceRef, ...batch.parameters.map((item) => item.ref)]);
         for (const parameter of batch.parameters) {
           const restored = this.parameterTarget(restoredSnapshot, batch.deviceRef, parameter.ref).parameter;
           if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { batch.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
@@ -8730,10 +8825,10 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!parameter || (parameter.state !== "applied" && !reconciliation) || parameter.appliedRevision === undefined) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
       try {
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await adapter.snapshotAsync(context); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (reconciliation) { if (current.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) throw new Error("device-parameter undo replay did not restore exact prior state"); }
         else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
-        const restoredSnapshot = await adapter.snapshotAsync(context); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
+        const restoredSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
         if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         parameter.state = "undone";
         return this.successText(id, { transactionId: parameter.id, state: "undone", value: restored.value, revision: this.parameterRevision(restored), idempotent: false });
@@ -8745,7 +8840,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     if (transaction.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain tempo transaction can be undone");
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string); const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
+      const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== (reconciliation ? transaction.priorTempo : transaction.appliedTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "Set identity or tempo changed after apply; undo refused");
       if (!reconciliation) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: transaction.appliedTempo, expectedObjectIdentity: transaction.setIdentity }, context); }
       const restored = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
@@ -9073,7 +9168,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   }
 
   private liveMidiPreview(id: RequestId, params: unknown): JsonObject {
-    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, 1023) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
+    if (!isObject(params) || !hasOnly(params, ["trackRef", "sceneIndex", "name", "length", "notes"]) || typeof params.trackRef !== "string" || !isIntegerInRange(params.sceneIndex, 0, MAX_SET_INDEX) || typeof params.name !== "string" || typeof params.length !== "number" || !Number.isFinite(params.length) || params.length <= 0 || params.length > 1024 || !Array.isArray(params.notes)) return error(id, -32602, "Invalid MIDI clip preview");
     try { return this.successText(id, this.midiTransactions.preview(params)); }
     catch (cause) { return this.adapterToolError(id, cause, "MIDI preview failed without mutation; verify the track, empty slot, and bounded notes."); }
   }
@@ -9256,7 +9351,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
    */
   private async requireOperation(operation: LiveInvocation["operation"]): Promise<LiveStatus> {
     let status = this.requireConnected();
-    if (!status.operations?.includes(operation)) status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
+    if (!status.operations?.includes(operation)) status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
     if (!status.operations?.includes(operation)) throw new Error(`${operation} is unavailable on this Live shape`);
     return status;
   }
@@ -9295,7 +9390,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   private newTransactionId(): string { return `tempo_${randomBytes(18).toString("base64url")}`; }
   private evictTransactions(): void {
     const now = Date.now();
-    for (const [id, transaction] of this.transactions) if ((transaction.state === "previewed" && transaction.expiresAt <= now) || (transaction.state === "previewed" && this.transactions.size > MAX_TRANSACTIONS)) this.transactions.delete(id);
+    for (const [id, transaction] of this.transactions) if (transaction.state === "previewed" && transaction.expiresAt <= now) this.transactions.delete(id);
   }
   private transactionError(id: RequestId, message: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: message, remediation: "Preview the change again, then apply the new transaction." }) }], isError: true }); }
   private recoveryFinalizeError(id: RequestId, reason: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence." }) }], isError: true }); }

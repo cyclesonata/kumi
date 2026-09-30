@@ -235,7 +235,7 @@ test("provisions bridge diagnostics only by explicit lifecycle opt-in and detect
     const saved = receipt(options);
     const diagnostics = saved.config.bridge.diagnostics!;
     assert.equal(diagnostics.path, join(options.stateDirectory, "bridge-diagnostics.log"));
-    assert.equal(diagnostics.maxBytes, 256 * 1024);
+    assert.equal(diagnostics.maxBytes, 16 * 1024 * 1024);
     assert.equal((installed.verification.bridgeDiagnostics as any).permissions, "owner-only");
     const entry = lstatSync(diagnostics.path);
     assert.equal(entry.isFile() && !entry.isSymbolicLink() && entry.nlink === 1, true);

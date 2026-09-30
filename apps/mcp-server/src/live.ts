@@ -125,7 +125,9 @@ export interface MixerState { volume: number | null; pan: number | null; cueVolu
   /** Live's own text for each value ("-3.2 dB", "25L"), when the adapter provides it. */
   volumeDisplay?: string | null; panDisplay?: string | null; cueVolumeDisplay?: string | null; sendDisplays?: (string | null)[]; volumeRef: LiveRef | null; volumeIdentity?: string | null; panRef: LiveRef | null; panIdentity?: string | null; cueRef: LiveRef | null; cueIdentity?: string | null; sendRefs: LiveRef[]; sendIdentities?: string[]; mixerIdentity?: string; trackActivator?: boolean; crossfader?: number; panningLeft?: number; panningRight?: number; trackActivatorRef?: LiveRef | null; crossfaderRef?: LiveRef | null; crossfadeAssign?: number | null; panningMode?: number | null; panningLeftRef?: LiveRef | null; panningRightRef?: LiveRef | null; songTempoRef?: LiveRef | null; }
 export interface ClipSlot { ref: LiveRef; parentRef: LiveRef; objectIdentity?: string; sceneIndex: number; clipRef?: LiveRef | null; empty: boolean; colorIndex?: number | null; controlsOtherClips?: boolean | null; hasStopButton?: boolean | null; isGroupSlot?: boolean | null; playingStatus?: number | null; willRecordOnStart?: boolean | null; fireButtonState?: boolean | null; }
-export interface Track { ref: LiveRef; objectIdentity?: string; name: string; kind: "audio" | "midi" | "group" | "return" | "main" | "master" | "regular"; volume: number; pan: number; mute: boolean; solo: boolean; armed: boolean | null; monitoringState?: LiveMonitoringState; playingSlotIndex?: number | null; firedSlotIndex?: number | null; clips: Clip[]; clipSlots?: ClipSlot[]; mixer?: MixerState; routing?: RoutingState; devices: Device[]; sends: number[]; input?: string; output?: string; takeLanes?: TakeLane[]; groupTrackRef?: LiveRef | null; isVisible?: boolean | null; isSelected?: boolean | null; isFrozen?: boolean | null; foldState?: boolean | null; implicitArm?: boolean | null; backToArranger?: boolean | null; mutedViaSolo?: boolean | null; colorIndex?: number | null; color?: number | null; inputMeterLeft?: number | null; inputMeterRight?: number | null; inputMeterLevel?: number | null; outputMeterLeft?: number | null; outputMeterRight?: number | null; outputMeterLevel?: number | null; performanceImpact?: number | null; view?: { selectedDeviceRef?: LiveRef | null; deviceInsertMode?: number | null; isCollapsed?: boolean | null }; }
+/** A track row. A focused read lists the tracks outside its focus as light rows (`light: true`): identity,
+ * name, kind, arm, colour and group only, with empty clips, slots, devices and lanes and no mixer or routing. */
+export interface Track { ref: LiveRef; objectIdentity?: string; light?: true; parentRef?: LiveRef; mediaKind?: "midi" | "audio"; name: string; kind: "audio" | "midi" | "group" | "return" | "main" | "master" | "regular"; volume: number; pan: number; mute: boolean; solo: boolean; armed: boolean | null; monitoringState?: LiveMonitoringState; playingSlotIndex?: number | null; firedSlotIndex?: number | null; clips: Clip[]; clipSlots?: ClipSlot[]; mixer?: MixerState; routing?: RoutingState; devices: Device[]; sends: number[]; input?: string; output?: string; takeLanes?: TakeLane[]; groupTrackRef?: LiveRef | null; isVisible?: boolean | null; isSelected?: boolean | null; isFrozen?: boolean | null; foldState?: boolean | null; implicitArm?: boolean | null; backToArranger?: boolean | null; mutedViaSolo?: boolean | null; colorIndex?: number | null; color?: number | null; inputMeterLeft?: number | null; inputMeterRight?: number | null; inputMeterLevel?: number | null; outputMeterLeft?: number | null; outputMeterRight?: number | null; outputMeterLevel?: number | null; performanceImpact?: number | null; view?: { selectedDeviceRef?: LiveRef | null; deviceInsertMode?: number | null; isCollapsed?: boolean | null }; }
 export interface TakeLane { ref: LiveRef; objectIdentity?: string; parentRef?: LiveRef; trackRef?: LiveRef; name: string; index: number; clips: Clip[]; }
 export interface Scene { ref: LiveRef; objectIdentity?: string; name: string; index: number; colorIndex?: number | null; isEmpty?: boolean | null; isTriggered?: boolean | null; tempo?: number | null; tempoEnabled?: boolean | null; signatureNumerator?: number | null; signatureDenominator?: number | null; timeSignatureEnabled?: boolean | null; fireButtonState?: boolean | null; triggerable?: boolean; }
 export interface LiveSnapshot {
@@ -142,6 +144,87 @@ export interface LiveSnapshot {
   song?: LiveSongState;
   tuning?: { system: { name: string; lowestNote: Record<string, unknown> | null; highestNote: Record<string, unknown> | null; referencePitch: Record<string, unknown> | null; pseudoOctaveInCents: number | null; noteTunings: Array<{ note: number; deviation: number }> }; scale: { rootNote: number | null; scaleName: string | null; scaleMode: boolean | null; scaleIntervals: number[] } };
   groovePool?: { amount: number | null; grooves: Array<{ ref: LiveRef; objectIdentity?: string; name: string; base: number | null; quantizationAmount: number | null; randomAmount: number | null; timingAmount: number | null; velocityAmount: number | null }> };
+  epoch?: number;
+  /** How many tracks and scenes the Set holds, whatever the read returned of them. */
+  trackCount?: number;
+  sceneCount?: number;
+  /** What the Remote Script honoured of the read's arguments; absent, the read was of the whole Set (what a
+   * Remote Script from before the arguments returns whatever it is asked). */
+  window?: { tracks?: LiveSnapshotWindow; scenes?: LiveSnapshotWindow; focus?: number[]; parts?: LiveSnapshotPart[] };
+}
+
+/** The top-level parts a snapshot read can be limited to (the epoch always comes). */
+export type LiveSnapshotPart = "set" | "tracks" | "scenes" | "arrangement" | "playback" | "selection";
+export const LIVE_SNAPSHOT_PARTS: readonly LiveSnapshotPart[] = ["set", "tracks", "scenes", "arrangement", "playback", "selection"];
+export interface LiveSnapshotWindow { from: number; count: number; }
+/**
+ * What one snapshot read builds, so that a read costs what an operation touches instead of the whole Set.
+ * Empty: the whole Set. `tracks`/`scenes`: only those whole rows, the track index running over regular and
+ * group tracks, then returns, then main. `focus`: every track in order, whole for the listed indices and
+ * light for the rest, with the Arrangement clips of the focus tracks only. `parts`: only those top-level
+ * parts; the others are absent. The result's `window` says what was honoured. A Remote Script from before
+ * these arguments answers with the whole Set whatever is asked (and no `window`), so a request only ever
+ * makes a read cheaper: nothing may rely on a row being light.
+ */
+export interface LiveSnapshotRequest { tracks?: LiveSnapshotWindow; scenes?: LiveSnapshotWindow; focus?: number[]; parts?: LiveSnapshotPart[]; }
+/** The largest track or scene index a read may name (the registry's bound). */
+export const MAX_SNAPSHOT_INDEX = 100_000;
+
+/** A request as the registry bounds it; anything else is refused before it is read. */
+export function validateSnapshotRequest(request: LiveSnapshotRequest): void {
+  if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) => !["tracks", "scenes", "focus", "parts"].includes(key))) throw new RangeError("snapshot request is invalid");
+  const index = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= MAX_SNAPSHOT_INDEX;
+  for (const window of [request.tracks, request.scenes]) if (window !== undefined && (!window || typeof window !== "object" || Object.keys(window).some((key) => key !== "from" && key !== "count") || !index(window.from) || !index(window.count) || window.count < 1)) throw new RangeError("snapshot window is invalid");
+  if (request.focus !== undefined && (!Array.isArray(request.focus) || !request.focus.every(index) || new Set(request.focus).size !== request.focus.length)) throw new RangeError("snapshot focus is invalid");
+  if (request.parts !== undefined && (!Array.isArray(request.parts) || request.parts.length > LIVE_SNAPSHOT_PARTS.length || !request.parts.every((part) => LIVE_SNAPSHOT_PARTS.includes(part)) || new Set(request.parts).size !== request.parts.length)) throw new RangeError("snapshot parts are invalid");
+}
+
+/** The parts a whole-Set answer holds. */
+const WHOLE_SET_PARTS = ["set", "tracks", "scenes", "arrangement", "playback"] as const;
+
+/**
+ * A snapshot answer checked against what was asked, now that the protocol leaves every part optional.
+ * Without a `window` it is the whole Set: every part, every row whole (what a Remote Script from before
+ * snapshot arguments answers to anything). With one, the window may only echo what was asked; the answer
+ * holds exactly the parts it names (all of them when it names none), a focus lists every track with only
+ * the focus tracks whole, and a window holds only its rows. Anything else is refused here, never passed on
+ * as a snapshot.
+ */
+export function checkSnapshotAnswer(answer: LiveSnapshot, request: LiveSnapshotRequest = {}): LiveSnapshot {
+  const value = answer as unknown as Record<string, unknown>;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("snapshot answer is not an object");
+  const window = value.window as LiveSnapshot["window"];
+  const rows = Array.isArray(value.tracks) ? value.tracks as Array<Partial<Track> | null> : undefined;
+  if (window === undefined) {
+    const missing = WHOLE_SET_PARTS.filter((part) => !(part in value));
+    if (missing.length > 0) throw new Error(`snapshot answer without a window isn't the whole Set: it lacks ${missing.join(", ")}`);
+    if (!rows || rows.some((row) => row?.light === true)) throw new Error("snapshot answer without a window isn't the whole Set: its tracks aren't all whole");
+    return answer;
+  }
+  if (!window || typeof window !== "object" || Array.isArray(window)) throw new Error("snapshot window is malformed");
+  for (const key of Object.keys(window)) if (!["tracks", "scenes", "focus", "parts"].includes(key) || request[key as keyof LiveSnapshotRequest] === undefined) throw new Error(`snapshot window says it honoured ${key}, which wasn't asked`);
+  if (window.parts && (window.parts.length !== request.parts!.length || !window.parts.every((part) => request.parts!.includes(part)))) throw new Error("snapshot window's parts aren't the parts asked");
+  if (window.focus && (!Array.isArray(window.focus) || !window.focus.every((index) => request.focus!.includes(index)))) throw new Error("snapshot window's focus isn't the focus asked");
+  for (const key of ["tracks", "scenes"] as const) { const honoured = window[key]; const asked = request[key]; if (honoured && (honoured.from !== asked!.from || !(honoured.count >= 1 && honoured.count <= asked!.count))) throw new Error(`snapshot window's ${key} aren't the ${key} asked`); }
+  for (const part of LIVE_SNAPSHOT_PARTS) {
+    const listed = window.parts ? window.parts.includes(part) : part !== "selection";
+    if (listed && !(part in value)) throw new Error(`snapshot answer lacks its ${part}`);
+    if (window.parts && !listed && part in value) throw new Error(`snapshot answer holds ${part}, which wasn't asked`);
+  }
+  const counted = (count: unknown, from: number, size: number): number | undefined => typeof count === "number" ? Math.max(0, Math.min(size, count - from)) : undefined;
+  if (rows) {
+    const from = window.tracks?.from ?? 0; const focus = window.focus ? new Set(window.focus) : undefined;
+    const expected = window.tracks ? counted(value.trackCount, from, window.tracks.count) : focus ? (typeof value.trackCount === "number" ? value.trackCount : undefined) : undefined;
+    if ((window.tracks && rows.length > window.tracks.count) || (expected !== undefined && rows.length !== expected)) throw new Error("snapshot answer doesn't hold the track rows asked");
+    rows.forEach((row, position) => { const whole = !focus || focus.has(from + position); if (!row || typeof row !== "object" || whole === (row.light === true)) throw new Error(`snapshot track ${from + position} is ${whole ? "light, but was asked whole" : "whole, but was asked light"}`); });
+  }
+  if (window.scenes && Array.isArray(value.scenes)) { const expected = counted(value.sceneCount, window.scenes.from, window.scenes.count); if (value.scenes.length > window.scenes.count || (expected !== undefined && value.scenes.length !== expected)) throw new Error("snapshot answer doesn't hold the scene rows asked"); }
+  return answer;
+}
+
+/** A track as a focused read lists it outside its focus: who it is, none of what it holds. */
+export function lightTrackRow(track: Track, setRef?: LiveRef): Track {
+  return { ref: track.ref, parentRef: track.parentRef ?? setRef, objectIdentity: track.objectIdentity, name: track.name, kind: track.kind, mediaKind: track.mediaKind ?? (track.kind === "midi" ? "midi" : "audio"), light: true, armed: track.armed ?? null, colorIndex: track.colorIndex ?? null, groupTrackRef: track.groupTrackRef ?? null, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } as unknown as Track;
 }
 export interface LiveSongState { visibleTracks: LiveRef[]; appointedDevice: LiveRef | null; songLength: number | null; startTime: number | null; signatureNumerator: number | null; signatureDenominator: number | null; swingAmount: number | null; overdub: boolean | null; arrangementOverdub: boolean | null; backToArranger: boolean | null; canCaptureMidi: boolean | null; canUndo: boolean | null; canRedo: boolean | null; exclusiveArm: boolean | null; exclusiveSolo: boolean | null; isCountingIn: boolean | null; tempoFollowerEnabled: boolean | null; reEnableAutomationEnabled: boolean | null; sessionRecord: boolean | null; sessionAutomationRecord: boolean | null; clipTriggerQuantization: { name: string; value: number | null } | null; midiRecordingQuantization: { name: string; value: number | null } | null; isAbletonLinkEnabled: boolean | null; isAbletonLinkStartStopSyncEnabled: boolean | null; tempoFollower: boolean | null; }
 export interface LiveEvent { epoch: number; sequence: number; type: "state" | "transport" | "object" | "meter" | "max" | "osc" | "reset"; ref?: LiveRef; payload: unknown; }
@@ -172,7 +255,8 @@ export interface LiveAdapter {
 /** Promise-based boundary used by process-backed adapters. Synchronous methods
  * remain available for deterministic in-process compatibility tests. */
 export interface AsyncLiveAdapter extends LiveAdapter {
-  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot>;
+  /** A snapshot of the Set; `request` limits what is built (see LiveSnapshotRequest). */
+  snapshotAsync(context?: LiveOperationContext, request?: LiveSnapshotRequest): Promise<LiveSnapshot>;
   discoverAsync(request: LiveDiscoveryRequest, context?: LiveOperationContext): Promise<LiveDiscoveryResult>;
   getAsync(ref: LiveRef, context?: LiveOperationContext): Promise<unknown>;
   invokeAsync(invocation: LiveInvocation, context?: LiveOperationContext): Promise<unknown>;
@@ -184,6 +268,183 @@ export interface AsyncLiveAdapter extends LiveAdapter {
  * prepare, or for lacking cleanup ownership): nothing in Live changed. */
 export class LiveMutationNotDispatchedError extends Error {
   public constructor(message: string) { super(message); this.name = "LiveMutationNotDispatchedError"; }
+}
+
+/** Kinds of reference that name something outside every track (the Set, a scene, a locator...): reading
+ * one needs no track rows. */
+const OUTSIDE_TRACK_KINDS = new Set(["set", "scene", "locator", "groove", "session_playback", "session-playback", "selection", "browser_item", "browser-item"]);
+/** Kinds whose Remote Script path starts with their track's index. */
+const TRACK_PATH_KINDS = new Set(["track", "clip_slot", "clip", "device", "chain", "drum_pad", "take_lane", "take_lane_clip", "arrangement_clip", "routing_choice", "parameter"]);
+
+/** The kind a reference names: `{epoch}:{kind}:{path}` from the Remote Script, `{kind}:{id}` from the simulator. */
+export function refKind(ref: string): string | undefined { return /^(?:\d+:)?([a-z_-]+):/.exec(ref)?.[1]; }
+
+/**
+ * The track a positional Remote Script reference sits under, by the combined index (regular and group
+ * tracks, then returns, then main): `{e}:track:3`, `{e}:clip_slot:3:5`, `{e}:clip:3:5`, `{e}:device:3:0:2`,
+ * `{e}:chain:3:0`, `{e}:drum_pad:3:0:36`, `{e}:take_lane:3:1`, `{e}:take_lane_clip:3:1:0`,
+ * `{e}:arrangement_clip:3:7`, `{e}:parameter:mixer:3:volume`, and a parameter or chain that names its
+ * owner's reference (`{e}:parameter:{e}:device:3:0:2:5`, `{e}:parameter:{e}:chain:3:0:volume`).
+ * Undefined when the reference doesn't place itself on a track: the Set, a scene, a group-track or view
+ * alias (`{e}:track:group:3`, `{e}:device:view:3`), a Set-level Arrangement clip, a simulator reference.
+ */
+export function trackIndexOfRef(ref: string, depth = 0): number | undefined {
+  const match = /^\d+:([a-z_]+):(.+)$/.exec(ref);
+  if (!match || depth > 8) return undefined;
+  const [, kind, path] = match as unknown as [string, string, string];
+  if (/^\d+:[a-z_]+:/.test(path)) return kind === "parameter" || kind === "chain" ? trackIndexOfRef(path, depth + 1) : undefined;
+  if (!TRACK_PATH_KINDS.has(kind)) return undefined;
+  const parts = path.split(":");
+  const numeric = kind === "parameter" ? (parts[0] === "mixer" ? parts[1] : undefined) : parts[0];
+  if (numeric === undefined || !/^\d{1,6}$/.test(numeric) || (kind === "arrangement_clip" && parts.length < 2)) return undefined;
+  const index = Number(numeric);
+  return index <= MAX_SNAPSHOT_INDEX ? index : undefined;
+}
+
+/** Every reference a whole track row owns: its own, its clips', slots', lanes', devices', parameters',
+ * chains' and pads', and its mixers' parameters. References to other objects (a parent, a group) aren't. */
+export function refsOwnedByTrack(track: unknown, owned: (ref: string) => void): void {
+  const visit = (value: unknown, mixer: boolean, depth: number): void => {
+    if (depth > 256 || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) { for (const item of value) visit(item, mixer, depth + 1); return; }
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key === "ref" && typeof item === "string") owned(item);
+      else if (mixer && /Refs?$/.test(key) && (typeof item === "string" || Array.isArray(item))) { for (const entry of Array.isArray(item) ? item : [item]) if (typeof entry === "string") owned(entry); }
+      else if (item !== null && typeof item === "object") visit(item, key === "mixer", depth + 1);
+    }
+  };
+  visit(track, false, 0);
+}
+
+/** Which tracks a view reads whole: the listed ones (every other one comes light), or all of them. */
+export type LiveViewScope = readonly number[] | "all";
+/** A whole-Set read is paged by this many tracks, so that no one request builds a whole big Set on Live's
+ * UI thread; the page is what keeps Live responsive, not a bound on the Set. */
+export const WHOLE_SET_PAGE_TRACKS = 16;
+const MAX_REMEMBERED_OWNERS = 250_000;
+
+/**
+ * Reads of Live shaped to what an operation touches. A mutation's preview, apply, verification and undo
+ * read the tracks it names whole and every other track light, so their cost doesn't grow with the Set;
+ * reads that genuinely need every track (a routing loop check, an export) say so and page through it.
+ * Positional Remote Script references carry their track. A reference that doesn't (the simulator's) is
+ * found through where it was last seen whole, and a read that doesn't find it there reads the whole Set:
+ * a view never makes an operation refuse what a whole snapshot would allow.
+ */
+export class LiveViews {
+  /** Tracks in the Set at the last read, for work whose time grows with the Set. */
+  public trackCount = 0;
+  private readonly owners = new Map<string, number>();
+
+  public constructor(private readonly adapter: () => AsyncLiveAdapter) {}
+
+  /** A view whole for `scope`'s tracks and light for the rest (`[]`: every track light); "all" reads the whole Set. */
+  public async view(context: LiveOperationContext | undefined, scope: LiveViewScope, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
+    if (scope === "all") return this.wholeSet(context, parts);
+    const focus = [...new Set(scope)].filter((index) => Number.isInteger(index) && index >= 0 && index <= MAX_SNAPSHOT_INDEX).sort((left, right) => left - right);
+    const wanted = parts ? [...new Set(parts)] : undefined;
+    // The focus also limits the Arrangement's clips to the focus tracks' (none, for a read of locators).
+    const snapshot = await this.adapter().snapshotAsync(context, wanted && !wanted.includes("tracks") && !wanted.includes("arrangement") ? { parts: wanted } : { focus, ...(wanted ? { parts: wanted } : {}) });
+    this.note(snapshot);
+    return snapshot;
+  }
+
+  /** A view whole for the tracks holding `refs` (and the tracks at `indices`), light for the rest. References
+   * outside every track (the Set, a scene, a locator) need no track. A reference placed by where it was last
+   * seen, or not placed at all beside ones that are (a device just made on a known track), is looked for in
+   * the tracks read, and in the whole Set when it isn't there. */
+  public async viewFor(context: LiveOperationContext | undefined, refs: readonly unknown[], parts?: readonly LiveSnapshotPart[], indices: readonly number[] = []): Promise<LiveSnapshot> {
+    if (parts && !parts.includes("tracks")) return this.view(context, [], parts);
+    const focus = new Set(indices); const unplaced: string[] = []; let unknown = false;
+    for (const ref of refs) {
+      if (typeof ref !== "string" || ref.length === 0) continue;
+      const kind = refKind(ref);
+      if (kind !== undefined && OUTSIDE_TRACK_KINDS.has(kind)) continue;
+      const index = trackIndexOfRef(ref);
+      if (index !== undefined) { focus.add(index); continue; }
+      const seen = this.owners.get(ref);
+      if (seen !== undefined) focus.add(seen); else unknown = true;
+      unplaced.push(ref);
+    }
+    if (unknown && focus.size === 0) return this.view(context, "all", parts);
+    const view = await this.view(context, [...focus], parts);
+    return unplaced.length === 0 || LiveViews.wholeRowsHold(view, unplaced) ? view : this.view(context, "all", parts);
+  }
+
+  /** The whole Set, paged by tracks and assembled: the first page lists every track (whole for its own) with
+   * the rest of the Set, later pages add whole rows, and a Set whose tracks moved meanwhile is read again.
+   * Paging is used only as far as the Remote Script says (its `window`) it honoured it. */
+  public async wholeSet(context: LiveOperationContext | undefined, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
+    const adapter = this.adapter(); const wanted = parts ? [...new Set(parts)] : undefined;
+    const read = async (request?: LiveSnapshotRequest): Promise<LiveSnapshot> => { const snapshot = await adapter.snapshotAsync(context, request); this.note(snapshot); return snapshot; };
+    if (wanted && !wanted.includes("tracks")) return read({ parts: wanted });
+    const pageParts = (wanted ?? LIVE_SNAPSHOT_PARTS).filter((part) => part === "tracks" || part === "arrangement");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const first = await read({ focus: Array.from({ length: WHOLE_SET_PAGE_TRACKS }, (_, index) => index), ...(wanted ? { parts: wanted } : {}) });
+      // Without a window the answer is the whole Set (a Remote Script from before focus); a small Set fits one page.
+      if (!first.window?.focus || !Array.isArray(first.tracks)) return first;
+      if (first.tracks.every((track) => track.light !== true)) { const whole: LiveSnapshot = { ...first }; delete whole.window; return whole; }
+      const count = first.tracks.length;
+      const tracks = [...first.tracks]; const clips = new Map<unknown, Record<string, unknown>>(); const heldClips = new Map<unknown, { clip: Clip; trackRef: LiveRef }>();
+      const keep = (snapshot: LiveSnapshot): void => {
+        for (const clip of snapshot.arrangement?.clips ?? []) if (!clips.has(clip.ref)) clips.set(clip.ref, clip);
+        for (const item of snapshot.arrangementClips ?? []) if (!heldClips.has(item.clip.ref)) heldClips.set(item.clip.ref, item);
+      };
+      keep(first);
+      let consistent = first.trackCount === undefined || first.trackCount === count;
+      for (let from = WHOLE_SET_PAGE_TRACKS; consistent && from < count; from += WHOLE_SET_PAGE_TRACKS) {
+        const size = Math.min(WHOLE_SET_PAGE_TRACKS, count - from);
+        const page = await read({ tracks: { from, count: size }, parts: pageParts });
+        // A page answered without its window is the whole Set: nothing left to assemble.
+        if (!page.window) return page;
+        if (!page.window.tracks || !Array.isArray(page.tracks) || page.tracks.length !== size || (page.trackCount !== undefined && page.trackCount !== count) || page.sceneCount !== first.sceneCount || page.epoch !== first.epoch) { consistent = false; break; }
+        page.tracks.forEach((row, offset) => { const listed = tracks[from + offset]; if (!listed || row.light === true || listed.ref !== row.ref || listed.objectIdentity !== row.objectIdentity) consistent = false; else tracks[from + offset] = row; });
+        keep(page);
+      }
+      if (!consistent) continue;
+      const whole: LiveSnapshot = { ...first, tracks };
+      if (first.arrangement && typeof first.arrangement === "object" && (wanted === undefined || wanted.includes("arrangement"))) whole.arrangement = { ...first.arrangement, clips: [...clips.values()] };
+      if (first.arrangementClips) whole.arrangementClips = [...heldClips.values()];
+      delete whole.window;
+      return whole;
+    }
+    throw new Error("the Set's tracks kept changing while it was read; read it again");
+  }
+
+  /** Session playback alone (transport, fired and playing slots): what playback polls read. */
+  public async playback(context?: LiveOperationContext): Promise<SessionPlaybackState> {
+    const adapter = this.adapter();
+    if (typeof adapter.discoverAsync !== "function") throw new Error("live adapter does not support asynchronous operations");
+    const result = await adapter.discoverAsync({ kind: "session-playback" }, context);
+    const state = result.items?.[0] as unknown as SessionPlaybackState | undefined;
+    if (!state || typeof state !== "object" || typeof state.revision !== "string" || !state.transport || typeof state.transport !== "object" || !Array.isArray(state.firedTargets) || !Array.isArray(state.playingTargets)) throw new Error("authoritative Session playback is unavailable");
+    return state;
+  }
+
+  /** Learns the track count, and where references that don't carry their track sit. */
+  private note(snapshot: LiveSnapshot): void {
+    if (typeof snapshot.trackCount === "number") this.trackCount = snapshot.trackCount;
+    else if (!snapshot.window && Array.isArray(snapshot.tracks) && snapshot.tracks.length > 0) this.trackCount = snapshot.tracks.length;
+    if (this.owners.size > MAX_REMEMBERED_OWNERS) this.owners.clear();
+    const offset = snapshot.window?.tracks?.from ?? 0; const indexOf = new Map<string, number>();
+    (Array.isArray(snapshot.tracks) ? snapshot.tracks : []).forEach((track, position) => {
+      if (!track || typeof track.ref !== "string" || trackIndexOfRef(track.ref) !== undefined) return;
+      const index = offset + position; indexOf.set(track.ref, index); this.owners.set(track.ref, index);
+      if (track.light !== true) refsOwnedByTrack(track, (ref) => this.owners.set(ref, index));
+    });
+    if (indexOf.size === 0) return;
+    for (const clip of snapshot.arrangement?.clips ?? []) { const index = indexOf.get(String(clip.trackRef)); if (index !== undefined && typeof clip.ref === "string") this.owners.set(clip.ref, index); }
+    for (const item of snapshot.arrangementClips ?? []) { const index = indexOf.get(item.trackRef); if (index !== undefined) this.owners.set(item.clip.ref, index); }
+  }
+
+  /** Whether every reference sits in a whole row of the view. */
+  private static wholeRowsHold(snapshot: LiveSnapshot, refs: readonly string[]): boolean {
+    const owned = new Set<string>(); const whole = new Set<string>();
+    for (const track of Array.isArray(snapshot.tracks) ? snapshot.tracks : []) if (track && track.light !== true) { whole.add(track.ref); refsOwnedByTrack(track, (ref) => owned.add(ref)); }
+    for (const clip of snapshot.arrangement?.clips ?? []) if (whole.has(String(clip.trackRef)) && typeof clip.ref === "string") owned.add(clip.ref);
+    for (const item of snapshot.arrangementClips ?? []) if (whole.has(item.trackRef)) owned.add(item.clip.ref);
+    return refs.every((ref) => owned.has(ref));
+  }
 }
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
@@ -684,7 +945,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       case "browser.search": {
         const query = typeof args.query === "string" ? args.query.toLowerCase() : "";
         const category = typeof args.category === "string" ? args.category : undefined;
-        const limit = Number.isInteger(args.limit) && (args.limit as number) >= 1 && (args.limit as number) <= 100 ? args.limit as number : 50;
+        const limit = Number.isInteger(args.limit) && (args.limit as number) >= 1 && (args.limit as number) <= 10_000 ? args.limit as number : 50;
         const catalog = this.browserCatalog();
         return { items: structuredClone(catalog.filter((item) => (!category || item.category === category) && (!query || item.name.toLowerCase().includes(query) || item.path.includes(query))).slice(0, limit)) };
       }
@@ -1972,7 +2233,43 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   }
   subscribe(listener: (event: LiveEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   reconnect(): LiveStatus { this.epoch += 1; this.state.playback.epoch = this.epoch; this.state.playback.revision = `${this.epoch}:reconnected`; this.emit({ type: "state", payload: { epoch: this.epoch, snapshot: this.snapshot() } }); return this.status(); }
-  async snapshotAsync(): Promise<LiveSnapshot> { return this.snapshot(); }
+  async snapshotAsync(_context?: LiveOperationContext, request?: LiveSnapshotRequest): Promise<LiveSnapshot> { return this.snapshotView(request); }
+  /**
+   * The snapshot a read of `request` returns, shaped as the Remote Script shapes it: windows and focus by
+   * the combined track index, light rows for the tracks outside a focus, the Arrangement clips of the tracks
+   * read whole, parts not asked for left out, the track and scene counts, and a `window` echoing what was
+   * honoured whenever anything was asked.
+   */
+  snapshotView(request: LiveSnapshotRequest = {}): LiveSnapshot {
+    validateSnapshotRequest(request);
+    const full = this.snapshot();
+    const value: LiveSnapshot = { ...full, epoch: this.epoch, trackCount: full.tracks.length, sceneCount: full.scenes.length };
+    const window: NonNullable<LiveSnapshot["window"]> = {};
+    let whole = full.tracks;
+    if (request.tracks) { const { from, count } = request.tracks; value.tracks = full.tracks.slice(from, from + count); whole = value.tracks; window.tracks = { from, count }; }
+    if (request.scenes) { const { from, count } = request.scenes; value.scenes = full.scenes.slice(from, from + count); window.scenes = { from, count }; }
+    if (request.focus) {
+      const focus = new Set(request.focus); const offset = request.tracks?.from ?? 0;
+      value.tracks = value.tracks.map((track, position) => focus.has(offset + position) ? track : lightTrackRow(track, full.set.ref));
+      whole = value.tracks.filter((track) => track.light !== true); window.focus = [...request.focus];
+    }
+    if (request.tracks || request.focus) {
+      const read = new Set(whole.map((track) => track.ref));
+      value.arrangement = { ...value.arrangement, clips: (full.arrangement.clips ?? []).filter((clip) => read.has(clip.trackRef as LiveRef)) };
+      value.arrangementClips = (full.arrangementClips ?? []).filter((item) => read.has(item.trackRef));
+    }
+    if (request.parts) {
+      const parts = new Set(request.parts); const partial = value as Partial<LiveSnapshot>; window.parts = [...request.parts];
+      if (!parts.has("set")) { delete partial.set; delete partial.song; delete partial.view; delete partial.tuning; delete partial.groovePool; delete partial.browser; }
+      if (!parts.has("tracks")) delete partial.tracks;
+      if (!parts.has("scenes")) delete partial.scenes;
+      if (!parts.has("arrangement")) { delete partial.arrangement; delete partial.arrangementClips; }
+      if (!parts.has("playback")) delete partial.playback;
+      if (!parts.has("selection")) { delete partial.selection; delete partial.selected; }
+    }
+    if (Object.keys(request).length > 0) value.window = window;
+    return checkSnapshotAnswer(value, request);
+  }
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
     const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
     return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };

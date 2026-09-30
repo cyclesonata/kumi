@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { McpHost, PROTOCOL_VERSION } from "../src/host.js";
 import { DeterministicLiveSimulator } from "../src/live.js";
+import { MIDI_TRANSFORM_MAX_GENERATED_NOTES } from "../src/midi-transforms.js";
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
 const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
@@ -240,14 +241,18 @@ test("chunked note mutations execute a 600-note in-place transform exactly", asy
   assert.ok(restored.notes.every((note) => note.pitch <= 92));
 });
 
-test("previews beyond the 2048-note transform bound fail with the public bound message", async () => {
-  const { simulator, call } = await hostWithMidiClip();
+test("previews past the old 2048-note bound transform the whole clip", async () => {
+  const { simulator, call, parse } = await hostWithMidiClip();
   const clip = (simulator as any).state.tracks[0].clips[0];
   for (let index = 0; index < 2050; index += 1) clip.notes.push({ pitch: 60, start: (index % 512) / 128, duration: 0.25, velocity: 90, channel: 1, id: 2000 + index, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 });
   clip.notesRevision = createHash("sha256").update(JSON.stringify(clip.notes)).digest("hex");
-  const refused = await call("live_midi_transform_preview", { clipRef: "clip:clip-1", transform: "transpose", params: { semitones: 1 } });
-  assert.equal((refused as any).error.code, -32602);
-  assert.match((refused as any).error.message, /2048/);
+  // A change this large goes to a copy in an empty slot (the in-place limit is for large updates, not a cap).
+  const preview = await parse(call("live_midi_transform_preview", { clipRef: "clip:clip-1", transform: "transpose", params: { semitones: 1 }, scope: "duplicate", target: { trackRef: "track:track-1", sceneIndex: 1 } }));
+  assert.equal(preview.scope, "duplicate");
+  const applied = await parse(call("live_midi_transform_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "big-transpose-1" }));
+  assert.equal(applied.state, "applied");
+  const copy = simulator.snapshot().tracks[0]!.clips.find((item) => item.ref === applied.created.ref)!;
+  assert.equal(copy.notes.length, clip.notes.length, "every note of the clip is transformed");
 });
 
 test("pathological arpeggiate previews refuse with a parameter error without generating notes", async () => {
@@ -260,15 +265,15 @@ test("pathological arpeggiate previews refuse with a parameter error without gen
   clip.notesRevision = createHash("sha256").update(JSON.stringify(clip.notes)).digest("hex");
   const refused = await call("live_midi_transform_preview", { clipRef: "clip:clip-1", transform: "arpeggiate", params: { pattern: "up", rate: 1 / 1024 } });
   assert.equal((refused as any).error.code, -32602);
-  assert.match((refused as any).error.message, /2048/);
+  assert.match((refused as any).error.message, new RegExp(`bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit`));
 });
 
-test("repeat outputs beyond the bound still fail through the post-transform check", async () => {
-  const { simulator, call } = await hostWithMidiClip();
+test("repeat outputs past the old 2048-note bound preview whole", async () => {
+  const { simulator, call, parse } = await hostWithMidiClip();
   const clip = (simulator as any).state.tracks[0].clips[0];
   for (let index = 0; index < 1100; index += 1) clip.notes.push({ pitch: 60, start: (index % 512) / 128, duration: 0.25, velocity: 90, channel: 1, id: 3000 + index, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 });
   clip.notesRevision = createHash("sha256").update(JSON.stringify(clip.notes)).digest("hex");
-  const refused = await call("live_midi_transform_preview", { clipRef: "clip:clip-1", transform: "repeat", params: { times: 2 } });
-  assert.equal((refused as any).result.isError, true);
-  assert.match((refused as any).result.content[0].text, /2048/);
+  const preview = await parse(call("live_midi_transform_preview", { clipRef: "clip:clip-1", transform: "repeat", params: { times: 2 }, scope: "duplicate", target: { trackRef: "track:track-1", sceneIndex: 1 } }));
+  assert.equal(preview.scope, "duplicate");
+  assert.equal(typeof preview.transactionId, "string");
 });

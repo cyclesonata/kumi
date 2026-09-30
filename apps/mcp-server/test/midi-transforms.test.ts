@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import type { Note } from "../src/live.js";
-import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_TYPES, UPDATE_ONLY_TRANSFORMS, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, seededRandom, stableNoteOrder } from "../src/midi-transforms.js";
+import { GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_MAX_GENERATED_NOTES, MIDI_TRANSFORM_MAX_NOTES, MIDI_TRANSFORM_TYPES, UPDATE_ONLY_TRANSFORMS, applyMidiTransform, diffNotes, midiExpressionProbe, noteContentDigest, noteIdentityDigest, seededRandom, stableNoteOrder } from "../src/midi-transforms.js";
 
 function note(pitch: number, start: number, duration: number, velocity = 100, id?: number): Note {
   return { pitch, start, duration, velocity, channel: 1, ...(id !== undefined ? { id } : {}) };
@@ -203,14 +203,15 @@ test("arpeggiate refuses pathological spans before allocating and honors the exa
     const rate = (1 / 1024) * Math.pow(4096, next());
     const chord = [note(60, 0, span, 100, 1), note(64, 0, span, 100, 2)];
     const expected = Math.max(1, Math.floor(span / rate));
-    if (expected > 2048) assert.throws(() => applyMidiTransform(chord, { type: "arpeggiate", params: { pattern: "up", rate } }), /2048/);
-    else assert.equal(applyMidiTransform(chord, { type: "arpeggiate", params: { pattern: "up", rate } }).notes.length, expected);
+    if (expected > MIDI_TRANSFORM_MAX_GENERATED_NOTES) assert.throws(() => applyMidiTransform(chord, { type: "arpeggiate", params: { pattern: "up", rate } }), /bounded/);
+    else if (expected <= 4096) assert.equal(applyMidiTransform(chord, { type: "arpeggiate", params: { pattern: "up", rate } }).notes.length, expected);
   }
-  // Legitimate arpeggios at exactly the 2048-note boundary still succeed.
-  const boundary = [note(60, 0, 512, 100, 1), note(64, 0, 512, 100, 2)];
-  assert.equal(applyMidiTransform(boundary, { type: "arpeggiate", params: { pattern: "up", rate: 0.25 } }).notes.length, 2048);
-  // One step past the boundary and pathological drone spans refuse with a clear parameter error.
-  assert.throws(() => applyMidiTransform([note(60, 0, 512.25, 100, 1), note(64, 0, 512.25, 100, 2)], { type: "arpeggiate", params: { pattern: "up", rate: 0.25 } }), /2048/);
+  // Legitimate arpeggios past the old 2048-note bound succeed.
+  const boundary = [note(60, 0, 512.25, 100, 1), note(64, 0, 512.25, 100, 2)];
+  assert.equal(applyMidiTransform(boundary, { type: "arpeggiate", params: { pattern: "up", rate: 0.25 } }).notes.length, 2049);
+  // One step past the generation bound and pathological drone spans refuse with a clear parameter error.
+  const past = (MIDI_TRANSFORM_MAX_GENERATED_NOTES + 1) * 0.25;
+  assert.throws(() => applyMidiTransform([note(60, 0, past, 100, 1), note(64, 0, past, 100, 2)], { type: "arpeggiate", params: { pattern: "up", rate: 0.25 } }), new RegExp(`bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit`));
   assert.throws(() => applyMidiTransform([note(60, 0, 1_000_000, 100, 1), note(64, 0, 1_000_000, 100, 2)], { type: "arpeggiate", params: { pattern: "up", rate: 1 / 1024 } }), /rate/);
 });
 
@@ -267,7 +268,8 @@ test("invalid inputs and unbounded note sets fail closed", () => {
   assert.throws(() => applyMidiTransform([note(140, 0, 1)], { type: "transpose", params: { semitones: 1 } }), /pitch/);
   assert.throws(() => applyMidiTransform([note(60, -1, 1)], { type: "transpose", params: { semitones: 1 } }), /start/);
   assert.throws(() => applyMidiTransform([note(60, 0, 0)], { type: "transpose", params: { semitones: 1 } }), /duration/);
-  assert.throws(() => applyMidiTransform(Array.from({ length: 2049 }, (_, index) => note(60, index, 1)), { type: "transpose", params: { semitones: 1 } }), /2048/);
+  // Past the bound (a sparse array: the length is checked before any note is).
+  assert.throws(() => applyMidiTransform(new Array<Note>(MIDI_TRANSFORM_MAX_NOTES + 1), { type: "transpose", params: { semitones: 1 } }), new RegExp(`bounded ${MIDI_TRANSFORM_MAX_NOTES}-note limit`));
   assert.throws(() => applyMidiTransform([note(60, 0, 1)], { type: "bogus" as never, params: {} }), /unknown MIDI transform/);
   assert.equal(stableNoteOrder([note(64, 1, 1, 100, 2), note(60, 0, 1, 100, 1)])[0]!.id, 1);
 });
@@ -302,14 +304,14 @@ test("note digests use code-unit ordering across locale-sensitive fixtures and p
   assert.equal(noteIdentityDigest(fixture), noteIdentityDigest([...fixture].reverse()));
 });
 
-test("note content digests stay valid at the full 2048-note transform bound", () => {
+test("note content digests stay valid past the old 2048-note bound and refuse past the transform bound", () => {
   const next = random(0x2048);
-  const source = randomNotes(next, 2048, 16);
+  const source = randomNotes(next, 4096, 16);
   const result = applyMidiTransform(source, { type: "transpose", params: { semitones: 1 } }, 16);
-  assert.equal(result.notes.length, 2048);
+  assert.equal(result.notes.length, 4096);
   const digest = noteContentDigest(result.notes as unknown as Record<string, unknown>[]);
   assert.equal(digest.length, 64);
   assert.equal(noteContentDigest(structuredClone(result.notes) as unknown as Record<string, unknown>[]), digest);
-  const over = randomNotes(next, 2049, 16);
-  assert.throws(() => noteContentDigest(over as unknown as Record<string, unknown>[]), /2048/);
+  const over = new Array<Record<string, unknown>>(MIDI_TRANSFORM_MAX_NOTES + 1);
+  assert.throws(() => noteContentDigest(over), new RegExp(`${MIDI_TRANSFORM_MAX_NOTES}-note transform bound`));
 });

@@ -338,7 +338,7 @@ const toolDescriptors = [
   {
     name: "live_discover",
     description: "Read bounded, deterministic parent-scoped Live objects without changing Live state.",
-    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] }, parent: { type: "string", minLength: 1, maxLength: 256 }, filter: { type: "object", additionalProperties: { type: ["string", "number", "boolean", "null"], maxLength: 256, minimum: -9007199254740991, maximum: 9007199254740991 }, maxProperties: 8 }, fields: { type: "array", items: { type: "string", minLength: 1, maxLength: 64 }, maxItems: 32 }, budget: { type: "integer", minimum: 1, maximum: 10000 }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string", maxLength: 1024 } }, required: ["kind"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] }, parent: { type: "string", minLength: 1, maxLength: 256 }, filter: { type: "object", additionalProperties: { type: ["string", "number", "boolean", "null"], maxLength: 256, minimum: -9007199254740991, maximum: 9007199254740991 }, maxProperties: 8 }, fields: { type: "array", items: { type: "string", minLength: 1, maxLength: 64 }, maxItems: 256 }, budget: { type: "integer", minimum: 1, maximum: 10000000 }, limit: { type: "integer", minimum: 1, maximum: 100000 }, cursor: { type: "string", maxLength: 1024 } }, required: ["kind"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -362,7 +362,7 @@ const toolDescriptors = [
   {
     name: "live_session_emergency_stop",
     description: "Independently authorized emergency stop of exactly the Session playback targets and recording mode observed in fresh discovery. Requires no transaction and survives host restart.",
-    inputSchema: { type: "object", properties: { confirmation: { type: "string", const: "emergency-stop" }, expectedTargets: { type: "array", items: { type: "string", minLength: 1, maxLength: 1024 }, maxItems: 256, description: "Exact active playback target keys (trackRef|clipSlotRef|sceneRef) observed in a fresh live_discover/live_snapshot read." }, expectedRecording: { type: "string", enum: ["stopped", "session", "arrangement", "both"], description: "Exact recording mode observed in the same fresh read." }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["confirmation", "expectedTargets", "expectedRecording"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { confirmation: { type: "string", const: "emergency-stop" }, expectedTargets: { type: "array", items: { type: "string", minLength: 1, maxLength: 1024 }, maxItems: 100000, description: "Exact active playback target keys (trackRef|clipSlotRef|sceneRef) observed in a fresh live_discover/live_snapshot read." }, expectedRecording: { type: "string", enum: ["stopped", "session", "arrangement", "both"], description: "Exact recording mode observed in the same fresh read." }, idempotencyKey: { type: "string", minLength: 8, maxLength: 128 } }, required: ["confirmation", "expectedTargets", "expectedRecording"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
   {
@@ -422,7 +422,7 @@ const toolDescriptors = [
   {
     name: "live_note_update_preview",
     description: "Read-only preflight for bounded MIDI note edits by note id, including velocity, mute, probability, velocity deviation, and release velocity.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, notes: { type: "array", maxItems: 512, items: { type: "object", properties: { id: { type: "integer", minimum: 0 }, pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0 }, duration: { type: "number", exclusiveMinimum: 0 }, velocity: { type: "number", minimum: 0, maximum: 127 }, mute: { type: "boolean" }, probability: { type: "number", minimum: 0, maximum: 1 }, velocityDeviation: { type: "number", minimum: -127, maximum: 127 }, releaseVelocity: { type: "number", minimum: 0, maximum: 127 } }, required: ["id"], additionalProperties: false } } }, required: ["clipRef", "notes"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, notes: { type: "array", items: { type: "object", properties: { id: { type: "integer", minimum: 0 }, pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0 }, duration: { type: "number", exclusiveMinimum: 0 }, velocity: { type: "number", minimum: 0, maximum: 127 }, mute: { type: "boolean" }, probability: { type: "number", minimum: 0, maximum: 1 }, velocityDeviation: { type: "number", minimum: -127, maximum: 127 }, releaseVelocity: { type: "number", minimum: 0, maximum: 127 } }, required: ["id"], additionalProperties: false } } }, required: ["clipRef", "notes"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -434,7 +434,7 @@ const toolDescriptors = [
   {
     name: "live_note_delete_preview",
     description: "Read-only preflight for deleting exact MIDI notes by id, capturing the prior notes for guarded undo.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, noteIds: { type: "array", maxItems: 512, items: { type: "integer", minimum: 0 } } }, required: ["clipRef", "noteIds"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, noteIds: { type: "array", items: { type: "integer", minimum: 0 } } }, required: ["clipRef", "noteIds"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -446,7 +446,7 @@ const toolDescriptors = [
   {
     name: "live_clip_duplicate_preview",
     description: "Read-only preflight for duplicating a Session clip to another Session slot or into the Arrangement.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetSceneIndex: { type: "integer", minimum: 0, maximum: 10000 }, arrangementPosition: { type: "number", minimum: 0 } }, required: ["clipRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetSceneIndex: { type: "integer", minimum: 0, maximum: 100000 }, arrangementPosition: { type: "number", minimum: 0 } }, required: ["clipRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -470,7 +470,7 @@ const toolDescriptors = [
   {
     name: "live_clip_move_preview",
     description: "Read-only preflight for repositioning an Arrangement clip or moving a Session clip to another slot.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, position: { type: "number", minimum: 0 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetSceneIndex: { type: "integer", minimum: 0, maximum: 10000 } }, required: ["clipRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, position: { type: "number", minimum: 0 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetSceneIndex: { type: "integer", minimum: 0, maximum: 100000 } }, required: ["clipRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -494,7 +494,7 @@ const toolDescriptors = [
   {
     name: "live_mixer_preview",
     description: "Read-only preflight for bounded mixer edits (volume, pan, mute, solo, cue, sends) with prior-value capture.",
-    inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, volume: { type: "number", minimum: 0, maximum: 1 }, pan: { type: "number", minimum: -1, maximum: 1 }, mute: { type: "boolean" }, solo: { type: "boolean" }, cueVolume: { type: "number", minimum: 0, maximum: 1 }, sends: { type: "array", maxItems: 64, items: { type: "number", minimum: 0, maximum: 1 } } }, required: ["trackRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, volume: { type: "number", minimum: 0, maximum: 1 }, pan: { type: "number", minimum: -1, maximum: 1 }, mute: { type: "boolean" }, solo: { type: "boolean" }, cueVolume: { type: "number", minimum: 0, maximum: 1 }, sends: { type: "array", items: { type: "number", minimum: 0, maximum: 1 } } }, required: ["trackRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -518,7 +518,7 @@ const toolDescriptors = [
   {
     name: "live_automation_preview",
     description: "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["create-envelope", "delete-envelope", "insert", "delete-range"] }, clipRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, points: { type: "array", maxItems: 512, items: { type: "object", properties: { time: { type: "number", minimum: 0 }, value: { type: "number" } }, required: ["time", "value"], additionalProperties: false } }, from: { type: "number", minimum: 0 }, to: { type: "number", minimum: 0 } }, required: ["action", "clipRef", "parameterRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["create-envelope", "delete-envelope", "insert", "delete-range"] }, clipRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, points: { type: "array", items: { type: "object", properties: { time: { type: "number", minimum: 0 }, value: { type: "number" } }, required: ["time", "value"], additionalProperties: false } }, from: { type: "number", minimum: 0 }, to: { type: "number", minimum: 0 } }, required: ["action", "clipRef", "parameterRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -554,7 +554,7 @@ const toolDescriptors = [
   {
     name: "live_device_preview",
     description: "Read-only preflight for guarded device insert, enable, or move with exact fencing. Inserting a Simpler can load a sample in the same change (filePath with its allowedRoot, the same file authority as an audio import). Transaction-owned inserted-device cleanup uses live_undo.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["insert", "enable", "move"] }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, deviceName: { type: "string", minLength: 1, maxLength: 256 }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, index: { type: "integer", minimum: -1, maximum: 256 }, enabled: { type: "boolean" }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["action"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["insert", "enable", "move"] }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, deviceName: { type: "string", minLength: 1, maxLength: 256 }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, index: { type: "integer", minimum: -1, maximum: 100000 }, enabled: { type: "boolean" }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -614,7 +614,7 @@ const toolDescriptors = [
   {
     name: "live_project_snapshot_diff",
     description: "Compare two complete semantic Set page bundles offline with conservative rename/reorder matching and explicit ambiguity. Observational only: no merge or Live authority is proposed.",
-    inputSchema: { type: "object", properties: { beforePages: { type: "array", minItems: 1, maxItems: 512, items: { type: "object" } }, afterPages: { type: "array", minItems: 1, maxItems: 512, items: { type: "object" } }, limit: { type: "integer", minimum: 1, maximum: 200 }, cursor: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["beforePages", "afterPages"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { beforePages: { type: "array", minItems: 1, maxItems: 2048, items: { type: "object" } }, afterPages: { type: "array", minItems: 1, maxItems: 2048, items: { type: "object" } }, limit: { type: "integer", minimum: 1, maximum: 200 }, cursor: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["beforePages", "afterPages"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -632,7 +632,7 @@ const toolDescriptors = [
   {
     name: "als_diff",
     description: "Diff two .als files, or one .als file against one previously exported semantic page bundle, through the existing semantic diff engine. Offline provenance is labeled honestly; no merge is proposed.",
-    inputSchema: { type: "object", properties: { before: { type: "object", properties: { als: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 4096 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, profile: { type: "string", enum: ["strict", "collaboration", "local"] } }, required: ["path", "allowedRoot"], additionalProperties: false }, pages: { type: "array", minItems: 1, maxItems: 512, items: { type: "object" } } }, additionalProperties: false }, after: { type: "object", properties: { als: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 4096 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, profile: { type: "string", enum: ["strict", "collaboration", "local"] } }, required: ["path", "allowedRoot"], additionalProperties: false }, pages: { type: "array", minItems: 1, maxItems: 512, items: { type: "object" } } }, additionalProperties: false }, limit: { type: "integer", minimum: 1, maximum: 200 }, cursor: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["before", "after"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { before: { type: "object", properties: { als: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 4096 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, profile: { type: "string", enum: ["strict", "collaboration", "local"] } }, required: ["path", "allowedRoot"], additionalProperties: false }, pages: { type: "array", minItems: 1, maxItems: 2048, items: { type: "object" } } }, additionalProperties: false }, after: { type: "object", properties: { als: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 4096 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, profile: { type: "string", enum: ["strict", "collaboration", "local"] } }, required: ["path", "allowedRoot"], additionalProperties: false }, pages: { type: "array", minItems: 1, maxItems: 2048, items: { type: "object" } } }, additionalProperties: false }, limit: { type: "integer", minimum: 1, maximum: 200 }, cursor: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["before", "after"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -673,9 +673,9 @@ const toolDescriptors = [
   },
   {
     name: "live_device_parameter_preview",
-    description: "Discover an authoritative device parameter and preview a bounded numeric change without mutation. values (instead of parameterRef and value) previews up to 64 parameters of the device as one change: one apply sets them all or none, and one undo restores them.",
+    description: "Discover an authoritative device parameter and preview a bounded numeric change without mutation. values (instead of parameterRef and value) previews many parameters of the device (up to 10000) as one change: one apply sets them all or none, and one undo restores them.",
     inputSchema: { type: "object", properties: { deviceRef: { type: "string", minLength: 1, maxLength: 256 }, parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" },
-      values: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", properties: { parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" } }, required: ["parameterRef", "value"], additionalProperties: false } } }, required: ["deviceRef"], additionalProperties: false },
+      values: { type: "array", minItems: 1, maxItems: 10000, items: { type: "object", properties: { parameterRef: { type: "string", minLength: 1, maxLength: 256 }, value: { type: "number" } }, required: ["parameterRef", "value"], additionalProperties: false } } }, required: ["deviceRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -687,7 +687,7 @@ const toolDescriptors = [
   {
     name: "live_session_structure_preview",
     description: "Preview bounded MIDI/audio track and named scene creation without mutation. Track indexes address only mutable regular tracks, never return or main tracks.",
-    inputSchema: { type: "object", properties: { tracks: { type: "array", maxItems: 16, items: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 128 }, kind: { type: "string", enum: ["audio", "midi"] }, index: { type: "integer", minimum: 0, maximum: 1024, description: "Insertion index in the regular-track collection; omitted entries default to request order." } }, required: ["name", "kind"], additionalProperties: false } }, scenes: { type: "array", maxItems: 32, items: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 128 }, index: { type: "integer", minimum: 0, maximum: 1024, description: "Insertion index in the scene collection; omitted entries default to request order." } }, required: ["name"], additionalProperties: false } } }, required: ["tracks", "scenes"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { tracks: { type: "array", maxItems: 1000, items: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 128 }, kind: { type: "string", enum: ["audio", "midi"] }, index: { type: "integer", minimum: 0, maximum: 100000, description: "Insertion index in the regular-track collection; omitted entries default to request order." } }, required: ["name", "kind"], additionalProperties: false } }, scenes: { type: "array", maxItems: 1000, items: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 128 }, index: { type: "integer", minimum: 0, maximum: 100000, description: "Insertion index in the scene collection; omitted entries default to request order." } }, required: ["name"], additionalProperties: false } } }, required: ["tracks", "scenes"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -711,7 +711,7 @@ const toolDescriptors = [
   {
     name: "live_midi_clip_preview",
     description: "Preview creation of a bounded MIDI clip in an empty Session slot.",
-    inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 1023 }, name: { type: "string", minLength: 1, maxLength: 256 }, length: { type: "number", exclusiveMinimum: 0, maximum: 1024 }, notes: { type: "array", maxItems: 512, items: { type: "object", properties: { pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0, maximum: 1024 }, duration: { type: "number", exclusiveMinimum: 0, maximum: 1024 }, velocity: { type: "integer", minimum: 1, maximum: 127 }, channel: { type: "integer", minimum: 1, maximum: 16, description: "MIDI channel; defaults to 1." }, mute: { type: "boolean" }, probability: { type: "number", minimum: 0, maximum: 1 }, velocityDeviation: { type: "number", minimum: -127, maximum: 127 }, releaseVelocity: { type: "number", minimum: 0, maximum: 127 } }, required: ["pitch", "start", "duration", "velocity"], additionalProperties: false } } }, required: ["trackRef", "sceneIndex", "name", "length", "notes"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 100000 }, name: { type: "string", minLength: 1, maxLength: 256 }, length: { type: "number", exclusiveMinimum: 0, maximum: 1024 }, notes: { type: "array", items: { type: "object", properties: { pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0, maximum: 1024 }, duration: { type: "number", exclusiveMinimum: 0, maximum: 1024 }, velocity: { type: "integer", minimum: 1, maximum: 127 }, channel: { type: "integer", minimum: 1, maximum: 16, description: "MIDI channel; defaults to 1." }, mute: { type: "boolean" }, probability: { type: "number", minimum: 0, maximum: 1 }, velocityDeviation: { type: "number", minimum: -127, maximum: 127 }, releaseVelocity: { type: "number", minimum: 0, maximum: 127 } }, required: ["pitch", "start", "duration", "velocity"], additionalProperties: false } } }, required: ["trackRef", "sceneIndex", "name", "length", "notes"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
@@ -845,7 +845,7 @@ const toolDescriptors = [
   {
     name: "live_audio_import_preview",
     description: "Read-only preflight for importing one audio file into an empty Session clip slot or a take lane, with explicit file authority (allowed root, canonical path, size/type, SHA-256).",
-    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 10000 }, takeLaneRef: { type: "string", minLength: 1, maxLength: 256 }, position: { type: "number", minimum: 0 }, name: { type: "string", minLength: 1, maxLength: 256 } }, required: ["filePath", "allowedRoot"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 100000 }, takeLaneRef: { type: "string", minLength: 1, maxLength: 256 }, position: { type: "number", minimum: 0 }, name: { type: "string", minLength: 1, maxLength: 256 } }, required: ["filePath", "allowedRoot"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -881,7 +881,7 @@ const toolDescriptors = [
   {
     name: "live_note_edit_preview",
     description: "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["quantize", "quantize-pitch", "duplicate"] }, noteIds: { type: "array", maxItems: 512, items: { type: "integer", minimum: 0 } }, grid: { type: "number", exclusiveMinimum: 0 }, amount: { type: "number", minimum: 0, maximum: 1 }, pitch: { type: "integer", minimum: 0, maximum: 127 } }, required: ["clipRef", "action"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, action: { type: "string", enum: ["quantize", "quantize-pitch", "duplicate"] }, noteIds: { type: "array", items: { type: "integer", minimum: 0 } }, grid: { type: "number", exclusiveMinimum: 0 }, amount: { type: "number", minimum: 0, maximum: 1 }, pitch: { type: "integer", minimum: 0, maximum: 127 } }, required: ["clipRef", "action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -893,13 +893,13 @@ const toolDescriptors = [
   {
     name: "live_note_read",
     description: "Read notes by stable IDs, or the currently selected notes, from one MIDI clip.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, noteIds: { type: "array", maxItems: 1024, items: { type: "integer", minimum: 0 } }, selected: { type: "boolean" } }, required: ["clipRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, noteIds: { type: "array", items: { type: "integer", minimum: 0 } }, selected: { type: "boolean" } }, required: ["clipRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
     name: "live_key_estimate",
     description: "Estimate the musical key of a MIDI clip (or an explicit note set) as ranked candidates with correlation scores, an explicit confidence classification, and an ambiguity flag — never a forced single answer. Read-only and deterministic.",
-    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, notes: { type: "array", maxItems: 4096, items: { type: "object", properties: { pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0, maximum: 1000000 }, duration: { type: "number", exclusiveMinimum: 0, maximum: 1000000 }, velocity: { type: "integer", minimum: 0, maximum: 127 } }, required: ["pitch", "start", "duration"], additionalProperties: false } }, expectedNotesRevision: { type: "string", minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" } }, additionalProperties: false },
+    inputSchema: { type: "object", properties: { clipRef: { type: "string", minLength: 1, maxLength: 256 }, notes: { type: "array", items: { type: "object", properties: { pitch: { type: "integer", minimum: 0, maximum: 127 }, start: { type: "number", minimum: 0, maximum: 1000000 }, duration: { type: "number", exclusiveMinimum: 0, maximum: 1000000 }, velocity: { type: "integer", minimum: 0, maximum: 127 } }, required: ["pitch", "start", "duration"], additionalProperties: false } }, expectedNotesRevision: { type: "string", minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" } }, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1085,7 +1085,7 @@ const toolDescriptors = [
   {
     name: "live_chain_mixer_preview",
     description: "Read-only preflight for a rack chain's mixer: volume, pan, sends, and chain activator.",
-    inputSchema: { type: "object", properties: { chainRef: { type: "string", minLength: 1, maxLength: 256 }, volume: { type: "number", minimum: 0, maximum: 1 }, pan: { type: "number", minimum: -1, maximum: 1 }, sends: { type: "array", maxItems: 64, items: { type: "number", minimum: 0, maximum: 1 } }, chainActivator: { type: "boolean" } }, required: ["chainRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { chainRef: { type: "string", minLength: 1, maxLength: 256 }, volume: { type: "number", minimum: 0, maximum: 1 }, pan: { type: "number", minimum: -1, maximum: 1 }, sends: { type: "array", items: { type: "number", minimum: 0, maximum: 1 } }, chainActivator: { type: "boolean" } }, required: ["chainRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1121,7 +1121,7 @@ const toolDescriptors = [
   {
     name: "live_device_advanced_preview",
     description: "Read-only preflight for device parameter banks, automation re-enable, A/B comparison save, chain insertion, and cross-track/chain device moves.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set-bank", "re-enable-automation", "save-comparison", "insert-chain", "move-cross"] }, ref: { type: "string", minLength: 1, maxLength: 256 }, bank: { type: "integer", minimum: 0, maximum: 32 }, scriptIndex: { type: "integer", minimum: 0, maximum: 16 }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, chainRef: { type: "string", minLength: 1, maxLength: 256 }, deviceName: { type: "string", minLength: 1, maxLength: 256 }, index: { type: "integer", minimum: 0, maximum: 256 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetChainRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["action"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set-bank", "re-enable-automation", "save-comparison", "insert-chain", "move-cross"] }, ref: { type: "string", minLength: 1, maxLength: 256 }, bank: { type: "integer", minimum: 0, maximum: 32 }, scriptIndex: { type: "integer", minimum: 0, maximum: 16 }, trackRef: { type: "string", minLength: 1, maxLength: 256 }, chainRef: { type: "string", minLength: 1, maxLength: 256 }, deviceName: { type: "string", minLength: 1, maxLength: 256 }, index: { type: "integer", minimum: 0, maximum: 100000 }, targetTrackRef: { type: "string", minLength: 1, maxLength: 256 }, targetChainRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1144,10 +1144,10 @@ const toolDescriptors = [
   },
   {
     name: "live_drum_pad_preview",
-    description: "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad). load-samples does that for up to 16 pads of one rack as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
+    description: "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad). load-samples does that for up to 128 pads of one rack (a whole Drum Rack) as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
     inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set", "delete-all-chains", "load-sample", "load-samples"] }, padRef: { type: "string", minLength: 1, maxLength: 256 }, deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127 }, solo: { type: "boolean" }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 },
       instrument: { type: "string", enum: ["Simpler", "Drum Sampler"] },
-      pads: { type: "array", minItems: 1, maxItems: 16, items: { type: "object", properties: { note: { type: "integer", minimum: 0, maximum: 127 }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, instrument: { type: "string", enum: ["Simpler", "Drum Sampler"] } }, required: ["note", "filePath", "allowedRoot"], additionalProperties: false } } }, required: ["action"], additionalProperties: false },
+      pads: { type: "array", minItems: 1, maxItems: 128, items: { type: "object", properties: { note: { type: "integer", minimum: 0, maximum: 127 }, filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 }, instrument: { type: "string", enum: ["Simpler", "Drum Sampler"] } }, required: ["note", "filePath", "allowedRoot"], additionalProperties: false } } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: true, openWorldHint: true },
   },
   {
@@ -1159,7 +1159,7 @@ const toolDescriptors = [
   {
     name: "live_rack_preview",
     description: "Read-only preflight for rack visible macro count and selected variation (exact undo), plus rack actions: add/remove/randomize macros, insert chain, copy pad, and variation store/recall/delete (momentary, non-undoable).",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set", "add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation"] }, rackRef: { type: "string", minLength: 1, maxLength: 256 }, selectedVariationIndex: { type: "integer", minimum: -1, maximum: 256 }, index: { type: "integer", minimum: -1, maximum: 256 }, sourceIndex: { type: "integer", minimum: 0, maximum: 127 }, targetIndex: { type: "integer", minimum: 0, maximum: 127 } }, required: ["action", "rackRef"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["set", "add-macro", "remove-macro", "randomize-macros", "insert-chain", "copy-pad", "store-variation", "recall-variation", "delete-variation"] }, rackRef: { type: "string", minLength: 1, maxLength: 256 }, selectedVariationIndex: { type: "integer", minimum: -1, maximum: 100000 }, index: { type: "integer", minimum: -1, maximum: 100000 }, sourceIndex: { type: "integer", minimum: 0, maximum: 127 }, targetIndex: { type: "integer", minimum: 0, maximum: 127 } }, required: ["action", "rackRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
@@ -1250,7 +1250,7 @@ const toolDescriptors = [
         transform: { type: "string", enum: ["transpose", "scale-constrain", "quantize", "swing", "velocity-curve", "humanize-velocity", "humanize-timing", "legato", "staccato", "rotate", "repeat", "ratchet", "chord-voicing", "arpeggiate", "seeded-variation", "euclidean", "chord-progression", "drum-pattern", "bassline", "motif-invert", "motif-retrograde", "motif-augment", "motif-diminish"] },
         params: { type: "object", maxProperties: 12, additionalProperties: { anyOf: [{ type: ["string", "number"] }, { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 32 } }, { type: "object", maxProperties: 32, additionalProperties: { type: "number" } }] } },
         scope: { type: "string", enum: ["in-place", "duplicate"] },
-        target: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 10000 } }, required: ["trackRef", "sceneIndex"], additionalProperties: false },
+        target: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 }, sceneIndex: { type: "integer", minimum: 0, maximum: 100000 } }, required: ["trackRef", "sceneIndex"], additionalProperties: false },
       },
       required: ["clipRef", "transform", "params"],
       additionalProperties: false,

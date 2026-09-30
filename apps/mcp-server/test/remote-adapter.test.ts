@@ -435,3 +435,86 @@ test("song.read is one read-only invoke with no authority chain, and mutation ar
     assert.equal(seen.length, beforeInvalid, "nothing reached the bridge");
   } finally { await adapter?.close(); await close(server); }
 });
+
+/** Rows and parts a snapshot answer holds, for fake Remote Scripts. */
+const trackRow = (index: number, light = false) => light ? { ref: `1:track:${index}`, objectIdentity: `live:track:${index}`, name: `Track ${index}`, kind: "regular", light: true, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } : { ref: `1:track:${index}`, objectIdentity: `live:track:${index}`, name: `Track ${index}`, kind: "regular", clips: [], clipSlots: [], devices: [], takeLanes: [] };
+const playbackPart = { ref: "1:session_playback:playback", epoch: 1, revision: "1:playback:1:0", transport: { playing: false, arrangementRecord: false, sessionRecord: false, position: 0, launchQuantization: { raw: null, normalized: null }, loop: { enabled: false, start: 0, length: 4 }, punchIn: null, punchOut: null, metronome: null, countIn: null }, firedTargets: [], playingTargets: [] };
+const wholeSetAnswer = (tracks = 4) => ({ set: { ref: "1:set:song", name: "Set" }, tracks: Array.from({ length: tracks }, (_, index) => trackRow(index)), scenes: [], arrangement: { locators: [], clips: [] }, playback: playbackPart, trackCount: tracks, sceneCount: 0, epoch: 1 });
+
+test("a snapshot's windows, focus and parts go as its wire args, checked against the registry before anything is sent", async () => {
+  const snapshots: Record<string, unknown>[] = [];
+  const server = framedServer((request, socket) => {
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method !== "snapshot") return;
+    snapshots.push(request); const args = request.args as { focus?: number[]; tracks?: { from: number; count: number }; parts?: string[] } | undefined;
+    const whole = wholeSetAnswer(4) as Record<string, unknown>;
+    if (!args) { socket.write(`${JSON.stringify(response(request.id as string, whole))}\n`); return; }
+    const answer: Record<string, unknown> = { trackCount: 4, sceneCount: 0, epoch: 1, window: args };
+    for (const part of args.parts ?? ["set", "tracks", "scenes", "arrangement", "playback"]) answer[part] = whole[part];
+    if (args.focus) answer.tracks = [0, 1, 2, 3].map((index) => trackRow(index, !args.focus!.includes(index)));
+    if (args.tracks) answer.tracks = [0, 1, 2, 3].slice(args.tracks.from, args.tracks.from + args.tracks.count).map((index) => trackRow(index));
+    socket.write(`${JSON.stringify(response(request.id as string, answer))}\n`);
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    const focused = await adapter.snapshotAsync(undefined, { focus: [3], parts: ["tracks"] });
+    assert.deepEqual(focused.window, { focus: [3], parts: ["tracks"] }); assert.equal("set" in focused, false);
+    assert.deepEqual(focused.tracks.map((track) => track.light === true), [true, true, true, false]);
+    assert.deepEqual((await adapter.snapshotAsync(undefined, { tracks: { from: 2, count: 16 }, parts: ["tracks", "arrangement"] })).tracks.map((track) => track.ref), ["1:track:2", "1:track:3"]);
+    await adapter.snapshotAsync(undefined, {});
+    await adapter.snapshotAsync();
+    assert.deepEqual(snapshots.map((request) => request.args), [{ focus: [3], parts: ["tracks"] }, { tracks: { from: 2, count: 16 }, parts: ["tracks", "arrangement"] }, undefined, undefined]);
+    assert.equal("args" in snapshots[3]!, false, "no request sends no args: the whole Set, as before");
+    for (const bad of [{ focus: [1, 1] }, { focus: [100_001] }, { parts: ["everything"] }, { tracks: { from: 0, count: 0 } }]) await assert.rejects(adapter.snapshotAsync(undefined, bad as never), /registry/);
+    assert.equal(snapshots.length, 4, "a request the registry refuses is never sent");
+  } finally { await adapter?.close(); await close(server); }
+});
+
+test("a snapshot answer is checked against what was asked: no window means the whole Set, a window holds exactly what it says", async () => {
+  const answers: unknown[] = [];
+  const server = framedServer((request, socket) => {
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method === "snapshot") socket.write(`${JSON.stringify(response(request.id as string, answers.shift()))}\n`);
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  const lightExcept = (...whole: number[]) => [0, 1, 2, 3].map((index) => trackRow(index, !whole.includes(index)));
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    // A Remote Script from before snapshot arguments answers a focused read with the whole Set: that's used as the whole Set.
+    answers.push(wholeSetAnswer(4));
+    const legacy = await adapter.snapshotAsync(undefined, { focus: [1], parts: ["tracks"] });
+    assert.equal(legacy.window, undefined); assert.equal(legacy.tracks.every((track) => track.light !== true), true); assert.ok(legacy.playback);
+    const refusals: Array<[unknown, Parameters<RemoteScriptLiveAdapter["snapshotAsync"]>[1], RegExp]> = [
+      [(({ playback: _playback, ...rest }) => rest)(wholeSetAnswer(4)), undefined, /without a window isn't the whole Set: it lacks playback/],
+      [{ ...wholeSetAnswer(4), tracks: lightExcept(0) }, { focus: [0] }, /without a window isn't the whole Set: its tracks aren't all whole/],
+      [{ tracks: lightExcept(1), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] }, set: {} }, { focus: [1], parts: ["tracks"] }, /holds set, which wasn't asked/],
+      [{ trackCount: 4, epoch: 1, window: { parts: ["tracks", "set"] }, set: {} }, { parts: ["tracks", "set"] }, /lacks its tracks/],
+      [{ tracks: lightExcept(1, 2), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /track 2 is whole, but was asked light/],
+      [{ tracks: lightExcept(), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /track 1 is light, but was asked whole/],
+      [{ tracks: lightExcept(1).slice(0, 3), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /doesn't hold the track rows asked/],
+      [{ tracks: [0, 1, 2].map((index) => trackRow(index)), trackCount: 4, epoch: 1, window: { tracks: { from: 0, count: 2 }, parts: ["tracks"] } }, { tracks: { from: 0, count: 2 }, parts: ["tracks"] }, /doesn't hold the track rows asked/],
+      [{ ...wholeSetAnswer(4), window: { focus: [0] } }, { parts: ["tracks"] }, /honoured focus, which wasn't asked/],
+      [{ tracks: lightExcept(3), trackCount: 4, epoch: 1, window: { focus: [3], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /focus isn't the focus asked/],
+    ];
+    for (const [answer, request, reason] of refusals) { answers.push(answer); await assert.rejects(adapter.snapshotAsync(undefined, request), reason); }
+    // A window honouring the focus and parts asked holds exactly them.
+    answers.push({ tracks: lightExcept(2), trackCount: 4, sceneCount: 0, epoch: 1, window: { focus: [2], parts: ["tracks"] } });
+    assert.equal((await adapter.snapshotAsync(undefined, { focus: [2], parts: ["tracks"] })).tracks.filter((track) => track.light !== true)[0]!.ref, "1:track:2");
+  } finally { await adapter?.close(); await close(server); }
+});
+
+test("a snapshot or discovery page without a caller's deadline gets six times the configured timeout; a single object's read doesn't", async () => {
+  const server = framedServer((request, socket) => {
+    const answer = (result: unknown) => setTimeout(() => { if (!socket.destroyed) socket.write(`${JSON.stringify(response(request.id as string, result))}\n`); }, 150);
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method === "snapshot") answer(wholeSetAnswer(0));
+    if (request.method === "get") answer({ ref: "1:track:0" });
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 50 });
+    assert.deepEqual((await adapter.snapshotAsync()).tracks, []);
+    await assert.rejects(adapter.getAsync("1:track:0"), /uncertain after dispatch timeout|disconnected/);
+  } finally { await adapter?.close(); await close(server); }
+});
