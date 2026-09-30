@@ -18,6 +18,7 @@ import { KUMI, KUMI_VERSION } from "@kumi/runtime";
 import { isLiveRunning, runProgram, type Ran } from "./bridge-setup.js";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
+import { liveExtensionsDir, removeExtension } from "./live-extension.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 type Run = (command: string, args: readonly string[], cwd?: string) => Promise<Ran>;
@@ -268,8 +269,11 @@ async function removeBridge(io: InstalledIo, run: Run): Promise<"removed" | "kep
   if (!lifecycle || !existsSync(lifecycle)) { say("Kumi couldn't find the bridge's own uninstaller; remove AbletonMcpBridge from Live's Remote Scripts folder by hand."); return "kept"; }
   const state = join(config, "..");
   const ran = await run(process.execPath, [lifecycle, "uninstall", "--remote-scripts-dir", remoteScriptsDir(io.env), "--state-dir", state, "--package-root", root!, "--apply", "--confirm-live-stopped"]);
-  say(ran.code === 0 ? "The bridge is out of Live." : "The bridge's uninstaller refused; remove AbletonMcpBridge from Live's Remote Scripts folder by hand.");
-  return ran.code === 0 ? "removed" : "kept";
+  if (ran.code !== 0) { say("The bridge's uninstaller refused; remove AbletonMcpBridge from Live's Remote Scripts folder by hand."); return "kept"; }
+  // Kumi's extension goes with the bridge: Live would otherwise go on starting it.
+  const extensions = liveExtensionsDir(io.env);
+  say(extensions && removeExtension(extensions) ? "The bridge and Kumi's extension are out of Live." : "The bridge is out of Live.");
+  return "removed";
 }
 
 /** Whether the bridge Live loads keeps its configuration or its package inside this folder. */
