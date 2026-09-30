@@ -7740,3 +7740,47 @@ class ExtendedOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gesture didn't end"): bridge.mapper.invoke("device.parameter.set", args(0.25))
         del parameter_object.begin_gesture
         with self.assertRaisesRegex(ValueError, "gestures are unavailable"): bridge.mapper.invoke("device.parameter.set", args(0.5))
+
+
+class AuditRowFieldTests(unittest.TestCase):
+    """The cheap reads the LOM audit found, as fields of existing rows."""
+
+    def test_devices_racks_clips_and_tracks_carry_what_live_says_about_them(self):
+        song = FakeSong(); track = song.tracks[0]; track.can_be_frozen = True; track.is_grouped = False; track.is_showing_chains = False; track.is_part_of_selection = True
+        track.devices[0].class_display_name = "Utility"
+        rack = FakeRackDevice(); rack.has_macro_mappings = True; rack.macros_mapped = (True, False); rack.is_showing_chains = True; track.devices.append(rack)
+        audio = FakeCapturedAudioClip(); audio.is_recording = False; audio.gain_display_string = "-3.0 dB"; audio.sample_rate = 44100; audio.is_overdubbing = False; audio.has_envelopes = True
+        track.clip_slots = [FakeSlot(), FakeSlot()]; track.clip_slots[0].clip = audio; midi = FakeNoteClip(4.0); midi.gain_display_string = "0.0 dB"; midi.has_envelopes = False; track.clip_slots[1].clip = midi
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        self.assertEqual((row["canBeFrozen"], row["isGrouped"], row["view"]["isShowingChains"], row["view"]["isPartOfSelection"]), (True, False, False, True))
+        self.assertEqual((row["devices"][0]["classDisplayName"], row["devices"][1]["hasMacroMappings"], row["devices"][1]["macrosMapped"], row["devices"][1]["view"]["isShowingChains"]), ("Utility", True, [True, False], True))
+        audio_row, midi_row = row["clips"]
+        self.assertEqual({key: audio_row[key] for key in ("gainDisplay", "sampleRate", "isOverdubbing", "hasEnvelopes")}, {"gainDisplay": "-3.0 dB", "sampleRate": 44100.0, "isOverdubbing": False, "hasEnvelopes": True})
+        self.assertEqual((midi_row["gainDisplay"], midi_row["sampleRate"], midi_row["hasEnvelopes"]), (None, None, False))
+        # Rows stay within what get and discover may return.
+        self.assertLessEqual(len(row), 64); self.assertLessEqual(max(len(audio_row), len(midi_row)), 64)
+        for reference in (audio_row["ref"], row["devices"][1]["ref"], row["ref"]): validate_operation_payload("get", "result", mapper.get(reference))
+
+    def test_selection_and_shown_chains_leave_a_created_tracks_fingerprint_alone(self):
+        song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live")
+        created = mapper.invoke("track.create", {"kind": "midi", "index": 1, "name": "Made", "expectedStructureRevision": mapper._structure_revision()}, "transaction-rows")
+        made = song.tracks[1]; made.is_part_of_selection = False; made.is_showing_chains = False; before = mapper._ownership_fingerprint(created["ref"])
+        made.is_part_of_selection = True; made.is_showing_chains = True
+        self.assertEqual(mapper._ownership_fingerprint(created["ref"]), before)
+
+    def test_the_set_says_where_modulation_mapping_is(self):
+        song = FakeSong(); device = song.tracks[0].devices[0]; parameter = device.parameters[0]
+        song.view = types.SimpleNamespace(selected_track=song.tracks[0], mod_mapping_device=device, mod_mapping_parameter=parameter)
+        mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); set_row = snapshot["set"]
+        self.assertEqual((set_row["modMappingDeviceRef"], set_row["modMappingParameterRef"]), (snapshot["tracks"][0]["devices"][0]["ref"], snapshot["tracks"][0]["devices"][0]["parameters"][0]["ref"]))
+        song.view.mod_mapping_device = None; song.view.mod_mapping_parameter = None
+        self.assertEqual({key: mapper.snapshot()["set"][key] for key in ("modMappingDeviceRef", "modMappingParameterRef")}, {"modMappingDeviceRef": None, "modMappingParameterRef": None})
+        # A Live without those says nothing about them.
+        self.assertNotIn("modMappingDeviceRef", LiveObjectMapper(FakeSong()).snapshot()["set"])
+
+    def test_status_names_lives_version_and_variant(self):
+        application = types.SimpleNamespace(get_version_string=lambda: "12.4.15b5", get_variant=lambda: "Suite", unavailable_features=["push_apps"])
+        live = types.SimpleNamespace(Application=types.SimpleNamespace(get_application=lambda: application))
+        with patch.dict(sys.modules, {"Live": live}):
+            environment = LiveObjectMapper(FakeSong())._environment_probe()
+        self.assertEqual((environment["liveVersion"], environment["liveEdition"], environment["unavailableFeatures"]), ("12.4.15b5", "Suite", ["push_apps"]))

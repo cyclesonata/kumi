@@ -888,15 +888,20 @@ class LiveObjectMapper:
             import Live  # type: ignore
             application = getattr(getattr(Live, "Application", None), "get_application", lambda: None)()
             if application is not None:
-                for attribute, key in (("get_version", "liveVersion"), ("get_edition", "liveEdition")):
-                    reader = getattr(application, attribute, None)
-                    if callable(reader):
+                for attributes, key in ((("get_version_string", "get_version"), "liveVersion"), (("get_variant", "get_edition"), "liveEdition")):
+                    for attribute in attributes:
+                        reader = getattr(application, attribute, None)
+                        if not callable(reader): continue
                         try:
                             value = reader()
                             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-                                probe[key] = str(value)
+                                probe[key] = str(value)[:128]; break
                         except BaseException:
                             pass
+                features = getattr(application, "unavailable_features", None)
+                if features is not None and not isinstance(features, (str, bytes)):
+                    try: probe["unavailableFeatures"] = [str(getattr(item, "name", item))[:128] for item in list(features)[:64]]
+                    except BaseException: pass
         except BaseException:
             pass
         return probe
@@ -1719,6 +1724,7 @@ class LiveObjectMapper:
             "ref": device_ref, "parentRef": track_ref, "chainPosition": index,
             "objectIdentity": self._capture_object_identity(device),
             "className": str(self._read_attr(device, "class_name") or device.__class__.__name__),
+            "classDisplayName": (lambda value: value[:256] if isinstance(value, str) and value else None)(self._read_attr(device, "class_display_name")),
             "name": str(self._read_attr(device, "name") or "Device"),
             "kind": "rack" if self._read_attr(device, "can_have_chains") is True else "device",
             "deviceType": self._device_type(device),
@@ -1754,6 +1760,9 @@ class LiveObjectMapper:
             row["selectedVariationIndex"] = int(self._read_attr(device, "selected_variation_index")) if isinstance(self._read_attr(device, "selected_variation_index"), int) and not isinstance(self._read_attr(device, "selected_variation_index"), bool) else None
             macro_mapped = self._read_attr(device, "macro_mapped")
             row["macroMapped"] = [bool(value) for value in self._items(macro_mapped)] if isinstance(macro_mapped, (list, tuple)) else None
+            has_mappings, macros_mapped = self._read_attr(device, "has_macro_mappings"), self._read_attr(device, "macros_mapped")
+            row["hasMacroMappings"] = has_mappings if isinstance(has_mappings, bool) else None
+            row["macrosMapped"] = [bool(value) for value in self._items(macros_mapped)] if macros_mapped is not None and not isinstance(macros_mapped, (bool, str, bytes)) else None
             rack_view = getattr(device, "view", None)
             selected_chain = self._read_attr(rack_view, "selected_chain") if rack_view is not None else None
             selected_pad = self._read_attr(rack_view, "selected_drum_pad") if rack_view is not None else None
@@ -1764,6 +1773,7 @@ class LiveObjectMapper:
                 "selectedPadIndex": int(self._read_attr(selected_pad, "index")) if selected_pad is not None and isinstance(self._read_attr(selected_pad, "index"), int) and not isinstance(self._read_attr(selected_pad, "index"), bool) else None,
                 "padScrollPosition": int(pad_scroll) if isinstance(pad_scroll, int) and not isinstance(pad_scroll, bool) else None,
                 "showChainDevices": show_devices if isinstance(show_devices, bool) else None,
+                "isShowingChains": self._read_attr(device, "is_showing_chains") if isinstance(self._read_attr(device, "is_showing_chains"), bool) else None,
             }
         if row["canHaveDrumPads"] is True:
             # Live lists a Drum Rack's chains both on the rack and on their pads: build each once.
@@ -2049,7 +2059,29 @@ class LiveObjectMapper:
             loop_row["length"] = float(loop_length)
         if loop_row:
             set_row["loop"] = loop_row
+        view = getattr(self.song, "view", None)
+        if view is not None and (hasattr(view, "mod_mapping_device") or hasattr(view, "mod_mapping_parameter")):
+            set_row.update(self._mod_mapping_refs(view))
         return set_row
+
+    def _mod_mapping_refs(self, view: Any) -> dict[str, str | None]:
+        """The device and parameter Live's modulation mapping is on (Song.View.mod_mapping_device and
+        mod_mapping_parameter) as snapshot refs name them, found on the track Live's canonical_parent
+        chain names (without one, on every track); None when there's none."""
+        device, parameter = self._read_attr(view, "mod_mapping_device"), self._read_attr(view, "mod_mapping_parameter")
+        result: dict[str, str | None] = {"modMappingDeviceRef": None, "modMappingParameterRef": None}
+        if device is None and parameter is None: return result
+        tracks = self._all_track_objects(); track_indices: dict[str, int] = {}
+        for index, track in enumerate(tracks): track_indices.setdefault(self._capture_object_identity(track), index)
+        def on_tracks(value: Any) -> list[int]:
+            owner = self._owner_track_index(value, track_indices)
+            return [owner] if owner is not None else list(range(len(tracks)))
+        if device is not None:
+            identity = self._capture_object_identity(device)
+            result["modMappingDeviceRef"] = next((self.refs.put("device", candidate, path) for index in on_tracks(device) for kind, candidate, path in self._device_paths(tracks[index], str(index)) if kind == "device" and self._capture_object_identity(candidate) == identity), None)
+        if parameter is not None:
+            result["modMappingParameterRef"] = next((reference for index in on_tracks(parameter) for reference in [self._parameter_ref_of(parameter, index, tracks[index])] if reference is not None), None)
+        return result
 
     def _slot_rows(self, track_ref: str, index: int, slot: Any, slot_index: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """A Session slot's row and its clip's row (None when empty), as a track's whole row has them."""
@@ -4774,6 +4806,15 @@ class LiveObjectMapper:
         fields["fireButtonState"] = optional_bool("fire_button_state")
         is_take_lane = self._read_attr(clip, "is_take_lane_clip")
         fields["isTakeLaneClip"] = is_take_lane if isinstance(is_take_lane, bool) else None
+        gain_display = self._read_attr(clip, "gain_display_string")
+        if callable(gain_display):
+            try: gain_display = gain_display()
+            except Exception: gain_display = None
+        audio = self._read_attr(clip, "is_audio_clip") is True
+        fields["gainDisplay"] = gain_display[:64] if audio and isinstance(gain_display, str) and gain_display else None
+        fields["sampleRate"] = optional_float("sample_rate") if audio else None
+        fields["isOverdubbing"] = optional_bool("is_overdubbing")
+        fields["hasEnvelopes"] = optional_bool("has_envelopes")
         if getattr(clip, "view", None) is not None:
             fields["clipView"] = self._clip_view_state(clip)
         groove = self._read_attr(clip, "groove")
@@ -6080,6 +6121,8 @@ class LiveObjectMapper:
             "isFrozen": optional_bool(track, "is_frozen"),
             "foldState": optional_bool(track, "fold_state") if optional_bool(track, "fold_state") is not None else optional_bool(track, "is_folded"),
             "implicitArm": optional_bool(track, "implicit_arm"),
+            "canBeFrozen": optional_bool(track, "can_be_frozen"),
+            "isGrouped": optional_bool(track, "is_grouped"),
             "backToArranger": optional_bool(track, "back_to_arranger"),
             "mutedViaSolo": optional_bool(track, "muted_via_solo"),
             "inputMeterLeft": optional_float(track, "input_meter_left"),
@@ -6093,6 +6136,8 @@ class LiveObjectMapper:
                 "selectedDeviceRef": self.refs.put("device", selected_device, f"view:{track_index}") if selected_device is not None else None,
                 "deviceInsertMode": int(device_insert_mode) if isinstance(device_insert_mode, int) and not isinstance(device_insert_mode, bool) else None,
                 "isCollapsed": optional_bool(view, "is_collapsed") if view is not None else None,
+                "isShowingChains": optional_bool(track, "is_showing_chains"),
+                "isPartOfSelection": optional_bool(track, "is_part_of_selection"),
             },
         }
 
