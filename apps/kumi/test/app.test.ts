@@ -471,6 +471,24 @@ test("a resumed conversation shows its earlier exchanges", async () => {
   await h.app.close();
 });
 
+test("the welcome screen opens with Kumi's wordmark when the window has room for it", async () => {
+  const { LOGO_LETTERS, LOGO_RULE } = await import("../src/tui/logo.js");
+  const tall = harness(120, 36);
+  void tall.app.run();
+  await delay(5);
+  connect(tall);
+  const lines = tall.screen();
+  for (const text of [...LOGO_LETTERS.map((line) => line.trim()), LOGO_RULE]) assert.ok(has(lines, text), text);
+  assert.ok(lines.findIndex((line) => line.includes(LOGO_RULE)) < lines.findIndex((line) => line.includes("Kumi can see Night Drive.")), "above the welcome");
+  await tall.app.close();
+  const short = harness(120, 16);
+  void short.app.run();
+  await delay(5);
+  connect(short);
+  assert.ok(!has(short.screen(), LOGO_RULE) && has(short.screen(), "Kumi can see Night Drive."), "a short window keeps the welcome and drops the wordmark");
+  await short.app.close();
+});
+
 test("the welcome screen catches you up on the Set; later it's a note in the conversation", async () => {
   const h = harness();
   void h.app.run();

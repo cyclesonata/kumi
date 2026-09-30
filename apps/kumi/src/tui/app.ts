@@ -20,6 +20,7 @@ import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, 
 import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
+import { LOGO_HEIGHT, LOGO_LETTERS, LOGO_RULE, LOGO_WIDTH } from "./logo.js";
 import { treeRows, treeWindow, type TreeRow } from "./tree.js";
 import { TabPanel, type Tab, type TabRow } from "./tabs.js";
 import { textWidth, truncate } from "./width.js";
@@ -1440,7 +1441,7 @@ export class TuiApp {
     const textX = area.x + 3;
     const width = Math.max(1, area.width - 5);
     const rows = this.transcript.rows(width);
-    if (!rows.length) { this.drawWelcome(screen, textX, area.y + 2, width); return; }
+    if (!rows.length) { this.drawWelcome(screen, textX, area.y + 2, width, area.height - 2); return; }
     const total = rows.length;
     if (this.scroll > 0 && total > this.lastTotal) this.scroll += total - this.lastTotal;
     this.lastTotal = total;
@@ -1465,7 +1466,7 @@ export class TuiApp {
     }
   }
 
-  private drawWelcome(screen: Screen, x: number, y: number, width: number): void {
+  private drawWelcome(screen: Screen, x: number, y: number, width: number, height: number): void {
     const rows: { text: string; style: Style }[] = [];
     const add = (text = "", style: Style = st.text) => rows.push({ text, style });
     if (this.connection === "connected" && this.setName) {
@@ -1492,6 +1493,10 @@ export class TuiApp {
     }
     add();
     add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
+    // The wordmark goes above, when the window has room for it and everything under it.
+    if (width >= LOGO_WIDTH && height >= rows.length + LOGO_HEIGHT + 1) {
+      rows.unshift(...LOGO_LETTERS.map((text) => ({ text, style: st.bright })), { text: "", style: st.text }, { text: LOGO_RULE, style: st.faint }, { text: "", style: st.text });
+    }
     rows.forEach((row, index) => { if (row.text) screen.put(x, y + index, truncate(row.text, width), row.style); });
   }
 
