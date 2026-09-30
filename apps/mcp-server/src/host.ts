@@ -210,7 +210,7 @@ interface NoteEditTransaction {
 interface ClipLifecycleTransaction {
   id: string;
   epoch: number;
-  kind: "rename" | "duplicate" | "arrangement-create" | "arrangement-delete" | "arrangement-audio-create" | "arrangement-take-lane-create" | "move" | "audio-set" | "mixer-set" | "automation" | "browser-load" | "device" | "routing-set" | "recording" | "backup" | "realtime-arm" | "capture-midi" | "scene-capture" | "view" | "locator-jump" | "clip-set" | "session-audio-create" | "warp-marker" | "clip-action" | "note-target" | "midi-transform" | "tuning" | "groove" | "scene-set" | "scene-fire" | "transport-action" | "track-structure" | "track-set" | "song-set" | "device-delete" | "track-view" | "selection" | "clip-view" | "device-view" | "dialog" | "mixer-extended" | "chain-mixer" | "device-io" | "device-advanced" | "chain-set" | "drum-pad" | "rack" | "rack-view" | "device-specialized" | "looper" | "simpler";
+  kind: "rename" | "duplicate" | "arrangement-create" | "arrangement-delete" | "arrangement-audio-create" | "arrangement-take-lane-create" | "move" | "audio-set" | "mixer-set" | "automation" | "browser-load" | "device" | "routing-set" | "recording" | "backup" | "realtime-arm" | "capture-midi" | "scene-capture" | "view" | "locator-jump" | "clip-set" | "session-audio-create" | "warp-marker" | "clip-action" | "note-target" | "midi-transform" | "tuning" | "groove" | "scene-set" | "scene-fire" | "transport-action" | "track-structure" | "track-set" | "song-set" | "device-delete" | "clip-delete" | "scene-delete" | "track-delete" | "locator-delete" | "track-view" | "selection" | "clip-view" | "device-view" | "dialog" | "mixer-extended" | "chain-mixer" | "device-io" | "device-advanced" | "chain-set" | "drum-pad" | "rack" | "rack-view" | "device-specialized" | "looper" | "simpler";
   fence: string;
   clipRef?: LiveRef;
   payload: Record<string, unknown>;
@@ -275,8 +275,12 @@ const MAX_SET_INDEX = 100_000;
 const MAX_PARAMETER_VALUES = 10_000;
 /** Notifications queued for a slow client before the rest are counted as dropped. */
 const MAX_QUEUED_EVENTS = 65_536;
+/** What deleting an existing object leaves: the deletion is kept, as device deletion is. */
+const KEPT_DELETION = "Kumi can't bring this back; Live's undo can.";
+type DeletionKind = "clip" | "scene" | "track" | "locator";
+const DELETION_KINDS: ReadonlySet<string> = new Set(["device-delete", "clip-delete", "scene-delete", "track-delete", "locator-delete"]);
 /** Tools only the asynchronous request path runs (the synchronous one refuses them): the newer ones. */
-const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo"]);
+const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo", "live_clip_delete_preview", "live_clip_delete_apply", "live_scene_delete_preview", "live_scene_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_locator_delete_preview", "live_locator_delete_apply"]);
 /** live_change's fused changes, by idempotency key, so a retried call reconciles its change instead of making another. */
 const MAX_FUSED_CHANGES = 4096;
 /**
@@ -705,6 +709,10 @@ export class McpHost {
       live_device_view_preview: payload("device.view.set", "device-view"),
       live_rack_view_preview: payload("rack.view.set", "rack-view"),
       live_device_delete_preview: payload("device.delete", "device-delete"),
+      ...Object.fromEntries(["clip", "scene", "track", "locator"].map((kind) => [`live_${kind}_delete_preview`, (record: Record<string, unknown>) => {
+        if (record.kind !== `${kind}-delete` || !isObject(record.payload) || typeof record.payload.operation !== "string") return undefined;
+        const { operation, ...args } = record.payload; return { operation: operation as LiveInvocation["operation"], args };
+      }])),
       live_simpler_preview: payload("simpler.replace-sample", "simpler"),
       live_browser_load_preview: payload("browser.load", "browser-load"),
       live_object_rename_preview: (record) => record.kind === "rename" && isObject(record.payload) && typeof record.clipRef === "string"
@@ -894,6 +902,8 @@ export class McpHost {
       if (name === "live_undo_step_end") return await this.liveUndoStepEndAsync(id, toolArguments);
       if (name === "live_song_undo") return await this.liveSongHistoryAsync(id, toolArguments, false, signal);
       if (name === "live_song_redo") return await this.liveSongHistoryAsync(id, toolArguments, true, signal);
+      const deletion = /^live_(clip|scene|track|locator)_delete_(preview|apply)$/.exec(name);
+      if (deletion) return deletion[2] === "preview" ? await this.liveDeletionPreviewAsync(id, toolArguments, deletion[1] as DeletionKind) : await this.liveDeletionApplyAsync(id, toolArguments, deletion[1] as DeletionKind, signal);
       if (name === "live_status") return await this.liveStatusAsync(id);
       if (name === "audio_analyze") return await this.audioAnalyzeAsync(id, toolArguments, signal);
       if (name === "audio_compare_reference") return await this.audioCompareReferenceAsync(id, toolArguments, signal);
@@ -2516,7 +2526,7 @@ export class McpHost {
 
   /** Map a transaction to the tool that owns its apply path for policy re-checks at undo/emergency dispatch. */
   private transactionOwnerTool(transactionId: string, kind?: string): string | undefined {
-    const byPrefix: Record<string, string> = { tempo_: "live_tempo_apply", arrangement_: "live_arrangement_section_apply", structure_: "live_session_structure_apply", parameter_: "live_device_parameter_apply", audition_: "live_session_audition_apply", transport_: "live_transport_apply", transportaction_: "live_transport_action_apply", cliplaunch_: "live_clip_launch_apply", noteupdate_: "live_note_update_apply", notedelete_: "live_note_delete_apply", midi_: "live_midi_clip_apply", miditransform_: "live_midi_transform_apply", capture_: "live_audio_capture_apply", audio_capture_: "live_audio_capture_apply", capturemidi_: "live_capture_midi_apply", scenecapture_: "live_scene_capture_apply", clipdup_: "live_clip_duplicate_apply", arrclip_: "live_arrangement_clip_apply", clipmove_: "live_clip_move_apply", audioimport_: "live_audio_import_apply", audioclip_: "live_audio_clip_apply", warp_: "live_warp_marker_apply", noteedit_: "live_note_edit_apply", rename_: "live_object_rename_apply", routing_: "live_routing_apply", backup_: "live_project_backup_apply", recording_: "live_recording_apply", realtime_: "live_realtime_arm_apply", browserload_: "live_browser_load_apply", device_: "live_device_apply", mixer_: "live_mixer_apply", mixerext_: "live_mixer_extended_apply", view_: "live_view_apply", locjump_: "live_locator_jump_apply", clipset_: "live_clip_properties_apply", clipaction_: "live_clip_action_apply", tuning_: "live_tuning_apply", groove_: "live_groove_apply", sceneset_: "live_scene_apply", trackset_: "live_track_properties_apply", songset_: "live_song_settings_apply", scenefire_: "live_scene_fire_apply", trackstruct_: "live_track_structure_apply", devdel_: "live_device_delete_apply", trackview_: "live_track_view_apply", selection_: "live_selection_apply", clipview_: "live_clip_view_apply", devview_: "live_device_view_apply", dialog_: "live_application_dialog_apply", chainmix_: "live_chain_mixer_apply", devio_: "live_device_io_apply", devadv_: "live_device_advanced_apply", chainset_: "live_chain_apply", drumpad_: "live_drum_pad_apply", rack_: "live_rack_apply", rackview_: "live_rack_view_apply", devspec_: "live_device_specialized_apply", looper_: "live_looper_apply", simpler_: "live_simpler_apply", automation_: "live_automation_apply", batch_: "live_batch_apply", devstate_: "live_device_state_recall_apply" };
+    const byPrefix: Record<string, string> = { tempo_: "live_tempo_apply", arrangement_: "live_arrangement_section_apply", structure_: "live_session_structure_apply", parameter_: "live_device_parameter_apply", audition_: "live_session_audition_apply", transport_: "live_transport_apply", transportaction_: "live_transport_action_apply", cliplaunch_: "live_clip_launch_apply", noteupdate_: "live_note_update_apply", notedelete_: "live_note_delete_apply", midi_: "live_midi_clip_apply", miditransform_: "live_midi_transform_apply", capture_: "live_audio_capture_apply", audio_capture_: "live_audio_capture_apply", capturemidi_: "live_capture_midi_apply", scenecapture_: "live_scene_capture_apply", clipdup_: "live_clip_duplicate_apply", arrclip_: "live_arrangement_clip_apply", clipmove_: "live_clip_move_apply", audioimport_: "live_audio_import_apply", audioclip_: "live_audio_clip_apply", warp_: "live_warp_marker_apply", noteedit_: "live_note_edit_apply", rename_: "live_object_rename_apply", routing_: "live_routing_apply", backup_: "live_project_backup_apply", recording_: "live_recording_apply", realtime_: "live_realtime_arm_apply", browserload_: "live_browser_load_apply", device_: "live_device_apply", mixer_: "live_mixer_apply", mixerext_: "live_mixer_extended_apply", view_: "live_view_apply", locjump_: "live_locator_jump_apply", clipset_: "live_clip_properties_apply", clipaction_: "live_clip_action_apply", tuning_: "live_tuning_apply", groove_: "live_groove_apply", sceneset_: "live_scene_apply", trackset_: "live_track_properties_apply", songset_: "live_song_settings_apply", scenefire_: "live_scene_fire_apply", trackstruct_: "live_track_structure_apply", devdel_: "live_device_delete_apply", clipdel_: "live_clip_delete_apply", scenedel_: "live_scene_delete_apply", trackdel_: "live_track_delete_apply", locatordel_: "live_locator_delete_apply", trackview_: "live_track_view_apply", selection_: "live_selection_apply", clipview_: "live_clip_view_apply", devview_: "live_device_view_apply", dialog_: "live_application_dialog_apply", chainmix_: "live_chain_mixer_apply", devio_: "live_device_io_apply", devadv_: "live_device_advanced_apply", chainset_: "live_chain_apply", drumpad_: "live_drum_pad_apply", rack_: "live_rack_apply", rackview_: "live_rack_view_apply", devspec_: "live_device_specialized_apply", looper_: "live_looper_apply", simpler_: "live_simpler_apply", automation_: "live_automation_apply", batch_: "live_batch_apply", devstate_: "live_device_state_recall_apply" };
     const prefixes = Object.keys(byPrefix).sort((a, b) => b.length - a.length);
     for (const prefix of prefixes) if (transactionId.startsWith(prefix)) return byPrefix[prefix];
     const byKind: Record<string, string> = { "audio-set": "live_audio_clip_apply", "mixer-set": "live_mixer_apply", automation: "live_automation_apply", "browser-load": "live_browser_load_apply", device: "live_device_apply", "routing-set": "live_routing_apply", recording: "live_recording_apply", backup: "live_project_backup_apply", "realtime-arm": "live_realtime_arm_apply", view: "live_view_apply", "locator-jump": "live_locator_jump_apply", "clip-set": "live_clip_properties_apply", "clip-action": "live_clip_action_apply", tuning: "live_tuning_apply", groove: "live_groove_apply", "scene-set": "live_scene_apply", "track-set": "live_track_properties_apply", "song-set": "live_song_settings_apply", "scene-fire": "live_scene_fire_apply", "transport-action": "live_transport_action_apply", "track-structure": "live_track_structure_apply", "device-delete": "live_device_delete_apply", "track-view": "live_track_view_apply", selection: "live_selection_apply", "clip-view": "live_clip_view_apply", "device-view": "live_device_view_apply", dialog: "live_application_dialog_apply", "mixer-extended": "live_mixer_extended_apply", "chain-mixer": "live_chain_mixer_apply", "device-io": "live_device_io_apply", "device-advanced": "live_device_advanced_apply", "chain-set": "live_chain_apply", "drum-pad": "live_drum_pad_apply", rack: "live_rack_apply", "rack-view": "live_rack_view_apply", "device-specialized": "live_device_specialized_apply", looper: "live_looper_apply", simpler: "live_simpler_apply", rename: "live_object_rename_apply", "warp-marker": "live_warp_marker_apply", "note-target": "live_note_edit_apply", duplicate: "live_clip_duplicate_apply", move: "live_clip_move_apply", "session-audio-create": "live_audio_import_apply", "capture-midi": "live_capture_midi_apply", "scene-capture": "live_scene_capture_apply", "arrangement-create": "live_arrangement_clip_apply", "arrangement-audio-create": "live_arrangement_clip_apply", "arrangement-take-lane-create": "live_arrangement_clip_apply" };
@@ -5482,8 +5492,90 @@ export class McpHost {
       try { this.deviceRow(after, transaction.payload.ref as LiveRef); throw new Error("deleted device remains discoverable after apply"); } catch (cause) { if (cause instanceof Error && cause.message === "deleted device remains discoverable after apply") throw cause; }
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", idempotent: false });
+      return this.successText(id, { transactionId: transaction.id, state: "applied", kept: KEPT_DELETION, idempotent: false });
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Device state is uncertain; perform fresh discovery before retrying."); }
+  }
+
+  /**
+   * Deleting one clip, scene, track or locator the producer asked to remove: the deletion, its explicit
+   * deletion arguments (each object's own identity fences, never a creating transaction's ownership), and
+   * what to tell the producer about it. Read from the view the kind needs.
+   */
+  private async deletionPlanAsync(kind: DeletionKind, reference: LiveRef, context: LiveOperationContext | undefined): Promise<{ operation: LiveInvocation["operation"]; payload: JsonObject; target: JsonObject; trackRef?: LiveRef }> {
+    if (kind === "clip") {
+      const snapshot = await this.viewForAsync(context, [reference]); const located = this.clipRow(snapshot, reference);
+      if (located.takeLane) throw new Error("a take lane's clip isn't deleted here: edit the take lane in Live");
+      const trackRef = located.track?.ref as LiveRef | undefined;
+      const target = { ref: reference, name: located.clip.name ?? null, arrangement: located.arrangement, trackRef: trackRef ?? null, trackName: located.track?.name ?? null, ...(located.arrangement ? { start: located.clip.start ?? null, length: located.clip.length ?? null } : {}) };
+      return { operation: located.arrangement ? "arrangement.clip.delete" : "clip.delete", payload: { ref: reference, ...this.clipAuthority(snapshot, reference), explicitDeletion: true }, target, ...(trackRef ? { trackRef } : {}) };
+    }
+    if (kind === "locator") {
+      const snapshot = await this.viewAsync(context, [], ["arrangement"]); const locator = snapshot.arrangement.locators.find((candidate) => candidate.ref === reference);
+      if (!locator) throw new Error("locator reference is not authoritative");
+      return { operation: "locator.delete", payload: { ...this.locatorDeleteArgs(snapshot, reference), explicitDeletion: true }, target: { ref: reference, name: locator.name, position: locator.position } };
+    }
+    const snapshot = await this.structureViewAsync(context);
+    if (kind === "scene") {
+      const scene = snapshot.scenes.find((candidate) => candidate.ref === reference);
+      if (!scene || !isNonEmptyString(scene.objectIdentity, 256)) throw new Error("scene reference is not authoritative");
+      if (snapshot.scenes.length < 2) throw new Error("a Set keeps at least one scene");
+      return { operation: "scene.delete", payload: { ref: reference, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: scene.objectIdentity, explicitDeletion: true }, target: { ref: reference, name: scene.name, index: scene.index } };
+    }
+    const track = snapshot.tracks.find((candidate) => candidate.ref === reference);
+    if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
+    if (track.kind === "return") throw new Error("a return track is deleted with live_track_structure (action delete-return)");
+    if (track.kind === "main") throw new Error("the Main track can't be deleted");
+    // Deleting a group deletes the tracks in it too: say which.
+    const grouped = snapshot.tracks.filter((candidate) => (candidate as unknown as { groupTrackRef?: unknown }).groupTrackRef === reference).map((candidate) => candidate.name);
+    return { operation: "track.delete", payload: { ref: reference, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: track.objectIdentity, explicitDeletion: true }, target: { ref: reference, name: track.name, kind: track.kind, ...(grouped.length ? { alsoDeletes: grouped } : {}) } };
+  }
+
+  /** Previews deleting one existing clip, scene, track or locator; the deletion is kept: Kumi can't bring it back, Live's undo can. */
+  private async liveDeletionPreviewAsync(id: RequestId, params: unknown, kind: DeletionKind): Promise<JsonObject> {
+    const field = `${kind}Ref`;
+    if (!isObject(params) || !hasOnly(params, [field]) || !isNonEmptyString(params[field], 256)) return error(id, -32602, `${field} is required`);
+    const reference = params[field] as LiveRef;
+    try {
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+      if (!status.connected) throw new Error("Live is not connected");
+      const plan = await this.deletionPlanAsync(kind, reference, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+      if (!(status.operations ?? []).includes(plan.operation)) throw new Error(`${plan.operation} is unavailable on this Live shape`);
+      const transaction: ClipLifecycleTransaction = { id: `${kind}del_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: `${kind}-delete` as ClipLifecycleTransaction["kind"], fence: canonicalMutationIdentity(plan.payload), clipRef: reference, payload: { ...plan.payload, operation: plan.operation }, prior: plan.target, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, `${kind} delete`);
+      return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, [kind]: plan.target, impact: `deletes-${kind}-no-undo`, kept: KEPT_DELETION, confirmation: "apply", expiresAt: transaction.expiresAt });
+    } catch (cause) { return this.adapterToolError(id, cause, `The ${kind} wasn't deleted; discover it again and preview the deletion from fresh references.`); }
+  }
+
+  private async liveDeletionApplyAsync(id: RequestId, params: unknown, kind: DeletionKind, signal?: AbortSignal): Promise<JsonObject | null> {
+    if (!this.validTransactionParams(params, "apply")) return error(id, -32602, "transactionId, confirmation=apply, and idempotencyKey are required");
+    const transaction = this.clipLifecycleTransactions.get(params.transactionId as string);
+    if (!transaction || transaction.kind !== `${kind}-delete` || !transaction.clipRef || (transaction.state === "previewed" && transaction.expiresAt <= Date.now())) return this.transactionError(id, `Unknown or expired ${kind}-delete transaction`);
+    if (transaction.state === "applied" && transaction.applyKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "applied", deleted: transaction.clipRef, kept: KEPT_DELETION, idempotent: true });
+    const reconciliation = transaction.state === "uncertain" && transaction.applyKey === params.idempotencyKey;
+    if (transaction.state !== "previewed" && !reconciliation) return this.transactionError(id, "Transaction is no longer applicable");
+    if (signal?.aborted) return null;
+    const { operation, ...payload } = transaction.payload;
+    try {
+      if (reconciliation) await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+      const status = this.requireConnected();
+      if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
+      const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
+      if (!reconciliation) {
+        let current: JsonObject | undefined;
+        try { current = (await this.deletionPlanAsync(kind, transaction.clipRef, context)).payload; } catch { current = undefined; }
+        if (!current || canonicalMutationIdentity(current) !== transaction.fence) return this.transactionError(id, `the ${kind} or what surrounds it changed since the preview; preview again`);
+      }
+      transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
+      const result = await this.asyncAdapter().invokeAsync({ operation: operation as LiveInvocation["operation"], args: payload }, context) as { deleted?: unknown };
+      if (result.deleted !== transaction.clipRef) throw new Error(`Live didn't confirm deleting the ${kind}`);
+      // Positional references move up after a deletion, so the same reference may now name the next
+      // object: its identity says whether the deleted one is still there.
+      let after: JsonObject | undefined;
+      try { after = (await this.deletionPlanAsync(kind, transaction.clipRef, context)).payload; } catch { after = undefined; }
+      if (after && after.expectedObjectIdentity === payload.expectedObjectIdentity) throw new Error(`the deleted ${kind} is still there`);
+      transaction.state = "applied";
+      return this.successText(id, { transactionId: transaction.id, state: "applied", deleted: transaction.clipRef, kept: KEPT_DELETION, idempotent: false });
+    } catch (cause) { if (transaction.state === "applying" || reconciliation) transaction.state = "uncertain"; return this.adapterToolError(id, cause, `Whether the ${kind} is gone is uncertain; discover it again before retrying with the same key.`); }
   }
 
   /** What track.view.set and track.select-instrument are fenced on, from the track row's view (the Remote Script's _track_view_state_revision). */
@@ -9031,7 +9123,12 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
         return this.successText(id, { transactionId: parameter.id, state: "undone", value: restored.value, revision: this.parameterRevision(restored), idempotent: false });
       } catch (cause) { if (parameter.state === "undoing" || parameter.state === "uncertain") parameter.state = "uncertain"; return this.adapterToolError(id, cause, "Device-parameter undo is uncertain; inspect authoritative parameter state."); }
     }
-    if (!transaction) return this.transactionError(id, "Unknown or expired transaction");
+    if (!transaction) {
+      // A deletion is kept: nothing of the deleted object is left for Kumi to restore it from.
+      const deletion = this.clipLifecycleTransactions.get(params.transactionId as string);
+      if (deletion && DELETION_KINDS.has(deletion.kind)) return this.reasonError(id, KEPT_DELETION, "If the producer wants it back, Live's own undo can bring it (Cmd-Z in Live, or live_song_undo when they ask for that).");
+      return this.transactionError(id, "Unknown or expired transaction");
+    }
     if (transaction.state === "undone" && transaction.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "undone", tempo: transaction.priorTempo, idempotent: true });
     const reconciliation = transaction.state === "uncertain" && transaction.undoKey === params.idempotencyKey;
     if (transaction.state !== "applied" && !reconciliation) return this.transactionError(id, "Only an applied or exact-key uncertain tempo transaction can be undone");
