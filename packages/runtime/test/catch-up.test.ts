@@ -46,6 +46,11 @@ test("what changed while Kumi watched reads exactly, in the order a recipe would
   assert.equal(changes[4]!.on, "Bass");
   assert(!JSON.stringify(changes).match(/Hash|Fingerprint|parentSnapshotId|order/), "no bookkeeping");
   assert.deepEqual(describeWatch(fixture.ambiguous.diff, fixture.ambiguous.before, fixture.ambiguous.after).changes, [{ unclear: "track", before: ["Vox"], after: ["Lead Vox", "Bells"] }]);
+  // Many lookalikes (a big Set's copies of one track) are each name once, with how many.
+  const many = Array.from({ length: 200 }, (_, index) => `t${index}`);
+  const rows = (ids: string[]) => ids.map((id) => ({ snapshotId: id, kind: "track", name: "Template", data: {} }));
+  const crowd = describeWatch({ items: [{ kind: "track", type: "ambiguity", beforeSnapshotIds: many, afterSnapshotIds: many.slice(1) }] }, [{ records: rows(many) }], [{ records: rows(many.slice(1)) }]).changes;
+  assert.deepEqual(crowd, [{ unclear: "track", before: ["Template ×200"], after: ["Template ×199"] }]);
 });
 
 test("look-alike tracks the bridge can't tell apart still read as a rename and an addition", () => {
