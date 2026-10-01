@@ -281,7 +281,7 @@ const MAX_PARAMETER_VALUES = 10_000;
 const MAX_QUEUED_EVENTS = 65_536;
 /** What deleting an existing object leaves: the deletion is kept, as device deletion is. */
 const KEPT_DELETION = "Kumi can't bring this back; Live's undo can.";
-/** How many notes one page of a clip's notes asks for. */
+/** How many notes one page of a clip's notes holds at most, whoever asks: sending ten thousand held Live's thread for 300 ms. */
 const NOTE_PAGE = 2_000;
 /** What each live_device_edit action takes, besides deviceRef. */
 const DEVICE_EDIT_TAKES: Readonly<Record<string, readonly string[]>> = { set: ["setting", "value"], modulate: ["source", "value", "targetIndex", "parameterRef"], "slice-insert": ["time"], "slice-move": ["time", "toTime"], "slice-remove": ["time"], "slice-clear": [], "slice-reset": [], "warp-as": ["beats"], "warp-double": [], "warp-half": [], resend: [] };
@@ -1808,7 +1808,7 @@ export class McpHost {
   private async liveDiscoverAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const kinds = ["set", "track", "return-track", "main-track", "scene", "clip-slot", "session-clip", "arrangement-clip", "note", "locator", "device", "parameter", "selection", "routing-choice", "session-playback"] as const;
     if (!isObject(params) || !hasOnly(params, ["kind", "parent", "filter", "fields", "budget", "limit", "cursor"]) || !kinds.includes(params.kind as typeof kinds[number]) || (["clip-slot", "session-clip", "arrangement-clip", "note", "parameter", "routing-choice"].includes(String(params.kind)) && !isNonEmptyString(params.parent, 256)) || (params.parent !== undefined && !isNonEmptyString(params.parent, 256)) || (params.filter !== undefined && !isDiscoveryFilter(params.filter)) || (params.fields !== undefined && (!Array.isArray(params.fields) || params.fields.length > 256 || params.fields.some((field) => !isNonEmptyString(field, 64)))) || (params.budget !== undefined && !isIntegerInRange(params.budget, 1, 10_000_000)) || (params.limit !== undefined && !isIntegerInRange(params.limit, 1, 100_000)) || (params.cursor !== undefined && !isNonEmptyString(params.cursor, 1024))) return error(id, -32602, "kind, parent, filter, fields, budget, limit, and cursor are invalid");
-    return this.successText(id, await this.asyncAdapter().discoverAsync({ kind: params.kind as import("./live.js").LiveDiscoveryKind, parent: params.parent as string | undefined, filter: params.filter as Record<string, unknown> | undefined, fields: params.fields as string[] | undefined, budget: (params.budget as number | undefined) ?? 1000, limit: (params.limit as number | undefined) ?? 50, cursor: params.cursor as string | undefined }));
+    return this.successText(id, await this.asyncAdapter().discoverAsync({ kind: params.kind as import("./live.js").LiveDiscoveryKind, parent: params.parent as string | undefined, filter: params.filter as Record<string, unknown> | undefined, fields: params.fields as string[] | undefined, budget: (params.budget as number | undefined) ?? 1000, limit: params.kind === "note" ? Math.min((params.limit as number | undefined) ?? 50, NOTE_PAGE) : (params.limit as number | undefined) ?? 50, cursor: params.cursor as string | undefined }));
   }
 
   private auditionAuthorityRevision(snapshot: LiveSnapshot, sceneRef: LiveRef, eligibleTargetKeys: string[]): string {

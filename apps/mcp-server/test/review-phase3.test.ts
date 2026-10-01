@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { McpHost, PROTOCOL_VERSION } from "../src/host.js";
-import { DeterministicLiveSimulator, LiveMutationNotDispatchedError, type AsyncLiveAdapter, type LiveDiscoveryRequest, type LiveInvocation, type LiveOperationContext, type LiveSnapshotRequest } from "../src/live.js";
+import { DeterministicLiveSimulator, LiveMutationNotDispatchedError, LiveViews, type AsyncLiveAdapter, type LiveDiscoveryRequest, type LiveInvocation, type LiveOperationContext, type LiveSnapshotRequest } from "../src/live.js";
 
 // Review of the merged phase 3: undo's checks, fences and pages, on rows as the Remote Script has them.
 
@@ -130,4 +130,32 @@ test("a retry's refusal doesn't prove its first attempt never ran: the change st
   const again = await undo(made.previewed.transactionId, "undo-key");
   assert.equal(again.isError, true); assert.doesNotMatch(again.reason, /before anything changed/);
   assert.match((await undo(made.previewed.transactionId)).reason, /exact-key uncertain/);
+});
+
+test("a clip's notes read a page at a time are refused when the notes already read moved: no note skipped or repeated", async () => {
+  const simulator = new DeterministicLiveSimulator(); simulator.discoveryBudgetItems = 2;
+  const clip = state(simulator).tracks[0]!.clips[0]; const note = clip.notes[0];
+  clip.notes = [1, 2, 3, 4, 5].map((id) => ({ ...note, id, pitch: 35 + id, start: id - 1 }));
+  let pages = 0;
+  const adapter = Object.assign(Object.create(simulator), { discoverAsync: async (request: LiveDiscoveryRequest) => {
+    const page = await simulator.discoverAsync(request);
+    // After the first page, the first note goes and one comes at the end: as many notes, each a place up.
+    if (request.kind === "note" && ++pages === 1) { clip.notes.shift(); clip.notes.push({ ...note, id: 6, pitch: 41, start: 5 }); }
+    return page;
+  } }) as AsyncLiveAdapter;
+  const views = new LiveViews(() => adapter);
+  await assert.rejects(views.discoverAll({ kind: "note", parent: "clip:clip-1", limit: 2000 }, { deadlineMs: Date.now() + 5_000 }), /stale discovery cursor/);
+  // Read again, they come whole.
+  assert.deepEqual((await views.discoverAll({ kind: "note", parent: "clip:clip-1", limit: 2000 }, { deadlineMs: Date.now() + 5_000 })).map((row) => row.id), [2, 3, 4, 5, 6]);
+});
+
+test("a page of a clip's notes holds at most 2,000, whatever limit the model asks for", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const clip = state(simulator).tracks[0]!.clips[0]; const note = clip.notes[0];
+  clip.notes = Array.from({ length: 2_500 }, (_, index) => ({ ...note, id: index + 1, start: index / 4 }));
+  const { call } = hosted(simulator);
+  const page = await call("live_discover", { kind: "note", parent: "clip:clip-1", limit: 100_000 });
+  assert.equal(page.items.length, 2_000); assert.equal(typeof page.nextCursor, "string");
+  const rest = await call("live_discover", { kind: "note", parent: "clip:clip-1", limit: 100_000, cursor: page.nextCursor });
+  assert.equal(rest.items.length, 500); assert.equal(rest.nextCursor, undefined);
 });

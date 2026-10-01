@@ -1526,7 +1526,9 @@ class LiveObjectMapper:
         tag = hmac.new(self.refs._cursor_key, payload, hashlib.sha256).hexdigest()[:24]
         return base64.urlsafe_b64encode(payload + b":" + tag.encode("ascii")).decode("ascii").rstrip("=")
 
-    def _cursor_offset(self, cursor: str, revision: str) -> int:
+    def _cursor_offset(self, cursor: str, revision: "str | Callable[[int], str]") -> int:
+        """The offset a cursor holds, once its tag, epoch and revision check out. A revision given as
+        a function of the offset binds the cursor to what lies before it too (a note page's notes)."""
         try:
             raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
             encoded = raw.decode("ascii")
@@ -1534,13 +1536,14 @@ class LiveObjectMapper:
             epoch, actual_revision, offset_text = payload_text.split("|", 2)
             payload = payload_text.encode("ascii")
             expected = hmac.new(self.refs._cursor_key, payload, hashlib.sha256).hexdigest()[:24]
-            if not hmac.compare_digest(tag, expected) or int(epoch) != self.refs.epoch or actual_revision != revision:
+            if not hmac.compare_digest(tag, expected) or int(epoch) != self.refs.epoch:
                 raise ValueError("stale discovery cursor")
             offset = int(offset_text)
+            if not 0 <= offset <= MAX_TRAVERSAL: raise ValueError("invalid discovery cursor")
+            if actual_revision != (revision(offset) if callable(revision) else revision):
+                raise ValueError("stale discovery cursor")
         except (ValueError, TypeError, UnicodeError, OSError) as error:
             raise ValueError("invalid discovery cursor") from error
-        if not 0 <= offset <= MAX_TRAVERSAL:
-            raise ValueError("invalid discovery cursor")
         return offset
 
     def _audio_fields(self, clip: Any) -> dict[str, Any]:
@@ -2880,7 +2883,9 @@ class LiveObjectMapper:
     def _indexed_page(self, kind: str, parent: str, owner: Any, limit: int, cursor: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
         """A clip's notes or a device's parameters, a page at a time by their index: a page reads the
         items it lists (and how many there are), not the rest. The cursor, and the list's revision,
-        are bound to the owner's identity and its item count."""
+        are bound to the owner's identity and its item count; a note page's cursor to the notes
+        listed before it too, by identity and order: a note gone or added there would make the next
+        page skip or repeat one."""
         if kind == "note":
             vector = self._note_vector(owner)
             convert = lambda item, index: self._note_rows_from([item])[0] | {"ref": f"{parent}:note:{index}", "parentRef": parent}
@@ -2889,14 +2894,30 @@ class LiveObjectMapper:
             convert = lambda item, index: self._parameter_row(item, index, parent)
         total = len(vector)
         revision = f"{self.refs.epoch}:{kind}:{hashlib.sha256(f'{parent}|{self._capture_object_identity(owner)}|{total}'.encode('utf-8')).hexdigest()[:16]}:{total}"
-        index = self._cursor_offset(cursor, revision) if cursor is not None else 0
+        bound: Callable[[int], str] = (lambda offset: f"{revision}/{self._note_prefix(vector, min(offset, total))}") if kind == "note" else (lambda offset: revision)
+        index = self._cursor_offset(cursor, bound) if cursor is not None else 0
         if not 0 <= index <= total: raise ValueError("invalid discovery cursor")
+        # The budget is the page's items': building the owner's list (a clip's whole note vector, each page) isn't one.
+        if deadline is not None: deadline = _ReadBudget(self.read_budget_seconds)
         end = min(total, traversal_budget); page: list[dict[str, Any]] = []
         while index < end and len(page) < limit:
             if deadline is not None and not deadline.room(): break
             row = convert(vector[index], index); index += 1
             if row is not None and (not filters or all(row.get(key) == value for key, value in filters.items())): page.append(row)
-        return self._page_result(kind, page, revision, self._cursor(index, revision) if index < end else None, requested_fields)
+        return self._page_result(kind, page, revision, self._cursor(index, bound(index)) if index < end else None, requested_fields)
+
+    @staticmethod
+    def _note_prefix(vector: Any, count: int) -> str:
+        """The first `count` notes of a note vector by identity, in order (their ids; a note without one
+        by its pitch and place), as a digest."""
+        keys: list[Any] = []
+        for index in range(count):
+            note = vector[index]
+            note_id = note.get("note_id", note.get("id")) if isinstance(note, dict) else getattr(note, "note_id", None)
+            if isinstance(note_id, int) and not isinstance(note_id, bool): keys.append(note_id); continue
+            fields = (note.get("pitch"), note.get("start", note.get("start_time")), note.get("duration")) if isinstance(note, dict) else (getattr(note, "pitch", None), getattr(note, "start_time", None), getattr(note, "duration", None))
+            keys.append([value if isinstance(value, (int, float)) and not isinstance(value, bool) else None for value in fields])
+        return hashlib.sha256(json.dumps(keys, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
     def _note_vector(self, clip: Any) -> Any:
         """A clip's notes as Live hands them over (its note vector, indexed without reading each

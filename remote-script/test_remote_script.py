@@ -8068,6 +8068,30 @@ class TargetedDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(mapper.discover("note", 100, None, song_level)["items"]), 50)
         self.assertEqual(mapper.discover("note", 100, None, f"{mapper.refs.epoch}:arrangement_clip:1:7")["items"], [])
 
+    def test_a_clips_note_pages_end_when_the_notes_listed_before_them_moved(self):
+        """A note page's cursor holds the notes listed so far: a note gone or added among them ends the
+        list (the next page would skip or repeat one); a change past them doesn't."""
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song)
+        clip_ref = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]["ref"]
+        first = mapper.discover("note", 20, None, clip_ref, budgeted=True)
+        self.assertEqual([note["id"] for note in first["items"]], list(range(1, 21)))
+        long_clip.stored[50].pitch = 99
+        second = mapper.discover("note", 20, first["nextCursor"], clip_ref, budgeted=True)
+        self.assertEqual([note["id"] for note in second["items"]], list(range(21, 41)))
+        self.assertEqual(second["revision"], first["revision"])
+        # The first note gone and one added at the end: as many notes, each moved up a place.
+        del long_clip.stored[1]; long_clip.stored[51] = FakeMidiNote(51, 40, 15.0, 0.25)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("note", 20, first["nextCursor"], clip_ref, budgeted=True)
+
+    def test_a_note_page_spends_its_budget_on_notes_not_on_building_the_clips_note_vector(self):
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); mapper.read_budget_seconds = 0.01
+        clip_ref = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]["ref"]
+        build = long_clip.get_all_notes_extended
+        def slow_build():
+            time.sleep(0.02); return build()
+        long_clip.get_all_notes_extended = slow_build
+        self.assertEqual(len(mapper.discover("note", 100, None, clip_ref, budgeted=True)["items"]), 50)
+
     def test_a_tracks_arrangement_clips_page_on_while_the_set_plays(self):
         """A list of clips binds its cursors to what it lists, not to where playback is: page 2
         follows page 1 while the clips play; a clip that changed ends them."""

@@ -2485,17 +2485,19 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   discoveryBudgetItems: number | undefined;
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
     const rows = this.discoveryRows(request);
-    // Pages as the Remote Script's: a cursor names where to go on in this list as it is, and nowhere else.
+    // Pages as the Remote Script's: a cursor names where to go on in this list as it is, and nowhere else;
+    // a note page's, the notes listed before it too (by id, in order).
     const revision = `${this.epoch}:${request.kind}:${request.parent ?? ""}:${rows.length}`;
+    const listed = (count: number): string => request.kind === "note" ? simulatorRevision(rows.slice(0, count).map((row) => row.id ?? [row.pitch, row.start, row.duration])) : "";
     let offset = 0;
     if (request.cursor !== undefined) {
-      let position: { revision?: unknown; offset?: unknown };
+      let position: { revision?: unknown; offset?: unknown; listed?: unknown };
       try { position = JSON.parse(Buffer.from(request.cursor, "base64url").toString("utf8")) as typeof position; } catch { throw new Error("invalid discovery cursor"); }
-      if (position.revision !== revision || !Number.isInteger(position.offset) || (position.offset as number) < 0 || (position.offset as number) > rows.length) throw new Error("stale discovery cursor");
+      if (position.revision !== revision || !Number.isInteger(position.offset) || (position.offset as number) < 0 || (position.offset as number) > rows.length || (position.listed ?? "") !== listed(position.offset as number)) throw new Error("stale discovery cursor");
       offset = position.offset as number;
     }
     const page = rows.slice(offset, offset + Math.max(1, Math.min(request.limit ?? 50, this.discoveryBudgetItems ?? Number.POSITIVE_INFINITY)));
-    const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length })).toString("base64url") : undefined;
+    const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length, ...(request.kind === "note" ? { listed: listed(offset + page.length) } : {}) })).toString("base64url") : undefined;
     return { epoch: this.epoch, items: structuredClone(page), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
   }
   /** What a discovery lists, before paging: a clip's notes (Session or Arrangement) by their parent clip. */
