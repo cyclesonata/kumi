@@ -100,3 +100,17 @@ test("a selection change in Live is read at once, not at the next poll", async (
     assert.ok(reads() > before, "the selection was read again straight away (the poll here is a minute)");
   } finally { await b.integration.close(); }
 });
+
+test("an Esc while the plan's undo step is opening still closes it", async () => {
+  const b = await opened({ fullControl: true, version: FULL });
+  try {
+    const controller = new AbortController();
+    const held = b.hold("live_undo_step_begin");
+    const plan = tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: { tempo: 126 } }] }, controller.signal);
+    await held.sent; controller.abort(); held.release();
+    await plan.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(b.requests.filter((request) => /^live_undo_step_/.test(request.name)).map((request) => request.name), ["live_undo_step_begin", "live_undo_step_end"]);
+    assert.equal(b.requests.some((request) => request.name === "live_tempo_apply"), false, "the plan itself stopped");
+  } finally { await b.integration.close(); }
+});

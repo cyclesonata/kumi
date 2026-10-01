@@ -59,6 +59,8 @@ export function bridge(options: Options = {}) {
   let undoRefusal: string | undefined;
   let applyFailure: "throw" | "uncertain" | "unreadable" | undefined;
   let gate: { sent: () => void; wait: Promise<void> } | undefined;
+  /** Requests held until released, by tool name (the first of each). */
+  const holds = new Map<string, { sent: () => void; wait: Promise<void> }>();
   const names = ["server_status", "live_status", "live_discover", "live_snapshot", "live_undo", ...(options.renders ? ["live_transaction_release"] : []),
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
@@ -93,6 +95,8 @@ export function bridge(options: Options = {}) {
     async list() { return { tools: catalog.filter((tool) => (drumRack || !tool.name.startsWith("live_drum_pad_")) && (!options.lateRacks || rackLoaded || !/^live_(rack|chain_mixer)_/.test(tool.name))) }; },
     async call(name, args, signal) {
       signal.throwIfAborted(); requests.push({ name, args: structuredClone(args) });
+      const holding = holds.get(name);
+      if (holding) { holds.delete(name); holding.sent(); await holding.wait; }
       if (failStep && (name === failStep || (name === "live_transport_action_preview" && args.action === failStep))) { failStep = undefined; return refusal("adapter request failed"); }
       if (name === "live_song_state") return wrap({ songLength: 64, signatureNumerator: 4, signatureDenominator: 4 });
       if (name === "live_status") return wrap({ connected: live, adapter: "remote-script", provenance: "fake-live", epoch: live ? epoch : null });
@@ -363,6 +367,13 @@ export function bridge(options: Options = {}) {
     addDrumRack: () => { drumRack = true; for (const listener of catalogListeners) listener(); },
     deleteLastTrack: () => { tracks = tracks.slice(0, -1); },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
+    /** The next request to this tool waits, after it's sent, until released. */
+    hold: (name: string) => {
+      let sent!: () => void; let release!: () => void;
+      const arrived = new Promise<void>((resolve) => { sent = resolve; });
+      holds.set(name, { sent, wait: new Promise<void>((resolve) => { release = resolve; }) });
+      return { sent: arrived, release };
+    },
     holdApply: () => {
       let sent!: () => void; let release!: () => void;
       const began = new Promise<void>((resolve) => { sent = resolve; });

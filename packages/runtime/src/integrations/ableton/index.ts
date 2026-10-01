@@ -912,17 +912,23 @@ export function createAbletonIntegration(options: Options): Integration {
     const running: { playing?: boolean; recording?: string | undefined } = {};
     // The whole plan is one Cmd-Z in Live (a step opened before its first change, closed after its last or when
     // it stops), where the bridge has Live's undo steps. Kumi's own undo stays per change, in HISTORY.
-    let undoStep: string | undefined;
+    let undoStep: string | undefined; let opening: Promise<void> | undefined;
+    // Opening and closing aren't the turn's to cancel: an Esc mid-opening must still leave the step closed.
+    const lasting = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(10_000)]);
     const openUndoStep = async () => {
       if (undoStep !== undefined || !tools?.has("live_undo_step_begin") || !tools.has("live_undo_step_end")) return;
       undoStep = "";
-      try { const opened = payload(await tools.call("live_undo_step_begin", { label: "Kumi", timeoutMs: 600_000 }, signal, { host: true })); if (typeof opened.stepId === "string") undoStep = opened.stepId; }
-      catch { /* Live's undo then has a step for each change, as before */ }
+      opening = (async () => {
+        try { const opened = payload(await tools.call("live_undo_step_begin", { label: "Kumi", timeoutMs: 600_000 }, lasting(), { host: true })); if (typeof opened.stepId === "string") undoStep = opened.stepId; }
+        catch { /* Live's undo then has a step for each change, as before */ }
+      })();
+      await opening;
     };
     const closeUndoStep = async () => {
+      await opening?.catch(() => undefined);
       const id = undoStep; undoStep = undefined;
       if (!id) return;
-      try { await tools!.call("live_undo_step_end", { stepId: id }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(10_000)]), { host: true }); }
+      try { await tools!.call("live_undo_step_end", { stepId: id }, lasting(), { host: true }); }
       catch { /* the bridge closes it when the connection goes, and Live's side when its time is up */ }
     };
     const steps_ = async (): Promise<Stop | undefined> => {
