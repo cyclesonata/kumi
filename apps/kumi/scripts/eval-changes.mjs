@@ -60,7 +60,7 @@ function syntheticBridge() {
       state.tracks.push({ name: "Pad", kind: "audio", volume: 0.85, pan: 0 });
     },
     endpoint: {
-      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.63" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
+      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.64" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
       async list() { return { tools: schemas }; },
       async call(name, args) {
         requests.push({ name, args });
