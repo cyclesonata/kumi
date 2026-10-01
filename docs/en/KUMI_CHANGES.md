@@ -310,10 +310,10 @@ On real Live 12.4 ([evidence](../evidence/kumi-poc.md#speed)):
 
 ## Undo
 
-Undo is the bridge's guarded `live_undo`: it restores the exact prior state only
-while the current state still matches what the change left. If the producer
-changed the same thing afterwards, the undo is refused and the entry reads
-**kept**, with the reason in plain words. Each change keeps a single undo key, so
+Undo is the bridge's guarded `live_undo`: it restores the exact prior state on
+the object the change was made on, however it changed since (a renamed track, a
+knob moved again). Only when that object is gone or replaced is the undo refused,
+and the entry reads **kept**, with the reason in plain words. Each change keeps a single undo key, so
 retrying an undo that Live didn't confirm reconciles it rather than undoing
 twice.
 

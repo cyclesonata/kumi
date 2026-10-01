@@ -64,7 +64,7 @@ read-back; most content edits can be undone with `live_undo`.
 | Edit audio-clip sound: gain, pitch, warp, fades | `live_audio_clip_preview/apply` | Only fields the exact clip advertises are written; warp mode and fades included |
 | Write clip automation | `live_automation_preview/apply` | Create envelopes, insert points, delete ranges, with envelope-revision fencing |
 | Route, arm, and monitor tracks | `live_routing_preview/apply` | Feedback routes are refused; arm and monitoring are fenced and restorable |
-| Record into Session or Arrangement | `live_recording_preview/apply` | Bounded start/stop with armed-destination and output-safety rechecks, and a verified stop |
+| Record into Session or Arrangement | `live_recording_preview/apply` | Bounded start/stop with an armed-destination recheck (other armed tracks record too), and a verified stop |
 | Capture a track's output for analysis | `live_audio_capture_preview/apply/status/emergency_stop` | Consent-bound Session Resampling with watchdog, cleanup, and zero-residual verification (real Live only) |
 | Rename tracks, scenes, clips, devices, locators | `live_object_rename_preview/apply` | Exact identity fencing on every rename |
 | Undo a change | `live_undo` | Restores the exact prior state while it still matches; refuses when something else changed it |
