@@ -345,6 +345,8 @@ export type LiveViewScope = readonly number[] | "all";
  * UI thread; the page is what keeps Live responsive, not a bound on the Set. */
 export const WHOLE_SET_PAGE_TRACKS = 16;
 const MAX_REMEMBERED_OWNERS = 250_000;
+/** How many pages one discovery may take to its end (a page holds one item at least). */
+const MAX_DISCOVERY_PAGES = 1_000_000;
 /** A read put together from pages: its rows, and the Arrangement's clips of the whole ones. */
 interface Assembly { tracks: Track[]; clips: Map<unknown, Record<string, unknown>>; held: Map<unknown, { clip: Clip; trackRef: LiveRef }> }
 
@@ -425,6 +427,27 @@ export class LiveViews {
       return filled === true ? LiveViews.assembled(first, assembly, wanted) : filled;
     }
     throw new Error("the Set's tracks kept changing while it was read; read it again");
+  }
+
+  /**
+   * Every item a discovery lists, page after page: a page ends at its limit or where the Remote Script's read
+   * budget ran out, with `nextCursor` to go on. `most` stops once that many came (what the caller asked for).
+   * A list that changes between pages is refused (its cursors are bound to it), and so is a cursor that
+   * doesn't move on.
+   */
+  public async discoverAll(request: LiveDiscoveryRequest, context?: LiveOperationContext, most = Number.POSITIVE_INFINITY): Promise<Array<Record<string, unknown>>> {
+    const adapter = this.adapter(); const items: Array<Record<string, unknown>> = []; let cursor = request.cursor; let revision: string | undefined;
+    for (let pages = 0; pages < MAX_DISCOVERY_PAGES; pages += 1) {
+      const page = await adapter.discoverAsync({ ...request, ...(cursor !== undefined ? { cursor } : {}) }, context);
+      if (revision !== undefined && page.revision !== revision) throw new Error(`the ${request.kind} list changed while it was read; read it again`);
+      revision = page.revision;
+      items.push(...(Array.isArray(page.items) ? page.items : []));
+      if (items.length >= most) return items.slice(0, most);
+      if (!page.nextCursor) return items;
+      if (page.nextCursor === cursor) throw new Error(`the ${request.kind} list's cursor didn't move on`);
+      cursor = page.nextCursor;
+    }
+    throw new Error(`the ${request.kind} list didn't end`);
   }
 
   /** Reads that remember what they saw (the track count, where references sit). */
@@ -2442,9 +2465,26 @@ export class DeterministicLiveSimulator implements LiveAdapter {
    * read budget cuts it (a window ends there, a focus goes on light); undefined: no budget. A snapshot without
    * arguments is always whole. */
   readBudgetRows: number | undefined;
+  /** How many items a discovery page holds before its budget runs out (then truncated, with nextCursor); undefined: its limit. */
+  discoveryBudgetItems: number | undefined;
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
-    return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
+    const rows = this.discoveryRows(request);
+    // Pages as the Remote Script's: a cursor names where to go on in this list as it is, and nowhere else.
+    const revision = `${this.epoch}:${request.kind}:${request.parent ?? ""}:${rows.length}`;
+    let offset = 0;
+    if (request.cursor !== undefined) {
+      let position: { revision?: unknown; offset?: unknown };
+      try { position = JSON.parse(Buffer.from(request.cursor, "base64url").toString("utf8")) as typeof position; } catch { throw new Error("invalid discovery cursor"); }
+      if (position.revision !== revision || !Number.isInteger(position.offset) || (position.offset as number) < 0 || (position.offset as number) > rows.length) throw new Error("stale discovery cursor");
+      offset = position.offset as number;
+    }
+    const page = rows.slice(offset, offset + Math.max(1, Math.min(request.limit ?? 50, this.discoveryBudgetItems ?? Number.POSITIVE_INFINITY)));
+    const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length })).toString("base64url") : undefined;
+    return { epoch: this.epoch, items: structuredClone(page), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
+  }
+  /** What a discovery lists, before paging. */
+  private discoveryRows(request: LiveDiscoveryRequest): Record<string, unknown>[] {
+    return (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
   async invokeAsync(invocation: LiveInvocation): Promise<unknown> { return this.invoke(invocation); }

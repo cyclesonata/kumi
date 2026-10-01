@@ -5805,7 +5805,7 @@ export class McpHost {
     const before = new Set((transaction.prior as { clipIdentities?: unknown[] } | undefined)?.clipIdentities ?? []);
     const found: Array<JsonObject | undefined> = [];
     for (const clip of clips) {
-      const rows = (await this.asyncAdapter().discoverAsync({ kind: "arrangement-clip", parent: clip.trackRef }, context)).items;
+      const rows = await this.views.discoverAll({ kind: "arrangement-clip", parent: clip.trackRef }, context);
       found.push(rows.find((row) => !before.has(row.objectIdentity) && isNonEmptyString(row.objectIdentity, 256) && Math.abs((row.start as number) - clip.start) < 1e-6 && Math.abs((row.length as number) - clip.length) < 1e-6 && (clip.name === undefined || row.name === clip.name)));
     }
     return found;
