@@ -2,13 +2,14 @@
  * Reading an address: a page as text, a PDF, a text or code file, a GitHub repository or a file in
  * one, a Max patch or Max for Live device (its controls and gen~ code first), or a picture to look
  * at. Kumi reads it itself; a PDF, a page a browser builds with scripts, and a site that turns Kumi
- * away go through Exa's reader.
+ * away go through the free services' readers, in turn (free.ts). An address carrying a key or token
+ * isn't read at all: every server that sees the address would get the key.
  */
 import { decodeAmxd } from "../devices/amxd.js";
-import { exaRead } from "./exa.js";
+import { FREE_SERVICES, freeTrouble, NoFreeService, type FreeServices } from "./free.js";
 import { githubTarget, rawUrl, readGithubTree } from "./github.js";
 import { readHtml } from "./html.js";
-import { checkedUrl, decodeText, statusWords, WebError, type WebClient, type WebResponse } from "./net.js";
+import { carriesKey, checkedUrl, decodeText, statusWords, WebError, type WebClient, type WebResponse } from "./net.js";
 
 export interface Page {
   /** The address as asked for (a github.com one, even when its raw text was read). */
@@ -17,8 +18,10 @@ export interface Page {
   /** What it is, in the producer's words: "a page", "a PDF", "code", "a GitHub repository"… */
   kind: string;
   text: string;
-  /** Why it was read through Exa's reader ("it's a PDF"), when it was. */
+  /** Why it was read through a free service's reader ("it's a PDF"), when it was. */
   via?: string;
+  /** Whose reader read it ("Exa", "Parallel"…), when one did. */
+  reader?: string;
   /** There was more than Kumi reads of one address. */
   truncated?: boolean;
   /** A picture, shown to the model. */
@@ -111,9 +114,9 @@ export function maxPatchSummary(root: unknown): string | undefined {
   return lines.join("\n");
 }
 
-async function throughExa(client: WebClient, address: string, why: string, kind: string, signal: AbortSignal | undefined): Promise<Page> {
-  const read = await exaRead(client, address, signal);
-  return { url: address, ...(read.title ? { title: read.title } : {}), kind, text: read.text, via: why };
+async function throughReader(client: WebClient, address: string, why: string, kind: string, signal: AbortSignal | undefined, services: FreeServices): Promise<Page> {
+  const read = await services.first((service) => service.read(client, address, signal), signal ? { signal } : {});
+  return { url: address, ...(read.value.title ? { title: read.value.title } : {}), kind, text: read.value.text, via: why, reader: read.service.name };
 }
 
 function picture(url: string, response: WebResponse, title: string | undefined): Page {
@@ -133,7 +136,8 @@ function patch(url: string, value: unknown, kind: string, title: string | undefi
   return { url, ...(title ? { title } : {}), kind, text: `${summary}\n\nThe whole patch, as Max saves it:\n${JSON.stringify(value, null, 1)}`, ...(truncated ? { truncated: true } : {}) };
 }
 
-export async function readPage(client: WebClient, address: string, signal?: AbortSignal): Promise<Page> {
+export async function readPage(client: WebClient, address: string, signal?: AbortSignal, services: FreeServices = FREE_SERVICES): Promise<Page> {
+  if (carriesKey(address)) throw new WebError("That address carries what looks like a key or token, so Kumi won't read it: every server that sees an address gets what's in it. Read it without the key.");
   const url = checkedUrl(address);
   const target = githubTarget(url);
   if (target && target.kind !== "blob") {
@@ -146,19 +150,19 @@ export async function readPage(client: WebClient, address: string, signal?: Abor
   const host = new URL(response.url).hostname;
   const path = target ? target.rest : new URL(response.url).pathname;
   if (response.skipped) {
-    if (response.contentType === "application/pdf") return pdf(client, response.url, signal);
+    if (response.contentType === "application/pdf") return pdf(client, response.url, signal, services);
     throw new WebError(response.contentType.startsWith("video/") ? "That's a video: watch_video watches it." : "That's a sound file: listen hears one saved on this computer.");
   }
   if (response.status >= 400) {
-    // A site that turns Kumi away (a sign-in wall, a bot check) may still let Exa's reader in.
+    // A site that turns Kumi away (a sign-in wall, a bot check) may still let a reader service in.
     if (!target && [401, 403, 429, 503].includes(response.status)) {
-      try { return await throughExa(client, named, `${host} ${statusWords(response.status)}`, "a page", signal); } catch { signal?.throwIfAborted(); }
+      try { return await throughReader(client, named, `${host} ${statusWords(response.status)}`, "a page", signal, services); } catch { signal?.throwIfAborted(); }
     }
     throw new WebError(target && response.status === 404 ? `GitHub has no file there (${target.owner}/${target.repo}/${target.rest}).` : `Kumi couldn't read ${host}: ${statusWords(response.status)}.`, response.status);
   }
   const type = response.contentType;
   if (PICTURES.has(type)) return picture(named, response, fileName(path));
-  if (type === "application/pdf" || response.body.subarray(0, 5).toString("latin1") === "%PDF-") return pdf(client, response.url, signal);
+  if (type === "application/pdf" || response.body.subarray(0, 5).toString("latin1") === "%PDF-") return pdf(client, response.url, signal, services);
   const device = decodeAmxd(response.body);
   if (device) return patch(named, device.patcher, "a Max for Live device", fileName(path), response.truncated) ?? { url: named, kind: "a Max for Live device", text: JSON.stringify(device.patcher, null, 1) };
   if (binary(response.body)) throw new WebError(`That's a file of another kind (${type || "unnamed"}, ${sizeWords(response.body.length)}), not text Kumi can read.`);
@@ -167,7 +171,7 @@ export async function readPage(client: WebClient, address: string, signal?: Abor
   if (type === "text/html" || type === "application/xhtml+xml" || (!type && /^\s*<(!doctype html|html)\b/i.test(text))) {
     const read = readHtml(text, response.url);
     if (read.scripted) {
-      try { return await throughExa(client, named, "its page is built by scripts", "a page", signal); } catch { signal?.throwIfAborted(); }
+      try { return await throughReader(client, named, "its page is built by scripts", "a page", signal, services); } catch { signal?.throwIfAborted(); }
     }
     const lead = read.description && !read.text.includes(read.description) ? `${read.description}\n\n` : "";
     return { url: named, ...(read.title ? { title: read.title } : {}), kind: "a page", text: `${lead}${read.text}`, ...truncated };
@@ -182,9 +186,10 @@ export async function readPage(client: WebClient, address: string, signal?: Abor
   return { url: named, ...(fileName(path) ? { title: fileName(path)! } : {}), kind: CODE.test(path) ? "code" : "text", text, ...truncated };
 }
 
-async function pdf(client: WebClient, address: string, signal: AbortSignal | undefined): Promise<Page> {
-  try { return await throughExa(client, address, "it's a PDF", "a PDF", signal); } catch (error) {
+async function pdf(client: WebClient, address: string, signal: AbortSignal | undefined, services: FreeServices): Promise<Page> {
+  try { return await throughReader(client, address, "it's a PDF", "a PDF", signal, services); } catch (error) {
     signal?.throwIfAborted();
-    throw new WebError(`Kumi reads a PDF through Exa's reader, which couldn't read this one: ${error instanceof Error ? error.message : "it failed"}`);
+    const said = error instanceof NoFreeService ? freeTrouble(error) : error instanceof Error ? error.message.replace(/\.$/, "") : "it failed";
+    throw new WebError(`Kumi reads a PDF through a free reader (${services.services.map((service) => service.name).join(", ")}), and none could read this one: ${said}.`);
   }
 }

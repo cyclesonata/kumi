@@ -509,7 +509,7 @@ export interface WebEvent {
   url?: string;
   /** Searched: "web" or "github". */
   where?: "web" | "github";
-  /** Who answered a search, or "Exa" when its reader read the page. */
+  /** Who answered a search, or whose reader read the page ("Exa", "Parallel"…) when one did. */
   via?: string;
   results?: number;
   /** What was read: "a page", "a PDF", "code", "a GitHub repository"… */

@@ -12,10 +12,48 @@ import type { Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { KUMI_VERSION } from "../version.js";
 
+/** What kind of trouble a web error is, for trying elsewhere: none of it is shown as is. */
+export interface WebTrouble {
+  /** The service has had too many requests from here (or used up what it gives free). */
+  busy?: boolean;
+  /** How long it asked Kumi to wait, when it said. */
+  retryAfterMs?: number;
+  /** Nothing answered: no connection, no name, no answer in time. */
+  unreachable?: boolean;
+}
+
 /** Something Kumi couldn't read, said so the model and the producer can act on it. */
 export class WebError extends Error {
-  constructor(message: string, readonly status?: number) { super(message); }
+  constructor(message: string, readonly status?: number, readonly trouble: WebTrouble = {}) { super(message); }
 }
+
+/** How a service says it has had too many requests: by status, or in words. */
+const BUSY_WORDS = /rate.?limit|too many requests|quota|slow down|out of credits|\bcredits\b|\b429\b/i;
+
+/** How long a service asked to be left alone: its Retry-After (seconds or a date), or a field in its answer. */
+export function retryAfter(response: Pick<WebResponse, "headers">, body?: unknown, now = Date.now()): number | undefined {
+  const header = response.headers["retry-after"];
+  const value = Array.isArray(header) ? header[0] : header;
+  if (value && /^\d+$/.test(value.trim())) return Number(value.trim()) * 1000;
+  if (value && Number.isFinite(Date.parse(value))) return Math.max(0, Date.parse(value) - now);
+  const field = body && typeof body === "object" ? (body as Record<string, unknown>).retry_after_seconds ?? (body as Record<string, unknown>).retry_after : undefined;
+  return typeof field === "number" && Number.isFinite(field) && field >= 0 ? field * 1000 : undefined;
+}
+
+/** A service's answer that isn't what was asked for, as a WebError that says whether it's busy. */
+export function serviceTrouble(service: string, response: WebResponse): WebError {
+  const text = response.body.subarray(0, 4096).toString("utf8");
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { /* not JSON */ }
+  if (response.status === 429 || (response.status >= 400 && BUSY_WORDS.test(text))) {
+    const wait = retryAfter(response, body);
+    return new WebError(`${service} has had too many requests from here for now.`, response.status, { busy: true, ...(wait !== undefined ? { retryAfterMs: wait } : {}) });
+  }
+  return new WebError(`${service} answered ${response.status}${response.status >= 500 ? " (its server had trouble)" : ""}.`, response.status, response.status >= 500 ? { unreachable: true } : {});
+}
+
+/** Whether a service's own words say it has had too many requests. */
+export const busyWords = (text: string) => BUSY_WORDS.test(text);
 
 /** Sites answer a browser; Kumi says who it is too. */
 export const WEB_USER_AGENT = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Kumi/${KUMI_VERSION}`;
@@ -95,6 +133,23 @@ export interface WebClientOptions {
   lookup?: typeof dnsLookup;
   /** Which addresses Kumi may connect to: public ones only, except in tests. */
   allow?: (address: string) => boolean;
+}
+
+/** Keys and tokens as services issue them (after Hermes Agent's list), each with a digit in it as real ones have. */
+const KEY_SHAPES = new RegExp(`(?:^|[^A-Za-z0-9])(?=[A-Za-z0-9._-]*\\d)(?:${[
+  "sk-[A-Za-z0-9_-]{20,}", "(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}", "gh[pousr]_[A-Za-z0-9]{20,}", "github_pat_[A-Za-z0-9_]{20,}", "glpat-[A-Za-z0-9_-]{20,}",
+  "xox[abprs]-[A-Za-z0-9-]{10,}", "xapp-\\d+-[A-Za-z0-9-]{10,}", "AIza[A-Za-z0-9_-]{30,}", "AKIA[A-Z0-9]{16}", "ya29\\.[A-Za-z0-9_-]{20,}",
+  "(?:hf|r8|npm|gsk|exa|fal)_[A-Za-z0-9]{20,}", "(?:tvly|pplx|pypi|fc)-[A-Za-z0-9_-]{20,}", "SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}",
+  "eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
+].join("|")})`);
+/** A key passed by name in a query: ?api_key=…, &access_token=…. */
+const NAMED_KEY = /[?&#;](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|private[_-]?token|client[_-]?secret|secret|password|passwd)=[^&#]{8,}/i;
+
+/** Whether an address carries what looks like a key or token, as written or percent-decoded. */
+export function carriesKey(address: string): boolean {
+  let decoded = address;
+  try { decoded = decodeURIComponent(address); } catch { /* not all percent-encoding is whole */ }
+  return [address, decoded].some((form) => KEY_SHAPES.test(form) || NAMED_KEY.test(form));
 }
 
 /** An address Kumi may read: http(s), no credentials in it, and public by name. */
@@ -206,11 +261,11 @@ export function createWebClient(options: WebClientOptions = {}): WebClient {
       } catch (error) {
         request.signal?.throwIfAborted();
         if (error instanceof WebError) throw error;
-        if (timeout.aborted) throw new WebError(`${url.hostname} didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`);
+        if (timeout.aborted) throw new WebError(`${url.hostname} didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`, undefined, { unreachable: true });
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "EKUMIPRIVATE") throw new WebError((error as Error).message);
-        if (code === "ENOTFOUND" || code === "EAI_AGAIN") throw new WebError(`Kumi couldn't find ${url.hostname}: check the address, or the internet connection.`);
-        if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EPIPE") throw new WebError(`${url.hostname} wouldn't connect (${code}).`);
+        if (code === "ENOTFOUND" || code === "EAI_AGAIN") throw new WebError(`Kumi couldn't find ${url.hostname}: check the address, or the internet connection.`, undefined, { unreachable: true });
+        if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EPIPE") throw new WebError(`${url.hostname} wouldn't connect (${code}).`, undefined, { unreachable: true });
         if (code === "CERT_HAS_EXPIRED" || code?.startsWith("ERR_TLS") || code?.includes("CERT")) throw new WebError(`${url.hostname}'s secure connection didn't check out (${code}), so Kumi didn't read it.`);
         throw new WebError(`Kumi couldn't read ${url.hostname}: ${error instanceof Error ? error.message.slice(0, 160) : "it failed"}.`);
       }

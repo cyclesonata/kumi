@@ -458,8 +458,12 @@ Kumi can search the web and read what it finds, to build or explain what you
 name and it doesn't know well enough: a hardware unit, a plugin, a synth, an
 effect's algorithm, an artist's technique.
 
-- `search_web` searches the web through Exa's free search, or DuckDuckGo when
-  Exa can't answer, and GitHub's repositories when it's looking for code.
+- `search_web` searches the web through free search services that need no key,
+  taking turns as Hermes Agent does: Exa, Parallel, Keenable and Firecrawl, each
+  search starting with the next. One that's busy or doesn't answer hands the search
+  to the next and rests (as long as it asks, when it says), and DuckDuckGo answers
+  when none of them can. The same search within 20 minutes isn't made again. For
+  code it searches GitHub's repositories.
 - `read_web` reads a page, a PDF, a text or code file, a GitHub repository (its
   files and README) or a file in one, a Max patch or Max for Live device (its
   controls and its gen~ code first), or a picture, which the model sees. A long
@@ -642,9 +646,11 @@ selected inference provider. Track/device names and tool results are untrusted
 data, not instructions or permission grants. Reading Live is not local-only.
 Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only by
 you; terminal scrollback and the provider's retention policies are separate.
-When Kumi looks something up, its searches go to Exa (or DuckDuckGo), and it reads
-pages itself; a PDF, a page built by scripts, or a site that turns Kumi away is
-read through Exa's reader, which then sees that address. The
+When Kumi looks something up, its searches go to Exa, Parallel, Keenable or
+Firecrawl (or DuckDuckGo), and it reads pages itself; a PDF, a page built by
+scripts, or a site that turns Kumi away is read through one of those services'
+readers, which then sees that address. Kumi doesn't read an address that carries a
+key or token. The
 credential store intentionally persists.
 
 Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25
