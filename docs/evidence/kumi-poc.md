@@ -1193,8 +1193,8 @@ Compressor, Reverb, racks). Each rename was followed by a 2 s pause.
 | Change | 1.0.62 (ms) | 1.0.63 (ms) | 1.0.63 median |
 | --- | --- | --- | --- |
 | Tempo | 30, 63, 786, 61, 33, 87, 475, 87, 74, 73 | 69, 76, 19, 74, 77, 67, 65, 123, 39, 86 | 72 |
-| Mixer | 316, 225, 213, 216, 213, 269, 661, 240, 150, 156 | 26, 28, 74, 28, 92, 26, 26, 87, 78, 26 | 27 |
-| Operator's Volume | 435–1114 | 85, 82, 52, 71, 91, 36, 100, 340, 305, 124 | 88 |
+| Mixer | 316, 225, 213, 216, 213, 269, 661, 240, 150, 156 | 26, 28, 74, 28, 92, 26, 26, 87, 78, 26 | 28 |
+| An Operator parameter | 435, 1114, 932, 1004, 999 (Algorithm, each right after a rename) | 85, 82, 52, 71, 91, 36, 100, 340, 305, 124 (Volume) | 88 |
 | Rename | 321, 195, 913, 912, 194, 1346, 406, 264, 213, 211 | 910, 69, 28, 86, 37, 79, 794, 33, 797, 793 | 83 |
 
 **What changed in 1.0.63.** A parameter, mixer or rename change reads only its own objects:
