@@ -56,7 +56,10 @@ On Live's main thread, in the same tick, the Remote Script recomputes the digest
 and applies only if nothing changed since the preview; otherwise it refuses with
 "Live state changed since the preview" and nothing has happened. A refusal before
 anything ran always says so ("…; nothing changed"), so the host records it as
-not dispatched rather than uncertain. The bridge keeps a bounded executed-result
+not dispatched rather than uncertain. On a retry with the same key, such a refusal
+proves only that the retry didn't run: the first attempt may have, so the change
+stays uncertain. An undo that fails its checks before sending anything to Live
+leaves the change applied, and the next undo checks again. The bridge keeps a bounded executed-result
 ledger across TCP reconnections, so a lost response is reconciled exactly by its
 idempotency key instead of replayed. Audible launch, capture-start, recording
 and realtime-arm contracts also revalidate output-safety evidence on the bridge
