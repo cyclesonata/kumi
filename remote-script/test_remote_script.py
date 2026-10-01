@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import select as select_module
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6174,6 +6175,20 @@ class LingeringTickTests(_BridgeSocketFixture, unittest.TestCase):
             self.assertEqual(mapper._read_budget().deadline, 1000.005, "inside one, no later than the tick's end")
             mapper.tick_deadline = 999.0
             budget = mapper._read_budget(); self.assertEqual([budget.room(), budget.room()], [True, False], "past it, one unit")
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "counts open descriptors in /dev/fd")
+    def test_lingering_ticks_leave_no_descriptor_open(self):
+        # Each lingering tick makes a selector (a kqueue on macOS); a leak would run Live out of descriptors.
+        client, channel = self.connect(); buffer = bytearray()
+        def answer_once(sequence):
+            client.sendall(self.frame(channel, sequence))
+            while b"\n" not in buffer:
+                self.bridge.update_display()
+                while select_module.select([client], [], [], 0)[0]: buffer.extend(client.recv(1 << 20))
+            del buffer[:buffer.find(b"\n") + 1]
+        answer_once(1); before = len(os.listdir("/dev/fd"))
+        for sequence in range(2, 152): answer_once(sequence)
+        self.assertLessEqual(len(os.listdir("/dev/fd")), before)
 
     def test_a_tick_that_answered_no_one_doesnt_wait(self):
         self.connect()
