@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { McpHost, PROTOCOL_VERSION } from "../src/host.js";
+import { DeterministicLiveSimulator, type AsyncLiveAdapter, type LiveDiscoveryRequest, type LiveInvocation, type LiveOperationContext, type LiveSnapshotRequest } from "../src/live.js";
+
+// Review of the merged phase 3: undo's checks, fences and pages, on rows as the Remote Script has them.
+
+const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "test", version: "1" } } };
+const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
+type Body = Record<string, any>;
+
+function hosted(adapter: ConstructorParameters<typeof McpHost>[0]) {
+  const host = new McpHost(adapter); host.handle(initialize); host.handle(initialized);
+  let id = 100;
+  const call = async (name: string, args: unknown): Promise<Body> => { const answer = await host.handleAsync({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name, arguments: args } }) as any; assert.ok(answer.result, JSON.stringify(answer.error)); return { ...JSON.parse(answer.result.content[0].text), ...(answer.result.isError ? { isError: true } : {}) }; };
+  let keys = 0;
+  const apply = (tool: string, transactionId: string, key = `review-${++keys}`) => call(tool, { transactionId, confirmation: "apply", idempotencyKey: key });
+  const change = async (preview: string, args: unknown): Promise<{ previewed: Body; applied: Body }> => { const previewed = await call(preview, args); assert.ok(previewed.transactionId, JSON.stringify(previewed)); const applied = await apply(preview.replace(/_preview$/, "_apply"), previewed.transactionId); assert.equal(applied.state, "applied", JSON.stringify(applied)); return { previewed, applied }; };
+  const undo = (transactionId: string, key = `review-undo-${++keys}`) => call("live_undo", { transactionId, confirmation: "undo", idempotencyKey: key });
+  return { host, call, apply, change, undo };
+}
+const state = (simulator: DeterministicLiveSimulator) => (simulator as unknown as { state: { tracks: Array<Record<string, any>>; arrangementClips: Array<{ clip: Record<string, any>; trackRef: string }> } }).state;
+
+/** The simulator, with reads and changes that fail when a test says so. */
+function faulty(simulator: DeterministicLiveSimulator) {
+  const faults: { read?: (request: LiveDiscoveryRequest | LiveSnapshotRequest | undefined) => boolean; invoke?: (invocation: LiveInvocation) => boolean } = {};
+  const adapter = Object.assign(Object.create(simulator), {
+    discoverAsync: async (request: LiveDiscoveryRequest) => { if (faults.read?.(request)) { faults.read = undefined; throw new Error("request failed: invalid discovery cursor"); } return simulator.discoverAsync(request); },
+    snapshotAsync: async (context?: LiveOperationContext, request?: LiveSnapshotRequest) => { if (faults.read?.(request)) { faults.read = undefined; throw new Error("remote adapter request timed out"); } return simulator.snapshotAsync(context, request); },
+    invokeAsync: async (invocation: LiveInvocation) => { const result = await simulator.invokeAsync(invocation); if (faults.invoke?.(invocation)) { faults.invoke = undefined; throw new Error("remote adapter request timed out"); } return result; },
+  }) as AsyncLiveAdapter;
+  return { adapter, faults };
+}
+
+test("an undo whose checks can't read Live leaves its change applied, and undoing again checks afresh", async () => {
+  const simulator = new DeterministicLiveSimulator(); simulator.discoveryBudgetItems = 1;
+  const { adapter, faults } = faulty(simulator);
+  const { change, undo } = hosted(adapter);
+  const made = await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 0, length: 4, name: "Hook", notes: [{ pitch: 60, start: 0, duration: 1 }, { pitch: 64, start: 1, duration: 1 }] });
+  const clip = state(simulator).arrangementClips.find((item) => item.clip.name === "Hook")!.clip;
+  clip.notes.push({ ...clip.notes[0], pitch: 67, id: 99 });
+  // The clip's second page of notes can't be read: the check stops there, with nothing changed.
+  faults.read = (request) => (request as LiveDiscoveryRequest | undefined)?.kind === "note" && (request as LiveDiscoveryRequest).cursor !== undefined;
+  const stopped = await undo(made.previewed.transactionId, "same-key");
+  assert.equal(stopped.isError, true); assert.match(stopped.reason, /^Undo stopped before it changed anything in Live/); assert.match(stopped.remediation, /Nothing changed in Live/);
+  // Undoing again with the same key checks again: the producer's edit keeps the clip.
+  const again = await undo(made.previewed.transactionId, "same-key");
+  assert.equal(again.isError, true); assert.match(again.reason, /has been edited since/);
+  assert.ok(state(simulator).arrangementClips.some((item) => item.clip.objectIdentity === clip.objectIdentity));
+});
+
+test("any undo that stops before its first change leaves the change applied; one stopped after a change stays uncertain", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { adapter, faults } = faulty(simulator);
+  const { change, undo } = hosted(adapter);
+  const mixed = await change("live_mixer_preview", { trackRef: "track:track-1", volume: 0.5 });
+  faults.read = () => true;
+  const stopped = await undo(mixed.previewed.transactionId);
+  assert.equal(stopped.isError, true); assert.match(stopped.reason, /^Undo stopped before it changed anything in Live/);
+  assert.equal(state(simulator).tracks[0]!.volume, 0.5);
+  // Still applied: an undo with a new key runs.
+  assert.equal((await undo(mixed.previewed.transactionId)).state, "undone"); assert.equal(state(simulator).tracks[0]!.volume, 0.85);
+  // The change was sent and its answer lost: the undo is uncertain, and only its own key may finish it.
+  const again = await change("live_mixer_preview", { trackRef: "track:track-1", volume: 0.4 });
+  faults.invoke = (invocation) => invocation.operation === "mixer.set";
+  const lost = await undo(again.previewed.transactionId, "lost-answer");
+  assert.equal(lost.isError, true); assert.doesNotMatch(lost.reason, /stopped before/);
+  assert.match((await undo(again.previewed.transactionId)).reason, /exact-key uncertain/);
+});

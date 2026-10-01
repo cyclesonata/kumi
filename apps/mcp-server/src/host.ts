@@ -29,6 +29,7 @@ import { PACKAGE_VERSION } from "./delivery.js";
 import { DEFAULT_TOOL_POLICY, TOOL_POLICY_PROFILES, liveMutationAvailable, parseToolPolicySpec, resolveToolVisibility, toolCatalogEntry, toolPolicyFromEnv, visibleToolDescriptors, type ToolPolicySpec, type ToolVisibilityRow } from "./tool-catalog.js";
 
 import { LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, MODERN_UNAVAILABLE_TOOLS, prepareMcpRequest, formatMcpResponse, type ProtocolEra } from "./mcp-protocol.js";
+import { READ_ONLY_INVOKES } from "./bridge/remote-adapter.js";
 
 /** Kept as the legacy initialize version for existing embedded callers. */
 export const PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSION;
@@ -613,6 +614,10 @@ export class McpHost {
   /** Undos the bridge refused before dispatching anything to Live, by transaction: live_undo reports
    * them as refusals and the change stays applied, instead of leaving it uncertain. */
   private readonly undoRefusals = new Map<string, { record: object; message: string }>();
+  /** Undos in flight, each counting the changes sent to Live while it runs (anyone's, so a count only
+   * errs toward "something changed"): an undo that fails before its first change leaves the change
+   * applied, and its next try checks afresh. */
+  private readonly undoWatches = new Set<{ changes: number }>();
   /** live_change's changes by idempotency key: the change asked for, its transaction and the preview's answer. */
   private readonly fusedChanges = new Map<string, { digest: string; transactionId: string; confirmation: string; preview: JsonObject }>();
   /** The Live undo step this host opened and hasn't seen end: closed when the host's client goes. */
@@ -1558,7 +1563,21 @@ export class McpHost {
   private asyncAdapter(): AsyncLiveAdapter {
     const value = this.adapter as Partial<AsyncLiveAdapter>;
     if (typeof value.snapshotAsync !== "function" || typeof value.discoverAsync !== "function" || typeof value.getAsync !== "function" || typeof value.invokeAsync !== "function") throw new Error("live adapter does not support asynchronous operations");
-    return this.adapter as AsyncLiveAdapter;
+    const adapter = this.adapter as AsyncLiveAdapter;
+    if (this.undoWatches.size === 0) return adapter;
+    // While an undo runs, every change sent through here counts for it; a refusal before one ran doesn't.
+    const watches = [...this.undoWatches];
+    const counted = <T>(operation: string, send: () => T): T => {
+      const changes = !READ_ONLY_INVOKES.has(operation); if (changes) for (const watch of watches) watch.changes += 1;
+      const unrun = (cause: unknown): never => { if (changes && (cause instanceof LiveMutationNotDispatchedError || nothingChanged(cause))) for (const watch of watches) watch.changes -= 1; throw cause; };
+      try { const sent = send(); return (sent instanceof Promise ? sent.catch(unrun) : sent) as T; } catch (cause) { return unrun(cause); }
+    };
+    return new Proxy(adapter, { get: (target, property) => {
+      if (property === "invokeAsync") return (invocation: LiveInvocation, context?: LiveOperationContext) => counted(invocation.operation, () => target.invokeAsync(invocation, context));
+      if (property === "invoke") return (invocation: LiveInvocation) => counted(invocation.operation, () => target.invoke(invocation));
+      const member = Reflect.get(target, property, target) as unknown;
+      return typeof member === "function" ? (member as (...args: unknown[]) => unknown).bind(target) : member;
+    } });
   }
 
   /** When one operation's Live work must be done: `base` from now, plus 20 ms per track in the Set (the
@@ -8824,14 +8843,25 @@ export class McpHost {
   private async liveUndoAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     const transactionId = isObject(params) && typeof params.transactionId === "string" ? params.transactionId : undefined;
     if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
-    const result = await this.liveUndoDispatchAsync(id, params, signal);
+    const undoing = transactionId === undefined ? undefined : this.transactionRecord(transactionId) as { state?: string; undoKey?: unknown } | undefined;
+    const before = undoing?.state; const watch = { changes: 0 };
+    this.undoWatches.add(watch);
+    let result: JsonObject;
+    try { result = await this.liveUndoDispatchAsync(id, params, signal); } finally { this.undoWatches.delete(watch); }
     const refusal = transactionId === undefined ? undefined : this.undoRefusals.get(transactionId);
     if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
     const record = refusal?.record as { state?: string } | undefined;
-    if (!refusal || record?.state !== "uncertain") return result;
-    // Nothing reached Live: the change stays applied, and a later undo starts over.
-    record.state = "applied"; this.undoRecoveryPlans.delete(refusal.record);
-    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo refused before anything changed in Live: ${adapterReason(refusal.message)}`, remediation: "Nothing changed in Live, and the change is still in place. Later changes may have moved or replaced what it made, so its undo can no longer be proven; change it by hand if needed." }) }], isError: true });
+    if (refusal && record?.state === "uncertain") {
+      // Nothing reached Live: the change stays applied, and a later undo starts over.
+      record.state = "applied"; this.undoRecoveryPlans.delete(refusal.record);
+      return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo refused before anything changed in Live: ${adapterReason(refusal.message)}`, remediation: "Nothing changed in Live, and the change is still in place. Later changes may have moved or replaced what it made, so its undo can no longer be proven; change it by hand if needed." }) }], isError: true });
+    }
+    // Stopped before its first change (a read or check failed): only a change sent to Live makes an undo uncertain.
+    const failed = isObject(result.result) && result.result.isError === true && Array.isArray(result.result.content) && isObject(result.result.content[0]) ? result.result.content[0].text : undefined;
+    if (!undoing || before !== "applied" || undoing.state === "applied" || undoing.state === "undone" || watch.changes > 0 || typeof failed !== "string") return result;
+    undoing.state = "applied"; delete undoing.undoKey; this.undoRecoveryPlans.delete(undoing);
+    let reason = failed; try { const parsed = JSON.parse(failed) as { reason?: unknown }; if (typeof parsed.reason === "string") reason = parsed.reason; } catch { /* the text is the reason */ }
+    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo stopped before it changed anything in Live: ${reason}`, remediation: "Nothing changed in Live, and the change is still in place. A later undo checks it again from the start." }) }], isError: true });
   }
 
   private async liveUndoDispatchAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
