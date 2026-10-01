@@ -83,3 +83,17 @@ test("undo of a clip Kumi copied into the Arrangement leaves it when its notes c
   assert.equal((await undo(copied.previewed.transactionId)).state, "undone");
   assert.equal(state(simulator).arrangementClips.length, 0);
 });
+
+test("clearing a range is refused when a looped clip was extended into it after the preview", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { call, apply, change } = hosted(simulator);
+  await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 0, length: 4, name: "Loop", notes: [] });
+  await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 8, length: 2, name: "Fill", notes: [] });
+  const previewed = await call("live_clip_clear_range_preview", { trackRef: "track:track-1", fromBeat: 6, toBeat: 12 });
+  assert.deepEqual([previewed.removes.map((row: Body) => row.name), previewed.cuts], [["Fill"], []]);
+  // The producer drags the loop out to beat 7: same start and loop length, a later end.
+  const loop = state(simulator).arrangementClips.find((item) => item.clip.name === "Loop")!.clip; loop.endTime = 7;
+  const refused = await apply("live_clip_clear_range_apply", previewed.transactionId);
+  assert.equal(refused.isError, true); assert.match(refused.reason, /changed since the preview/);
+  assert.equal(loop.endTime, 7); assert.equal(state(simulator).arrangementClips.length, 2);
+});

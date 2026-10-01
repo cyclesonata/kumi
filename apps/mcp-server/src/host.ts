@@ -7959,10 +7959,11 @@ export class McpHost {
     throw new Error("owned clip cleanup was not confirmed");
   }
 
-  /** The Arrangement clips of the tracks an operation touches, as a fence: what a clip made there lands among. */
+  /** The Arrangement clips of the tracks an operation touches, as a fence: what a clip made there lands
+   * among. Each where it ends too: a looped clip extended over the timeline keeps its start and length. */
   private arrangementFence(snapshot: LiveSnapshot, trackRefs: readonly unknown[]): string {
     const tracks = new Set(trackRefs.filter((ref): ref is string => typeof ref === "string"));
-    const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).filter((clip) => tracks.has(String(clip.trackRef))).map((clip) => `${clip.ref}:${String(clip.objectIdentity)}:${String(clip.trackRef)}:${String(clip.name)}:${String(clip.start)}:${String(clip.length)}`);
+    const clips = ((snapshot.arrangement as unknown as { clips?: unknown[] }).clips ?? []).filter(isObject).filter((clip) => tracks.has(String(clip.trackRef))).map((clip) => `${clip.ref}:${String(clip.objectIdentity)}:${String(clip.trackRef)}:${String(clip.name)}:${String(clip.start)}:${String(clip.length)}:${String(arrangementClipEnd(clip))}`);
     return JSON.stringify(clips);
   }
 
