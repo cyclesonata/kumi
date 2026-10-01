@@ -694,7 +694,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   }
 
   status(): LiveStatus { return { connected: true, adapter: "simulator", epoch: this.epoch, protocol: LIVE_PROTOCOL_VERSION, capabilities: liveCapabilitiesForOperations(SIMULATOR_OPERATIONS), operations: [...SIMULATOR_OPERATIONS] }; }
-  snapshot(): LiveSnapshot { const value = structuredClone(this.state) as LiveSnapshot; value.arrangement.clips = (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, muted: item.clip.muted ?? null, colorIndex: item.clip.colorIndex ?? null, looping: item.clip.looping ?? null, loopStart: item.clip.loopStart ?? null, loopEnd: item.clip.loopEnd ?? null, filePath: item.clip.filePath ?? null, isAudio: item.clip.isAudio ?? (item.clip.kind === "audio") })); return value; }
+  snapshot(): LiveSnapshot { const value = structuredClone(this.state) as LiveSnapshot; value.arrangement.clips = (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, muted: item.clip.muted ?? null, colorIndex: item.clip.colorIndex ?? null, looping: item.clip.looping ?? null, loopStart: item.clip.loopStart ?? null, loopEnd: item.clip.loopEnd ?? null, filePath: item.clip.filePath ?? null, isAudio: item.clip.isAudio ?? (item.clip.kind === "audio"), endTime: (item.clip as Clip & { endTime?: number }).endTime ?? item.clip.start + item.clip.length, noteCount: item.clip.notes.length })); return value; }
   get(objectRef: LiveRef): unknown {
     if (objectRef === this.state.set.ref) return structuredClone(this.state.set);
     const scene = this.state.scenes.find((item) => item.ref === objectRef);
@@ -2930,11 +2930,13 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const from = number("fromBeat"); const to = number("toBeat");
         if (!(to > from)) throw new Error("the range to clear is empty");
         const all = this.state.arrangementClips ?? []; const mine = all.filter((item) => item.trackRef === target.ref);
-        const removed = mine.filter((item) => item.clip.start >= from && item.clip.start + item.clip.length <= to);
+        // A clip's extent on the timeline is its end time (a looped clip plays past its loop length).
+        const endOf = (clip: Clip): number => (clip as Clip & { endTime?: number }).endTime ?? clip.start + clip.length;
+        const removed = mine.filter((item) => item.clip.start >= from && endOf(item.clip) <= to);
         for (const item of mine) {
           if (removed.includes(item)) continue;
-          const end = item.clip.start + item.clip.length;
-          if (item.clip.start < to && end > from) { if (item.clip.start < from) item.clip.length = from - item.clip.start; else { item.clip.length = end - to; item.clip.start = to; } }
+          const end = endOf(item.clip); const clip = item.clip as Clip & { endTime?: number };
+          if (clip.start < to && end > from) { if (clip.start < from) { clip.length = Math.min(clip.length, from - clip.start); clip.endTime = from; } else { clip.length = Math.min(clip.length, end - to); clip.start = to; clip.endTime = end; } }
         }
         this.state.arrangementClips = all.filter((item) => !removed.includes(item));
         this.emit({ type: "object", ref: target.ref, payload: { operation } });

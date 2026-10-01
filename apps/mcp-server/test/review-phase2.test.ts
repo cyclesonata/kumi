@@ -44,3 +44,53 @@ test("the extension's tools take tracks as the Remote Script describes them: kin
   assert.equal((await call("live_clip_clear_range_preview", { trackRef: "track:track-1", fromBeat: 0, toBeat: 4 })).removes.length, 1);
 });
 
+test("undo of an Arrangement clip Kumi made leaves it, with the producer's edits, when its notes, name or extent changed", async () => {
+  const simulator = new DeterministicLiveSimulator(); simulator.discoveryBudgetItems = 1;
+  const { change, undo } = hosted(simulator);
+  const notes = [{ pitch: 60, start: 0, duration: 1 }, { pitch: 64, start: 1, duration: 1 }];
+  for (const [index, edit] of (["notes", "name", "extent"] as const).entries()) {
+    const made = await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: index * 8, length: 4, name: `Hook ${index}`, notes });
+    const clip = state(simulator).arrangementClips.find((item) => item.clip.name === `Hook ${index}`)!.clip;
+    const prior = structuredClone(clip);
+    if (edit === "notes") clip.notes.push({ ...clip.notes[0], pitch: 67, id: 99 });
+    else if (edit === "name") clip.name = "Hook (producer's)";
+    else clip.length = 6;
+    const refused = await undo(made.previewed.transactionId);
+    assert.equal(refused.isError, true); assert.match(refused.reason, /has been edited since .*it stays, with those edits/, edit);
+    assert.ok(state(simulator).arrangementClips.some((item) => item.clip.objectIdentity === clip.objectIdentity), edit);
+    Object.assign(clip, prior); clip.notes = prior.notes;
+    assert.equal((await undo(made.previewed.transactionId)).state, "undone", edit);
+  }
+});
+
+test("a retry of an Arrangement clip change that Live made finds the clip on a later page instead of making it again", async () => {
+  const simulator = new DeterministicLiveSimulator(); simulator.discoveryBudgetItems = 1;
+  let fail = false;
+  const adapter = Object.assign(Object.create(simulator), { invokeAsync: async (invocation: LiveInvocation) => { const result = await simulator.invokeAsync(invocation); if (fail && invocation.operation === "arrangement.midi-clip.create") { fail = false; throw new Error("the answer was lost on the way"); } return result; } }) as AsyncLiveAdapter;
+  const { call, apply, change } = hosted(adapter);
+  for (const [index, name] of ["A", "B"].entries()) await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: index * 4, length: 4, name, notes: [] });
+  const previewed = await call("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 8, length: 4, name: "C", notes: [] });
+  fail = true;
+  assert.equal((await apply("live_arrangement_midi_clip_apply", previewed.transactionId, "lost-answer-key")).isError, true);
+  const retried = await apply("live_arrangement_midi_clip_apply", previewed.transactionId, "lost-answer-key");
+  assert.deepEqual([retried.state, retried.reconciled], ["applied", true]);
+  assert.deepEqual(state(simulator).arrangementClips.map((item) => item.clip.name), ["A", "B", "C"]);
+  // A retry that finds nothing makes the clips only while the Arrangement is as previewed.
+  const next = await call("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 12, length: 4, name: "D", notes: [] });
+  const failing = Object.assign(Object.create(simulator), { invokeAsync: async (invocation: LiveInvocation) => { if (invocation.operation === "arrangement.midi-clip.create") throw new Error("Live was busy"); return simulator.invokeAsync(invocation); } }) as AsyncLiveAdapter;
+  void failing;
+  fail = false;
+  state(simulator).arrangementClips.push({ clip: { ...structuredClone(state(simulator).arrangementClips[0]!.clip), ref: "arrangement-clip:producer", objectIdentity: "simulator:arrangement-clip:producer", name: "Producer's", start: 20 }, trackRef: "track:track-1" });
+  assert.match((await apply("live_arrangement_midi_clip_apply", next.transactionId, "next-key")).reason, /changed since the preview/);
+});
+
+test("an Arrangement clip's extent is its endTime: a looped clip past its loop length is cut by a range it reaches", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { change } = hosted(simulator);
+  await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 0, length: 4, name: "Loop", notes: [] });
+  // Looped on in Live, the clip plays to beat 16 though its loop is 4 beats long.
+  state(simulator).arrangementClips[0]!.clip.endTime = 16;
+  const cleared = await change("live_clip_clear_range_preview", { trackRef: "track:track-1", fromBeat: 8, toBeat: 12 });
+  assert.deepEqual(cleared.previewed.cuts.map((clip: { name: string; end: number }) => [clip.name, clip.end]), [["Loop", 16]]);
+});
+

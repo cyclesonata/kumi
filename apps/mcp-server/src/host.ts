@@ -545,6 +545,12 @@ function sceneFieldRestored(restored: Record<string, unknown>, field: string, va
   return sameLiveValue(restored[field], value);
 }
 
+/** Where an Arrangement clip ends on the timeline: its row's endTime (a looped clip's end isn't its start
+ * plus its loop length), or start + length on rows without one. */
+function arrangementClipEnd(clip: JsonObject): number {
+  return typeof clip.endTime === "number" && Number.isFinite(clip.endTime) ? clip.endTime : (clip.start as number) + (clip.length as number);
+}
+
 function sameLiveValue(observed: unknown, expected: unknown): boolean {
   if (typeof observed === "number" && typeof expected === "number") return Math.abs(observed - expected) <= 1e-6 * Math.max(1, Math.abs(observed), Math.abs(expected));
   if (Array.isArray(observed) && Array.isArray(expected)) return observed.length === expected.length && observed.every((value, index) => sameLiveValue(value, expected[index]));
@@ -5787,7 +5793,7 @@ export class McpHost {
       // A new clip goes where the Arrangement is empty: it never replaces or cuts what's there, or another new one.
       for (const [index, clip] of clips.entries()) {
         const end = clip.start + clip.length; const name = tracks.get(clip.trackRef)!.name;
-        const there = this.arrangementClipsOf(snapshot, clip.trackRef).find((other) => (other.start as number) < end && (other.start as number) + (other.length as number) > clip.start);
+        const there = this.arrangementClipsOf(snapshot, clip.trackRef).find((other) => (other.start as number) < end && arrangementClipEnd(other) > clip.start);
         if (there) throw new Error(`track "${name}" already has "${String(there.name ?? "a clip")}" in the Arrangement between beat ${clip.start} and ${end}; clear the range first (live_clip_clear_range) or choose another place`);
         if (clips.some((other, otherIndex) => otherIndex !== index && other.trackRef === clip.trackRef && other.start < end && other.start + other.length > clip.start)) throw new Error(`two of the new clips overlap on "${name}"`);
       }
@@ -5830,7 +5836,8 @@ export class McpHost {
       let made = reconciliation ? await this.createdArrangementMidiClips(transaction, context) : [];
       if (reconciliation && made.some(Boolean) && !made.every(Boolean)) throw new Error("only some of the clips are there; look at the Arrangement before making them again");
       if (!made.every(Boolean) || made.length === 0) {
-        if (!reconciliation) {
+        // About to make them, a retry too: only while the tracks and their Arrangement clips are as previewed.
+        {
           const snapshot = await this.viewForAsync(context, trackRefs);
           const current = JSON.stringify({ tracks: trackRefs.map((trackRef) => { const track = snapshot.tracks.find((candidate) => candidate.ref === trackRef); return [trackRef, track?.objectIdentity, track?.name]; }), clips: this.arrangementFence(snapshot, trackRefs) });
           if (current !== transaction.fence) return this.transactionError(id, "the tracks or their Arrangement clips changed since the preview; preview again");
@@ -5842,7 +5849,10 @@ export class McpHost {
         made = await this.createdArrangementMidiClips(transaction, context);
         if (!made.every(Boolean)) throw new Error("Live made the clips, but the Arrangement doesn't show every one where it was asked");
       }
-      transaction.created = { clips: made.map((row, index) => ({ ref: row!.ref, objectIdentity: row!.objectIdentity, trackRef: clips[index]!.trackRef, name: row!.name ?? null, start: row!.start, length: row!.length, notes: (clips[index]!.notes as unknown[]).length })) };
+      // What undo checks is as it was made: each clip's name, extent and notes (the producer's later edits are theirs).
+      const fences: JsonObject[] = [];
+      for (const row of made) fences.push({ objectIdentity: row!.objectIdentity, name: row!.name ?? null, start: row!.start, end: arrangementClipEnd(row!), notesRevision: McpHost.notesRevision(await this.clipNotesAsync(row!.ref as LiveRef, context)) });
+      transaction.created = { clips: made.map((row, index) => ({ ref: row!.ref, objectIdentity: row!.objectIdentity, trackRef: clips[index]!.trackRef, name: row!.name ?? null, start: row!.start, length: row!.length, notes: (clips[index]!.notes as unknown[]).length })), fences };
       transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", clips: transaction.created.clips, ...(reconciliation ? { reconciled: true } : {}), idempotent: false });
     } catch (cause) { if (transaction.state === "applying" || reconciliation) transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Whether the clips are there is uncertain: retry with the same key, which looks for them before making any."); }
@@ -5859,11 +5869,11 @@ export class McpHost {
       const track = snapshot.tracks.find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
       if (track.kind === "return" || track.kind === "main" || trackMedia(track) === undefined) throw new Error(`track "${track.name}" has no Arrangement clips of its own`);
-      const row = (clip: JsonObject) => ({ ref: clip.ref, name: clip.name ?? null, start: clip.start, end: (clip.start as number) + (clip.length as number) });
-      const overlapping = this.arrangementClipsOf(snapshot, params.trackRef as LiveRef).filter((clip) => (clip.start as number) < to && (clip.start as number) + (clip.length as number) > from);
+      const row = (clip: JsonObject) => ({ ref: clip.ref, name: clip.name ?? null, start: clip.start, end: arrangementClipEnd(clip) });
+      const overlapping = this.arrangementClipsOf(snapshot, params.trackRef as LiveRef).filter((clip) => (clip.start as number) < to && arrangementClipEnd(clip) > from);
       if (!overlapping.length) throw new Error(`track "${track.name}" has no Arrangement clips between beat ${from} and ${to}`);
-      const removes = overlapping.filter((clip) => (clip.start as number) >= from && (clip.start as number) + (clip.length as number) <= to).map(row);
-      const cuts = overlapping.filter((clip) => !((clip.start as number) >= from && (clip.start as number) + (clip.length as number) <= to)).map(row);
+      const removes = overlapping.filter((clip) => (clip.start as number) >= from && arrangementClipEnd(clip) <= to).map(row);
+      const cuts = overlapping.filter((clip) => !((clip.start as number) >= from && arrangementClipEnd(clip) <= to)).map(row);
       const fence = JSON.stringify({ track: [track.ref, track.objectIdentity, track.name], clips: this.arrangementFence(snapshot, [params.trackRef]) });
       const transaction: ClipLifecycleTransaction = { id: `clearrange_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "clip-clear-range", fence, clipRef: params.trackRef as LiveRef, payload: { trackRef: params.trackRef, fromBeat: from, toBeat: to, expectedName: track.name }, prior: { removes, cuts }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "clear range");
@@ -5888,7 +5898,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await this.asyncAdapter().invokeAsync({ operation: "clip.clear-range", args: transaction.payload }, context) as JsonObject;
       const after = this.arrangementClipsOf(await this.viewForAsync(context, [trackRef]), trackRef);
-      if (after.some((clip) => (clip.start as number) < toBeat - 1e-6 && (clip.start as number) + (clip.length as number) > fromBeat + 1e-6)) throw new Error("the range still holds a clip after clearing");
+      if (after.some((clip) => (clip.start as number) < toBeat - 1e-6 && arrangementClipEnd(clip) > fromBeat + 1e-6)) throw new Error("the range still holds a clip after clearing");
       transaction.created = { removed: result.removed ?? [] }; transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", removed: result.removed ?? [], clipsBefore: result.clipsBefore ?? null, clipsAfter: result.clipsAfter ?? null, kept: KEPT_DELETION, idempotent: false });
     } catch (cause) { if (transaction.state === "applying") transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Whether the range is clear is uncertain: look at the Arrangement before trying again."); }
@@ -8345,6 +8355,9 @@ export class McpHost {
   /** What a MIDI or scene capture is fenced on; the Remote Script's _capture_authority_revision computes the same. */
   /** Every note of a clip, as its rows are (an Arrangement clip's row carries only its noteCount): through
    * `discover note`, page after page. */
+  /** A clip's notes' revision, over their rows as the Remote Script computes a clip's notesRevision. */
+  private static notesRevision(notes: ReadonlyArray<Record<string, unknown>>): string { return createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex"); }
+
   private async clipNotesAsync(clipRef: LiveRef, context?: LiveOperationContext): Promise<Array<Record<string, unknown>>> {
     const items = await this.views.discoverAll({ kind: "note", parent: clipRef, limit: 100_000 }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
     return items.map(({ ref: _ref, parentRef: _parentRef, ...note }) => note);
@@ -9330,12 +9343,20 @@ export class McpHost {
       const reconciliation = made.state === "uncertain" && made.undoKey === params.idempotencyKey;
       if ((made.state !== "applied" && !reconciliation) || !made.created) return this.transactionError(id, "Only an applied or exact-key uncertain Arrangement MIDI clip transaction can be undone");
       try {
-        this.beginUndoRecovery(made, params.idempotencyKey as string); const status = this.requireConnected(); if (status.epoch !== made.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const status = this.requireConnected(); if (status.epoch !== made.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; made.undoKey = params.idempotencyKey as string;
         const clips = made.created.clips as Array<{ objectIdentity: string; trackRef: LiveRef }>;
         const trackRefs = [...new Set(clips.map((clip) => clip.trackRef))];
         // All of them still there, or none deleted: an undo doesn't leave half a change.
         if (!reconciliation) { const snapshot = await this.viewForAsync(context, trackRefs); if (clips.some((clip) => !this.arrangementClipsOf(snapshot, clip.trackRef).some((row) => row.objectIdentity === clip.objectIdentity))) return this.transactionError(id, "a clip this change made isn't in the Arrangement any more; undo refused"); }
+        // Edited since Kumi made it (its notes, name or extent): it stays, with the producer's edits.
+        if (!reconciliation) for (const fence of (made.created.fences as JsonObject[] | undefined) ?? []) {
+          const clip = clips.find((item) => item.objectIdentity === fence.objectIdentity); if (!clip) continue;
+          const row = this.arrangementClipsOf(await this.viewForAsync(context, [clip.trackRef]), clip.trackRef).find((candidate) => candidate.objectIdentity === fence.objectIdentity); if (!row) continue;
+          if (row.name !== fence.name || !sameLiveValue(row.start, fence.start) || !sameLiveValue(arrangementClipEnd(row), fence.end) || McpHost.notesRevision(await this.clipNotesAsync(row.ref as LiveRef, context)) !== fence.notesRevision) return this.reasonError(id, `the clip "${String(fence.name ?? "")}" Kumi made has been edited since (its notes, name or length): it stays, with those edits`, "If it should go anyway, delete it with live_clip_delete_preview, then live_clip_delete_apply.");
+        }
+        // Checked first: a refused undo leaves no recovery behind it, and a later one starts afresh.
+        this.beginUndoRecovery(made, params.idempotencyKey as string);
         made.state = "undoing";
         // Each is found again by its identity: an Arrangement clip's reference moves when an earlier one goes.
         for (const clip of [...clips].reverse()) {
