@@ -56,9 +56,10 @@ const newer = (left: string, right: string) => {
 };
 
 function nodeCheck(version: string): Check {
+  if (major(version) > Math.max(...SUPPORTED_NODE_MAJORS)) return { status: "ok", text: `Node.js ${version.replace(/^v/, "")} (Kumi is tested on 22 and 24)` };
   return SUPPORTED_NODE_MAJORS.includes(major(version))
     ? { status: "ok", text: `Node.js ${version.replace(/^v/, "")}` }
-    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or 24)`,
+    : { status: "fix", text: `Node.js ${version.replace(/^v/, "")} isn't supported (Kumi needs 22 or newer)`,
       // An installed Kumi brings its own Node: running the installer again is the whole fix.
       next: INSTALLED ? `Run ${KUMI_REPAIR}, which brings Kumi's own Node back` : `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
 }

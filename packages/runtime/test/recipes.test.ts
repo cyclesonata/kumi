@@ -50,7 +50,7 @@ test("recipes are checked when saved and when run: known tools, declared blanks,
     assert.match((await f.run("save_recipe", { ...resample, steps: [{ tool: "delete_everything", input: {} }] })).text, /isn't one of Kumi's change tools/);
     assert.match((await f.run("save_recipe", { ...resample, params: [] })).text, /use \$track, which params doesn't declare/);
     assert.match((await f.run("save_recipe", { ...resample, name: "!!!" })).text, /needs? a name|letters or numbers/);
-    assert.match((await f.run("save_recipe", { ...resample, steps: Array.from({ length: MAX_RECIPE_STEPS + 1 }, () => resample.steps[0]) })).text, /1 to 40 steps/);
+    assert.match((await f.run("save_recipe", { ...resample, steps: Array.from({ length: MAX_RECIPE_STEPS + 1 }, () => resample.steps[0]) })).text, /1 to 500 steps/);
     await f.run("save_recipe", resample);
     assert.match((await f.run("run_recipe", { name: "Resample twice" })).text, /needs \$track \(the track to work on\)/);
     assert.match((await f.run("run_recipe", { name: "nope" })).text, /There's no recipe called "nope"/);

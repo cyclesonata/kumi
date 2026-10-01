@@ -28,9 +28,12 @@ test("the doctor says what's fine and exactly what to fix, without printing secr
   try {
     let printed = "";
     const out = new Writable({ write(chunk, _e, done) { printed += String(chunk); done(); } });
-    const code = await runDoctor({ ...io(s.env), out, nodeVersion: "v25.9.0", bundledBridgeVersion: "1.0.10" });
+    const code = await runDoctor({ ...io(s.env), out, nodeVersion: "v20.11.0", bundledBridgeVersion: "1.0.10" });
     assert.equal(code, 1);
-    assert.match(printed, /fix +Node\.js 25\.9\.0 isn't supported/); assert.match(printed, /Install Node 24 LTS/);
+    assert.match(printed, /fix +Node\.js 20\.11\.0 isn't supported \(Kumi needs 22 or newer\)/); assert.match(printed, /Install Node 24 LTS/);
+    // A newer Node than Kumi is tested on is fine.
+    let newer = ""; await runDoctor({ ...io(s.env), out: new Writable({ write(chunk, _e, done) { newer += String(chunk); done(); } }), nodeVersion: "v25.9.0", bundledBridgeVersion: "1.0.10" });
+    assert.match(newer, /ok +Node\.js 25\.9\.0 \(Kumi is tested on 22 and 24\)/);
     assert.match(printed, /ok +openai API key from OPENAI_API_KEY · model openai\/gpt-fixture/);
     assert.match(printed, /fix +The installed bridge \(1\.0\.9\) is older than this Kumi's \(1\.0\.10\)/);
     assert.match(printed, /note +Other MCP apps would start the bridge with a Node from a temporary folder/);

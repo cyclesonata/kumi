@@ -122,12 +122,12 @@ export function memoryTools(options: { store: MemoryStore; project: () => string
     const prefix = scope === "set" ? "s" : "p";
     const replacing = replaces ? notes.findIndex((note) => note.id === replaces) : -1;
     if (replaces && replacing < 0) return { text: `There's no note ${replaces.slice(0, 16)} about ${scope === "set" ? "this Set" : "the producer"}; leave replaces out to add one.`, isError: true };
-    if (replacing < 0 && notes.length >= MAX_NOTES) {
-      return { text: `${MAX_NOTES} notes are kept ${scope === "set" ? "about this Set" : "about the producer"}; replace the least useful one (replaces: its id).`, isError: true };
-    }
+    // Full: the oldest note makes room, rather than the new one being refused.
+    const oldest = replacing < 0 && notes.length >= MAX_NOTES ? notes.reduce((best, item, index) => item.at < notes[best]!.at ? index : best, 0) : -1;
+    const making = replacing >= 0 ? replacing : oldest;
     const note: MemoryNote = { id: replacing >= 0 ? notes[replacing]!.id : nextId(notes, prefix), text, at: Date.now() };
-    const replaced = replacing >= 0 ? notes[replacing] : undefined;
-    if (replacing >= 0) notes.splice(replacing, 1);
+    const replaced = making >= 0 ? notes[making] : undefined;
+    if (making >= 0) notes.splice(making, 1);
     notes.push(note);
     await options.store.save(scope, project, notes);
     options.onEvent({ type: "remembered", scope, note, ...(replaced ? { replaced } : {}) });
