@@ -25,7 +25,7 @@ const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailabl
 const EVENT_TYPES: ReadonlySet<string> = new Set(REMOTE_SCRIPT_EVENT_TYPES);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
 export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"]);
-/** Changes the Remote Script makes without mutation authority: its own undo steps, and a message in Live's status bar. */
+/** Direct Remote Script calls without mutation authority: Live undo steps, messages and Python. */
 export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end", "application.message", "python.run"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
