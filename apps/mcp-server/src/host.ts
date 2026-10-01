@@ -8956,8 +8956,11 @@ export class McpHost {
     }
     // Stopped before its first change (a read or check failed): only a change sent to Live makes an undo uncertain.
     const failed = isObject(result.result) && result.result.isError === true && Array.isArray(result.result.content) && isObject(result.result.content[0]) ? result.result.content[0].text : undefined;
-    if (!undoing || before !== "applied" || undoing.state === "applied" || undoing.state === "undone" || watch.changes > 0 || typeof failed !== "string") return result;
+    if (!undoing || before !== "applied" || undoing.state === "undone" || watch.changes > 0 || typeof failed !== "string") return result;
+    const refused = undoing.state === "applied";
     undoing.state = "applied"; delete undoing.undoKey; this.undoRecoveryPlans.delete(undoing);
+    // Refused by its own check, still applied: its words say why, and a later undo (any key) starts over.
+    if (refused) return result;
     let reason = failed; try { const parsed = JSON.parse(failed) as { reason?: unknown }; if (typeof parsed.reason === "string") reason = parsed.reason; } catch { /* the text is the reason */ }
     return response(id, { content: [{ type: "text", text: JSON.stringify({ reason: `Undo stopped before it changed anything in Live: ${reason}`, remediation: "Nothing changed in Live, and the change is still in place. A later undo checks it again from the start." }) }], isError: true });
   }
