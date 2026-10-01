@@ -122,6 +122,8 @@ test("a device's settings beyond its parameters, Live's own undo as a last resor
     assert.equal(set.isError, false, set.text); assert.equal(b.records.at(-1)!.state, "applied");
     await tool(b.tools, "edit_device").execute({ deviceRef: "device:1", action: "warp-double" }, signal());
     assert.equal(b.records.at(-1)!.state, "kept", "doubling the warping has only Live's undo"); assert.match(b.records.at(-1)!.title, /warp double/);
+    await tool(b.tools, "edit_device").execute({ deviceRef: "device:1", action: "modulate", source: 1, target: 2, amount: 0.5 }, signal());
+    assert.equal(b.records.at(-1)!.state, "kept", "a modulation amount's undo couldn't tell a later turn of it");
     const undone = await tool(b.tools, "undo_in_live").execute({}, signal());
     assert.deepEqual(JSON.parse(undone.text), { done: true, canUndo: false, canRedo: true });
     assert.deepEqual(b.requests.find((request) => request.name === "live_song_undo")!.args.confirmation, "undo-in-live");

@@ -17,26 +17,29 @@ export const MAX_BRIDGE_MESSAGE_BYTES = 64 * 1024 * 1024;
  * chunk the pipe delivers, which for a message of megabytes is quadratic. Over the limit, the message
  * is refused (and the link closes, as the SDK's does).
  */
-class LinearReadBuffer {
+export class LinearReadBuffer {
   private pieces: Buffer[] = []; private size = 0;
+  /** How many pieces were searched for a line end and had none: the SDK asks after every chunk. */
+  private scanned = 0;
   constructor(private readonly limit: number) {}
   append(chunk: Buffer): void {
     if (this.size + chunk.length > this.limit) { this.clear(); throw new Error(`ReadBuffer exceeded maximum size of ${this.limit} bytes`); }
     this.pieces.push(chunk); this.size += chunk.length;
   }
   readMessage(): JSONRPCMessage | null {
-    for (let index = 0; index < this.pieces.length; index++) {
+    for (let index = this.scanned; index < this.pieces.length; index++) {
       const at = this.pieces[index]!.indexOf(10);
       if (at < 0) continue;
       const head = Buffer.concat([...this.pieces.slice(0, index), this.pieces[index]!.subarray(0, at)]);
       const rest = this.pieces[index]!.subarray(at + 1);
       this.pieces = [...(rest.length ? [rest] : []), ...this.pieces.slice(index + 1)];
-      this.size = this.pieces.reduce((sum, piece) => sum + piece.length, 0);
+      this.size -= head.length + 1; this.scanned = 0;
       return deserializeMessage(head.toString("utf8").replace(/\r$/, ""));
     }
+    this.scanned = this.pieces.length;
     return null;
   }
-  clear(): void { this.pieces = []; this.size = 0; }
+  clear(): void { this.pieces = []; this.size = 0; this.scanned = 0; }
 }
 
 // SDK 1.30.1 starts an unawaited close on initialize failure, and its stdio

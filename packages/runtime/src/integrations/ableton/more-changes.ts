@@ -496,7 +496,8 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "edit_device", since: FULL_CONTROL_BRIDGE, preview: "live_device_edit_preview", apply: "live_device_edit_apply", family: "device",
     description: "Edit what a device has beyond its parameters (deviceRef from discovery): a setting of Roar, Shifter, Spectral Resonator, Hybrid Reverb, CC Control or Simpler (action set: setting, value; the preview lists a setting's choices), how much a Wavetable modulation source moves a target (action modulate), Simpler's slices (slice-insert, slice-move, slice-remove at a time; slice-clear, slice-reset), and its sample's warping (warp-as beats, warp-double, warp-half).",
-    permanent: (input) => (["slice-clear", "slice-reset", "warp-as", "warp-double", "warp-half"].includes(String(input.action)) ? "Live gives Kumi no way to put this back; Live's own undo can." : undefined),
+    // A modulation amount's undo can't yet tell whether it was turned again since, so HISTORY keeps it too.
+    permanent: (input) => (["slice-clear", "slice-reset", "warp-as", "warp-double", "warp-half", "modulate"].includes(String(input.action)) ? "Live gives Kumi no way to put this back; Live's own undo can." : undefined),
     summarize(preview, input, track) {
       const device = record(preview.device ?? preview.target); const known = ownerTrack(input.deviceRef, track);
       const what = input.action === "set" ? `${String(input.setting ?? "a setting").split(".").at(-1)!.replace(/_/g, " ")} set` : input.action === "modulate" ? "modulation amount set" : String(input.action ?? "edited").replace(/-/g, " ");

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { connectMcp, bridgeEntry, type McpEndpoint } from "../src/mcp/client.js";
+import { connectMcp, LinearReadBuffer, bridgeEntry, type McpEndpoint } from "../src/mcp/client.js";
 import { AllowedTools } from "../src/mcp/allowed-tools.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 const fixture = fileURLToPath(new URL("../../test/fixtures/mcp-server.mjs", import.meta.url));
@@ -276,4 +276,23 @@ test("a bridge message of megabytes (a big Set's page) arrives whole, read in li
     assert.ok(performance.now() - started < 5_000, "no quadratic joining");
     assert.ok((data(await tools.call("server_status", {}, freshSignal())) as { calls: unknown[] }).calls.length > 0, "the link is still up");
   } finally { await tools.close(); }
+});
+
+test("the bridge's read buffer looks at each byte once, however the message is cut into chunks", () => {
+  const buffer = new LinearReadBuffer(128 * 1024 * 1024);
+  const chunk = Buffer.alloc(64 * 1024, 0x20);
+  const started = performance.now();
+  // As the SDK reads: a message asked for after every chunk the pipe delivers.
+  buffer.append(Buffer.from('{"jsonrpc":"2.0","id":1,"result":{"text":"'));
+  for (let index = 0; index < 1000; index++) { buffer.append(chunk); assert.equal(buffer.readMessage(), null); }
+  buffer.append(Buffer.from('"}}\n{"jsonrpc":"2.0","id":2,"result":{}}\n{"jsonrpc"'));
+  const first = buffer.readMessage() as unknown as { id: number; result: { text: string } };
+  assert.equal(first.id, 1); assert.equal(first.result.text.length, 1000 * 64 * 1024);
+  assert.equal((buffer.readMessage() as { id: number }).id, 2);
+  assert.equal(buffer.readMessage(), null, "the start of the next message waits for its end");
+  buffer.append(Buffer.from(':"2.0","id":3,"result":{}}\r\n'));
+  assert.equal((buffer.readMessage() as { id: number }).id, 3);
+  // Searching every chunk again on each one took over a second here; once each, a few tens of ms.
+  assert.ok(performance.now() - started < 600, `${Math.round(performance.now() - started)} ms`);
+  assert.throws(() => { const small = new LinearReadBuffer(10); small.append(Buffer.alloc(11)); }, /exceeded maximum size of 10 bytes/);
 });
