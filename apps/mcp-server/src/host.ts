@@ -7946,11 +7946,13 @@ export class McpHost {
     return { expectedObjectIdentity: located.clip.objectIdentity, expectedAuthorityRevision, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
   }
 
-  private async deleteOwnedClipAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false): Promise<void> {
+  private async deleteOwnedClipAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false, expectedNotesRevision?: string): Promise<void> {
     const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["clipRow"]>;
     try { located = this.clipRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
     if (located.clip.objectIdentity !== objectIdentity) throw new Error("owned clip identity changed before cleanup");
     if (expectedFingerprint && this.captureBoundedFingerprint(located.clip) !== expectedFingerprint) throw new Error("transaction-owned clip was modified after creation; cleanup refused");
+    // An Arrangement clip's row counts its notes without them: its notes are checked on their own.
+    if (located.arrangement && expectedNotesRevision !== undefined && McpHost.notesRevision(await this.clipNotesAsync(reference, context)) !== expectedNotesRevision) throw new Error("transaction-owned clip was modified after creation (its notes); cleanup refused");
     const operation = located.arrangement ? "arrangement.clip.delete" : "clip.delete"; const args = located.arrangement ? { ref: reference, ...this.arrangementClipAuthority(snapshot, reference) } : { ref: reference, ...this.clipAuthority(snapshot, reference) };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, operation, args, context); else await adapter.invokeAsync({ operation, args }, context);
     try { this.clipRow(await this.viewForAsync(context, [located.track?.ref ?? reference]), reference); } catch { return; }
@@ -8038,7 +8040,9 @@ export class McpHost {
       const created = await adapter.invokeAsync({ operation: "clip.duplicate", args: transaction.payload }, context) as { ref?: unknown; objectIdentity?: unknown; name?: unknown; createdFingerprint?: unknown };
       if (typeof created?.ref !== "string" || !isNonEmptyString(created.objectIdentity, 256) || !isNonEmptyString(created.createdFingerprint, 64)) throw new Error("clip duplication did not return exact created identity");
       const createdClip = this.clipRow(await this.viewForAsync(context, [created.ref, transaction.clipRef, transaction.payload.targetTrackRef]), created.ref as LiveRef); if (createdClip.clip.objectIdentity !== created.objectIdentity || this.captureObjectFingerprint(createdClip.clip) !== created.createdFingerprint) throw new Error("duplicated clip identity or creation fingerprint was not confirmed");
-      transaction.created = { ...(created as Record<string, unknown>), fingerprint: created.createdFingerprint };
+      // An Arrangement MIDI copy's notes, which its row only counts: undo leaves it once they change.
+      const notesRevision = createdClip.arrangement && createdClip.clip.kind === "midi" ? McpHost.notesRevision(await this.clipNotesAsync(created.ref as LiveRef, context)) : undefined;
+      transaction.created = { ...(created as Record<string, unknown>), fingerprint: created.createdFingerprint, ...(notesRevision !== undefined ? { notesRevision } : {}) };
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", created: transaction.created, idempotent: false });
@@ -8915,7 +8919,7 @@ export class McpHost {
       try {
         this.beginUndoRecovery(duplicate, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== duplicate.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; duplicate.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(duplicate, adapter, context); duplicate.state = "undoing";
-        await this.deleteOwnedClipAsync(adapter, duplicate.created.ref as LiveRef, duplicate.created.objectIdentity as string, context, duplicate.created.fingerprint as string, duplicate, reconciliation);
+        await this.deleteOwnedClipAsync(adapter, duplicate.created.ref as LiveRef, duplicate.created.objectIdentity as string, context, duplicate.created.fingerprint as string, duplicate, reconciliation, typeof duplicate.created.notesRevision === "string" ? duplicate.created.notesRevision : undefined);
         duplicate.state = "undone"; return this.successText(id, { transactionId: duplicate.id, state: "undone", deleted: duplicate.created.ref, idempotent: false });
       } catch (cause) { duplicate.state = "uncertain"; return this.adapterToolError(id, cause, "Clip-duplicate undo is uncertain; inspect the exact destination."); }
     }
