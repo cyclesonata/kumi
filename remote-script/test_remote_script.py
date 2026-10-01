@@ -1666,18 +1666,21 @@ class ControlSurfaceTests(unittest.TestCase):
         returned = rows[1]; mapper.invoke("track.rename", {"ref": returned["ref"], "name": "Return Renamed", "expectedName": returned["name"], "expectedObjectIdentity": returned["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", returned["ref"])})
         self.assertEqual(song.return_tracks[0].name, "Return Renamed")
 
-    def test_recording_takes_tracks_alongside_when_exactly_they_and_the_destination_are_armed(self):
+    def test_recording_starts_with_other_tracks_armed_too_and_needs_the_destination_armed(self):
         song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack(), FakeTrack()]
         for index, track in enumerate(song.tracks): track._live_ptr = 400 + index; track.arm = index < 2
         mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"]
         args = {"action": "start", "expectedSessionRecord": False, "expectedArrangementRecord": False, "destinationTrackRef": rows[0]["ref"], "destinationTrackIdentity": "live:400", "outputSafety": {"safe": True, "provenance": "unit-test"}}
-        with self.assertRaisesRegex(ValueError, "only unambiguous armed track"): mapper._recording_authority(args, "arrangement")
+        # Another track armed too: Live records onto both, as when the producer presses Record.
+        self.assertEqual(mapper._recording_authority(args, "arrangement"), "start")
         both = {**args, "alsoTrackRefs": [rows[1]["ref"]], "alsoTrackIdentities": ["live:401"]}
         self.assertEqual(mapper._recording_authority(both, "arrangement"), "start")
         song.tracks[2].arm = True
-        with self.assertRaisesRegex(ValueError, "exactly the armed ones"): mapper._recording_authority(both, "arrangement")
+        self.assertEqual(mapper._recording_authority(both, "arrangement"), "start")
         song.tracks[1].arm = False; song.tracks[2].arm = False
         with self.assertRaisesRegex(ValueError, "not armed"): mapper._recording_authority(both, "arrangement")
+        song.tracks[0].arm = False
+        with self.assertRaisesRegex(ValueError, "isn't armed"): mapper._recording_authority(args, "arrangement")
 
     def test_duplicate_proxy_identities_and_route_labels_are_refused(self):
         song = FakeSong(); first, second = FakeDevice(), FakeDevice(); first._live_ptr = 301; second._live_ptr = 302; song.tracks[0].devices = [first, second]; mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; device = track["devices"][0]; siblings = [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for row in track["devices"]]
@@ -1966,14 +1969,14 @@ class ControlSurfaceTests(unittest.TestCase):
         snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; slot = track["clipSlots"][0]; scene = snapshot["scenes"][0]
         clip = next(item for item in track["clips"] if item["ref"] == slot["clipRef"])
         authority = {"slotRef": slot["ref"], "trackRef": track["ref"], "sceneRef": scene["ref"], "sceneIndex": scene["index"], "clipRef": slot["clipRef"], "trackIdentity": track["objectIdentity"], "sceneIdentity": scene["objectIdentity"], "slotIdentity": slot["objectIdentity"], "clipIdentity": clip["objectIdentity"], "playbackRevision": snapshot["playback"]["revision"], "outputSafety": {"safe": True, "provenance": "unit-test-operator"}}
-        stale = dict(authority); stale["playbackRevision"] = "stale"
-        with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", stale)
+        # Playback moving on since the preview doesn't stop a launch (it launches whatever plays); a target that isn't the one previewed does.
         cross_wired = dict(authority); cross_wired["sceneRef"] = snapshot["scenes"][1]["ref"]; cross_wired["sceneIndex"] = 1
         with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", cross_wired)
         launched = mapper.invoke("session.clip-launch", authority)
         self.assertEqual(launched["launched"], slot["ref"])
+        # Launching again while it plays isn't refused, as pressing the slot again in Live.
         layered = dict(authority); layered["playbackRevision"] = mapper.snapshot()["playback"]["revision"]
-        with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", layered)
+        self.assertEqual(mapper.invoke("session.clip-launch", layered)["launched"], slot["ref"])
         stopped = mapper.invoke("session.clip-stop", {key: value for key, value in authority.items() if key != "playbackRevision"})
         self.assertTrue(stopped["stopped"])
 

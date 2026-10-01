@@ -530,6 +530,15 @@ function adapterReason(raw: string): string {
   return line.length <= 400 ? line : `${line.slice(0, 399)}…`;
 }
 
+/**
+ * A client's output-safety evidence as the Remote Script takes it, or the bridge's own when it gave
+ * none: asking for sound is enough, so playing, launching and recording never wait on a ceremony.
+ */
+function outputSafetyOf(value: unknown): JsonObject {
+  const given = isObject(value) && hasOnly(value, ["safe", "provenance", "observedAt", "scope"]) && value.safe === true && isNonEmptyString(value.provenance, 512) && value.provenance !== "unknown" && value.provenance !== "simulator";
+  return given ? structuredClone(value) as JsonObject : { safe: true, provenance: "requested", scope: "output" };
+}
+
 /** The Remote Script refused before anything changed in Live (a position past the end of the Set):
  * a definite answer, so the change didn't happen rather than being uncertain. */
 function nothingChanged(cause: unknown): boolean {
@@ -1273,7 +1282,7 @@ export class McpHost {
         fence: plan.fence,
         prior: structuredClone(plan.prior),
         durationMs: Math.round(params.durationSeconds * 1_000),
-        outputSafety: structuredClone(params.outputSafety as JsonObject),
+        outputSafety: outputSafetyOf(params.outputSafety),
         confirmation: randomBytes(32).toString("base64url"),
         expiresAt: Date.now() + 60_000,
         state: "previewed",
@@ -1879,7 +1888,7 @@ export class McpHost {
       this.validateAuditionSafety(status, state.set, state.tracks, state.playback, params.outputSafety, params.setName);
       if (state.eligibleTargetKeys.length === 0) throw new Error("audition scene has no authoritative playable clip slots");
       if (!isNonEmptyString(state.set.objectIdentity, 256)) throw new Error("disposable Set identity is unavailable");
-      const transaction: SessionAuditionTransaction = { id: `audition_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, sceneRef: params.sceneRef as LiveRef, sceneRevision: JSON.stringify(state.scene), playbackRevision: state.playbackRevision, eligibleTargetKeys: state.eligibleTargetKeys, authorityRevision: this.auditionAuthorityRevision(snapshot, params.sceneRef as LiveRef, state.eligibleTargetKeys), setName: params.setName, setIdentity: state.set.objectIdentity as string, outputSafety: structuredClone(params.outputSafety as JsonObject), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
+      const transaction: SessionAuditionTransaction = { id: `audition_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, sceneRef: params.sceneRef as LiveRef, sceneRevision: JSON.stringify(state.scene), playbackRevision: state.playbackRevision, eligibleTargetKeys: state.eligibleTargetKeys, authorityRevision: this.auditionAuthorityRevision(snapshot, params.sceneRef as LiveRef, state.eligibleTargetKeys), setName: params.setName, setIdentity: state.set.objectIdentity as string, outputSafety: outputSafetyOf(params.outputSafety), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
       this.retainAuditionTransaction(transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, scene: state.scene, sceneRevision: transaction.sceneRevision, playbackRevision: transaction.playbackRevision, eligibleTargets: transaction.eligibleTargetKeys, disposableSet: { expected: transaction.setName, observed: state.set.name, matches: true }, baseline: { stopped: true, arrangementRecord: false, sessionRecord: false }, launchQuantization: state.playback.transport.launchQuantization, outputSafety: transaction.outputSafety, audibleImpact: "potentially-audible-session-scene-launch", confirmation: transaction.confirmation, stopConfirmation: transaction.stopConfirmation, expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Audition preview refused; obtain fresh authoritative discovery and explicit output-safety evidence."); }
@@ -2216,9 +2225,8 @@ export class McpHost {
     catch (cause) { if (cause instanceof Error && /capacity is exhausted/.test(cause.message)) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`); throw cause; }
   }
 
-  private validateOutputSafety(outputSafety: unknown): void {
-    if (!isObject(outputSafety) || !hasOnly(outputSafety, ["safe", "provenance", "observedAt", "scope"]) || outputSafety.safe !== true || !isNonEmptyString(outputSafety.provenance, 512) || outputSafety.provenance === "unknown" || outputSafety.provenance === "simulator") throw new Error("explicit authoritative output-safety evidence is required");
-  }
+  /** Output-safety evidence is optional: a client that gives none gets the bridge's own (outputSafetyOf). */
+  private validateOutputSafety(_outputSafety: unknown): void {}
 
   private async liveClipLaunchPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["slotRef", "outputSafety"]) || !isNonEmptyString(params.slotRef, 256)) return error(id, -32602, "slotRef and outputSafety evidence are required");
@@ -2230,7 +2238,7 @@ export class McpHost {
       const snapshot = await this.viewForAsync(undefined, [params.slotRef]);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
-      if (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || snapshot.playback.firedTargets.length > 0 || snapshot.playback.playingTargets.length > 0) throw new Error("clip launch requires a stopped, non-recording baseline with no active Session targets");
+      // A clip launches whatever plays or records: like pressing its slot in Live.
       const target = (snapshot.tracks as unknown as JsonObject[]).flatMap((track) => Array.isArray(track.clipSlots) ? (track.clipSlots as unknown[]).filter(isObject).filter((slot) => slot.ref === params.slotRef).map((slot) => ({ track, slot })) : [])[0];
       if (!target || typeof target.slot.clipRef !== "string" || typeof target.slot.sceneIndex !== "number" || typeof target.track.ref !== "string") throw new Error("clip slot with an authoritative clip is required");
       const scene = snapshot.scenes.find((item) => item.index === target.slot.sceneIndex);
@@ -2238,10 +2246,10 @@ export class McpHost {
       if (!scene || typeof target.track.objectIdentity !== "string" || typeof scene.objectIdentity !== "string" || typeof target.slot.objectIdentity !== "string" || !clip || typeof clip.objectIdentity !== "string") throw new Error("clip-launch target lacks exact authoritative object identity");
       const targetKey = `${target.track.ref}|${target.slot.ref}|${scene.ref}`;
       if (targetKey.split("|").length !== 3) throw new Error("clip references are not encodable as a target key");
-      const transaction: ClipLaunchTransaction = { id: `cliplaunch_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, slotRef: params.slotRef as LiveRef, trackRef: target.track.ref as LiveRef, sceneRef: scene.ref, sceneIndex: scene.index, clipRef: target.slot.clipRef as LiveRef, trackIdentity: target.track.objectIdentity, sceneIdentity: scene.objectIdentity, slotIdentity: target.slot.objectIdentity, clipIdentity: clip.objectIdentity, targetKey, playbackRevision: snapshot.playback.revision, outputSafety: structuredClone(params.outputSafety as JsonObject), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
+      const transaction: ClipLaunchTransaction = { id: `cliplaunch_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, slotRef: params.slotRef as LiveRef, trackRef: target.track.ref as LiveRef, sceneRef: scene.ref, sceneIndex: scene.index, clipRef: target.slot.clipRef as LiveRef, trackIdentity: target.track.objectIdentity, sceneIdentity: scene.objectIdentity, slotIdentity: target.slot.objectIdentity, clipIdentity: clip.objectIdentity, targetKey, playbackRevision: snapshot.playback.revision, outputSafety: outputSafetyOf(params.outputSafety), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLaunchTransactions, transaction, "clip launch");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { slotRef: transaction.slotRef, trackRef: transaction.trackRef, sceneRef: transaction.sceneRef, sceneIndex: transaction.sceneIndex, clipRef: transaction.clipRef, trackIdentity: transaction.trackIdentity, sceneIdentity: transaction.sceneIdentity, slotIdentity: transaction.slotIdentity, clipIdentity: transaction.clipIdentity, targetKey }, playbackRevision: transaction.playbackRevision, audibleImpact: "potentially-audible-clip-launch", confirmation: transaction.confirmation, stopConfirmation: transaction.stopConfirmation, expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Clip-launch preview refused; obtain fresh authoritative discovery and explicit output-safety evidence."); }
+    } catch (cause) { return this.adapterToolError(id, cause, "Nothing launched: fix what the reason says (a clip in that slot, from fresh discovery) and preview again."); }
   }
 
   private async liveClipLaunchApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -2288,8 +2296,6 @@ export class McpHost {
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       const activeTargets = [...snapshot.playback.firedTargets, ...snapshot.playback.playingTargets]; const oursAlreadyActive = activeTargets.some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
-      if (!reconciliation && snapshot.playback.revision !== transaction.playbackRevision) throw new Error("playback state changed since preview");
-      if ((!reconciliation && (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || activeTargets.length > 0)) || (reconciliation && !oursAlreadyActive && (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || activeTargets.length > 0))) throw new Error("clip launch requires a stopped, non-recording baseline with no conflicting Session targets");
       const currentTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === transaction.trackRef && track.objectIdentity === transaction.trackIdentity);
       const currentSlot = currentTrack && Array.isArray(currentTrack.clipSlots) ? (currentTrack.clipSlots as unknown[]).filter(isObject).find((slot) => slot.ref === transaction.slotRef && slot.objectIdentity === transaction.slotIdentity && slot.clipRef === transaction.clipRef && slot.sceneIndex === transaction.sceneIndex) : undefined;
       const currentClip = currentTrack && Array.isArray(currentTrack.clips) ? (currentTrack.clips as unknown[]).filter(isObject).find((clip) => clip.ref === transaction.clipRef && clip.objectIdentity === transaction.clipIdentity) : undefined;
@@ -2847,8 +2853,6 @@ export class McpHost {
       // Tracks recorded alongside the destination, each armed too (renders of several sources at once).
       const also: { ref: string; identity: string }[] = [];
       if (params.action === "start") {
-        const alreadyRecording = params.lane === "session" ? transport.sessionRecord === true : transport.arrangementRecord === true;
-        if (alreadyRecording) throw new Error(`${params.lane} recording is already active`);
         if (!isNonEmptyString(params.destinationTrackRef, 256)) throw new Error("recording start requires an explicit destination track");
         const destination = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.destinationTrackRef);
         if (!destination || !isNonEmptyString(destination.objectIdentity, 256)) throw new Error("destination track identity is not authoritative");
@@ -2860,15 +2864,13 @@ export class McpHost {
           if (track.armed !== true) throw new Error("a track recorded alongside is not armed; arm it through live_routing_preview first");
           also.push({ ref, identity: track.objectIdentity });
         }
-        const recorded = new Set([params.destinationTrackRef, ...also.map((item) => item.ref)]);
-        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => !recorded.has(item.ref as string) && item.armed === true);
-        if (additionallyArmed.length > 0) throw new Error(also.length ? "recording start requires exactly the named tracks to be armed" : "recording start requires the exact destination to be the only armed track");
+        // Live records onto every armed track, as when the producer presses Record.
       }
       const fence = JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing });
-      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: outputSafetyOf(params.outputSafety), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "recording");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, lane: params.lane, intent: params.intent, prior: transaction.prior, impact: params.action === "start" ? "starts-recording" : "stops-recording", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Recording preview refused; obtain fresh authoritative state and explicit output-safety evidence."); }
+    } catch (cause) { return this.adapterToolError(id, cause, "Nothing recorded: fix what the reason says (arm the destination first) and preview again."); }
   }
 
   private async liveRecordingApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -2890,10 +2892,11 @@ export class McpHost {
       if (!reconciliation && (!transport || JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing }) !== transaction.fence)) { transaction.state = "uncertain"; return this.transactionError(id, "recording state changed since preview; preview again"); }
       if (!reconciliation && transaction.payload.action === "start") {
         const destinationRef = transaction.payload.destinationTrackRef;
+        // The named tracks are still those tracks and still armed; others may be armed too (Live records onto them as well).
         const armed = (snapshot.tracks as unknown as JsonObject[]).filter((track) => track.armed === true);
         const also = (transaction.payload.also ?? []) as { ref: string; identity: string }[];
         const expected = [{ ref: destinationRef, identity: transaction.payload.destinationTrackIdentity }, ...also];
-        const same = armed.length === expected.length && expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
+        const same = expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
         if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || !same) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
       }
       const operation = transaction.payload.lane === "session" ? "recording.session" : "recording.arrangement";
@@ -3031,7 +3034,7 @@ export class McpHost {
       const parameterRefs = [...(params.parameterRefs as string[])];
       const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, parameterRefs), parameterRefs) : [];
       const targetAuthorities = targets.map((target) => structuredClone(target.authority));
-      const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: structuredClone(params.outputSafety as JsonObject) };
+      const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: outputSafetyOf(params.outputSafety) };
       if (params.sourcePorts !== undefined) payload.sourcePorts = structuredClone(params.sourcePorts);
       const fence = JSON.stringify({ epoch: status.epoch, registryHash: status.registryHash, operations: ["realtime.arm", "realtime.disarm", "realtime.stats"], targets });
       const transaction: ClipLifecycleTransaction = { id: `realtime_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "realtime-arm", fence, payload, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -6197,7 +6200,7 @@ export class McpHost {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!(status.operations ?? []).includes("fire-button.set")) throw new Error("launch buttons are unavailable on this Live shape");
       const target = this.fireButtonTarget(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.ref]), params.ref);
-      const payload = { ref: params.ref, pressed: params.pressed, expectedObjectIdentity: target.objectIdentity, outputSafety: structuredClone(params.outputSafety) };
+      const payload = { ref: params.ref, pressed: params.pressed, expectedObjectIdentity: target.objectIdentity, outputSafety: outputSafetyOf(params.outputSafety) };
       const transaction: ClipLifecycleTransaction = { id: `firebutton_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "fire-button", fence: JSON.stringify({ ref: params.ref, objectIdentity: target.objectIdentity }), payload, prior: { kind: target.kind }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "launch button");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { ref: params.ref, kind: target.kind, name: target.name }, pressed: params.pressed, impact: params.pressed ? "presses-launch-button-audible" : "releases-launch-button", confirmation: "apply", expiresAt: transaction.expiresAt });

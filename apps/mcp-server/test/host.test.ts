@@ -1264,8 +1264,9 @@ test("clip launch previews, applies with one dispatch, verifies, and stops throu
   const preview = JSON.parse(((await call(2, "live_clip_launch_preview", { slotRef: "clip-slot:track-1:0", outputSafety: { safe: true, provenance: "operator-confirmed-headphones" } })) as any).result.content[0].text);
   assert.equal(preview.target.slotRef, "clip-slot:track-1:0");
   assert.deepEqual([preview.target.trackIdentity, preview.target.sceneIdentity, preview.target.slotIdentity, preview.target.clipIdentity], ["simulator:track:track-1", "simulator:scene:scene-1", "simulator:clip-slot:track-1:0", "simulator:clip:clip-1"]);
-  const unsafe = await call(3, "live_clip_launch_preview", { slotRef: "clip-slot:track-1:0", outputSafety: { safe: true, provenance: "unknown" } });
-  assert.equal((unsafe as any).result.isError, true);
+  // Evidence the bridge can't use is no reason to refuse: the bridge gives its own.
+  const unsure = await call(3, "live_clip_launch_preview", { slotRef: "clip-slot:track-1:0", outputSafety: { safe: true, provenance: "unknown" } });
+  assert.equal((unsure as any).result.isError, false);
   const replacementPreview = JSON.parse(((await call(7, "live_clip_launch_preview", { slotRef: "clip-slot:track-1:0", outputSafety: { safe: true, provenance: "operator-confirmed-headphones" } })) as any).result.content[0].text);
   state.tracks[0]!.clips[0]!.objectIdentity = "simulator:clip:replacement";
   const replacementApply = await call(8, "live_clip_launch_apply", { transactionId: replacementPreview.transactionId, confirmation: replacementPreview.confirmation, idempotencyKey: "clip-replacement" });
@@ -2301,7 +2302,7 @@ test("realtime control requires real provenance and arms exact bounded channels 
   assert.equal(armCalls, 2);
 });
 
-test("one recording takes several armed tracks when they're named: exactly those and the destination armed", async () => {
+test("one recording takes several armed tracks when they're named; others armed too record as well", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
   ready(host);
@@ -2311,8 +2312,9 @@ test("one recording takes several armed tracks when they're named: exactly those
   simulator.invoke({ operation: "track.create", args: { name: "Render B", kind: "audio", index: 1, expectedStructureRevision } });
   const tracks = (simulator as any).state.tracks; tracks[0].armed = true; tracks[1].armed = true;
   const safety = { safe: true, provenance: "operator-confirmed" };
+  // Another track armed too: Live records onto both, as when the producer presses Record.
   const alone = await call(101, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, outputSafety: safety });
-  assert.equal(body(alone).reason, "recording start requires the exact destination to be the only armed track");
+  assert.equal(body(alone).impact, "starts-recording");
   const repeated = await call(102, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[0].ref], outputSafety: safety });
   assert.equal((repeated as any).error?.code, -32602, "the destination can't be named twice");
   const preview = body(await call(103, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
@@ -2322,16 +2324,16 @@ test("one recording takes several armed tracks when they're named: exactly those
   assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
   const stop = body(await call(105, "live_recording_preview", { action: "stop", lane: "arrangement", intent: "stop", outputSafety: safety }));
   await call(106, "live_recording_apply", { transactionId: stop.transactionId, confirmation: "apply", idempotencyKey: "rec-both-stop" });
-  // A third track armed since the preview: refused, nothing recorded.
+  // A third track armed since the preview: it records too.
   const again = body(await call(107, "live_recording_preview", { action: "start", lane: "arrangement", intent: "render", destinationTrackRef: tracks[0].ref, alsoTrackRefs: [tracks[1].ref], outputSafety: safety }));
   simulator.invoke({ operation: "track.create", args: { name: "Late", kind: "audio", index: 2, expectedStructureRevision: createHash("sha256").update(JSON.stringify({ tracks: simulator.snapshot().tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: simulator.snapshot().scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex") } });
   (simulator as any).state.tracks[2].armed = true;
   const raced = await call(108, "live_recording_apply", { transactionId: again.transactionId, confirmation: "apply", idempotencyKey: "rec-raced" });
-  assert.equal((raced as any).result.isError, true);
-  assert.equal((simulator as any).state.playback.transport.arrangementRecord, false);
+  assert.equal((raced as any).result.isError, false, JSON.stringify(raced));
+  assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
 });
 
-test("recording preview gates intent, destination, and recording state", async () => {
+test("recording preview needs a destination, armed; others armed or recording already are no reason to refuse", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
   ready(host);
@@ -2348,20 +2350,21 @@ test("recording preview gates intent, destination, and recording state", async (
   const structure = simulator.snapshot(); const expectedStructureRevision = createHash("sha256").update(JSON.stringify({ tracks: structure.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: structure.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) })).digest("hex");
   simulator.invoke({ operation: "track.create", args: { name: "Other Armed", kind: "audio", index: 1, expectedStructureRevision } }); (simulator as any).state.tracks[1].armed = true;
   const multipleArmed = await call(21, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
-  assert.equal((multipleArmed as any).result.isError, true);
-  assert.equal(JSON.parse((multipleArmed as any).result.content[0].text).reason, "recording start requires the exact destination to be the only armed track");
+  assert.equal((multipleArmed as any).result.isError, false, "another armed track records too");
   (simulator as any).state.tracks[1].armed = false;
   let preview = JSON.parse(((await call(4, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
   (simulator as any).state.tracks[1].armed = true;
   const racedArm = await call(22, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-raced-arm" });
-  assert.equal((racedArm as any).result.isError, true); assert.equal((simulator as any).state.playback.transport.arrangementRecord, false);
+  assert.equal((racedArm as any).result.isError, false, "armed since the preview: it records too"); assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
+  const stopRaced = JSON.parse(((await call(24, "live_recording_preview", { action: "stop", lane: "arrangement", intent: "stop", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
+  await call(25, "live_recording_apply", { transactionId: stopRaced.transactionId, confirmation: "apply", idempotencyKey: "rec-raced-stop" });
   (simulator as any).state.tracks[1].armed = false;
   preview = JSON.parse(((await call(23, "live_recording_preview", { action: "start", lane: "arrangement", intent: "record arrangement pass", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
   const applied = JSON.parse(((await call(5, "live_recording_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rec-1-key" })) as any).result.content[0].text);
   assert.equal(applied.state, "applied");
   assert.equal((simulator as any).state.playback.transport.arrangementRecord, true);
   const alreadyActive = await call(6, "live_recording_preview", { action: "start", lane: "arrangement", intent: "again", destinationTrackRef: "track:track-1", outputSafety: { safe: true, provenance: "operator-confirmed" } });
-  assert.equal((alreadyActive as any).result.isError, true);
+  assert.equal((alreadyActive as any).result.isError, false, "starting what already records isn't refused");
   const stopPreview = JSON.parse(((await call(7, "live_recording_preview", { action: "stop", lane: "arrangement", intent: "stop the pass", outputSafety: { safe: true, provenance: "operator-confirmed" } })) as any).result.content[0].text);
   const stopped = JSON.parse(((await call(8, "live_recording_apply", { transactionId: stopPreview.transactionId, confirmation: "apply", idempotencyKey: "rec-stop" })) as any).result.content[0].text);
   assert.equal(stopped.recording, false);

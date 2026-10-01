@@ -3642,12 +3642,9 @@ class LiveObjectMapper:
         return slot_ref, track_ref, scene_ref, clip_ref, scene_index
 
     def _guarded_clip_launch(self, args: dict[str, Any]) -> dict[str, Any]:
-        playback_revision = args.get("playbackRevision")
-        if not isinstance(playback_revision, str):
+        # It launches whatever plays or records, like pressing the slot in Live; the target is fenced on its identity.
+        if not isinstance(args.get("playbackRevision"), str):
             raise ValueError("guarded clip-launch identity is invalid")
-        playback = self._playback()
-        if playback.get("revision") != playback_revision or playback["transport"].get("playing") is not False or playback["transport"].get("arrangementRecord") is not False or playback["transport"].get("sessionRecord") is not False or playback["firedTargets"] or playback["playingTargets"]:
-            raise ValueError("stopped playback or recording baseline changed since clip-launch preview")
         slot_ref, _, _, _, _ = self._guarded_session_target(args, "clip-launch")
         return self._clip_launch({"ref": slot_ref})
 
@@ -11027,16 +11024,9 @@ class LiveObjectMapper:
             if not hmac.compare_digest(self._capture_object_identity(referenced), identity) or len(matches) != 1 or self._read_attr(matches[0], "arm") is not True:
                 raise ValueError("a track recorded alongside is stale, ambiguous or not armed")
             also.append(matches[0])
-        if action == "start":
-            armed_tracks = [track for track in tracks if self._armed(track) is True]
-            armed_matches = [track for track in armed_tracks if self._capture_same_object(track, destination, str(destination_identity))]
-            others = [track for track in armed_tracks if not any(track is item for item in also) and not self._capture_same_object(track, destination, str(destination_identity))]
-            if destination is None or self._read_attr(destination, "arm") is not True or len(armed_matches) != 1 or others or len(armed_tracks) != 1 + len(also):
-                raise ValueError("recording destination must be the only unambiguous armed track" if not also else "recording tracks must be exactly the armed ones")
-        if lane == "session" and action == "start" and current_session:
-            raise ValueError("Session recording is already active")
-        if lane == "arrangement" and action == "start" and current_arrangement:
-            raise ValueError("Arrangement recording is already active")
+        # Live records onto every armed track, as when the producer presses Record; the destination has to be one.
+        if action == "start" and (destination is None or self._read_attr(destination, "arm") is not True):
+            raise ValueError("recording destination isn't armed; arm it first")
         return action
 
     def _recording_session(self, args: dict[str, Any]) -> dict[str, Any]:

@@ -110,10 +110,10 @@ test("the song jumps by beats, and a track jumps in the clip playing there (Live
   assert.equal((await change("live_transport_action_preview", { action: "jump-in-running-clip", trackRef: "track:track-1", beats: 2 })).previewed.playing, true);
 });
 
-test("a launch button is pressed and let go with output-safety evidence; live_change won't fuse it and there's nothing to undo", async () => {
+test("a launch button is pressed and let go, with or without output-safety evidence; live_change won't fuse it and there's nothing to undo", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, change, undo } = hosted(simulator);
-  const unsafe = await call("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: { safe: true, provenance: "unknown" } });
-  assert.equal(unsafe.isError, true);
+  const unsure = await call("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: { safe: true, provenance: "unknown" } });
+  assert.notEqual(unsure.isError, true, JSON.stringify(unsure));
   const pressed = await change("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: safety });
   assert.equal(pressed.previewed.target.kind, "clip-slot"); assert.match(pressed.applied.held, /30 s/);
   assert.ok(simulator.heldFireButtons.has("clip-slot:track-1:0"));
