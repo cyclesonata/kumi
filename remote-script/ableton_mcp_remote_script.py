@@ -39,6 +39,10 @@ _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-ti
 
 
 
+# json.dumps(text, ensure_ascii=False) without making an encoder each time.
+_encode_string = json.encoder.encode_basestring
+
+
 def _js_number(value: float) -> str:
     """A float as JavaScript writes it (Number::toString), so both ends of the wire sign the
     same text: Python writes 0.0000022 as "2.2e-06", JavaScript as "0.0000022". The digits are
@@ -658,8 +662,39 @@ class AuthenticatedRemoteScript:
 
     @classmethod
     def _canonical(cls, value: Any, depth: int = 0) -> str:
+        """The canonical wire text both ends sign. The common types go straight to their text (a big
+        Set's answer is thousands of strings and numbers, and Live's thread waits while it's made);
+        anything else takes the general path, which writes the same text."""
         if depth > MAX_WIRE_DEPTH:
             raise ValueError("wire payload is too deeply nested")
+        kind = type(value)
+        if kind is str:
+            if len(value) > MAX_WIRE_STRING_LENGTH:
+                raise ValueError("wire string is too large")
+            return _encode_string(value)
+        if kind is dict:
+            if len(value) > MAX_WIRE_OBJECT_PROPERTIES:
+                raise ValueError("wire object is too large")
+            return "{" + ",".join((_encode_string(key) if type(key) is str else json.dumps(key, ensure_ascii=False)) + ":" + cls._canonical(value[key], depth + 1) for key in sorted(value)) + "}"
+        if kind is list:
+            if len(value) > MAX_WIRE_ARRAY_LENGTH:
+                raise ValueError("wire array is too large")
+            return "[" + ",".join(cls._canonical(item, depth + 1) for item in value) + "]"
+        if kind is int:
+            return str(value)
+        if kind is float and math.isfinite(value) and value != 0 and not (value.is_integer() and abs(value) < 1e21):
+            # Python and JavaScript both write a float's shortest round-trip digits; they differ only in
+            # where they switch to an exponent, so without one Python's text is JavaScript's.
+            text = repr(value)
+            return text if "e" not in text else _js_number(value)
+        if value is None:
+            return "null"
+        if kind is bool:
+            return "true" if value else "false"
+        return cls._canonical_general(value, depth)
+
+    @classmethod
+    def _canonical_general(cls, value: Any, depth: int) -> str:
         if value is None or isinstance(value, (str, bool)):
             if isinstance(value, str) and len(value) > MAX_WIRE_STRING_LENGTH:
                 raise ValueError("wire string is too large")
