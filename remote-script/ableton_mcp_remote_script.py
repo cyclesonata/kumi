@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import secrets
-import select
+import selectors
 import base64
 import re
 import math
@@ -2118,7 +2118,7 @@ class LiveObjectMapper:
         says how many), and focused tracks past it come light (window.focus says which came whole).
         A snapshot without arguments is always the whole Set, however long that takes."""
         normalized = self._snapshot_arguments(args)
-        if budgeted and normalized: return self._build_snapshot(normalized, _ReadBudget(self.read_budget_seconds))
+        if budgeted and normalized: return self._build_snapshot(normalized, self._read_budget())
         key = "snapshot" if not normalized else "snapshot:" + json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         cache = self._read_cache
         if cache is not None and key in cache: return cache[key]
@@ -2695,7 +2695,7 @@ class LiveObjectMapper:
         runs out (after at least one item), with a cursor to go on: `truncated` and `nextCursor`
         can come before `limit` items. A Set-wide device list is walked track by track, a clip's
         notes and a device's parameters by their index, so a page reads only what it lists."""
-        deadline = _ReadBudget(self.read_budget_seconds) if budgeted else None
+        deadline = self._read_budget() if budgeted else None
         supported = {"set", "song", "track", "group_track", "return_track", "main_track", "scene", "clip_slot", "clip", "session_clip", "arrangement_clip", "note", "locator", "device", "parameter", "selection", "routing_choice", "session_playback"}
         if kind not in supported:
             raise ValueError("unsupported discovery kind")
@@ -3644,6 +3644,14 @@ class LiveObjectMapper:
             self.refs.restore(checkpoint); raise
 
     def invoke(self, operation: str, args: dict[str, Any], transaction_id: str | None = None, ownership_token: str | None = None) -> Any:
+        try:
+            return self._invoke_body(operation, args, transaction_id, ownership_token)
+        finally:
+            # Live may tell its listeners about a change only after the next request in the same tick (a
+            # rename's name listener): the held structure revision is read again after a change, not trusted.
+            if operation not in _READ_ONLY_INVOKES: self._structure_held = None
+
+    def _invoke_body(self, operation: str, args: dict[str, Any], transaction_id: str | None, ownership_token: str | None) -> Any:
         if operation == "ownership.settle": return self._ownership_settle(args, transaction_id, ownership_token)
         enforce_ownership = transaction_id is not None or self.provenance == "real-live"
         if enforce_ownership and operation in _TRANSACTION_CREATIONS.union(_TRANSACTION_DELETIONS) and (not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128): raise ValueError("mutation transaction identity is required")
@@ -4368,6 +4376,14 @@ class LiveObjectMapper:
     # How many display ticks (about 100 ms each) a watched structure revision is trusted without a
     # listener saying it changed: a safety net, should Live ever change it without telling.
     STRUCTURE_HOLD_TICKS = 20
+
+    def _read_budget(self) -> "_ReadBudget":
+        """A read's time on Live's thread: its own budget, and no later than the end of the tick that runs
+        it, so a read the tick took while waiting for a client's next request doesn't stretch the tick."""
+        seconds = self.read_budget_seconds
+        tick = getattr(self, "tick_deadline", None)
+        if tick is not None: seconds = min(seconds, max(0.0, tick - time.perf_counter()))
+        return _ReadBudget(seconds)
 
     def _structure_revision(self) -> str:
         """The Set's structure (each track's and scene's ref, identity, name, kind and place), hashed
@@ -11201,7 +11217,7 @@ class _Subscription:
             for group in [group for group in self._groups if group not in wanted]: self._detach(group)
             self._dirty.update(wanted)
         for group in sorted(self._dirty, key=lambda name: (name.split(":")[0], int(name.split(":")[1]) if ":" in name else -1)):
-            if deadline is not None and time.monotonic() >= deadline: break
+            if deadline is not None and time.perf_counter() >= deadline: break
             self._dirty.discard(group); self._detach(group)
             kind, _, position = group.partition(":")
             if kind == "track" and int(position) < len(tracks): self._attach_track(int(position), tracks[int(position)])
@@ -12109,8 +12125,11 @@ class AbletonMcpBridge:
         inline and answered here within one Control Surface tick. Work is bounded per
         tick so Live's UI thread is never held for long."""
         if self._stop.is_set(): return
-        deadline = time.monotonic() + PUMP_BUDGET_SECONDS
+        # perf_counter: Windows' monotonic clock moves in steps of about 15.6 ms.
+        deadline = time.perf_counter() + PUMP_BUDGET_SECONDS
         self.queue.inline_thread = threading.get_ident()
+        mapper = getattr(self, "mapper", None)
+        if mapper is not None: mapper.tick_deadline = deadline
         try:
             self._accept_pending()
             # Each tick starts with the next connection and serves every one at least one request,
@@ -12118,14 +12137,20 @@ class AbletonMcpBridge:
             connections = list(self._connections); self._pump_turn += 1
             start = self._pump_turn % len(connections) if connections else 0
             served = sum(self._service(connection, deadline) for connection in connections[start:] + connections[:start])
-            while served and time.monotonic() < deadline:
+            while served and time.perf_counter() < deadline:
                 waiting = [connection for connection in self._connections if not connection.closing]
                 if not waiting: break
-                try: readable = set(select.select([connection.socket for connection in waiting], [], [], min(PUMP_LINGER_SECONDS, max(0.0, deadline - time.monotonic())))[0])
+                # A selector, not select(): select refuses descriptors past 1024, which a Live with many
+                # files open can hand out.
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        for connection in waiting: selector.register(connection.socket, selectors.EVENT_READ, connection)
+                        ready = [key.data for key, _ in selector.select(min(PUMP_LINGER_SECONDS, max(0.0, deadline - time.perf_counter())))]
                 except (OSError, ValueError): break
-                served = sum(self._service(connection, deadline) for connection in waiting if connection.socket in readable)
+                served = sum(self._service(connection, deadline) for connection in ready)
         finally:
             self.queue.inline_thread = None
+            if mapper is not None: mapper.tick_deadline = None
 
     @staticmethod
     def _frame(payload: dict[str, Any]) -> bytes:
@@ -12167,11 +12192,11 @@ class AbletonMcpBridge:
                 inbound += chunk
                 if len(inbound) > MAX_WIRE_BYTES: self._close(connection); return frames
                 # What's left waits in the socket for the next tick.
-                if time.monotonic() >= deadline: break
+                if time.perf_counter() >= deadline: break
             # Frames are taken by offset, searching only bytes not searched before, and the buffer is
             # compacted once: a frame arriving in many pieces is scanned once, not once per piece.
             frames = 0; start = 0; search = connection.scanned
-            while not connection.auth.invalid and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.monotonic() < deadline):
+            while not connection.auth.invalid and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.perf_counter() < deadline):
                 newline = inbound.find(b"\n", search)
                 if newline < 0:
                     search = len(inbound); break
@@ -12228,7 +12253,7 @@ class AbletonMcpBridge:
         if not types:
             return {"subscribed": False, "subscriptionId": "none"}
         # Listeners on a big Set's objects attach over the next ticks, within each tick's budget.
-        holder["subscription"] = _Subscription(self.mapper, set(types), time.monotonic() + PUMP_BUDGET_SECONDS)
+        holder["subscription"] = _Subscription(self.mapper, set(types), time.perf_counter() + PUMP_BUDGET_SECONDS)
         return {"subscribed": True, "subscriptionId": secrets.token_urlsafe(12)}
 
     def _claim_mutation(self, idempotency_key: str, transaction_id: str, operation: str, digest: str) -> Callable[..., None]:

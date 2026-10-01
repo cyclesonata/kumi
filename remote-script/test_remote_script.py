@@ -6165,6 +6165,16 @@ class LingeringTickTests(_BridgeSocketFixture, unittest.TestCase):
         self.assertEqual([item["id"] for item in answered], ["status-1", "status-2", "status-3"])
         self.assertEqual(ticks_after_first, 0, "the two later steps were served in the tick that answered the first")
 
+    def test_a_read_the_tick_takes_late_ends_with_the_tick(self):
+        # A paged read served while the tick waited for the next request mustn't stretch the tick past its budget.
+        mapper = LiveObjectMapper(FakeSong()); mapper.read_budget_seconds = 10
+        with patch.object(remote_module.time, "perf_counter", return_value=1000.0):
+            self.assertEqual(mapper._read_budget().deadline, 1010.0, "outside a tick, a read has its own budget")
+            mapper.tick_deadline = 1000.005
+            self.assertEqual(mapper._read_budget().deadline, 1000.005, "inside one, no later than the tick's end")
+            mapper.tick_deadline = 999.0
+            budget = mapper._read_budget(); self.assertEqual([budget.room(), budget.room()], [True, False], "past it, one unit")
+
     def test_a_tick_that_answered_no_one_doesnt_wait(self):
         self.connect()
         started = time.perf_counter()
@@ -8269,6 +8279,18 @@ class FlatChangeTests(unittest.TestCase):
         self.assertEqual((song.listening(), sum(track.listening() for track in song.tracks)), (0, 0)); self.assertIsNone(mapper._structure_held)
         # A Live that can't be watched is read every time.
         plain = LiveObjectMapper(FakeSong()); plain._structure_revision(); self.assertIsNone(plain._structure_held)
+
+    def test_a_change_drops_the_kept_revision_even_before_live_tells_its_listeners(self):
+        # On real Live a rename's name listener can fire after the next request in the same tick: a preview
+        # then read the old name from the kept revision, its apply the new one, and the change was refused.
+        song = self.watched_song(); mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][2]; before = mapper._structure_revision()
+        with patch.object(ListenTrack, "notify", lambda self, name: None):
+            mapper.invoke("track.rename", {"ref": row["ref"], "name": "Bass", "expectedName": row["name"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": before})
+            after = mapper._structure_revision()
+        self.assertNotEqual(after, before, "the revision has the new name though no listener told")
+        mapper._structure_held = None
+        self.assertEqual(after, mapper._structure_revision(), "and it's what Live holds now")
 
     def test_a_rename_binds_the_track_not_what_it_holds(self):
         song = FakeSong(); song.tracks = [lean_track("Synth"), lean_track("Bass")]; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][1]
