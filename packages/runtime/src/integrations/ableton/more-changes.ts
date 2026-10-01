@@ -204,11 +204,17 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "edit_notes", since: FIXED_BRIDGE, preview: "live_note_edit_preview", apply: "live_note_edit_apply", family: "clip",
-    description: "Quantize a Session clip's notes (action quantize: grid in beats, 0.25 is 1/16; amount 0–1), move them to one pitch (quantize-pitch with pitch), or duplicate them (duplicate). noteIds limits it to some notes; left out, all.",
+    description: "Quantize a Session clip's notes (action quantize: grid in beats, 0.25 is 1/16; amount 0–1), move them to one pitch (quantize-pitch with pitch), or duplicate them (duplicate). noteIds limits it to some notes; left out, all. select selects notes in the clip as a click would (noteIds, all: true or none: true; nothing to undo); delete-range deletes the notes starting in a region of pitch (fromPitch, pitchSpan) and time (fromTime, timeSpan, in beats).",
+    // Selecting notes changes no notes: HISTORY keeps it without an undo.
+    permanent: (input) => (input.action === "select" ? "Selecting notes changes no notes: there's nothing to undo." : undefined),
     summarize(preview, input, track) {
-      const action = label(preview.action ?? input.action) ?? "edit"; const grid = number(input.grid);
+      const action = label(preview.action ?? input.action) ?? "edit"; const grid = number(input.grid); const count = number(preview.notes);
       const known = ownerTrack(preview.clipRef ?? input.clipRef, track);
-      const what = action === "quantize" ? `notes quantized${grid ? ` to 1/${Math.round(4 / grid)}` : ""}` : action === "quantize-pitch" ? "notes moved to one pitch" : "notes duplicated";
+      const what = action === "quantize" ? `notes quantized${grid ? ` to 1/${Math.round(4 / grid)}` : ""}`
+        : action === "quantize-pitch" ? "notes moved to one pitch"
+        : action === "select" ? (count !== undefined ? `${plural(count, "note")} selected` : "notes selected")
+        : action === "delete-range" ? (count !== undefined ? `${plural(count, "note")} deleted in a range` : "notes deleted in a range")
+        : action === "duplicate" ? "notes duplicated" : "notes edited";
       return withTrack({ title: `${known ? `${known.name} clip` : "Clip"}: ${what}` }, known);
     },
   },
@@ -237,12 +243,12 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "set_automation", preview: "live_automation_preview", apply: "live_automation_apply", family: "clip",
-    description: "Draw automation inside a Session clip for one device parameter: create-envelope, then insert points ({time in beats from the clip start, value in the parameter's own range}), delete-range (from, to), or delete-envelope. clipRef from discovery; parameterRef from discovering the device's parameters. The Arrangement's automation lanes aren't reachable.",
+    description: "Draw automation inside a Session clip for one device parameter: create-envelope, then insert points ({time in beats from the clip start, value in the parameter's own range}), insert-step (start and length in beats, value: one value held for that long; it makes the lane when there's none), delete-range (from, to), or delete-envelope. clipRef from discovery; parameterRef from discovering the device's parameters. The Arrangement's automation lanes aren't reachable.",
     summarize(preview, input, track) {
       const action = label(preview.action ?? input.action) ?? "automation";
       const points = Array.isArray(input.points) ? input.points.length : 0;
       const known = ownerTrack(input.clipRef, track);
-      const what = action === "insert" ? `automation drawn (${plural(points, "point")})` : action === "create-envelope" ? "automation lane added" : action === "delete-range" ? "automation erased in a range" : "automation lane removed";
+      const what = action === "insert" ? `automation drawn (${plural(points, "point")})` : action === "insert-step" ? "automation step drawn" : action === "create-envelope" ? "automation lane added" : action === "delete-range" ? "automation erased in a range" : action === "delete-envelope" ? "automation lane removed" : "automation edited";
       return withTrack({ title: `${known ? `${known.name} clip` : "Clip"}: ${what}` }, known);
     },
   },

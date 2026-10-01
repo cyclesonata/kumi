@@ -557,6 +557,17 @@ test("every change kind has its own tool, a family, host-only bridge tools and a
   for (const off of ["live_audio_capture_apply", "live_project_backup_apply", "live_realtime_arm_apply", "live_application_dialog_apply", "live_device_state_save"]) assert(!HOST_TOOLS.has(off), off);
 });
 
+test("note selections, note ranges and automation steps get titles of their own, and a selection no undo", () => {
+  const notes = CHANGES.find((item) => item.tool === "edit_notes")!; const automation = CHANGES.find((item) => item.tool === "set_automation")!;
+  assert.equal(notes.summarize({ action: "select", notes: 3 }, { action: "select", all: true }, () => undefined).title, "Clip: 3 notes selected");
+  assert.equal(notes.summarize({ action: "delete-range", notes: 2 }, { action: "delete-range", fromPitch: 36, pitchSpan: 12, fromTime: 0, timeSpan: 4 }, () => undefined).title, "Clip: 2 notes deleted in a range");
+  assert.equal(notes.summarize({ action: "duplicate" }, { action: "duplicate" }, () => undefined).title, "Clip: notes duplicated");
+  assert.equal(notes.permanent?.({ action: "select", all: true }), "Selecting notes changes no notes: there's nothing to undo.");
+  assert.equal(notes.permanent?.({ action: "delete-range" }), undefined, "a range deletion has its undo");
+  assert.equal(automation.summarize({ action: "insert-step" }, { action: "insert-step", start: 0, length: 1, value: 0.5 }, () => undefined).title, "Clip: automation step drawn");
+  assert.equal(automation.summarize({ action: "delete-envelope" }, { action: "delete-envelope" }, () => undefined).title, "Clip: automation lane removed");
+});
+
 test("a new clip's record carries its notes, for NOW's picture", () => {
   const kind = CHANGES.find((item) => item.tool === "write_midi_clip")!;
   const notes = [60, 64].map((pitch) => ({ pitch, start: 0, duration: 4, velocity: 96, channel: 1 }));
