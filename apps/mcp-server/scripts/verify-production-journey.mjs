@@ -687,6 +687,16 @@ class EnvelopeEvent:
     const response = await client.call(name, args, timeoutMs);
     return response;
   };
+  // A clip's notes come a page at a time (each page within the Remote Script's read budget, which a
+  // slow machine or a busy tick shortens): every page, as a client reads them.
+  const notesOf = async (client, parent) => {
+    const notes = []; let cursor;
+    do {
+      const page = (await textOf(client, "live_discover", { kind: "note", parent, limit: 100, ...(cursor ? { cursor } : {}) })).parsed;
+      notes.push(...(page.items ?? [])); cursor = page.nextCursor;
+    } while (cursor);
+    return notes;
+  };
   const requiredTool = async (client, name, args, timeoutMs) => {
     const response = await client.call(name, args, timeoutMs);
     assert(!response.isError, `${name} failed: ${JSON.stringify(response.parsed)}`);
@@ -1056,7 +1066,7 @@ class EnvelopeEvent:
     const songApplied = await requiredTool(client, "live_midi_clip_apply", { transactionId: songPreview.transactionId, confirmation: "apply", idempotencyKey: "journey-song-midi" });
     const structureApplied = await requiredTool(client, "live_session_structure_apply", { transactionId: structurePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-song-structure" });
     const songClipRef = songApplied.clipRef;
-    const songNotes = (await textOf(client, "live_discover", { kind: "note", parent: songClipRef, limit: 100 })).parsed.items;
+    const songNotes = (await notesOf(client, songClipRef));
     assert(typeof songClipRef === "string" && structureApplied.created?.length === 1 && songNotes.length === songEvents.length, "beat/song MIDI/structure creation failed");
     journeyProgress("create-beat-or-song", "apply-create", "verifying", { midiRef: songClipRef, structureRefs: structureApplied.created.map((item) => item.ref), authoritativeNoteCount: songNotes.length });
     journeyProgress("create-beat-or-song", "apply-create", "completed", { midiTarget: songClipRef, structureRefs: structureApplied.created.map((item) => item.ref), verifiedNotes: songNotes.length, guidanceKind: songGuidance.kind });
@@ -1073,7 +1083,7 @@ class EnvelopeEvent:
     journeyProgress("sequence-advanced-drums", "apply-write", "applying", { idempotencyKeyPresent: true });
     const drumApplied = await requiredTool(client, "live_midi_clip_apply", { transactionId: drumPreview.transactionId, confirmation: "apply", idempotencyKey: "journey-drum-midi" });
     const clipRef = drumApplied.clipRef;
-    const notes = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const notes = (await notesOf(client, clipRef));
     assert(typeof clipRef === "string" && notes.length === drumEvents.length && notes.every((item) => typeof item.id === "number"), "advanced drum clip/notes failed verification");
     journeyProgress("sequence-advanced-drums", "apply-write", "verifying", { clipRef, authoritativeNoteCount: notes.length, stableIds: true });
     journeyProgress("sequence-advanced-drums", "apply-write", "completed", { clipRef, verifiedNotes: notes.length, guidanceKind: drumGuidance.kind });
@@ -1083,16 +1093,16 @@ class EnvelopeEvent:
     journeyProgress("sequence-advanced-drums", "expressive-revision", "applying", { noteId: firstId, idempotencyKeyPresent: true });
     const updated = (await textOf(client, "live_note_update_apply", { transactionId: updatePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-note-update" })).parsed;
     assert(updated.updated === 1, "note update failed");
-    const afterUpdate = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const afterUpdate = (await notesOf(client, clipRef));
     const edited = afterUpdate.find((item) => item.id === firstId);
     assert(edited.velocity === 66 && edited.probability === 0.5 && edited.velocityDeviation === 10 && edited.releaseVelocity === 32 && edited.mute === true, `note fields did not land: ${JSON.stringify(edited)}`);
     journeyProgress("sequence-advanced-drums", "expressive-revision", "verifying", { noteId: firstId, authoritativeReadback: true });
     journeyProgress("sequence-advanced-drums", "expressive-revision", "completed", { noteId: firstId, verifiedFields: ["velocity", "probability", "velocityDeviation", "releaseVelocity", "mute"] });
     const deletePreview = (await textOf(client, "live_note_delete_preview", { clipRef, noteIds: [firstId] })).parsed;
     const deleted = (await textOf(client, "live_note_delete_apply", { transactionId: deletePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-note-delete" })).parsed;
-    assert(deleted.deleted === 1 && (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items.length === drumEvents.length - 1, "note was not removed");
+    assert(deleted.deleted === 1 && (await notesOf(client, clipRef)).length === drumEvents.length - 1, "note was not removed");
     const undone = (await textOf(client, "live_undo", { transactionId: deletePreview.transactionId, confirmation: "undo", idempotencyKey: "journey-note-delete-undo" })).parsed;
-    const afterDeleteUndo = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const afterDeleteUndo = (await notesOf(client, clipRef));
     assert(undone.state === "undone" && afterDeleteUndo.length === drumEvents.length, `note-delete undo did not restore the note: ${JSON.stringify({ undone, count: afterDeleteUndo.length, expected: drumEvents.length })}`);
     const drumSlots = (await textOf(client, "live_discover", { kind: "clip-slot", parent: freshTracks[0].ref })).parsed.items;
     const drumSlot = drumSlots.find((slot) => slot.clipRef === clipRef);
@@ -1172,7 +1182,7 @@ class EnvelopeEvent:
     journeyProgress("create-beat-or-song", "audition", "verifying", { started: true, authoritativeStopState: songAuditionStopped.state });
     journeyProgress("create-beat-or-song", "audition", "completed", { slotRef: songSlot.ref, started: true, stopped: true });
     const songClipRef = songSlot.clipRef;
-    const songNotes = (await textOf(client, "live_discover", { kind: "note", parent: songClipRef, limit: 100 })).parsed.items;
+    const songNotes = (await notesOf(client, songClipRef));
     const revisePreview = (await textOf(client, "live_note_update_preview", { clipRef: songClipRef, notes: [{ id: songNotes[0].id, velocity: 77 }] })).parsed;
     journeyProgress("create-beat-or-song", "revise", "awaiting_confirmation", { clipRef: songClipRef, noteId: songNotes[0].id, mechanism: "fixed-apply" });
     journeyProgress("create-beat-or-song", "revise", "applying", { clipRef: songClipRef, noteId: songNotes[0].id, idempotencyKeyPresent: true });
@@ -1429,8 +1439,8 @@ class EnvelopeEvent:
     const finalSlots = (await textOf(client, "live_discover", { kind: "clip-slot", parent: finalTracks[0].ref })).parsed.items;
     const songClip = finalSlots.find((slot) => slot.sceneIndex === 1)?.clipRef;
     const drumClip = finalSlots.find((slot) => slot.sceneIndex === 2)?.clipRef;
-    const songFinalNotes = songClip ? (await textOf(client, "live_discover", { kind: "note", parent: songClip, limit: 100 })).parsed.items : [];
-    const drumFinalNotes = drumClip ? (await textOf(client, "live_discover", { kind: "note", parent: drumClip, limit: 100 })).parsed.items : [];
+    const songFinalNotes = songClip ? (await notesOf(client, songClip)) : [];
+    const drumFinalNotes = drumClip ? (await notesOf(client, drumClip)) : [];
     const realtime = await adapter_call(client, "realtime.stats", {});
     assert(finalTracks[0].armed === false && finalTracks[0].monitoringState === "off" && realtime.armed === false, "routing or realtime authority remained active");
     journeyProgress("create-beat-or-song", "final-readback", "completed", { clipRef: songClip, notes: songFinalNotes.length, playback: "stopped", recording: "stopped" });
