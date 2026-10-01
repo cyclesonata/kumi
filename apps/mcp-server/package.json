@@ -1,6 +1,6 @@
 {
   "name": "@ableton-mcp/mcp-server",
-  "version": "1.0.62",
+  "version": "1.0.63",
   "private": true,
   "license": "MIT",
   "abletonMcpSupport": {
