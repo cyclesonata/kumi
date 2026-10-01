@@ -634,14 +634,14 @@ def _unrun(error: BaseException) -> BaseException:
 
 
 def _failure_summary(error: BaseException) -> str:
-    """Say why a request failed without echoing Live's own exception text: the bridge's validation
-    messages (ValueError/TimeoutError) are actionable and carry no payloads; anything else is named by type.
+    """Say why a request failed: the bridge's own messages (ValueError/TimeoutError) as they are, and
+    anything else (Live's own exceptions) by its type and Live's text, so the client can work round it.
     A refusal that says nothing ran keeps saying so, however long it is."""
-    if isinstance(error, (ValueError, TimeoutError)) and str(error):
-        text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(error))
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(error))
+    if isinstance(error, (ValueError, TimeoutError)) and text:
         if text.endswith(UNRUN_SUFFIX) and len(text) > 200: return "request failed: " + text[:200 - len(UNRUN_SUFFIX)] + UNRUN_SUFFIX
         return "request failed: " + text[:200]
-    return f"request failed: {type(error).__name__}"
+    return f"request failed: {type(error).__name__}" + (f": {text[:200]}" if text.strip() else "")
 
 
 class AuthenticatedRemoteScript:
@@ -5154,9 +5154,11 @@ class LiveObjectMapper:
         record = self._owned_cleanup_tokens.get(str(ownership_token)) if isinstance(ownership_token, str) else None
         if record is None or record.get("transactionId") != transaction_id or record.get("ref") != reference or record.get("objectIdentity") != expected_identity: raise ValueError("destructive cleanup lacks exact transaction-owned authority")
         if record.get("deleted") is True: return
-        # A client's own scratch track (a render it recorded onto) goes as it is when the client says so.
-        discard = operation == "track.delete" and args.get("discardChanges") is True
-        if not discard and not hmac.compare_digest(self._ownership_fingerprint(str(reference)), record["fingerprint"]): raise ValueError("transaction-owned object changed after creation; cleanup refused")
+        # What a transaction made goes however it changed since (renamed, filled, re-set), as long as it's
+        # the same object: its identity, not its contents.
+        try: current_identity = self._capture_object_identity(self.refs.get(str(reference)))
+        except Exception: current_identity = None
+        if not isinstance(current_identity, str) or not isinstance(expected_identity, str) or not hmac.compare_digest(current_identity, expected_identity): raise ValueError("the object at this reference isn't the one this transaction made any more; cleanup refused")
         if operation in {"track.delete", "scene.delete"}:
             target_text = str(reference).rsplit(":", 1)[-1]
             if not target_text.isdigit(): raise ValueError("transaction-owned structure reference is malformed")

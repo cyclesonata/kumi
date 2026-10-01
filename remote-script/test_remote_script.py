@@ -305,7 +305,7 @@ class RemoteScriptTests(unittest.TestCase):
         unsigned = remote.bound({"version": PROTOCOL, "id": "one", "method": "snapshot", "nonce": "0000000000000001", "sequence": 1})
         result = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "request failed: RuntimeError", "foreign exception text is not echoed")
+        self.assertEqual(result["error"], "request failed: RuntimeError: not available", "Live's own reason comes through")
         validation = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: (_ for _ in ()).throw(ValueError("structure changed since preview\x1b[2J")))
         unsigned = validation.bound({"version": PROTOCOL, "id": "two", "method": "snapshot", "nonce": "0000000000000002", "sequence": 1})
         self.assertEqual(validation.dispatch({**unsigned, "mac": validation.sign(unsigned)})["error"], "request failed: structure changed since preview [2J")
@@ -1688,16 +1688,15 @@ class ControlSurfaceTests(unittest.TestCase):
         rack = FakeDevice(); rack.can_have_chains = True; chain = type("Chain", (), {})(); chain.devices = [rack]; rack.chains = [chain]; song.tracks[0].devices = [rack]
         with self.assertRaisesRegex(ValueError, "cyclic"): LiveObjectMapper(song).snapshot()
 
-    def test_destructive_cleanup_requires_unforgeable_unchanged_creation_ownership(self):
+    def test_destructive_cleanup_requires_unforgeable_creation_ownership_of_the_same_object(self):
         song = FakeSong(); mapper = LiveObjectMapper(song); transaction = "structure-ownership-transaction"; created = mapper.invoke("track.create", {"name": "Owned", "kind": "midi", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, transaction)
         self.assertIn("ownershipToken", created)
         delete_args = {"ref": created["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": created["objectIdentity"]}
         with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", delete_args, "attacker-transaction")
         song.tracks[1].arrangement_clips = [FakeClip(4.0)]; delete_args["expectedStructureRevision"] = mapper._structure_revision()
-        with self.assertRaisesRegex(ValueError, "changed after creation"): mapper.invoke("track.delete", delete_args, transaction, created["ownershipToken"])
-        # The client's own scratch track, recorded onto: it goes when the client says so, and only with the creating transaction's authority.
-        with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, "attacker-transaction")
-        self.assertEqual(mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, transaction, created["ownershipToken"]), {"deleted": created["ref"]})
+        # A track it made goes though it changed since (recorded onto), only with the creating transaction's authority.
+        with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", delete_args, "attacker-transaction")
+        self.assertEqual(mapper.invoke("track.delete", delete_args, transaction, created["ownershipToken"]), {"deleted": created["ref"]})
         clean_song = FakeSong(); clean_mapper = LiveObjectMapper(clean_song); clean = clean_mapper.invoke("scene.create", {"name": "Owned Scene", "index": 1, "expectedStructureRevision": clean_mapper._structure_revision()}, transaction); clean_args = {"ref": clean["ref"], "expectedStructureRevision": clean_mapper._structure_revision(), "expectedObjectIdentity": clean["objectIdentity"]}
         self.assertEqual(clean_mapper.invoke("scene.delete", clean_args, transaction, clean["ownershipToken"]), {"deleted": clean["ref"]}); clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"]); clean_mapper.retire_transaction_ownership(transaction)
         with self.assertRaisesRegex(ValueError, "transaction-owned"): clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"])
@@ -6693,8 +6692,9 @@ class SingleRequestMutationTests(unittest.TestCase):
         delete = lambda row, key, owner=transaction: {"operation": "track.delete", "transactionId": owner, "idempotencyKey": key, "ownershipToken": row["ownershipToken"], "args": {"ref": row["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": row["objectIdentity"]}}
         refused("destructive cleanup lacks exact transaction-owned authority", delete(made[1], "delete-key-0001", "transaction-other"))
         refused("transaction-owned structure cleanup must proceed from the highest positional authority", delete(made[0], "delete-key-0002"))
-        mapper.song.tracks[2].arrangement_clips = [FakeClip(4.0)]
-        refused("transaction-owned object changed after creation; cleanup refused", delete(made[1], "delete-key-0003"))
+        owned_b = mapper.song.tracks[2]; mapper.song.tracks[2] = FakeTrack()
+        refused("the object at this reference isn't the one this transaction made any more; cleanup refused", delete(made[1], "delete-key-0003"))
+        mapper.song.tracks[2] = owned_b
         self.assertEqual([track.name for track in mapper.song.tracks], ["Drums", "Owned A", "Owned B"]); self.assertEqual(bridge._pending_mutations, {})
         # A queue that refused it before Live's thread ran it (its deadline had passed).
         queued = immediate_bridge(); queued.queue = remote_module._MainThreadQueue()

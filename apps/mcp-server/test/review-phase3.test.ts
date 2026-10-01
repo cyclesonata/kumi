@@ -72,7 +72,7 @@ test("any undo that stops before its first change leaves the change applied; one
   assert.match((await undo(again.previewed.transactionId)).reason, /exact-key uncertain/);
 });
 
-test("undo of a clip Kumi copied into the Arrangement leaves it when its notes changed, even to as many notes", async () => {
+test("undo of a clip Kumi copied into the Arrangement takes it out though its notes changed since", async () => {
   const simulator = new DeterministicLiveSimulator(); simulator.discoveryBudgetItems = 1;
   const source = state(simulator).tracks[0]!.clips[0]; source.notes.push({ ...source.notes[0], pitch: 38, start: 1, id: 2 });
   const { change, undo } = hosted(simulator);
@@ -80,10 +80,7 @@ test("undo of a clip Kumi copied into the Arrangement leaves it when its notes c
   const clip = state(simulator).arrangementClips[0]!.clip; const prior = structuredClone(clip.notes);
   // Re-voiced: as many notes, other pitches.
   clip.notes = clip.notes.map((note: Record<string, any>) => ({ ...note, pitch: note.pitch + 2 }));
-  const refused = await undo(copied.previewed.transactionId);
-  assert.equal(refused.isError, true); assert.match(refused.reason, /modified after creation/);
-  assert.equal(state(simulator).arrangementClips.length, 1);
-  clip.notes = prior;
+  assert.notDeepEqual(clip.notes, prior);
   assert.equal((await undo(copied.previewed.transactionId)).state, "undone");
   assert.equal(state(simulator).arrangementClips.length, 0);
 });

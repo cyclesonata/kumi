@@ -1633,7 +1633,7 @@ test("browser search returns stable identities and browser load verifies onto th
   assert.equal(undone.state, "undone"); assert.equal((simulator as any).state.tracks[0].devices.filter((item: any) => item.name === "Drum Rack").length, 0);
 });
 
-test("Browser-load undo still removes a device whose parameter was tweaked and reverted or whose rack view changed", async () => {
+test("Browser-load undo removes the device it loaded however it changed since: a parameter tweaked and reverted, its rack view, its name", async () => {
   const simulator = new DeterministicLiveSimulator(); const host = new McpHost(simulator); ready(host);
   const call = async (id: number, name: string, args: unknown) => (await host.handleAsync({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) as any).result;
   const body = (result: any) => JSON.parse(result.content[0].text);
@@ -1665,9 +1665,8 @@ test("Browser-load undo still removes a device whose parameter was tweaked and r
   assert.equal(racks().length, 0);
 
   const edited = await load(9110); racks()[0].name = "Renamed by hand";
-  const refused = await call(9112, "live_undo", { transactionId: edited, confirmation: "undo", idempotencyKey: "edited-undo-key" });
-  assert.equal(refused.isError, true); assert.match(refused.content[0].text, /modified after creation/);
-  assert.equal(((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Renamed by hand").length, 1, "the edited device is kept");
+  assert.equal(body(await call(9112, "live_undo", { transactionId: edited, confirmation: "undo", idempotencyKey: "edited-undo-key" })).state, "undone");
+  assert.equal(((simulator as any).state.tracks[0].devices as any[]).filter((device) => device.name === "Renamed by hand").length, 0, "undo takes back the load, renamed or not");
 });
 
 test("Browser items load into a rack's chains, a nested rack too, and undo takes each out", async () => {
@@ -2110,7 +2109,7 @@ test("samples go onto several empty pads as one change: one transaction, all or 
   assert.deepEqual([36, 37].map((note) => pads().find((item: any) => item.note === note).chains.length), [0, 0], "the first pad was cleared again");
 });
 
-test("an inserted device someone changed afterwards isn't removed by undo", async () => {
+test("undo removes an inserted device someone changed afterwards: it takes back the change it was asked to", async () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
   ready(host);
@@ -2120,8 +2119,8 @@ test("an inserted device someone changed afterwards isn't removed by undo", asyn
   const device = (simulator as any).state.tracks[0].devices.find((item: any) => item.ref === inserted.result.ref);
   device.name = "Echo (tweaked)";
   const undo = await call(4, "live_undo", { transactionId: insert.transactionId, confirmation: "undo", idempotencyKey: "echo-undo" });
-  assert.equal((undo as any).result.isError, true);
-  assert.ok((simulator as any).state.tracks[0].devices.some((item: any) => item.ref === inserted.result.ref), "the changed device stays");
+  assert.equal((undo as any).result.isError, false, JSON.stringify(undo));
+  assert.ok(!(simulator as any).state.tracks[0].devices.some((item: any) => item.ref === inserted.result.ref), "the changed device goes");
 });
 
 test("chain rows retain the true owning rack through track siblings and drum pads", () => {

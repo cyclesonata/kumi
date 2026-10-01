@@ -521,15 +521,13 @@ function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { m
 /** An adapter failure as a tool may show it: bounded bridge and host messages, anything else generic.
  * "request failed: ..." carries the Remote Script's bounded validation message or exception type. */
 /**
- * What a refusal says to the client. Known reasons pass; so does the host's own sentence saying why it
- * refused ("recording start requires the exact destination to be the only armed track"), so the
- * client can fix the cause. Anything else (a runtime error, a message with a path or a stack) is
- * masked as "adapter request failed".
+ * What a refusal says to the client: why it failed, in one line, so the client can fix the cause or
+ * work round it. Only a stack trace or a multi-line dump is reduced to "adapter request failed".
  */
 function adapterReason(raw: string): string {
-  const known = /^(live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter |Kumi's Live extension)/i.test(raw) && raw.length <= 240;
-  const hostSentence = raw.length <= 240 && /^(?:[a-z]|Live )/.test(raw) && !/[\r\n]/.test(raw) && !/(?:^|[\s'"(=])(?:\/[^\s/'"]+){2,}|[A-Za-z]:\\|\bat \S+ \(|node:internal/.test(raw);
-  return known || hostSentence ? raw : "adapter request failed";
+  const line = raw.trim();
+  if (!line || /[\r\n]/.test(line) || /\bat \S+ \(|node:internal/.test(line)) return "adapter request failed";
+  return line.length <= 400 ? line : `${line.slice(0, 399)}…`;
 }
 
 /** The Remote Script refused before anything changed in Live (a position past the end of the Set):
@@ -3196,8 +3194,8 @@ export class McpHost {
   private async deleteOwnedDeviceAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false): Promise<void> {
     const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["deviceRow"]>;
     try { located = this.deviceRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
+    // The same device goes however it changed since (its identity, not its settings).
     if (located.device.objectIdentity !== objectIdentity) throw new Error("owned device identity changed before cleanup");
-    if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
     // Gone, or another device slid into its place: either way this one isn't there any more.
@@ -8000,10 +7998,8 @@ export class McpHost {
   private async deleteOwnedClipAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false, expectedNotesRevision?: string): Promise<void> {
     const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["clipRow"]>;
     try { located = this.clipRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
+    // The same clip goes however it changed since (its identity, not its notes or settings).
     if (located.clip.objectIdentity !== objectIdentity) throw new Error("owned clip identity changed before cleanup");
-    if (expectedFingerprint && this.captureBoundedFingerprint(located.clip) !== expectedFingerprint) throw new Error("transaction-owned clip was modified after creation; cleanup refused");
-    // An Arrangement clip's row counts its notes without them: its notes are checked on their own.
-    if (located.arrangement && expectedNotesRevision !== undefined && McpHost.notesRevision(await this.clipNotesAsync(reference, context)) !== expectedNotesRevision) throw new Error("transaction-owned clip was modified after creation (its notes); cleanup refused");
     const operation = located.arrangement ? "arrangement.clip.delete" : "clip.delete"; const args = located.arrangement ? { ref: reference, ...this.arrangementClipAuthority(snapshot, reference) } : { ref: reference, ...this.clipAuthority(snapshot, reference) };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, operation, args, context); else await adapter.invokeAsync({ operation, args }, context);
     try { this.clipRow(await this.viewForAsync(context, [located.track?.ref ?? reference]), reference); } catch { return; }
@@ -9331,8 +9327,7 @@ export class McpHost {
         const action = trackstruct.payload.action as string;
         const snapshot = await this.structureOwnedViewAsync(context, [{ kind: action === "duplicate-scene" ? "scene" : "track", ref: trackstruct.created.ref as LiveRef }]);
         const structureRevision = this.structureRevision(snapshot);
-        const currentFingerprint = this.sessionStructureCreatedFingerprint(snapshot, action === "duplicate-scene" ? "scene" : "track", trackstruct.created.ref as LiveRef);
-        if (!reconciliation && currentFingerprint !== (trackstruct.created as unknown as { contentFingerprint?: unknown }).contentFingerprint) return this.transactionError(id, "created structure content changed after apply; cleanup refused");
+        // What it made goes however it changed since: the delete itself is fenced on its identity.
         if (action === "create-return") {
           const result = await this.invokeUndoRecovery(trackstruct, adapter, "track.delete-return", { ref: trackstruct.created.ref, expectedObjectIdentity: trackstruct.created.objectIdentity, expectedStructureRevision: structureRevision }, context) as { deleted?: unknown };
           if (result.deleted !== trackstruct.created.ref) throw new Error("return-track cleanup was not confirmed");
@@ -10048,8 +10043,10 @@ export class McpHost {
         let currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
         // The track, and its mixer's parameters, the change was made on: values alone can match another track's.
         const moved = this.undoTargetMoved(id, mixer, "track", mixer.clipRef, McpHost.mixerIdentities(this.mixerAuthority(currentTarget)), McpHost.mixerIdentities(mixer.payload)); if (moved) return moved;
-        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
-        if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
+        // The same track's mixer goes back to how it was, however it moved since.
+        if (reconciliation) for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, "mixer undo replay did not restore prior state");
+        const alreadyPrior = mutableFields.every((field) => !Object.prototype.hasOwnProperty.call(mixer.payload, field) || JSON.stringify(currentTarget.mixer[field] ?? null) === JSON.stringify(mixer.prior?.[field] ?? null));
+        if (!reconciliation && !alreadyPrior) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
         currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
         return this.successText(id, { transactionId: mixer.id, state: "undone", restored: mixer.prior, idempotent: false });
@@ -10109,14 +10106,13 @@ export class McpHost {
       const status = this.requireConnected("session.structure"); if (status.epoch !== structure.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
       try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await this.structureOwnedViewAsync(context(), structure.created);
-        // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
-        const discard = params.discard === true;
-        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !(discard && item.kind === "track") && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
-        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await this.structureOwnedViewAsync(context(), [item]); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
-if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
+        // What it made goes however it changed since (renamed, filled with clips and devices): undo
+        // takes back the change it was asked to; each delete is fenced on the object's identity.
+        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await this.structureOwnedViewAsync(context(), [item]); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue;
+await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
         const after = await this.structureViewAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
       catch (cause) {
-        // Refused because what it made has changed since: nothing was touched, so it stays applied (a later undo, with discard, can still go).
+        // Refused before anything was touched: it stays applied.
         if (structure.state === "applied" && cause instanceof Error && /was modified after apply/.test(cause.message)) { this.undoRecoveryPlans.delete(structure); return this.adapterToolError(id, cause, "Session-structure undo refused; nothing changed."); }
         structure.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure undo is uncertain; inspect authoritative tracks and scenes.");
       }
@@ -10153,7 +10149,8 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
         const unchanged = (index: number) => state[index]!.same;
         if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
         else {
-          if (currents.some((current, index) => !sameLiveValue(current.value, batch.parameters[index]!.proposedValue) || this.parameterRevision(current) !== batch.parameters[index]!.appliedRevision || !unchanged(index))) return this.transactionError(id, "A device parameter changed after apply; undo refused");
+          // The same parameters go back to their prior values, however they moved since (a hand tweak, a macro).
+          if (currents.some((_current, index) => !unchanged(index))) return this.transactionError(id, "A device parameter isn't the one this change was made on any more; undo refused");
           batch.state = "undoing";
           await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
         }
@@ -10175,7 +10172,8 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const [currentState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }]); const current = currentState!.parameter;
         if (reconciliation) { if (current.value !== parameter.priorValue || !currentState!.same) throw new Error("device-parameter undo replay did not restore exact prior state"); }
-        else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || !currentState!.same) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
+        // The same parameter goes back to its prior value, however it moved since; fenced on how it is now.
+        else { if (!currentState!.same) return this.transactionError(id, "Device parameter isn't the one this change was made on any more; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, this.parameterRevision(current)), context); }
         const [restoredState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }], false); const restored = restoredState!.parameter;
         if (restored.value !== parameter.priorValue || !restoredState!.same) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         parameter.state = "undone";
@@ -10194,8 +10192,9 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string); const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
-      if (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== (reconciliation ? transaction.priorTempo : transaction.appliedTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "Set identity or tempo changed after apply; undo refused");
-      if (!reconciliation) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: transaction.appliedTempo, expectedObjectIdentity: transaction.setIdentity }, context); }
+      // The same Set's tempo goes back, however it moved since; fenced on the tempo it has now.
+      if (!current || current.objectIdentity !== transaction.setIdentity || (reconciliation && current.tempo !== transaction.priorTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "The Set changed since this tempo change (another Set is open); undo refused");
+      if (!reconciliation && current.tempo !== transaction.priorTempo) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: current.tempo, expectedObjectIdentity: transaction.setIdentity }, context); }
       const restored = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!restored || restored.objectIdentity !== transaction.setIdentity || restored.tempo !== transaction.priorTempo) throw new Error("Live did not confirm exact Set tempo restoration");
       transaction.state = "undone";
@@ -10735,7 +10734,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   }
 
   private validTransactionParams(params: unknown, confirmation: "apply" | "undo"): params is JsonObject {
-    // An undo may say discard: a client's own scratch track (a render it recorded) goes even though it changed.
+    // An undo may say discard (still accepted; what a change made now goes however it changed since).
     return isObject(params) && hasOnly(params, confirmation === "undo" ? ["transactionId", "confirmation", "idempotencyKey", "discard"] : ["transactionId", "confirmation", "idempotencyKey"])
       && (params.discard === undefined || typeof params.discard === "boolean") && isNonEmptyString(params.transactionId, 128) && params.confirmation === confirmation && isIdempotencyKey(params.idempotencyKey);
   }
@@ -10751,7 +10750,9 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   private reasonError(id: RequestId, reason: string, remediation: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true }); }
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const reason = adapterReason(cause instanceof Error ? cause.message : "adapter request failed");
-    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
+    // A preview that failed changed nothing; the reason says what to fix, not a fresh read.
+    const next = /preview requires fresh authoritative state\.$/.test(remediation) ? "Nothing changed in Live: fix what the reason says (or take another route) and preview again." : remediation;
+    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: next }) }], isError: true });
   }
 
   private readResource(id: RequestId, params: unknown): JsonObject {
