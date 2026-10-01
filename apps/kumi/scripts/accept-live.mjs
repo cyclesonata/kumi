@@ -110,9 +110,13 @@ async function acceptFullControl(change) {
       const refused = await run("duplicate_device", { deviceRef: instrument.ref });
       say(!refused.ok && /one instrument/.test(refused.error ?? ""), refused.ms, `an instrument isn't copied beside itself${refused.ok ? ", but it was" : ""}`);
     }
-    const page = await run("live_discover", { kind: "device", limit: 100, fields: ["name", "deviceType"] });
-    const effect = (contentOf(page.body).items ?? []).find((row) => row.deviceType === "audio_effect" || row.deviceType === "midi_effect");
-    if (effect) await change("duplicate_device", { deviceRef: effect.ref }); else say(false, undefined, "no effect in the Set's first devices to copy");
+    // Devices are discovered a track at a time: the first effect on the Set's first tracks.
+    let effect;
+    for (const track of (await all("track", { fields: ["name"] })).items.slice(0, 40)) {
+      effect = (await all("device", { parent: track.ref, fields: ["name", "deviceType"] })).items.find((row) => row.deviceType === "audio_effect" || row.deviceType === "midi_effect");
+      if (effect || stopping) break;
+    }
+    if (effect) await change("duplicate_device", { deviceRef: effect.ref }); else say(false, undefined, "no effect on the Set's first tracks to copy");
   } else if (!tool("duplicate_device")) skip("duplicate_device");
   if (tool("render") && !stopping) {
     const bounce = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === BOUNCE).at(-1);

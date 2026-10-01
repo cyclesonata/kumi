@@ -8090,6 +8090,13 @@ class ReadBudgetTests(unittest.TestCase):
         focus = set(window["focus"]) if "focus" in window else None
         for position, row in enumerate(rows): assert (row.get("light") is True) == (focus is not None and start + position not in focus), position
 
+    def test_a_spent_budget_stops_after_one_unit_even_when_the_clock_seems_to_stand_still(self):
+        # Windows' monotonic clock moves in steps of about 15.6 ms: between two quick units it may not move.
+        with patch.object(remote_module.time, "monotonic", return_value=1000.0):
+            spent = remote_module._ReadBudget(0); roomy = remote_module._ReadBudget(10)
+            self.assertEqual([spent.room(), spent.room()], [True, False])
+            self.assertEqual([roomy.room(), roomy.room(), roomy.room()], [True, True, True])
+
     def test_a_snapshot_window_ends_and_a_focus_goes_light_when_the_budget_is_spent(self):
         song, mapper = self.set(); mapper.read_budget_seconds = 0
         window = {"tracks": {"from": 0, "count": 3}}

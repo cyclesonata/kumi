@@ -11931,7 +11931,9 @@ class _ReadBudget:
         now = time.monotonic()
         if self.units: self.slowest = max(self.slowest, now - self.mark)
         self.mark = now
-        if self.units and now + self.slowest > self.deadline: return False
+        # Reaching the deadline spends it: on Windows the clock moves in steps of about 15.6 ms, so no
+        # time may seem to pass, and a budget of nothing still stops after the first unit.
+        if self.units and now + self.slowest >= self.deadline: return False
         self.units += 1
         return True
 
