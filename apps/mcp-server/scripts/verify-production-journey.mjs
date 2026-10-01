@@ -481,6 +481,10 @@ def apply_control(command):
             song.is_playing = True; song.tracks[1].playing_slot_index = 1; song.tracks[1].fired_slot_index = 1
         else:
             song.is_playing = False; song.tracks[1].playing_slot_index = -1; song.tracks[1].fired_slot_index = -1
+    # The producer's own edits in Live: a track inserted or deleted (the ones after it move), a track muted.
+    elif name == "insertTrack": song.create_midi_track(int(command.get("index", 0))); song._notify("tracks")
+    elif name == "deleteTrack": song.delete_track(song.tracks[int(command.get("index", 0))]); song._notify("tracks")
+    elif name == "muteTrack": song.tracks[int(command.get("index", 0))].mute = bool(command.get("value"))
     else: raise RuntimeError("unknown control command")
 
 # The bridge serves its sockets on Live's main thread (update_display) and runs requests
@@ -1227,6 +1231,31 @@ class EnvelopeEvent:
     assert(finalRead.points.length === 2, "envelope undo did not restore points");
   });
 
+  await step("a mixer undo after a track is inserted above changes nothing there, and the change stays applied", async () => {
+    // Kumi unmutes Bass; the producer inserts a track above, which puts Drums (unmuted, as the change
+    // left Bass) at Bass's place. The undo must not mute Drums: it is refused before anything is sent,
+    // and once the inserted track is gone the same undo mutes Bass again.
+    const byName = async (name) => (await textOf(client, "live_discover", { kind: "track" })).parsed.items.find((track) => track.name === name);
+    await control({ command: "muteTrack", index: 1, value: true });
+    const bass = await byName("Journey Bass");
+    assert(bass?.mixer?.mute === true, `Bass did not start muted: ${JSON.stringify(bass?.mixer)}`);
+    const preview = (await textOf(client, "live_mixer_preview", { trackRef: bass.ref, mute: false })).parsed;
+    const applied = (await textOf(client, "live_mixer_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "journey-moved-mixer" })).parsed;
+    assert(applied.state === "applied", `unmuting Bass failed: ${JSON.stringify(applied)}`);
+    await control({ command: "insertTrack", index: 0 });
+    const atPlace = (await textOf(client, "live_discover", { kind: "track" })).parsed.items.find((track) => track.ref === bass.ref);
+    assert(atPlace?.name === "Journey Drums" && atPlace.mixer.mute === false, `Drums is not at Bass's place: ${JSON.stringify(atPlace)}`);
+    const refused = await textOf(client, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "journey-moved-mixer-undo" });
+    assert(refused.isError === true && /isn't the one this change was made on any more/.test(refused.parsed.reason ?? ""), `the undo was not refused: ${JSON.stringify(refused.parsed)}`);
+    assert((await byName("Journey Drums")).mixer.mute === false, "the undo muted Drums");
+    assert((await byName("Journey Bass")).mixer.mute === false, "Bass lost the change");
+    await control({ command: "deleteTrack", index: 0 });
+    const undone = (await textOf(client, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "journey-moved-mixer-undo-2" })).parsed;
+    assert(undone.state === "undone", `the undo once Bass is back failed: ${JSON.stringify(undone)}`);
+    assert((await byName("Journey Bass")).mixer.mute === true, "the undo did not mute Bass again");
+    await control({ command: "muteTrack", index: 1, value: false });
+  });
+
   await step("browser search/load and device lifecycle through the packaged path", async () => {
     const search = (await textOf(client, "live_browser_search", { category: "instruments", query: "rack" })).parsed;
     assert(search.items.length >= 1 && search.items.some((item) => item.id === "instruments/Drum Rack"), `browser search mismatch: ${JSON.stringify(search)}`);
@@ -1492,6 +1521,6 @@ const accessibilityEvidence = {
 };
 const packageIdentityPassed = packageEvidence?.version === "npm-packed-artifact/v1" && packageEvidence?.name === packageMetadata.name && packageEvidence?.packageVersion === packageMetadata.version && /^[a-f0-9]{64}$/.test(packageEvidence?.sha256 ?? "") && Number.isSafeInteger(packageEvidence?.sizeBytes);
 const accessibilityPassed = accessibilityChecks.length === 5 && accessibilityChecks.every((entry) => entry.contentType === "text" && entry.orderedStages && !entry.ansiControlBytes && entry.nonColorGuidance && !entry.pointerInputUsedByVerifier);
-const summary = { schemaVersion: "phase-9-packaged-journeys/v1", generatedAt: new Date().toISOString(), package: packageEvidence, journey: "packaged-production-boundary", provenance: "fake-live", progressEvidence: "derived-from-actual-purpose-specific-tool-results-not-plan-template-flags", accessibilityEvidence, userJourneys: executionRows, steps: results, passed: !failed && results.every((entry) => entry.passed) && results.length === 25 && userJourneyEvidence.length === 5 && representativeJourneysPassed && accessibilityPassed && packageIdentityPassed };
+const summary = { schemaVersion: "phase-9-packaged-journeys/v1", generatedAt: new Date().toISOString(), package: packageEvidence, journey: "packaged-production-boundary", provenance: "fake-live", progressEvidence: "derived-from-actual-purpose-specific-tool-results-not-plan-template-flags", accessibilityEvidence, userJourneys: executionRows, steps: results, passed: !failed && results.every((entry) => entry.passed) && results.length === 26 && userJourneyEvidence.length === 5 && representativeJourneysPassed && accessibilityPassed && packageIdentityPassed };
 console.log(JSON.stringify(summary));
 if (!summary.passed) process.exitCode = 1;

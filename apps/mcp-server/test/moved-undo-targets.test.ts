@@ -83,6 +83,25 @@ function sample(): { filePath: string; allowedRoot: string } {
   return { filePath, allowedRoot };
 }
 
+test("a mixer undo after a track is inserted above is refused: the track now at that place is untouched, and the change stays applied", async () => {
+  // The reviewer's case: Kumi unmutes Bass; a track inserted above puts Drums (unmuted, as the change
+  // left Bass) at Bass's place. The undo must not mute Drums.
+  const simulator = new DeterministicLiveSimulator(); const bass = drums(simulator); bass.name = "Bass"; bass.mute = true; bass.mixer.mute = true;
+  const { adapter, writes } = watched(simulator); const { call, apply, undo } = hosted(adapter);
+  const previewed = await call("live_mixer_preview", { trackRef: "track:track-1", mute: false }); assert.ok(previewed.transactionId, JSON.stringify(previewed));
+  assert.equal((await apply("live_mixer_apply", previewed)).state, "applied"); assert.equal(bass.mixer.mute, false);
+  const back = another(bass); const mixerBack = another(bass.mixer, ["volumeIdentity", "panIdentity", "cueIdentity", "sendIdentities", "mixerIdentity"]); bass.name = "Drums";
+  writes.length = 0;
+  const refused = await undo(previewed.transactionId);
+  assert.equal(refused.isError, true, JSON.stringify(refused));
+  assert.match(refused.reason, /Undo stopped before it changed anything in Live: the track at track:track-1 isn't the one this change was made on any more/);
+  assert.match(refused.remediation, /the change is still in place/);
+  assert.deepEqual(writes, [], "nothing was sent to Live"); assert.equal(bass.mixer.mute, false, "the track now at that place keeps its mute");
+  // The track inserted above goes again: Bass is back at its place, and the same change undoes.
+  back(); mixerBack(); bass.name = "Bass";
+  assert.equal((await undo(previewed.transactionId)).state, "undone"); assert.equal(bass.mixer.mute, true);
+});
+
 test("an undo its own check refuses leaves the change applied, and the next undo, with any key, starts over", async () => {
   const simulator = new DeterministicLiveSimulator(); const { adapter, writes } = watched(simulator); const { call, apply, undo } = hosted(adapter);
   const previewed = await call("live_mixer_preview", { trackRef: "track:track-1", volume: 0.5 });

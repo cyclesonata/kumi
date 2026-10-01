@@ -8938,6 +8938,32 @@ export class McpHost {
     } finally { IN_FLIGHT_TRANSACTION_IDS.delete(transactionId); this.recoveryFinalizationInFlight = false; }
   }
 
+  /**
+   * Why an undo can't go to what's now at its change's reference, or undefined when that's the object the
+   * change was made on. A reference is a place: a track inserted above (or a device, clip, chain or groove
+   * added or removed before it) puts another object there, one that may hold the very values the change
+   * wrote, so an undo that went by those values alone would change it. `found` is read now, `made` was
+   * recorded by the preview, each the same shape (an identity, or several).
+   */
+  private static movedTarget(what: string, ref: unknown, found: unknown, made: unknown): string | undefined {
+    if (made !== undefined && made !== null && JSON.stringify(found ?? null) === JSON.stringify(made)) return undefined;
+    return `the ${what} at ${String(ref)} isn't the one this change was made on any more (something was added, removed or moved since), so undoing there would change another ${what}`;
+  }
+
+  /** An undo refused before it sends anything, when its reference holds another object than its change's (movedTarget). */
+  private undoTargetMoved(id: RequestId, record: { state: string }, what: string, ref: unknown, found: unknown, made: unknown): JsonObject | undefined {
+    const moved = McpHost.movedTarget(what, ref, found, made); if (moved === undefined) return undefined;
+    // An applied change stays applied; a retried uncertain undo may have changed it before.
+    return record.state === "applied"
+      ? this.reasonError(id, `Undo stopped before it changed anything in Live: ${moved}`, `Nothing changed in Live, and the change is still in place. Find the ${what} again with live_discover, and change it back by hand if it still needs to.`)
+      : this.reasonError(id, moved, `Find the ${what} again with live_discover and look at it: an earlier try of this undo may have changed it.`);
+  }
+
+  /** A mixer's identities as its change fences on them: the track's, and its volume's, pan's, cue's and sends' parameters'. */
+  private static mixerIdentities(authority: Record<string, unknown>): Record<string, unknown> {
+    return { track: authority.expectedObjectIdentity ?? null, volume: authority.expectedVolumeIdentity ?? null, pan: authority.expectedPanIdentity ?? null, cue: authority.expectedCueIdentity ?? null, sends: authority.expectedSendIdentities ?? null };
+  }
+
   private async liveUndoAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
     const transactionId = isObject(params) && typeof params.transactionId === "string" ? params.transactionId : undefined;
     if (transactionId !== undefined) this.undoRefusals.delete(transactionId);
@@ -9970,6 +9996,8 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
         let currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
+        // The track, and its mixer's parameters, the change was made on: values alone can match another track's.
+        const moved = this.undoTargetMoved(id, mixer, "track", mixer.clipRef, McpHost.mixerIdentities(this.mixerAuthority(currentTarget)), McpHost.mixerIdentities(mixer.payload)); if (moved) return moved;
         for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
         if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
         currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
