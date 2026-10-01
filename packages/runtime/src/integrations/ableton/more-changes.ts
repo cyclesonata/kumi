@@ -456,7 +456,8 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
     description: "Delete an audio, MIDI or group track with its clips and devices (trackRef from discovery; a group takes the tracks in it). Only when the producer asks: Kumi can't bring it back (Live's own undo can), so say so. Later tracks move up.",
     permanent: () => "Kumi can't bring a deleted track back; Live's own undo can.",
     summarize(preview, input, track) {
-      const known = track(input.trackRef); const also = Array.isArray(preview.alsoDeletes) ? preview.alsoDeletes.length : 0;
+      // The preview names the track it deletes, and with a group the tracks inside it (alsoDeletes).
+      const known = track(input.trackRef); const inside = record(preview.track).alsoDeletes; const also = Array.isArray(inside) ? inside.length : 0;
       return { title: `Deleted track ${quoted(known?.name ?? record(preview.track).name, "")}${also ? ` and the ${plural(also, "track")} in it` : ""}`.replace("  ", " ") };
     },
   },

@@ -6877,6 +6877,24 @@ class ExplicitDeletionTests(unittest.TestCase):
         song = grouped_song(live_keeps_members=True); mapper = LiveObjectMapper(song, provenance="real-live"); group = mapper.snapshot()["tracks"][1]
         with self.assertRaisesRegex(ValueError, "did not preserve exact remaining sibling order"): mapper.invoke("track.delete", {"ref": group["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": group["objectIdentity"], "explicitDeletion": True}, "transaction-group")
 
+    def test_a_grouped_track_names_its_group_by_the_group_rows_own_ref(self):
+        """A track in a group points at the group's own row, nested groups too: whole and light rows,
+        snapshots and discovery pages alike."""
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(6)]
+        group, nested = song.tracks[1], song.tracks[3]; group.is_foldable = True; nested.is_foldable = True
+        song.tracks[2].group_track = group; nested.group_track = group; song.tracks[4].group_track = nested
+        mapper = LiveObjectMapper(song, provenance="real-live")
+        def parents(rows):
+            refs = {row["ref"]: index for index, row in enumerate(rows)}
+            return [refs.get(row.get("groupTrackRef")) if row.get("groupTrackRef") is not None else None for row in rows]
+        expected = [None, None, 1, 1, 3, None]
+        self.assertEqual(parents(mapper.snapshot()["tracks"][:6]), expected)
+        self.assertEqual(parents(mapper.snapshot({"focus": [0]})["tracks"][:6]), expected)
+        self.assertEqual(parents(mapper.discover("track", limit=6)["items"]), expected)
+        for index in (2, 4):
+            row = mapper.snapshot({"tracks": {"from": index, "count": 1}})["tracks"][0]
+            self.assertEqual(row["groupTrackRef"], mapper.snapshot()["tracks"][expected[index]]["ref"])
+
     def test_objects_an_explicit_deletion_moved_lose_their_ownership(self):
         song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack()]; mapper = LiveObjectMapper(song, provenance="real-live")
         made = mapper.invoke("track.create", {"name": "Made later", "kind": "midi", "index": 2, "expectedStructureRevision": mapper._structure_revision()}, "transaction-maker")
@@ -8105,6 +8123,46 @@ class TargetedDiscoveryTests(unittest.TestCase):
         song.arrangement_clips = [long_clip]; song_level = f"{mapper.refs.epoch}:arrangement_clip:0"
         self.assertEqual(len(mapper.discover("note", 100, None, song_level)["items"]), 50)
         self.assertEqual(mapper.discover("note", 100, None, f"{mapper.refs.epoch}:arrangement_clip:1:7")["items"], [])
+
+    def test_a_clips_note_pages_end_when_the_notes_listed_before_them_moved(self):
+        """A note page's cursor holds the notes listed so far: a note gone or added among them ends the
+        list (the next page would skip or repeat one); a change past them doesn't."""
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song)
+        clip_ref = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]["ref"]
+        first = mapper.discover("note", 20, None, clip_ref, budgeted=True)
+        self.assertEqual([note["id"] for note in first["items"]], list(range(1, 21)))
+        long_clip.stored[50].pitch = 99
+        second = mapper.discover("note", 20, first["nextCursor"], clip_ref, budgeted=True)
+        self.assertEqual([note["id"] for note in second["items"]], list(range(21, 41)))
+        self.assertEqual(second["revision"], first["revision"])
+        # The first note gone and one added at the end: as many notes, each moved up a place.
+        del long_clip.stored[1]; long_clip.stored[51] = FakeMidiNote(51, 40, 15.0, 0.25)
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("note", 20, first["nextCursor"], clip_ref, budgeted=True)
+
+    def test_a_note_page_spends_its_budget_on_notes_not_on_building_the_clips_note_vector(self):
+        song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); mapper.read_budget_seconds = 0.01
+        clip_ref = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]["ref"]
+        build = long_clip.get_all_notes_extended
+        def slow_build():
+            time.sleep(0.02); return build()
+        long_clip.get_all_notes_extended = slow_build
+        self.assertEqual(len(mapper.discover("note", 100, None, clip_ref, budgeted=True)["items"]), 50)
+
+    def test_a_tracks_arrangement_clips_page_on_while_the_set_plays(self):
+        """A list of clips binds its cursors to what it lists, not to where playback is: page 2
+        follows page 1 while the clips play; a clip that changed ends them."""
+        song = FakeSong(); song.tracks = [lean_track("Keys")]
+        clips = [FakeClip(4.0) for _ in range(3)]
+        for index, clip in enumerate(clips): clip.start_time = index * 4.0; clip.name = f"C{index}"; clip.is_playing = False; clip.playing_position = 0.0
+        song.tracks[0].arrangement_clips = clips
+        mapper = LiveObjectMapper(song); track_ref = mapper.snapshot()["tracks"][0]["ref"]
+        first = mapper.discover("arrangement_clip", 2, None, track_ref)
+        clips[0].is_playing = True; clips[0].playing_position = 1.5
+        second = mapper.discover("arrangement_clip", 2, first["nextCursor"], track_ref)
+        self.assertEqual([item["name"] for item in first["items"] + second["items"]], ["C0", "C1", "C2"])
+        self.assertEqual(first["items"][0]["isPlaying"], False)
+        clips[1].name = "Renamed"
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("arrangement_clip", 2, first["nextCursor"], track_ref)
 
     def test_arrangement_clip_rows_hold_their_notes_only_when_asked(self):
         song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); long_clip.note_reads = 0

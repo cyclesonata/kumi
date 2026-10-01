@@ -900,6 +900,8 @@ class LiveObjectMapper:
         self._playback_revision_counter = 0
         # Set while reads share one snapshot (see _shared_reads).
         self._read_cache: dict[str, Any] | None = None
+        # The tracks' places by identity, found once within a read (see _group_track_ref).
+        self._track_places: dict[str, int] | None = None
         # The Live undo step a client opened ({stepId, expiresAt, owner, label}): closed by the client,
         # or by a guard (its deadline, its connection closing, a reconnect, the bridge shutting down).
         self._undo_step: dict[str, Any] | None = None
@@ -1560,7 +1562,9 @@ class LiveObjectMapper:
         tag = hmac.new(self.refs._cursor_key, payload, hashlib.sha256).hexdigest()[:24]
         return base64.urlsafe_b64encode(payload + b":" + tag.encode("ascii")).decode("ascii").rstrip("=")
 
-    def _cursor_offset(self, cursor: str, revision: str) -> int:
+    def _cursor_offset(self, cursor: str, revision: "str | Callable[[int], str]") -> int:
+        """The offset a cursor holds, once its tag, epoch and revision check out. A revision given as
+        a function of the offset binds the cursor to what lies before it too (a note page's notes)."""
         try:
             raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
             encoded = raw.decode("ascii")
@@ -1568,13 +1572,14 @@ class LiveObjectMapper:
             epoch, actual_revision, offset_text = payload_text.split("|", 2)
             payload = payload_text.encode("ascii")
             expected = hmac.new(self.refs._cursor_key, payload, hashlib.sha256).hexdigest()[:24]
-            if not hmac.compare_digest(tag, expected) or int(epoch) != self.refs.epoch or actual_revision != revision:
+            if not hmac.compare_digest(tag, expected) or int(epoch) != self.refs.epoch:
                 raise ValueError("stale discovery cursor")
             offset = int(offset_text)
+            if not 0 <= offset <= MAX_TRAVERSAL: raise ValueError("invalid discovery cursor")
+            if actual_revision != (revision(offset) if callable(revision) else revision):
+                raise ValueError("stale discovery cursor")
         except (ValueError, TypeError, UnicodeError, OSError) as error:
             raise ValueError("invalid discovery cursor") from error
-        if not 0 <= offset <= MAX_TRAVERSAL:
-            raise ValueError("invalid discovery cursor")
         return offset
 
     def _audio_fields(self, clip: Any) -> dict[str, Any]:
@@ -2135,8 +2140,28 @@ class LiveObjectMapper:
         seconds, growing with the Set."""
         if self._read_cache is not None: return work()
         self._read_cache = {}
-        try: return work()
+        try: return self._with_track_places(work)
         finally: self._read_cache = None
+
+    def _with_track_places(self, work: Callable[[], Any]) -> Any:
+        """Runs a read (it changes nothing) finding the tracks' places at most once, however many
+        grouped tracks' rows it builds."""
+        if self._track_places is not None: return work()
+        self._track_places = {}
+        try: return work()
+        finally: self._track_places = None
+
+    def _group_track_ref(self, group: Any) -> str | None:
+        """The group a track sits in, by the group's own ref (its place among the Set's tracks): the
+        ref the group's row has. None outside a group, or for a group not among the tracks."""
+        if group is None: return None
+        places = self._track_places
+        if not places:
+            found = {self._capture_object_identity(track): index for index, track in enumerate(self._items(getattr(self.song, "tracks", [])))}
+            if places is not None: places.update(found)
+            places = found
+        index = places.get(self._capture_object_identity(group))
+        return self.refs.put("track", group, str(index)) if index is not None else None
 
     def _track_entries(self, kinds: bool = True) -> list[tuple[Any, Any]]:
         """Every track in snapshot order (regular and group tracks, returns, then the main track) with
@@ -2339,7 +2364,7 @@ class LiveObjectMapper:
             "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
             "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
             "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
-            "groupTrackRef": self.refs.put("track", group, f"group:{index}") if group is not None else None,
+            "groupTrackRef": self._group_track_ref(group),
             "colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None,
             "color": int(color_rgb) if isinstance(color_rgb, int) and not isinstance(color_rgb, bool) and 0 <= color_rgb <= 0xFFFFFF else None,
             "isVisible": optional_bool("is_visible"),
@@ -2354,6 +2379,9 @@ class LiveObjectMapper:
         return range(min(window["from"], total), min(window["from"] + window["count"], total))
 
     def _build_snapshot(self, args: dict[str, Any] | None = None, budget: "_ReadBudget | None" = None) -> dict[str, Any]:
+        return self._with_track_places(lambda: self._snapshot_rows(args, budget))
+
+    def _snapshot_rows(self, args: dict[str, Any] | None, budget: "_ReadBudget | None") -> dict[str, Any]:
         args = args or {}
         parts = set(args["parts"]) if "parts" in args else set(self._SNAPSHOT_PARTS)
         track_window, scene_window = args.get("tracks"), args.get("scenes")
@@ -2686,6 +2714,9 @@ class LiveObjectMapper:
     _DISCOVERY_TRACK_KINDS = {"track": {"regular", "group"}, "group_track": {"group"}, "return_track": {"return"}, "main_track": {"main"}}
 
     def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = MAX_TRAVERSAL, budgeted: bool = False) -> dict[str, Any]:
+        return self._with_track_places(lambda: self._discover_page(kind, limit, cursor, parent, filters, requested_fields, traversal_budget, budgeted))
+
+    def _discover_page(self, kind: str, limit: int, cursor: str | None, parent: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, budgeted: bool) -> dict[str, Any]:
         """A page of one kind of object. What it reads follows what it lists: a parent's track alone
         for what lives under a track; light rows for the Set's tracks (whole rows only for the page,
         and only when the requested fields need them); scene rows; the locators. A Set-wide list's
@@ -2803,7 +2834,8 @@ class LiveObjectMapper:
         if filters:
             items = [item for item in items if all(item.get(key) == value for key, value in filters.items())]
         items = items[:traversal_budget]
-        basis = [[item.get(field) for field in identity_fields] for item in items] if identity_fields is not None else items
+        # A list of clips or slots binds its cursors to them, not to where playback is (it moves every tick).
+        basis = [[item.get(field) for field in identity_fields] for item in items] if identity_fields is not None else _without_fields(items, _VOLATILE_CLIP_FIELDS | _VOLATILE_SLOT_FIELDS) if kind in {"arrangement_clip", "clip", "session_clip", "clip_slot"} else items
         fingerprint = hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
         revision = f"{self.refs.epoch}:{kind}:{len(items)}:{fingerprint}"
         offset = 0
@@ -2887,7 +2919,9 @@ class LiveObjectMapper:
     def _indexed_page(self, kind: str, parent: str, owner: Any, limit: int, cursor: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
         """A clip's notes or a device's parameters, a page at a time by their index: a page reads the
         items it lists (and how many there are), not the rest. The cursor, and the list's revision,
-        are bound to the owner's identity and its item count."""
+        are bound to the owner's identity and its item count; a note page's cursor to the notes
+        listed before it too, by identity and order: a note gone or added there would make the next
+        page skip or repeat one."""
         if kind == "note":
             vector = self._note_vector(owner)
             convert = lambda item, index: self._note_rows_from([item])[0] | {"ref": f"{parent}:note:{index}", "parentRef": parent}
@@ -2896,14 +2930,30 @@ class LiveObjectMapper:
             convert = lambda item, index: self._parameter_row(item, index, parent)
         total = len(vector)
         revision = f"{self.refs.epoch}:{kind}:{hashlib.sha256(f'{parent}|{self._capture_object_identity(owner)}|{total}'.encode('utf-8')).hexdigest()[:16]}:{total}"
-        index = self._cursor_offset(cursor, revision) if cursor is not None else 0
+        bound: Callable[[int], str] = (lambda offset: f"{revision}/{self._note_prefix(vector, min(offset, total))}") if kind == "note" else (lambda offset: revision)
+        index = self._cursor_offset(cursor, bound) if cursor is not None else 0
         if not 0 <= index <= total: raise ValueError("invalid discovery cursor")
+        # The budget is the page's items': building the owner's list (a clip's whole note vector, each page) isn't one.
+        if deadline is not None: deadline = _ReadBudget(self.read_budget_seconds)
         end = min(total, traversal_budget); page: list[dict[str, Any]] = []
         while index < end and len(page) < limit:
             if deadline is not None and not deadline.room(): break
             row = convert(vector[index], index); index += 1
             if row is not None and (not filters or all(row.get(key) == value for key, value in filters.items())): page.append(row)
-        return self._page_result(kind, page, revision, self._cursor(index, revision) if index < end else None, requested_fields)
+        return self._page_result(kind, page, revision, self._cursor(index, bound(index)) if index < end else None, requested_fields)
+
+    @staticmethod
+    def _note_prefix(vector: Any, count: int) -> str:
+        """The first `count` notes of a note vector by identity, in order (their ids; a note without one
+        by its pitch and place), as a digest."""
+        keys: list[Any] = []
+        for index in range(count):
+            note = vector[index]
+            note_id = note.get("note_id", note.get("id")) if isinstance(note, dict) else getattr(note, "note_id", None)
+            if isinstance(note_id, int) and not isinstance(note_id, bool): keys.append(note_id); continue
+            fields = (note.get("pitch"), note.get("start", note.get("start_time")), note.get("duration")) if isinstance(note, dict) else (getattr(note, "pitch", None), getattr(note, "start_time", None), getattr(note, "duration", None))
+            keys.append([value if isinstance(value, (int, float)) and not isinstance(value, bool) else None for value in fields])
+        return hashlib.sha256(json.dumps(keys, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
     def _note_vector(self, clip: Any) -> Any:
         """A clip's notes as Live hands them over (its note vector, indexed without reading each
@@ -6651,7 +6701,7 @@ class LiveObjectMapper:
             value = self._read_attr(obj, name)
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         group = self._read_attr(track, "group_track")
-        group_ref = self.refs.put("track", group, f"group:{track_index}") if group is not None else None
+        group_ref = self._group_track_ref(group)
         view = getattr(track, "view", None)
         color_index = self._read_attr(track, "color_index")
         color_rgb = self._read_attr(track, "color")
