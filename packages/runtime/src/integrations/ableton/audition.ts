@@ -109,3 +109,17 @@ export function restoreStore(file: string) {
   };
 }
 export type RestoreStore = ReturnType<typeof restoreStore>;
+
+export const RENDER_TOOL = "render";
+
+export const RENDER_DESCRIPTION = [
+  "Render an audio track's own clips (its recordings, a bounce) between two points to a file at once: offline and silent, no transport, no recording.",
+  "It's the raw audio, before the track's devices; instruments, effects and the mix aren't in it (for those, audition, or record by resampling).",
+  "Returns the file for listen, to hear it or compare it with a reference.",
+].join(" ");
+
+export const RENDER_SCHEMA: JsonObject = { type: "object", additionalProperties: false, required: ["track", "from_beat", "beats"], properties: {
+  track: { ...REF, description: "An audio track (its reference from this turn)" },
+  from_beat: { type: "number", minimum: 0, description: "Where to start in the Arrangement, in beats (a 4/4 bar is 4)" },
+  beats: { type: "number", exclusiveMinimum: 0, maximum: 100000, description: "How long, in beats" },
+} };

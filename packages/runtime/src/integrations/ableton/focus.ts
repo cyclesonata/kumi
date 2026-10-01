@@ -37,6 +37,10 @@ export function parseFocus(row: JsonObject): LiveFocus | null {
 
 export interface FocusFeed {
   stop(): void;
+  /** Read again now: Live said the selection changed. */
+  poke(): void;
+  /** Live says when the selection changes: the poll is only a heartbeat now. */
+  slow(): void;
 }
 
 /**
@@ -56,6 +60,7 @@ export function startFocusFeed(options: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inflight: AbortController | undefined;
   let failures = 0;
+  let again = false; let interval = options.intervalMs ?? 500;
   const report = (focus: LiveFocus | null) => {
     const key = JSON.stringify(focus);
     if (key === last) return;
@@ -75,7 +80,7 @@ export function startFocusFeed(options: {
     }
     finally {
       inflight = undefined;
-      if (!stopped) timer = setTimeout(() => { void tick(); }, options.intervalMs ?? 500);
+      if (!stopped) { timer = setTimeout(() => { void tick(); }, again ? 0 : interval); again = false; }
     }
   };
   void tick();
@@ -87,5 +92,11 @@ export function startFocusFeed(options: {
       inflight?.abort();
       report(null);
     },
+    poke() {
+      if (stopped) return;
+      if (inflight) { again = true; return; }
+      clearTimeout(timer); void tick();
+    },
+    slow() { interval = Math.max(interval, 5_000); },
   };
 }

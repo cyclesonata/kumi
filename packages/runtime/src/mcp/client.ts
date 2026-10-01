@@ -28,6 +28,8 @@ export interface McpEndpoint {
   call(name: string, args: JsonObject, signal: AbortSignal): Promise<CallToolResult>;
   onCatalogChanged(listener: () => void): () => void;
   onDisconnect(listener: () => void): () => void;
+  /** What happens in Live as it happens (the bridge's notifications/live_event, once subscribed; pointed events always). */
+  onLiveEvent?(listener: (event: JsonObject) => void): () => void;
   stderrStatus(): { bytes: number; truncated: boolean };
   close(): Promise<void>;
 }
@@ -102,6 +104,12 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
   client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
     for (const listener of [...catalogListeners]) listener();
   });
+  // Live's events: a method the SDK has no schema for, so it comes through the fallback handler.
+  const liveEventListeners = new Set<(event: JsonObject) => void>();
+  client.fallbackNotificationHandler = async (notification) => {
+    if (notification.method !== "notifications/live_event" || !notification.params || typeof notification.params !== "object") return;
+    for (const listener of [...liveEventListeners]) { try { listener(notification.params as JsonObject); } catch { /* a listener failure must not affect the link */ } }
+  };
   function requireReady(signal: AbortSignal) {
     signal.throwIfAborted();
     if (!ready || closing) throw new Error("Kumi's link to Live is down; it reconnects when Live is back.");
@@ -154,6 +162,7 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
       },
       onCatalogChanged(listener) { catalogListeners.add(listener); return () => { catalogListeners.delete(listener); }; },
       onDisconnect(listener) { disconnectListeners.add(listener); return () => { disconnectListeners.delete(listener); }; },
+      onLiveEvent(listener) { liveEventListeners.add(listener); return () => { liveEventListeners.delete(listener); }; },
       stderrStatus: () => ({ bytes: stderrBytes, truncated: stderrTruncated }),
       close,
     };

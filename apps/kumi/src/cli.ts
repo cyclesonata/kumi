@@ -190,6 +190,7 @@ try {
       integrationFactory: (onConnection) => config.mode === "inference-only" ? createInferenceOnlyIntegration(onConnection)
         : withFallback(createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
+          onPointed: (pin) => terminal?.handleEvent({ type: "pointed", pin }),
           // Kumi's changes are kept with the conversation too, for its HISTORY when it's resumed.
           onChange: (change) => { controller.watch?.({ type: "change", change }); terminal?.handleEvent({ type: "change", change }); },
           onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },

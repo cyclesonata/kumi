@@ -27,3 +27,7 @@ export const GOAL_BRIDGE = "1.0.50";
 /** The bridge release without caps on a Set's size: its Remote Script pages whole collections (a discovery
  * of up to 100000 rows) and verifies a change without walking the Set. Older ones refuse pages over 100. */
 export const SCALE_BRIDGE = "1.0.57";
+
+/** The bridge release with explicit deletions, Live's undo steps, single-request changes, Live's events, and
+ * the tools of Kumi's Live extension (Arrangement MIDI clips with notes, clearing a range, offline renders). */
+export const FULL_CONTROL_BRIDGE = "1.0.58";

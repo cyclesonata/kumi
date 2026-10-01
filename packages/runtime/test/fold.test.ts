@@ -53,3 +53,14 @@ test("the observation of a 200-track Set stays small: the selected track keeps i
     assert.equal(tracks.filter((row) => typeof row === "object").length, 2, "the selected track and the changed one");
   } finally { await b.integration.close(); }
 });
+
+test("pages that end early (Live's side keeping its UI responsive) still give Kumi the whole Set", async () => {
+  const b = await opened({ bigSet: 200, pageSize: 7, version: "1.0.57" });
+  try {
+    const context = JSON.parse(b.observation.context) as { tracks: Array<JsonObject | string>; moreTracks?: string };
+    assert.equal(context.tracks.length, 202, "every track, from 29 pages");
+    assert.equal(context.moreTracks, undefined);
+    assert.equal(context.tracks[3], "track:4 Part 2 (in track:3) · Operator, EQ Eight +2", "and every track's devices, from their pages");
+    assert.ok(b.requests.filter((request) => request.name === "live_discover" && request.args.kind === "device").length > 100, "the device list came in many pages");
+  } finally { await b.integration.close(); }
+});

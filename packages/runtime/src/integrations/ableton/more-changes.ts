@@ -6,7 +6,7 @@
  */
 import type { JsonObject } from "../../core/contracts.js";
 import type { ChangeKind, ChangeSummary, KnownTrack } from "./changes.js";
-import { FIXED_BRIDGE } from "./bridge-version.js";
+import { FIXED_BRIDGE, FULL_CONTROL_BRIDGE } from "./bridge-version.js";
 
 const record = (value: unknown): JsonObject => (value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {});
 const number = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
@@ -36,7 +36,7 @@ function ownerTrack(ref: unknown, track: (ref: unknown) => KnownTrack | undefine
   if (typeof ref !== "string") return undefined;
   const direct = track(ref);
   if (direct && /:track:/.test(ref)) return direct;
-  const match = /^(\d+):(?:clip|device|chain|clip_slot|slot|drum_pad):(\d+)(?::|$)/.exec(ref);
+  const match = /^(\d+):(?:clip|arrangement_clip|device|chain|clip_slot|slot|drum_pad):(\d+)(?::|$)/.exec(ref);
   return match ? track(`${match[1]}:track:${match[2]}`) : undefined;
 }
 const withTrack = (summary: ChangeSummary, known: KnownTrack | undefined): ChangeSummary => (known ? { ...summary, track: known } : summary);
@@ -425,7 +425,84 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
     description: "Operate or set a Looper device: record, overdub, play, stop, clear, undo, double or halve speed and length, as the bridge offers them.",
     summarize(_preview, input) { return { title: `Looper: ${label(input.action) ?? "settings"}` }; },
   },
+  // What Live's Remote Script could only take away by Kumi's own undo, now asked for: explicit deletions.
+  // Live keeps them in its own undo; Kumi can't bring them back, and says so in HISTORY.
+  {
+    tool: "delete_clip", since: FULL_CONTROL_BRIDGE, preview: "live_clip_delete_preview", apply: "live_clip_delete_apply", family: "clip",
+    description: "Delete a clip, in the Session or the Arrangement (clipRef from discovery). Only when the producer asks to remove it: Kumi can't bring it back (Live's own undo can), so say so.",
+    permanent: () => "Kumi can't bring a deleted clip back; Live's own undo can.",
+    summarize(preview, input, track) {
+      const clip = record(preview.clip ?? preview.target); const known = ownerTrack(preview.clipRef ?? input.clipRef, track);
+      return withTrack({ title: `Deleted clip ${quoted(clip.name ?? preview.name, "")}${known ? ` on ${known.name}` : ""}`.replace("  ", " ") }, known);
+    },
+  },
+  {
+    tool: "delete_scene", since: FULL_CONTROL_BRIDGE, preview: "live_scene_delete_preview", apply: "live_scene_delete_apply", family: "structure", restructures: true,
+    description: "Delete a Session scene and the clips in its slots (sceneRef from discovery). Only when the producer asks: Kumi can't bring it back (Live's own undo can), so say so. Later scenes move up.",
+    permanent: () => "Kumi can't bring a deleted scene back; Live's own undo can.",
+    summarize(preview) {
+      const scene = record(preview.scene ?? preview.target);
+      return { title: `Deleted scene ${quoted(scene.name ?? preview.name, number(scene.index) !== undefined ? `${number(scene.index)! + 1}` : "")}`.trim() };
+    },
+  },
+  {
+    tool: "delete_track", since: FULL_CONTROL_BRIDGE, preview: "live_track_delete_preview", apply: "live_track_delete_apply", family: "structure", restructures: true,
+    description: "Delete an audio, MIDI or group track with its clips and devices (trackRef from discovery; a group takes the tracks in it). Only when the producer asks: Kumi can't bring it back (Live's own undo can), so say so. Later tracks move up.",
+    permanent: () => "Kumi can't bring a deleted track back; Live's own undo can.",
+    summarize(preview, input, track) {
+      const known = track(input.trackRef); const also = Array.isArray(preview.alsoDeletes) ? preview.alsoDeletes.length : 0;
+      return { title: `Deleted track ${quoted(known?.name ?? record(preview.track).name, "")}${also ? ` and the ${plural(also, "track")} in it` : ""}`.replace("  ", " ") };
+    },
+  },
+  {
+    tool: "delete_locator", since: FULL_CONTROL_BRIDGE, preview: "live_locator_delete_preview", apply: "live_locator_delete_apply", family: "locators",
+    description: "Delete an Arrangement locator (locatorRef from discovery). Only when the producer asks: Kumi can't bring it back (Live's own undo can).",
+    permanent: () => "Kumi can't bring a deleted locator back; Live's own undo can.",
+    summarize(preview) {
+      const locator = record(preview.locator ?? preview.target); const at = number(locator.position ?? locator.time);
+      return { title: `Deleted locator ${quoted(locator.name, "")}${at !== undefined ? ` at ${bars(at)}` : ""}`.replace("  ", " ") };
+    },
+  },
+  // What Kumi's Live extension adds (offered only while it runs in Live).
+  {
+    tool: "write_arrangement_clip", since: FULL_CONTROL_BRIDGE, preview: "live_arrangement_midi_clip_preview", apply: "live_arrangement_midi_clip_apply", family: "clip",
+    description: "Write a new MIDI clip with its notes straight into the Arrangement: trackRef (a MIDI track from discovery), start and length in beats from the Set's start, notes (pitch, start and duration in beats from the clip's start, velocity), name and looping optional. Several at once: clips, a list of those. No recording, no copying from the Session.",
+    summarize(preview, input, track) {
+      const clips = Array.isArray(input.clips) ? input.clips.map(record) : [input];
+      const first = clips[0] ?? {}; const known = track(first.trackRef);
+      const notes = clips.reduce((sum, clip) => sum + (Array.isArray(clip.notes) ? clip.notes.length : 0), 0);
+      const start = number(first.start); const length = number(first.length);
+      const drawn = (Array.isArray(first.notes) ? first.notes : []).slice(0, 512).flatMap((item) => {
+        const note = record(item); const pitch = number(note.pitch); const at = number(note.start); const duration = number(note.duration);
+        return pitch !== undefined && at !== undefined && duration !== undefined && duration > 0 ? [{ pitch, start: at, duration, velocity: number(note.velocity) ?? 100 }] : [];
+      });
+      void preview;
+      const where = start !== undefined ? ` at ${bars(start)}` : "";
+      const title = clips.length > 1 ? `${plural(clips.length, "new Arrangement clip")} · ${plural(notes, "note")}` : `New Arrangement clip ${quoted(first.name, "")}${where} · ${plural(notes, "note")}`.replace("  ", " ");
+      return { title, ...(known ? { track: known } : {}), ...(clips.length === 1 && length !== undefined && length > 0 && drawn.length ? { clip: { length, notes: drawn } } : {}) };
+    },
+  },
+  {
+    tool: "clear_range", since: FULL_CONTROL_BRIDGE, preview: "live_clip_clear_range_preview", apply: "live_clip_clear_range_apply", family: "clip",
+    description: "Clear a stretch of the Arrangement on one track: the clips inside it go, and clips crossing its edges are cut there (trackRef, fromBeat, toBeat). Kumi can't bring them back (Live's own undo can), so only when the producer asks.",
+    permanent: () => "Kumi can't put back what it cleared; Live's own undo can.",
+    summarize(preview, input, track) {
+      const known = track(input.trackRef); const from = number(input.fromBeat); const to = number(input.toBeat);
+      const removed = Array.isArray(preview.removes) ? preview.removes.length : 0; const cut = Array.isArray(preview.cuts) ? preview.cuts.length : 0;
+      const range = from !== undefined && to !== undefined ? ` from ${bars(from)} to ${bars(to)}` : "";
+      return withTrack({ title: `Cleared${range}${known ? ` on ${known.name}` : ""}${removed || cut ? ` (${[removed ? plural(removed, "clip") + " gone" : "", cut ? plural(cut, "clip") + " cut" : ""].filter(Boolean).join(", ")})` : ""}` }, known);
+    },
+  },
+  {
+    tool: "duplicate_device", since: FULL_CONTROL_BRIDGE, preview: "live_device_duplicate_preview", apply: "live_device_duplicate_apply", family: "device",
+    description: "Copy a device with its settings, straight after itself in its chain (deviceRef from discovery).",
+    produces: (applied) => { const created = record(applied.created); return typeof created.ref === "string" ? { ref: created.ref, kind: "device" } : undefined; },
+    summarize(preview, input, track) {
+      const device = record(preview.device ?? preview.target); const known = ownerTrack(input.deviceRef, track);
+      return withTrack({ title: `Duplicated ${label(device.name) ?? "a device"}${known ? ` on ${known.name}` : ""}` }, known);
+    },
+  },
 ];
 
 /** Fields in the new tools that name Live objects; they must come from discovery in this turn. */
-export const MORE_REFERENCE_FIELDS = ["targetTrackRef", "targetChainRef", "slotRef", "sceneRef", "takeLaneRef", "destinationTrackRef"] as const;
+export const MORE_REFERENCE_FIELDS = ["targetTrackRef", "targetChainRef", "slotRef", "sceneRef", "takeLaneRef", "destinationTrackRef", "locatorRef"] as const;

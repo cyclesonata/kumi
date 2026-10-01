@@ -300,17 +300,26 @@ export interface DeviceTree {
   devices: DeviceNode[];
 }
 
-/** What the producer pointed at in Kumi (FOCUS's tree): "this" in their next messages. Names are data. */
+/**
+ * What the producer pointed at, in Kumi (FOCUS's tree: a device or a chain) or in Live (its right-click
+ * "Ask Kumi about this": a track, a clip, a scene, a slot, a device, or a stretch of the Arrangement):
+ * "this" in their next messages. Names are data.
+ */
 export interface PinnedNode {
+  /** The track it's on; empty for a scene. */
   trackRef: string;
   ref: string;
-  node: "device" | "chain";
+  node: "device" | "chain" | "track" | "clip" | "scene" | "clip-slot" | "selection";
   name: string;
   /** Its racks and chains, outermost first. */
   trail: string[];
   /** Its neighbours in the same chain, or on the track. */
   siblings: string[];
   track?: string;
+  /** Pointed at in Live (right-click), not in Kumi's FOCUS. */
+  live?: boolean;
+  /** A stretch of the Arrangement pointed at in Live, in beats from the Set's start. */
+  time?: { fromBeat: number; toBeat: number };
 }
 export type IntegrationFactory = (connection: (state: ConnectionState, cause?: DisconnectCause) => void) => Integration;
 
@@ -403,6 +412,8 @@ export interface CatchUp {
 
 export type SessionEvent = KernelEvent
   | { type: "focus"; focus: LiveFocus | null }
+  /** The producer pointed at something in Live (right-click "Ask Kumi about this"): the app pins it. */
+  | { type: "pointed"; pin: PinnedNode }
   | { type: "change"; change: ChangeRecord }
   | { type: "catch-up"; catchUp: CatchUp }
   /** A saved Set's conversation continues; `lines` are its recent exchanges. */

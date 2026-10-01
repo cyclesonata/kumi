@@ -17,9 +17,9 @@ import { defaultSampleFolders, findSamples, folderPath, userLibrary, type Sample
 import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
-import { setMeter } from "./more-changes.js";
-import { ARRANGEMENT_BRIDGE, atLeast, GOAL_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
-import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, renderSpan, restoreStore, silentRender } from "./audition.js";
+import { bars, setMeter } from "./more-changes.js";
+import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
+import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, RENDER_DESCRIPTION, RENDER_SCHEMA, RENDER_TOOL, renderSpan, restoreStore, silentRender } from "./audition.js";
 import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
 import { summary as heardSummary } from "../../audio/tools.js";
 import type { Knob } from "../../core/evolve.js";
@@ -90,6 +90,8 @@ interface Options {
   onDispatch?: (name: string) => void;
   /** Basic focus: what the producer is looking at, reported when it changes. */
   onFocus?: (focus: LiveFocus | null) => void;
+  /** The producer pointed at something in Live (its right-click "Ask Kumi about this"): pin it for their next message. */
+  onPointed?: (pin: PinnedNode) => void;
   focusIntervalMs?: number;
   /** A change Kumi made or undid in Live, for HISTORY. */
   onChange?: (change: ChangeRecord) => void;
@@ -243,6 +245,51 @@ export function createAbletonIntegration(options: Options): Integration {
         onFailure: () => { if (!lost) void readStatus(AbortSignal.timeout(1_500)).then((status) => { if (!status.connected) loseLive(); }).catch(() => {}); },
         ...(options.focusIntervalMs ? { intervalMs: options.focusIntervalMs } : {}) });
     }
+    // Live's events: the selection is read the moment it changes, and what the producer points at in Live
+    // becomes a pin. (Subscribing waits for the catalog: see subscribe.)
+    subscribed = false;
+    if (connected.onLiveEvent) unlisten.push(connected.onLiveEvent(liveEvent));
+  }
+  let subscribed = false;
+  /** Once per connection, where the bridge has Live's events: then the focus poll is only a heartbeat. */
+  async function subscribe(signal: AbortSignal) {
+    if (subscribed || !tools?.has("live_subscribe")) return;
+    subscribed = true;
+    try { if (!(await tools.call("live_subscribe", { types: ["selection", "structure"] }, signal, { host: true })).isError) focusFeed?.slow(); }
+    catch { subscribed = false; }
+  }
+  function liveEvent(event: JsonObject) {
+    if (event.type === "selection" || event.type === "structure") focusFeed?.poke();
+    if (event.type === "pointed" && options.onPointed) {
+      const pin = pointedPin(event);
+      if (pin) { try { options.onPointed(pin); } catch { /* a listener failure must not affect Live */ } }
+    }
+  }
+  /** A pin from what the producer pointed at in Live: its reference (the bridge's), what it is, its name and where. */
+  function pointedPin(event: JsonObject): PinnedNode | undefined {
+    const data = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as JsonObject : {};
+    const kind = String(data.kind ?? "");
+    const trail = Array.isArray(data.trail) ? data.trail.filter((part): part is string => typeof part === "string") : [];
+    const path = Array.isArray(data.path) ? data.path : [];
+    if (/selection$/.test(kind)) {
+      // A stretch of the Arrangement (or slots of the Session): its first lane, and the time it spans.
+      const lanes = (Array.isArray(data.lanes) ? data.lanes : Array.isArray(data.slots) ? data.slots : []).filter((lane): lane is JsonObject => Boolean(lane) && typeof lane === "object");
+      const lane = lanes[0]; const time = data.timeSelection && typeof data.timeSelection === "object" ? data.timeSelection as JsonObject : {};
+      if (typeof lane?.ref !== "string") return undefined;
+      const from = typeof time.fromBeat === "number" ? time.fromBeat : undefined; const to = typeof time.toBeat === "number" ? time.toBeat : undefined;
+      const laneName = typeof lane.name === "string" ? lane.name : "";
+      return { trackRef: lane.kind === "track" ? lane.ref : "", ref: lane.ref, node: from !== undefined && to !== undefined ? "selection" : "clip-slot", name: laneName, trail: [], siblings: lanes.slice(1).map((other) => String(other.name ?? "")),
+        live: true, ...(laneName ? { track: laneName } : {}), ...(from !== undefined && to !== undefined ? { time: { fromBeat: from, toBeat: to } } : {}) };
+    }
+    const ref = typeof data.ref === "string" ? data.ref : typeof event.ref === "string" ? event.ref : undefined;
+    if (!ref) return undefined;
+    const epoch = ref.split(":")[0];
+    const node: PinnedNode["node"] = kind === "track" ? "track" : kind === "scene" ? "scene" : kind === "clip_slot" ? "clip-slot" : /clip$/.test(kind) ? "clip" : "device";
+    const name = typeof data.name === "string" && data.name ? data.name : node === "scene" && typeof path[0] === "number" ? `Scene ${path[0] + 1}` : "";
+    // Live's trail ends with the object itself; a pin's is what holds it (as FOCUS's are).
+    if (trail.length && (trail.at(-1) === data.name || trail.at(-1) === "")) trail.pop();
+    return { trackRef: node === "track" ? ref : node === "scene" || typeof path[0] !== "number" ? "" : `${epoch}:track:${path[0]}`, ref, node, name, trail, siblings: [], live: true,
+      ...(node !== "track" && node !== "scene" && trail[0] ? { track: trail[0] } : {}) };
   }
   async function lookForLive() {
     if (closed || !lost || looking) return;
@@ -584,7 +631,11 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Whether the connected bridge is new enough for this tool (see `since`). */
   const supported = (kind: { since?: string }) => !kind.since || atLeast(endpoint?.serverInfo?.version, kind.since);
   /** Rows per discovery page: a whole collection from a bridge without size caps, 100 from an older one. */
-  const pageLimit = () => atLeast(endpoint?.serverInfo?.version, SCALE_BRIDGE) ? 100_000 : 100;
+  /** A bridge with no caps on a Set's size, which pages by work (SCALE_BRIDGE): Kumi's own reads ask it for everything. */
+  const scaled = () => atLeast(endpoint?.serverInfo?.version, SCALE_BRIDGE);
+  const pageLimit = () => scaled() ? 100_000 : 100;
+  /** The traversal budget of Kumi's own reads of a whole collection: everything, where the bridge allows it. */
+  const wholeBudget = () => scaled() ? 10_000_000 : 1000;
   const tooOld = (kind: { since?: string }) => `That needs the Ableton bridge ${kind.since} or later; this one is ${endpoint?.serverInfo?.version ?? "older"}. Tell the producer to update it (kumi doctor says how).`;
   /** New tracks go after the last one unless the model gave a position (the bridge's default is request order). */
   async function appendAtEnd(kind: ChangeKind, input: JsonObject, signal: AbortSignal): Promise<JsonObject> {
@@ -754,6 +805,17 @@ export function createAbletonIntegration(options: Options): Integration {
    * or by name where it was), it's given to the model with a reference for this turn; gone, it says so.
    */
   async function checkPin(pin: PinnedNode, signal: AbortSignal): Promise<JsonObject> {
+    if (pin.live) {
+      // Pointed at in Live: its reference holds while Live's references do (the same epoch).
+      if (!pin.ref.startsWith(`${currentEpoch}:`)) return { gone: `The producer pointed at “${pin.name}” in Live, but Live's references changed since: say so, and ask what they mean.` };
+      const refKind = /^\d+:([a-z_]+):/.exec(pin.ref)?.[1] ?? "";
+      const discovered = ({ track: "track", device: "device", chain: "chain", scene: "scene", clip_slot: "clip-slot", clip: "session-clip", arrangement_clip: "arrangement-clip" } as Record<string, string>)[refKind];
+      if (discovered) refs.set(pin.ref, discovered);
+      const words = pin.time ? "this part of the Arrangement" : `this ${pin.node === "clip-slot" ? "slot" : pin.node}`;
+      return { ref: shortRef(pin.ref), kind: pin.node, name: pin.name, ...(pin.trail.length ? { in: pin.trail.join(" › ") } : {}), ...(pin.track && pin.node !== "track" ? { track: pin.track } : {}),
+        ...(pin.time ? { fromBeat: pin.time.fromBeat, toBeat: pin.time.toBeat, spans: `${bars(pin.time.fromBeat)} to ${bars(pin.time.toBeat)}` } : {}),
+        note: `The producer pointed at this in Live (right-click): "this", "${words}" or "here" in their message means it.` };
+    }
     const tree = await readDeviceTree(pin.trackRef, signal).catch(() => undefined);
     const found: { ref: string; trail: string[] }[] = [];
     const walk = (devices: readonly DeviceNode[], trail: string[]) => {
@@ -848,6 +910,21 @@ export function createAbletonIntegration(options: Options): Integration {
     type Stop = { step: number; tool: unknown; error: string };
     // What this plan's own steps set going: stopped again if the plan doesn't finish.
     const running: { playing?: boolean; recording?: string | undefined } = {};
+    // The whole plan is one Cmd-Z in Live (a step opened before its first change, closed after its last or when
+    // it stops), where the bridge has Live's undo steps. Kumi's own undo stays per change, in HISTORY.
+    let undoStep: string | undefined;
+    const openUndoStep = async () => {
+      if (undoStep !== undefined || !tools?.has("live_undo_step_begin") || !tools.has("live_undo_step_end")) return;
+      undoStep = "";
+      try { const opened = payload(await tools.call("live_undo_step_begin", { label: "Kumi", timeoutMs: 600_000 }, signal, { host: true })); if (typeof opened.stepId === "string") undoStep = opened.stepId; }
+      catch { /* Live's undo then has a step for each change, as before */ }
+    };
+    const closeUndoStep = async () => {
+      const id = undoStep; undoStep = undefined;
+      if (!id) return;
+      try { await tools!.call("live_undo_step_end", { stepId: id }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(10_000)]), { host: true }); }
+      catch { /* the bridge closes it when the connection goes, and Live's side when its time is up */ }
+    };
     const steps_ = async (): Promise<Stop | undefined> => {
       for (let index = 0; ;) {
         await until(() => known(index));
@@ -879,6 +956,7 @@ export function createAbletonIntegration(options: Options): Integration {
         }
         if (!started) { started = true; onStart?.(); }
         if (!copyChecked && (index >= 2 || /^delete_/.test(String(item.tool)))) { copyChecked = true; copy = await keepCopy(signal); }
+        await openUndoStep();
         if (batch && run > 1) {
           let inputs: JsonObject[];
           try { inputs = steps.slice(index, index + run).map((other, offset) => resolve((other as JsonObject).input, step + offset) as JsonObject); }
@@ -951,6 +1029,7 @@ export function createAbletonIntegration(options: Options): Integration {
         return outcome;
       } finally {
         signal.removeEventListener("abort", nudge);
+        await closeUndoStep();
         if (!finished) {
           const note = await quiet().catch(() => undefined);
           if (note && outcome) outcome.error = `${outcome.error} ${note}`.slice(0, 800);
@@ -1211,18 +1290,18 @@ export function createAbletonIntegration(options: Options): Integration {
       await ensureCatalog(signal);
       if (!PROJECT_TOOLS.slice(1).every((name) => tools!.has(name))) throw new ObservationError("This bridge can't compare the Set's states, so Kumi can't learn routines by watching.");
       if (input.action === "start") {
-        const [pages, devices] = await Promise.all([exportPages(signal), allDevices(signal)]);
-        watching = { set: currentSet, pages, devices: new Set(devices.map((device) => String(device.objectIdentity))), at: now().getTime() };
+        const [exported, devices] = await Promise.all([exportPages(signal), allDevices(signal)]);
+        watching = { set: currentSet, pages: exported, devices: new Set(devices.map((device) => String(device.objectIdentity))), at: now().getTime() };
         watchingNow(true);
         return { text: JSON.stringify({ watching: true, note: "Tell the producer to go ahead in Live and to say when they're done." }), isError: false };
       }
       if (!watching) return { text: "Kumi isn't watching yet: start first, before the producer does it.", isError: true };
       if (watching.set !== currentSet) { watching = undefined; watchingNow(false); return { text: "A different Set is open now, so there's nothing to compare; start again.", isError: true }; }
       const before = watching;
-      const [pages, devices, tracks] = await Promise.all([exportPages(signal), allDevices(signal),
-        tools.call("live_discover", { kind: "track", fields: ["ref", "name", "mediaKind"], limit: pageLimit() }, signal, { host: true }).then((read) => payload(read).items)]);
-      const diff = payload(await tools.call("live_project_snapshot_diff", { beforePages: before.pages, afterPages: pages, limit: 200 }, signal, { host: true }));
-      const { changes, more } = describeWatch(diff, before.pages, pages);
+      const [exported, devices, tracks] = await Promise.all([exportPages(signal), allDevices(signal),
+        pages({ kind: "track", fields: ["ref", "name", "mediaKind"], limit: pageLimit(), budget: wholeBudget() }, signal).then((read) => payload(read).items)]);
+      const diff = payload(await tools.call("live_project_snapshot_diff", { beforePages: before.pages, afterPages: exported, limit: 200 }, signal, { host: true }));
+      const { changes, more } = describeWatch(diff, before.pages, exported);
       const trackRows = (Array.isArray(tracks) ? tracks : []).map((item) => object(item));
       const trackName = new Map(trackRows.map((track) => [String(track.ref), String(track.name ?? "")]));
       // An added track is audio or MIDI, which the Set's snapshot doesn't say.
@@ -1318,11 +1397,48 @@ export function createAbletonIntegration(options: Options): Integration {
     return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
   }
   /** A discovery for the audition's own use, through the model's path (so its references are current); its rows. */
+  /**
+   * Kumi's own read of a whole collection, as one answer: every page, however Live's side splits it (the
+   * Remote Script ends a page early to keep Live's UI responsive), up to the limit asked. An error on any
+   * page is the read's; a page from another epoch or kind ends it as Live having changed.
+   */
+  async function pages(args: JsonObject, signal: AbortSignal): Promise<CallToolResult> {
+    const first = await tools!.call("live_discover", args, signal, { host: true });
+    if (first.isError) return first;
+    let head: JsonObject;
+    try { head = payload(first); } catch { return first; }
+    if (typeof head.nextCursor !== "string" || !head.nextCursor) return first;
+    const items: unknown[] = Array.isArray(head.items) ? [...head.items] : [];
+    const limit = typeof args.limit === "number" ? args.limit : Number.POSITIVE_INFINITY;
+    let next: string | undefined = head.nextCursor;
+    const seen = new Set<string>([next]);
+    for (let count = 1; next && items.length < limit && count < 100_000; count++) {
+      const more = await tools!.call("live_discover", { ...args, cursor: next }, signal, { host: true });
+      if (more.isError) return more;
+      const page = payload(more);
+      if (page.epoch !== head.epoch || page.kind !== head.kind) return { isError: true, content: [{ type: "text", text: "Live changed while Kumi read it; read it again" }] };
+      if (Array.isArray(page.items)) for (const item of page.items) items.push(item);
+      next = typeof page.nextCursor === "string" && page.nextCursor ? page.nextCursor : undefined;
+      // A page that leads back to one already read would never end.
+      if (next && seen.has(next)) return { isError: true, content: [{ type: "text", text: "Live's pages of that read didn't end; read it again" }] };
+      if (next) seen.add(next);
+    }
+    const { nextCursor: _read, ...rest } = head;
+    const merged: JsonObject = { ...rest, items: items as JsonObject[], truncated: Boolean(next), ...(next ? { nextCursor: next } : {}) };
+    return { content: [{ type: "text", text: JSON.stringify(merged) }], structuredContent: merged };
+  }
+  /** Kumi's own read of every row of a kind (under `extra.parent`, say), registered for this turn's changes. */
   async function rows(kind: string, extra: JsonObject, signal: AbortSignal): Promise<JsonObject[]> {
-    const read = await invoke("live_discover", { kind, limit: pageLimit(), ...extra }, signal);
-    if (read.isError) throw new ObservationError(read.text);
-    const items = (JSON.parse(read.text) as { live?: { items?: unknown } }).live?.items;
-    return Array.isArray(items) ? items.map((item) => object(item)) : [];
+    if (!available || lost || currentEpoch === undefined || !tools) throw new ObservationError(NO_CURRENT_LIVE);
+    const epoch = currentEpoch;
+    const args = discoveryArgs({ kind, limit: pageLimit(), budget: wholeBudget(), ...(lengthen(extra) as JsonObject) });
+    const read = await pages(args, AbortSignal.any([signal, lifetime.signal]));
+    if (read.isError) throw new ObservationError(read.content.map((part) => (part.type === "text" ? part.text : "")).join("") || "Live read failed");
+    const page = discoveryPayload(read, kind, epoch);
+    registerRows(kind, page.items, args, page.nextCursor);
+    // As the model sees them: Live's references by their short names, mixers slimmed.
+    const shown = shorten(slimMixers({ items: page.items })) as { items: unknown[] };
+    return shown.items.map((item) => object(item));
   }
   /** One of the audition's steps, as its own tool would run it (quietly, while an audition runs); its reply. */
   async function step(tool: string, input: JsonObject, signal: AbortSignal): Promise<JsonObject> {
@@ -2043,7 +2159,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     const signal = AbortSignal.any([originalSignal, lifetime.signal, AbortSignal.timeout(15_000)]);
     // A Session clip's parent is its slot; an Arrangement clip's, its track.
     const query = arrangement ? { kind: "arrangement-clip", parent: `${arrangement[1]}:track:${arrangement[2]}` } : { kind: "session-clip", parent: `${session![1]}:clip_slot:${session![2]}:${session![3]}` };
-    const read = await tools.call("live_discover", { ...query, fields: ["ref", "name", "isAudio", "filePath"], limit: pageLimit() }, signal, { host: true });
+    const read = await pages({ ...query, fields: ["ref", "name", "isAudio", "filePath"], limit: pageLimit(), budget: wholeBudget() }, signal);
     const items = read.isError ? [] : payload(read).items;
     const clip = (Array.isArray(items) ? items : []).map((item) => object(item)).find((item) => item.ref === ref);
     if (!clip) throw new ObservationError("That clip isn't in the Set any more; discover it again.");
@@ -2107,7 +2223,22 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
               ...(take.closeness.structural ? { knobsCantCloseThis: `${take.closeness.structural.gap}: ${take.closeness.structural.move}` } : {}) } : {}) })),
           ...(result.reference ? { reference: result.reference.summary } : {}), seconds: result.seconds, ...(result.notes.length ? { notes: result.notes } : {}) }), isError: result.takes.every((take) => take.silent || !take.heard) };
       } }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions];
+    // Kumi's Live extension renders an audio track's own clips offline: a file at once, Live untouched.
+    const renders: KernelTool[] = supported({ since: FULL_CONTROL_BRIDGE }) && tools!.has("live_render_offline") ? [{ name: RENDER_TOOL, description: RENDER_DESCRIPTION, inputSchema: RENDER_SCHEMA,
+      execute: async (input, signal) => {
+        const from = typeof input.from_beat === "number" && Number.isFinite(input.from_beat) && input.from_beat >= 0 ? input.from_beat : undefined;
+        const beats = typeof input.beats === "number" && Number.isFinite(input.beats) && input.beats > 0 ? input.beats : undefined;
+        if (typeof input.track !== "string" || from === undefined || beats === undefined) return { text: "Give the track (an audio track's reference from this turn), from_beat and beats.", isError: true };
+        const trackRef = lengthen(input.track, "trackRef") as string;
+        try { requireFreshReferences({ trackRef }); } catch (error) { return { text: error instanceof Error ? error.message : "track must come from discovery in this turn", isError: true }; }
+        const name = knownTrack(trackRef)?.name;
+        const result = await tools!.call("live_render_offline", { trackRef, fromBeat: from, toBeat: from + beats, ...(name ? { expectedName: name } : {}) }, AbortSignal.any([signal, lifetime.signal]), { host: true });
+        if (result.isError) return { text: resultText(result), isError: true };
+        const rendered = payload(result);
+        return { text: JSON.stringify({ file: rendered.path, seconds: rendered.seconds, channels: rendered.channels, sampleRate: rendered.sampleRate,
+          note: "The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to." }), isError: false };
+      } }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders];
   }
   return {
     async start(signal) {
@@ -2134,7 +2265,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
       if (!available || lost || !tools?.has("live_discover") || !/^\d+:track:\d+$/.test(trackRef)) return undefined;
       try {
-        const read = await tools.call("live_discover", { kind: "clip-slot", parent: trackRef, fields: ["sceneIndex", "clipRef", "playingStatus"], limit: pageLimit() }, signal, { host: true });
+        const read = await pages({ kind: "clip-slot", parent: trackRef, fields: ["sceneIndex", "clipRef", "playingStatus"], limit: pageLimit(), budget: wholeBudget() }, signal);
         if (read.isError) return undefined;
         const rows = (payload(read).items as JsonObject[] | undefined) ?? [];
         const start = Math.max(0, Math.min(rows.length - 7, scene - 3));
@@ -2156,7 +2287,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       try {
         const [set, locators, song] = await Promise.all([
           tools.call("live_discover", { kind: "set", fields: ["position", "loop", "playing"], limit: 1 }, signal, { host: true }),
-          tools.call("live_discover", { kind: "locator", fields: ["name", "position"], limit: pageLimit() }, signal, { host: true }),
+          pages({ kind: "locator", fields: ["name", "position"], limit: pageLimit(), budget: wholeBudget() }, signal),
           tools.has("live_song_state") ? tools.call("live_song_state", {}, signal, { host: true }) : Promise.resolve(undefined)]);
         const row = set.isError ? undefined : (payload(set).items as JsonObject[] | undefined)?.[0];
         if (!row || typeof row.position !== "number") return undefined;
@@ -2219,17 +2350,20 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         await tools!.refresh(signal); assertLease(lease, signal);
         await ensureCatalog(signal); assertLease(lease, signal);
         if (!tools!.has("live_status")) throw new ObservationError("Live status capability is unavailable");
+        void subscribe(signal);
         // Live answers the requests waiting at each display tick (about every 100 ms) together, one
         // after another on its own thread. Sent together, the reads below arrive in one tick instead
         // of one tick each, and the Set can't change between them; each carries the epoch, checked
         // against the status's.
         const setArgs = discoveryArgs({ kind: "set", fields: [...FIELDS.set!, "filePath"] });
-        const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind", "groupTrackRef"], limit: pageLimit() });
-        const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: pageLimit() });
+        const trackArgs = discoveryArgs({ kind: "track", fields: ["name", "kind", "mediaKind", "groupTrackRef"], limit: pageLimit(), budget: wholeBudget() });
+        const deviceArgs = discoveryArgs({ kind: "device", fields: ["parentRef", "name", "className", "chainList"], limit: pageLimit(), budget: wholeBudget() });
         const settle = <T>(work: Promise<T>): Promise<{ value: T } | { error: unknown }> => work.then((value) => ({ value }), (error: unknown) => ({ error }));
         const song = tools!.has("live_song_state") ? settle(tools!.call("live_song_state", {}, signal, { host: true }).then(payload)) : Promise.resolve(undefined);
         const discover = tools!.has("live_discover");
-        const read = (args: JsonObject) => settle(discover ? tools!.call("live_discover", args, signal, { host: true }) : Promise.reject(new ObservationError("Required Set discovery capability is unavailable")));
+        // The Set's tracks and devices are read whole, page after page; the Set and the selection are one row.
+        const read = (args: JsonObject) => settle(!discover ? Promise.reject(new ObservationError("Required Set discovery capability is unavailable"))
+          : args.kind === "track" || args.kind === "device" ? pages(args, signal) : tools!.call("live_discover", args, signal, { host: true }));
         // And what's selected in Live, so "this track" means something.
         const selectionArgs = discoveryArgs({ kind: "selection", limit: 1 });
         const [statusRead, setRead, tracksRead, devicesRead, selectionRead] = await Promise.all([

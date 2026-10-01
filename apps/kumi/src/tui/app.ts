@@ -215,6 +215,15 @@ export function setNameFrom(label: string): string | undefined {
 /** "3:05": minutes and seconds (hours when it's gone that long). */
 const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const seconds = String(whole % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`; };
 
+/** The icon of what the producer pointed at in Live. */
+function pointedIcon(pin: PinnedNode): IconKind {
+  if (pin.node === "track") return "midi-track";
+  if (pin.node === "scene") return "scene";
+  if (pin.node === "clip" || pin.node === "selection" || pin.node === "clip-slot") return "midi-clip";
+  if (pin.node === "chain") return "chain";
+  return "device";
+}
+
 export class TuiApp {
   private readonly tty: Tty;
   private readonly renderer: Renderer;
@@ -407,6 +416,11 @@ export class TuiApp {
         this.readTree();
         this.readClip();
         this.readStrip();
+        break;
+      case "pointed":
+        // Right-clicked in Live ("Ask Kumi about this"): pinned like a row of FOCUS, for the next message.
+        this.pinned = { ...event.pin, kind: pointedIcon(event.pin) };
+        this.scheduler.request();
         break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());

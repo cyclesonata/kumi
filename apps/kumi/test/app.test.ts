@@ -1591,3 +1591,18 @@ test("tabs register as modules: a second one (a test stub) switches by click and
   assert.ok(has(one.screen(), "Nothing changed yet"));
   await one.app.close();
 });
+
+test("right-clicking in Live (Ask Kumi about this) pins it above the input box, and it goes with the next message", async () => {
+  const sent: unknown[] = [];
+  const h = harness(120, 40, undefined, { async submit(text, extra) { sent.push({ text, ...(extra ?? {}) }); } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  const pin = { trackRef: "3:track:0", ref: "3:arrangement_clip:0:0", node: "clip" as const, name: "Verse riff", trail: ["Bass"], siblings: [], live: true, track: "Bass" };
+  h.emit({ type: "pointed", pin });
+  await delay(5);
+  assert.ok(has(h.screen(), "Bass › Verse riff  ×"));
+  await h.type("double it\r");
+  await delay(5);
+  assert.deepEqual(sent.at(-1), { text: "double it", pinned: pin });
+});
