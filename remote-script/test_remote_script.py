@@ -1600,8 +1600,10 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25])
         self.assertEqual([row["revision"] for row in result["parameters"]], [2, 2])
         rows = mapper.discover("parameter", parent=device_row["ref"])["items"]
-        with self.assertRaisesRegex(ValueError, "parameter 2 of 2: parameter value is outside authoritative bounds"):
-            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.75), item(rows[2], 5.0)]})
+        device.parameters[2].is_enabled = False
+        with self.assertRaisesRegex(ValueError, "parameter 2 of 2: parameter is greyed out in Live right now"):
+            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.75), item(rows[2], 0.5)]})
+        device.parameters[2].is_enabled = True
         self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25], "the first one went back")
         stale = item(rows[0], 0.5); stale["expectedRevision"] = 1
         with self.assertRaisesRegex(ValueError, "revision changed since preview"):
@@ -2882,13 +2884,13 @@ class RealtimePlaneTests(unittest.TestCase):
         frame = {"version": 1, "id": "async-1", "ok": True, "result": snapshot}
         self.assertTrue(AuthenticatedRemoteScript._canonical(frame))
 
-    def test_stepped_parameters_report_whole_steps_and_refuse_fractions(self):
+    def test_stepped_parameters_report_whole_steps_and_take_the_nearest_one(self):
         mapper = LiveObjectMapper(FakeSong())
         switch = mapper.song.tracks[0].devices[0].parameters[0]
         del switch.quantization; switch.is_quantized = True; switch.value = 0.0; switch.value_items = ["Off", "On"]
         row = mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
         self.assertEqual(row["quantization"], 1.0); self.assertEqual(row["valueItems"], ["Off", "On"])
-        with self.assertRaisesRegex(ValueError, "quantization"): mapper._set_parameter_value(row["ref"], 0.75)
+        self.assertEqual(mapper._set_parameter_value(row["ref"], 0.75)["value"], 1.0, "between steps: the nearest one")
         self.assertEqual(mapper._set_parameter_value(row["ref"], 1.0)["value"], 1.0)
         switch.is_quantized = False; switch.value = 0.25
         self.assertEqual(mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]["quantization"], 0.0)
@@ -7908,7 +7910,8 @@ class ExtendedOperationTests(unittest.TestCase):
         parameter = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
         args = lambda value: {"ref": parameter["ref"], "value": value, "gesture": True, "expectedRevision": bridge.mapper.refs.revision(parameter["ref"]), **ControlSurfaceTests.parameter_authority(bridge.mapper, parameter["ref"])}
         self.assertEqual(mutate_through(bridge, "device.parameter.set", args(0.75), "gesture-key-0001")["value"], 0.75); self.assertEqual(calls, ["begin", "end"])
-        with self.assertRaisesRegex(ValueError, "outside authoritative bounds"): bridge.mapper.invoke("device.parameter.set", args(2.0))
+        # Past its range: held at the top of it.
+        self.assertEqual(bridge.mapper.invoke("device.parameter.set", args(2.0))["value"], 1.0)
         self.assertEqual(calls, ["begin", "end", "begin", "end"])
         def stuck(): raise RuntimeError("Live kept the gesture")
         parameter_object.end_gesture = stuck

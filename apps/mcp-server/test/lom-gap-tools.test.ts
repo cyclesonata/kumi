@@ -218,3 +218,14 @@ test("over the Remote Script's wire, saved text is one mutate carrying the previ
     assert.equal((await call("live_data_read", { key: "kumi.plan" })).value, "verse, chorus");
   } finally { await adapter.close(); await live.close(); }
 });
+
+test("a track or scene may take a name the Set already has, as in Live, and undo still takes back exactly what was made", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { change, undo } = hosted(simulator);
+  const tracks = () => ((simulator as any).state.tracks as any[]).filter((track) => track.name === "Drums").length;
+  assert.equal(tracks(), 1);
+  const made = await change("live_session_structure_preview", { tracks: [{ name: "Drums", kind: "midi" }, { name: "Drums", kind: "audio" }], scenes: [{ name: "Drums" }] });
+  assert.equal(made.applied.state, "applied");
+  assert.equal(tracks(), 3);
+  assert.equal((await undo(made.previewed.transactionId)).state, "undone");
+  assert.equal(tracks(), 1, "the original stays");
+});

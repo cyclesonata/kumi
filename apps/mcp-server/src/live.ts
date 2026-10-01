@@ -971,7 +971,6 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const name = stringArg("name");
         const index = args.index === undefined ? this.state.tracks.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.tracks.length) throw new RangeError("track index is invalid");
-        if (this.state.tracks.some((track) => track.name === name)) throw new Error("track name already exists");
         const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind: "regular", mediaKind: kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
         this.state.tracks.splice(index as number, 0, track);
         this.emit({ type: "object", ref: track.ref, payload: { operation, track } });
@@ -995,7 +994,6 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         requireStructureRevision(); const name = stringArg("name");
         const index = args.index === undefined ? this.state.scenes.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.scenes.length) throw new RangeError("scene index is invalid");
-        if (this.state.scenes.some((scene) => scene.name === name)) throw new Error("scene name already exists");
         const scene: Scene = { ref: ref("scene", `scene-${this.state.scenes.length + this.sequence + 1}`), objectIdentity: `sim-object:scene:${this.state.scenes.length + this.sequence + 1}`, name, index: index as number };
         this.state.scenes.splice(index as number, 0, scene);
         this.state.scenes.forEach((item, itemIndex) => { item.index = itemIndex; });
@@ -2693,7 +2691,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     const { siblings, ...own } = this.parameterAuthority(target.ref); const currentAuthority = lean ? own : { ...own, siblings };
     const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, ...(lean ? {} : { siblings: args.expectedSiblings }) };
     if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
-    if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
+    if (target.enabled === false) throw new Error("parameter is greyed out in Live right now");
     const quantization = target.quantization ?? 0;
     if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
     if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");

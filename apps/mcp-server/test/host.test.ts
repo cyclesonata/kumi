@@ -378,12 +378,12 @@ test("a device parameter Live rounds to a 32-bit float is still confirmed and un
   assert.equal(simulator.snapshot().tracks[0]!.devices[0]!.parameters[0]!.value, Math.fround(before.value));
 });
 
-test("refuses device parameter changes for invalid token, stale revision, epoch changes, and bounds", () => {
+test("refuses device parameter changes for invalid token, stale revision and epoch changes; a value past the range is held within it", () => {
   const simulator = new DeterministicLiveSimulator();
   const host = new McpHost(simulator);
   ready(host);
   const outOfBounds = host.handle({ jsonrpc: "2.0", id: 204, method: "tools/call", params: { name: "live_device_parameter_preview", arguments: { deviceRef: "device:utility-1", parameterRef: "parameter:gain-1", value: 2 } } });
-  assert.equal((outOfBounds as any).result.isError, true);
+  assert.equal((outOfBounds as any).result.isError, false, "held at the top of its range");
   const preview = host.handle({ jsonrpc: "2.0", id: 205, method: "tools/call", params: { name: "live_device_parameter_preview", arguments: { deviceRef: "device:utility-1", parameterRef: "parameter:gain-1", value: 0.25 } } });
   const value = JSON.parse((preview as any).result.content[0].text) as { transactionId: string; confirmation: string };
   const wrongToken = host.handle({ jsonrpc: "2.0", id: 206, method: "tools/call", params: { name: "live_device_parameter_apply", arguments: { transactionId: value.transactionId, confirmation: "wrong", idempotencyKey: "parameter-bad-token" } } });
@@ -1997,7 +1997,8 @@ test("several parameters of one device change as one transaction: one Live reque
   (simulator as any).invoke = (invocation: any) => { invokes.push(invocation.operation); return invoke(invocation); };
   const values = [{ parameterRef: "parameter:gain-1", value: 0.25 }, { parameterRef: "parameter:width-1", value: 2 }, { parameterRef: "parameter:mono-1", value: 1 }];
   assert.equal(((await call(11, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], values[0]] })) as any).error.code, -32602, "one value per parameter");
-  assert.match(text(await call(12, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], { parameterRef: "parameter:mono-1", value: 0.5 }] })).reason, /Bass Mono.*takes whole numbers from 0 to 1/);
+  // Between a stepped parameter's steps: the nearest one.
+  assert.deepEqual(text(await call(12, "live_device_parameter_preview", { deviceRef: "device:utility-1", values: [values[0], { parameterRef: "parameter:mono-1", value: 0.6 }] })).parameters.map((row: any) => row.proposedValue), [0.25, 1]);
   const preview = text(await call(13, "live_device_parameter_preview", { deviceRef: "device:utility-1", values }));
   assert.deepEqual(preview.parameters.map((row: any) => [row.name, row.currentValue, row.proposedValue]), [["Gain", 0.5, 0.25], ["Width", 1, 2], ["Bass Mono", 0, 1]]);
   const applied = text(await call(14, "live_device_parameter_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "three-parameters" }));

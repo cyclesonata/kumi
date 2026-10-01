@@ -582,14 +582,11 @@ function sameLiveValue(observed: unknown, expected: unknown): boolean {
  * Why a value between a stepped parameter's steps is refused, with the steps it takes: a switch or
  * a waveform choice takes the number of one of its items (0 is the first).
  */
-function steppedValueMessage(parameter: { name?: unknown; min: number; max: number; quantization?: number; valueItems?: unknown }): string {
-  const name = `parameter “${String(parameter.name ?? "").slice(0, 64)}”`;
-  const items = Array.isArray(parameter.valueItems) ? parameter.valueItems.filter((item): item is string => typeof item === "string") : [];
-  if (parameter.quantization === 1 && items.length) {
-    const listed = items.slice(0, 12).map((item, index) => `${parameter.min + index} ${item.slice(0, 32)}`).join(", ");
-    return `${name} takes one of its steps: ${listed}${items.length > 12 ? ", …" : ""}`;
-  }
-  return parameter.quantization === 1 ? `${name} takes whole numbers from ${parameter.min} to ${parameter.max}` : `${name} takes steps of ${parameter.quantization} from ${parameter.min} to ${parameter.max}`;
+/** A value as the parameter takes it: held within its range, and on its steps when it has them. */
+function fitParameterValue(value: number, parameter: { min: number; max: number; quantization?: number }): number {
+  const held = Math.min(parameter.max, Math.max(parameter.min, value));
+  const step = parameter.quantization ?? 0;
+  return step > 0 ? Math.min(parameter.max, parameter.min + Math.round((held - parameter.min) / step) * step) : held;
 }
 
 export class McpHost {
@@ -1637,12 +1634,10 @@ export class McpHost {
 
   private validateStructureItems(params: unknown): { tracks: SessionStructureItem[]; scenes: SessionStructureItem[] } | undefined {
     if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 1000 || params.scenes.length > 1000) return undefined;
-    const names = new Set<string>();
     const parse = (items: unknown[], kind: "track" | "scene"): SessionStructureItem[] | undefined => {
       const result: SessionStructureItem[] = [];
       for (const [position, item] of items.entries()) {
-        if (!isObject(item) || !hasOnly(item, kind === "track" ? ["name", "kind", "index"] : ["name", "index"]) || !isNonEmptyString(item.name, 128) || names.has(item.name)) return undefined;
-        names.add(item.name);
+        if (!isObject(item) || !hasOnly(item, kind === "track" ? ["name", "kind", "index"] : ["name", "index"]) || !isNonEmptyString(item.name, 128)) return undefined;
         if (kind === "track" && item.kind !== "audio" && item.kind !== "midi") return undefined;
         const index = item.index === undefined ? position : item.index;
         if (!isIntegerInRange(index, 0, MAX_SET_INDEX)) return undefined;
@@ -1676,12 +1671,10 @@ export class McpHost {
 
   private async liveSessionStructurePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const proposed = this.validateStructureItems(params);
-    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, unique, valid entries");
+    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, valid entries");
     try {
       const status = this.requireConnected("session.structure"); const snapshot = await this.structureViewAsync(undefined);
-      const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
-      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
+      // Names may repeat, as in Live: what a change made is found by its identity, not its name.
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -8643,10 +8636,10 @@ export class McpHost {
       if (!target) throw new Error("device and parameter references are not authoritative children");
       const authority = target.authority;
       const revision = this.parameterRevision(target.parameter);
-      if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
-      const quantization = target.parameter.quantization ?? 0;
-      if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+      // A switched-off device's knobs and a knob Live doesn't automate still turn; only one Live greys out doesn't.
+      if ((target.parameter.enabled as boolean | undefined) === false) throw new Error("parameter is greyed out in Live right now");
+      // A value past the range or between steps goes to the nearest one the parameter takes.
+      params.value = fitParameterValue(params.value, target.parameter); const quantization = target.parameter.quantization ?? 0;
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref as LiveRef, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -8672,10 +8665,8 @@ export class McpHost {
       for (const [index, item] of requested.entries()) {
         const target = reads[index]!;
         const authority = target.authority;
-        if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
-        const quantization = target.parameter.quantization ?? 0;
-        if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
-        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+        if ((target.parameter.enabled as boolean | undefined) === false) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is greyed out in Live right now`);
+        item.value = fitParameterValue(item.value, target.parameter);
         // One device: the same owner, track and sibling parameters for every one.
         if (parameters.length && JSON.stringify({ ...authority, ref: null, parameterIdentity: null }) !== JSON.stringify({ ...parameters[0]!.authority, ref: null, parameterIdentity: null })) throw new Error("parameter changes must all be on one device");
         device ??= target;
@@ -10447,10 +10438,9 @@ await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track
       const status = this.requireConnected("device.parameter.write");
       const snapshot = this.adapter.snapshot(); const target = this.parameterTarget(snapshot, params.deviceRef, params.parameterRef);
       const authority = this.parameterAuthority(snapshot, target.parameter.ref);
-      const revision = this.parameterRevision(target.parameter); const quantization = target.parameter.quantization ?? 0;
-      if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
-      if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+      const revision = this.parameterRevision(target.parameter);
+      if ((target.parameter.enabled as boolean | undefined) === false) throw new Error("parameter is greyed out in Live right now");
+      params.value = fitParameterValue(params.value, target.parameter); const quantization = target.parameter.quantization ?? 0;
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -10480,12 +10470,10 @@ await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track
 
   private liveSessionStructurePreview(id: RequestId, params: unknown): JsonObject {
     const proposed = this.validateStructureItems(params);
-    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, unique, valid entries");
+    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, valid entries");
     try {
       const status = this.requireConnected("session.structure"); const snapshot = this.adapter.snapshot();
-      const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
-      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
+      // Names may repeat, as in Live: what a change made is found by its identity, not its name.
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }

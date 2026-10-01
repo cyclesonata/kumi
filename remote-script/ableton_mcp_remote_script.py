@@ -2758,12 +2758,14 @@ class LiveObjectMapper:
         quantization = self._parameter_step(parameter)
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
             raise ValueError("parameter value is invalid")
-        if not bool(getattr(parameter, "is_enabled", getattr(parameter, "enabled", True))) or not bool(getattr(parameter, "is_automatable", getattr(parameter, "automatable", True))):
-            raise ValueError("parameter is disabled or not automatable")
-        if not isinstance(minimum, (int, float)) or not isinstance(maximum, (int, float)) or not float(minimum) <= float(value) <= float(maximum):
-            raise ValueError("parameter value is outside authoritative bounds")
-        if quantization > 0 and abs((float(value) - float(minimum)) / quantization - round((float(value) - float(minimum)) / quantization)) > 1e-9:
-            raise ValueError("parameter value does not match authoritative quantization")
+        # A knob Live doesn't automate still turns; only one Live greys out doesn't.
+        if not bool(getattr(parameter, "is_enabled", getattr(parameter, "enabled", True))):
+            raise ValueError("parameter is greyed out in Live right now")
+        if not isinstance(minimum, (int, float)) or not isinstance(maximum, (int, float)):
+            raise ValueError("parameter range is unavailable")
+        # A value past the range or between steps goes to the nearest one the parameter takes.
+        value = min(float(maximum), max(float(minimum), float(value)))
+        if quantization > 0: value = min(float(maximum), float(minimum) + round((value - float(minimum)) / quantization) * quantization)
         prior_value = self._read_attr(parameter, "value")
         if not isinstance(prior_value, (int, float)) or isinstance(prior_value, bool) or not math.isfinite(float(prior_value)): raise ValueError("parameter prior value is unavailable")
         target_value = float(value); setter_error: BaseException | None = None
@@ -4722,7 +4724,6 @@ class LiveObjectMapper:
             if not isinstance(name, str) or not 1 <= len(name) <= 128 or kind not in {"audio", "midi"}:
                 raise ValueError("track name or kind is invalid")
             tracks = self._items(getattr(self.song, "tracks", []))
-            if any(str(getattr(track, "name", "")) == name for track in tracks): raise ValueError("track name already exists")
             if index is None: index = len(tracks)
             if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= len(tracks): raise ValueError("track index is invalid")
             if self._own_insertion_conflict("track", index): raise ValueError("track insertion would shift active transaction-owned reference authority")
@@ -4735,7 +4736,7 @@ class LiveObjectMapper:
         if operation == "scene.create":
             name, index = args.get("name"), args.get("index")
             scenes = self._items(getattr(self.song, "scenes", []))
-            if not isinstance(name, str) or not 1 <= len(name) <= 128 or any(str(getattr(scene, "name", "")) == name for scene in scenes): raise ValueError("scene name is invalid or already exists")
+            if not isinstance(name, str) or not 1 <= len(name) <= 128: raise ValueError("scene name is invalid")
             if index is None: index = len(scenes)
             if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= len(scenes): raise ValueError("scene index is invalid")
             if self._own_insertion_conflict("scene", index): raise ValueError("scene insertion would shift active transaction-owned reference authority")

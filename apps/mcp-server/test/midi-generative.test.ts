@@ -139,7 +139,9 @@ test("drum patterns honor the exact mapping, never invent pitches, and repeat by
   const dense = applyMidiTransform([], { type: "drum-pattern", params: { ...params, density: 0.5, seed: "kit-a" } });
   assert.equal(dense.seed, "kit-a");
   assert.deepEqual(applyMidiTransform([], { type: "drum-pattern", params: { ...params, density: 0.5, seed: "kit-a" } }).notes, dense.notes);
-  assert.throws(() => applyMidiTransform([], { type: "drum-pattern", params: { ...params, density: 0.5 } }), /requires an explicit seed/);
+  // No seed given: one drawn from the request, the same each time.
+  const sparse = applyMidiTransform([], { type: "drum-pattern", params: { ...params, density: 0.5 } });
+  assert.deepEqual(applyMidiTransform([], { type: "drum-pattern", params: { ...params, density: 0.5 } }).notes, sparse.notes);
   assert.throws(() => applyMidiTransform([], { type: "drum-pattern", params: { ...params, mapping: { tom: 50 } } }), /role/);
   assert.throws(() => applyMidiTransform([], { type: "drum-pattern", params: { ...params, mapping: { kick: 200 } } }), /0\.\.127/);
   const next = random(0xd04d);
@@ -195,7 +197,7 @@ test("motif transforms invert, reverse, and scale rhythm exactly", () => {
   const clamped = applyMidiTransform([note(100, 0, 1, 100, 1)], { type: "motif-invert", params: { axis: 10 } }, 4);
   assert.equal(clamped.notes[0]!.pitch, 0);
   assert.match(clamped.assumptions.join(" "), /clamped/);
-  assert.throws(() => applyMidiTransform(source, { type: "motif-invert", params: {} }, 4), /explicit axis/);
+  assert.deepEqual(applyMidiTransform(source, { type: "motif-invert", params: {} }, 4).notes[0]!.pitch, [...source].sort((a, b) => a.start - b.start)[0]!.pitch, "without an axis, around its first note");
   const retrograde = applyMidiTransform(source, { type: "motif-retrograde", params: {} }, 4);
   assert.deepEqual(retrograde.notes.map((note) => note.start), [3, 2, 0]);
   assert.deepEqual(retrograde.notes.map((note) => note.pitch), [62, 64, 60]);
