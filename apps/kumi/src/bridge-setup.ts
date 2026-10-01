@@ -96,8 +96,10 @@ function lifecycleAnswer(ran: Ran): { ok: true; value: Record<string, unknown> }
 }
 
 const activated = (value: Record<string, unknown>) => {
-  const receipt = ((value.verification ?? {}) as Record<string, unknown>).receipt as Record<string, unknown> | undefined;
-  return value.state === "activated" || receipt?.effectiveStatus === "activated";
+  const verification = (value.verification ?? {}) as Record<string, unknown>;
+  const receipt = verification.receipt as Record<string, unknown> | undefined;
+  // activate answers "completed" once it has reached Live through the new bridge ("activation-required" until then).
+  return (value.state === "completed" && verification.liveConnected === true) || value.state === "activated" || receipt?.effectiveStatus === "activated";
 };
 
 /**

@@ -118,7 +118,9 @@ test("after installing, Kumi waits for Live to connect through the new bridge", 
   const w = world({ bundled: "1.0.34", installed: "1.0.33" });
   try {
     w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle/v1", state: "planned" }), answer({ version: "ableton-mcp-lifecycle/v1", state: "installed-restart-required" }),
-      answer({ version: "ableton-mcp-lifecycle/v1", state: "activation-required" }), answer({ version: "ableton-mcp-lifecycle/v1", state: "activated" }));
+      // As the lifecycle answers activate: "activation-required" until it reaches Live, then "completed".
+      answer({ version: "ableton-mcp-lifecycle/v1", action: "activate", state: "activation-required", verification: { liveConnected: false } }),
+      answer({ version: "ableton-mcp-lifecycle/v1", action: "activate", state: "completed", verification: { installationValid: true, liveConnected: true, provenance: "real-live" } }));
     assert.equal(await setupBridge(w.io({ waitMs: 60_000, allowDirty: true })), 0);
     const activations = w.calls.filter((call) => call.args[1] === "activate");
     assert.equal(activations.length, 2);
