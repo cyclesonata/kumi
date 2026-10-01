@@ -200,8 +200,18 @@ export class ExtensionChannel {
     const id = `ext-${++this.sequence}`;
     const unsigned = { version: LOOPBACK_PROTOCOL_VERSION, id, ...fields, nonce: randomBytes(18).toString("base64url"), sequence: this.sequence, bridgeEpoch: hello.bridgeEpoch, connectionChallenge: hello.connectionChallenge, deadlineMs: Date.now() + Math.min(timeoutMs, 600_000) };
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Kumi's Live extension didn't answer ${operation} in time`)); }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, operation });
+      const signal = context?.signal;
+      // Cancelled once sent (Esc during a long render): stop waiting at once. Live may still finish it,
+      // so this isn't "nothing changed"; its answer, if it comes, is let go.
+      const stop = () => {
+        const entry = this.pending.get(id); if (!entry) return;
+        clearTimeout(entry.timer); this.pending.delete(id);
+        reject(new Error(`Kumi stopped waiting for ${operation} after sending it; Live may still finish it`));
+      };
+      const settle = <T>(finish: (value: T) => void) => (value: T) => { signal?.removeEventListener("abort", stop); finish(value); };
+      const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); this.pending.delete(id); reject(new Error(`Kumi's Live extension didn't answer ${operation} in time`)); }, timeoutMs);
+      this.pending.set(id, { resolve: settle(resolve), reject: settle(reject), timer, operation });
+      signal?.addEventListener("abort", stop, { once: true });
       socket.write(`${JSON.stringify({ ...unsigned, mac: this.mac(unsigned) })}\n`);
     });
   }

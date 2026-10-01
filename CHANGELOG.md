@@ -8,7 +8,7 @@ each Kumi release names the bridge it ships with.
 Kumi takes full control of Live and stays quick on big Sets. It deletes what you ask for, writes MIDI
 straight into the Arrangement, renders offline, and answers for what you point at in Live. A 200-track
 Set answers about as fast as a small one. Web search no longer leans on one free service. Ships with
-bridge 1.0.64.
+bridge 1.0.65.
 
 ### Full control of Live
 
@@ -17,7 +17,8 @@ bridge 1.0.64.
   - MIDI with its notes goes straight into the Arrangement (`write_arrangement_clip`).
   - A stretch of a track's Arrangement can be cleared (`clear_range`).
   - A device can be copied with its settings (`duplicate_device`).
-  - `render` renders an audio track's clips offline in a fraction of a second, without playing the Set.
+  - `render` renders an audio track's clips offline in a fraction of a second, without playing the Set:
+    the clips' own audio, before the track's effects.
   - A sample goes onto a Drum Rack pad without the Browser.
 - **Right-click to point.** Right-click a track, clip, scene or Arrangement selection in Live, then
   Extensions › "kumi: Ask Kumi about this". Kumi pins it, and "this" in your next message means it.
@@ -55,6 +56,8 @@ bridge 1.0.64.
 
 - **Undoing a change goes only to what it was made on.** Before, undoing a mixer change (and 21 other
   kinds) after tracks had moved could change another track. This was so in 1.0 and 1.1 too.
+- An undo whose check failed once could skip its checks on the next try and change what you'd edited
+  since. This was so in 1.0 and 1.1 too.
 - After an install, `kumi bridge` sees Live connect, instead of waiting ten minutes and saying it hadn't.
 - Copying an instrument beside itself is refused plainly (a chain holds one instrument). Before, Live's
   refusal left the change uncertain.

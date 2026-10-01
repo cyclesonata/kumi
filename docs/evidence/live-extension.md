@@ -116,8 +116,10 @@ The Remote Script's device, note and parameter discovery is being made to read o
 to page by work so no request holds Live's UI for long.
 
 Duplicating the template track through the bridge's three-step change path took 0.92 s at 20 tracks,
-1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: a change still costs more the bigger the Set is. (Bridge
-1.0.62 changed that; see "Full control and scale on real Live" in `docs/evidence/kumi-poc.md`.)
+1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: then, every change cost more the bigger the Set was.
+Bridge 1.0.63 made a parameter, mixer or rename change cost the same on any Set. Making or duplicating
+a track still costs more on a bigger Set, as it does when Live makes one itself; see "Full control and
+scale on real Live" in `docs/evidence/kumi-poc.md`.
 
 ## Right-click "Ask Kumi about this"
 

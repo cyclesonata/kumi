@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readExtensionEndpoint } from "./extension-channel.js";
@@ -86,6 +87,8 @@ export interface LaunchOptions {
   scan?: boolean | (() => { kumi: string[]; live: boolean });
   /** Another bridge's Kumi extension is running, with this storage folder: use it rather than start one. */
   onShared?: (storageDirectory: string) => void;
+  /** The lock every bridge on this computer takes to start a host (tests put it elsewhere). */
+  lockPath?: string;
 }
 
 function ensureSecret(storageDirectory: string): void {
@@ -94,9 +97,11 @@ function ensureSecret(storageDirectory: string): void {
   writeFileSync(path, `${randomBytes(32).toString("base64url")}\n`, { mode: 0o600 });
 }
 
-/** A lock so two bridges starting at once don't both start an Extension Host; a stale lock (30 s) is taken over. */
-function takeLock(storageDirectory: string): (() => void) | undefined {
-  const path = join(storageDirectory, "launch.lock");
+/**
+ * A lock so two bridges starting at once, each with its own folder, don't both start an Extension Host
+ * (one host reaches a Live): one per computer, in the temp folder. A stale lock (30 s) is taken over.
+ */
+function takeLock(path: string): (() => void) | undefined {
   try { if (Date.now() - statSync(path).mtimeMs > 30_000) rmSync(path, { force: true }); } catch { /* no lock */ }
   try { closeSync(openSync(path, "wx", 0o600)); return () => rmSync(path, { force: true }); } catch { return undefined; }
 }
@@ -118,7 +123,8 @@ export async function launchExtension(options: LaunchOptions): Promise<LaunchOut
   if (readExtensionEndpoint(options.storageDirectory)) return "answering";
   // One Extension Host reaches a Live: a Kumi one another bridge started (with its own storage folder)
   // is used where it is; Live's own (a producer's installed extensions) leaves Kumi's to kumi.ablx.
-  const running = options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts();
+  const look = () => (options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts());
+  const running = look();
   const shared = running.kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
   if (shared) { options.onShared?.(shared); return "shared"; }
   // Live runs the extensions installed in it (kumi bridge installs Kumi's) and lets no other host in.
@@ -127,12 +133,17 @@ export async function launchExtension(options: LaunchOptions): Promise<LaunchOut
   const host = findExtensionHost(options.liveApp);
   if (!extension || !isExtension(extension)) { log("extension channel: Kumi's Live extension isn't with this bridge"); return "unavailable"; }
   if (!host) { log("extension channel: this Live has no Extension Host (Live 12.4 or later has one)"); return "unavailable"; }
-  const unlock = takeLock(options.storageDirectory);
+  const unlock = takeLock(options.lockPath ?? join(tmpdir(), "kumi-extension-launch.lock"));
   const deadline = Date.now() + (options.waitMs ?? 15_000);
   if (!unlock) {
-    // Another bridge is starting it: wait for its endpoint.
-    while (Date.now() < deadline && !readExtensionEndpoint(options.storageDirectory)) await pause(100);
-    return readExtensionEndpoint(options.storageDirectory) ? "answering" : "failed";
+    // Another bridge is starting one: wait for it, in this folder or its own, and use it.
+    while (Date.now() < deadline) {
+      if (readExtensionEndpoint(options.storageDirectory)) return "answering";
+      const other = look().kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
+      if (other) { options.onShared?.(other); return "shared"; }
+      await pause(100);
+    }
+    return "failed";
   }
   try {
     ensureSecret(options.storageDirectory);

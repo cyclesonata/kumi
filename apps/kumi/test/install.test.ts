@@ -138,6 +138,7 @@ test("uninstall keeps the bridge's files while Live still loads the bridge from 
     assert.equal(existsSync(join(kumi.home, "app")) || existsSync(join(kumi.home, "auth.json")), false, "everything else goes with --all");
     assert.match(kept.text(), /The bridge's files stay in .*bridge while Live uses it\./);
     assert.equal(existsSync(join(kumi.extensions, "kumi.kumi")), true, "Kumi's extension stays in Live with the bridge");
+    assert.ok(kept.text().includes(`remove AbletonMcpBridge from Live's Remote Scripts folder, and kumi.kumi from ${kumi.extensions}`), "and how to take both out by hand is said");
     rmSync(dir, { recursive: true, force: true }); mkdirSync(dir);
     // Taken out of Live by its own uninstaller: its files go too.
     kumi = withBridge(dir);

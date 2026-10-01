@@ -162,7 +162,8 @@ test("a device's settings by name, Wavetable's modulation, a Simpler's slices an
   assert.deepEqual([amount.applied.result.prior, amount.applied.result.value], [0, 0.5]);
   const added = await change("live_device_edit_preview", { deviceRef: "device:wavetable-1", action: "modulate", parameterRef: "parameter:wt-osc2-gain", source: 1, value: -0.25 });
   assert.equal(added.applied.result.targetIndex, 2); assert.deepEqual(wavetable.wavetable.visibleModulationTargetNames, ["Osc 1 Pos", "Filter 1 Freq", "Osc 2 Gain"]);
-  assert.equal((await undo(amount.previewed.transactionId)).state, "undone");
+  // Live can't read the amount back, so Kumi's undo can't tell a later turn of it: Live's own undo takes it back.
+  assert.match((await undo(amount.previewed.transactionId)).reason, /Live's undo can take it back/);
   // Slices: one at a time comes back; clearing is Live's undo's.
   const inserted = await change("live_device_edit_preview", { deviceRef: "device:simpler-1", action: "slice-insert", time: 11025 });
   assert.deepEqual(sample.slices, [0, 11025, 22050]);

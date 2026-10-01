@@ -1235,7 +1235,16 @@ class EnvelopeEvent:
     // Kumi unmutes Bass; the producer inserts a track above, which puts Drums (unmuted, as the change
     // left Bass) at Bass's place. The undo must not mute Drums: it is refused before anything is sent,
     // and once the inserted track is gone the same undo mutes Bass again.
-    const byName = async (name) => (await textOf(client, "live_discover", { kind: "track" })).parsed.items.find((track) => track.name === name);
+    // Every page: a slow machine's tick budget can end a page after a track or two.
+    const tracks = async () => {
+      const items = []; let cursor;
+      do {
+        const page = (await textOf(client, "live_discover", { kind: "track", ...(cursor ? { cursor } : {}) })).parsed;
+        items.push(...(page.items ?? [])); cursor = page.nextCursor;
+      } while (cursor);
+      return items;
+    };
+    const byName = async (name) => (await tracks()).find((track) => track.name === name);
     await control({ command: "muteTrack", index: 1, value: true });
     const bass = await byName("Journey Bass");
     assert(bass?.mixer?.mute === true, `Bass did not start muted: ${JSON.stringify(bass?.mixer)}`);
@@ -1243,7 +1252,7 @@ class EnvelopeEvent:
     const applied = (await textOf(client, "live_mixer_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "journey-moved-mixer" })).parsed;
     assert(applied.state === "applied", `unmuting Bass failed: ${JSON.stringify(applied)}`);
     await control({ command: "insertTrack", index: 0 });
-    const atPlace = (await textOf(client, "live_discover", { kind: "track" })).parsed.items.find((track) => track.ref === bass.ref);
+    const atPlace = (await tracks()).find((track) => track.ref === bass.ref);
     assert(atPlace?.name === "Journey Drums" && atPlace.mixer.mute === false, `Drums is not at Bass's place: ${JSON.stringify(atPlace)}`);
     const refused = await textOf(client, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "journey-moved-mixer-undo" });
     assert(refused.isError === true && /isn't the one this change was made on any more/.test(refused.parsed.reason ?? ""), `the undo was not refused: ${JSON.stringify(refused.parsed)}`);

@@ -17318,26 +17318,23 @@ function activate(activation) {
   }, (error) => log(`couldn't listen: ${error instanceof Error ? error.message : String(error)}`));
   void registerPointing(context, (payload) => server.broadcast("pointed", payload), log).catch((error) => log(`right-click actions unavailable: ${error instanceof Error ? error.message : String(error)}`));
   let misses = 0;
-  const watchdog = setInterval(() => {
+  const watchdog = process.env.KUMI_LAUNCHED_HOST === "1" ? setInterval(() => {
     try {
       void context.application.song.tempo;
       misses = 0;
     } catch {
       misses += 1;
-      if (misses < 3) return;
+      if (misses < 24) return;
       clearInterval(watchdog);
       log("Live is gone; stopping");
       try {
         (0, import_node_fs3.rmSync)((0, import_node_path2.join)(storage, "endpoint.json"), { force: true });
       } catch {
       }
-      const ownHost = process.env.KUMI_LAUNCHED_HOST === "1";
-      void server.close().finally(() => {
-        if (ownHost) process.exit(0);
-      });
+      void server.close().finally(() => process.exit(0));
     }
-  }, 5e3);
-  watchdog.unref();
+  }, 5e3) : void 0;
+  watchdog?.unref();
   running = { server, watchdog, storage };
 }
 // Annotate the CommonJS export names for ESM import in node:

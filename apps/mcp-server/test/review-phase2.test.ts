@@ -119,16 +119,16 @@ test("an Arrangement clip's extent is its endTime: a looped clip past its loop l
   assert.deepEqual(cleared.previewed.cuts.map((clip: { name: string; end: number }) => [clip.name, clip.end]), [["Loop", 16]]);
 });
 
-test("a Wavetable modulation's undo is refused once the matrix's targets changed", async () => {
+test("a Wavetable modulation's undo is left to Live's own undo, whatever the matrix holds (Live doesn't read the amount back)", async () => {
   const simulator = new DeterministicLiveSimulator();
   const wavetable: Record<string, any> = { visibleModulationTargetNames: ["Osc 1 Pos", "Filter 1 Freq"] };
   state(simulator).tracks[0]!.devices.push({ ref: "device:wt-1", parentRef: "track:track-1", name: "Wavetable", kind: "instrument", className: "InstrumentVector", parameters: [], objectIdentity: "simulator:device:wt-1", enabled: true, wavetable });
   const { change, undo } = hosted(simulator);
   const set = await change("live_device_edit_preview", { deviceRef: "device:wt-1", action: "modulate", targetIndex: 1, source: 0, value: 0.5 });
   wavetable.visibleModulationTargetNames = ["Osc 1 Pos", "Osc 2 Pos"];
-  assert.match((await undo(set.previewed.transactionId)).reason, /matrix changed after the edit/);
+  assert.match((await undo(set.previewed.transactionId)).reason, /Live's undo can take it back/);
   wavetable.visibleModulationTargetNames = ["Osc 1 Pos", "Filter 1 Freq"];
-  assert.equal((await undo(set.previewed.transactionId)).state, "undone");
+  assert.match((await undo(set.previewed.transactionId)).reason, /Live's undo can take it back/);
 });
 
 test("a group track goes with every track inside it, nested groups' too, as Live deletes a group", async () => {

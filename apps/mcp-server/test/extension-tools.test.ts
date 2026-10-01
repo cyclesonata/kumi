@@ -66,6 +66,25 @@ test("MIDI clips with their notes go into the Arrangement, found again through t
   assert.equal((await raw("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 0, length: 4, notes: [{ pitch: 60, start: 5, duration: 1 }] })).error?.code, -32602, "a note starts inside its clip");
 });
 
+test("a group of clips that stops partway records the ones it made (HISTORY undoes them) and says which weren't", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { change, undo } = hosted(simulator);
+  // Live refuses the second clip of three.
+  const operation = (simulator as unknown as { extensionOperation(name: string, args: Record<string, unknown>): Record<string, unknown> });
+  const original = operation.extensionOperation.bind(simulator); let calls = 0;
+  operation.extensionOperation = (name, args) => { if (name === "arrangement.midi-clip.create" && ++calls === 2) throw new Error("Live refused it"); return original(name, args); };
+  const notes = [{ pitch: 60, start: 0, duration: 1 }];
+  const group = await change("live_arrangement_midi_clip", { clips: [0, 4, 8].map((start, index) => ({ trackRef: "track:track-1", start, length: 4, name: `Part ${index + 1}`, notes })) }, "partial-group");
+  assert.equal(group.applied.body.state, "applied", JSON.stringify(group.applied.body));
+  assert.deepEqual(group.applied.body.clips.map((clip: { name: string }) => clip.name), ["Part 1"]);
+  assert.deepEqual([group.applied.body.partial.made, group.applied.body.partial.of], [1, 3]);
+  assert.deepEqual(group.applied.body.partial.notMade.map((clip: { name: string }) => clip.name), ["Part 2", "Part 3"]);
+  assert.match(group.applied.body.partial.reason, /step 2 failed \(Live refused it\)/);
+  assert.deepEqual(stateOf(simulator).arrangementClips.map((item) => item.clip.name), ["Part 1"]);
+  assert.equal((await undo(group.preview.transactionId, "partial-group-undo")).body.state, "undone");
+  assert.equal(stateOf(simulator).arrangementClips.length, 0, "the clip it made is gone with the undo");
+});
+
 test("a cleared range loses the clips inside and cuts the ones crossing it, and the clearing is kept", async () => {
   const simulator = new DeterministicLiveSimulator();
   const { call, change, undo } = hosted(simulator);

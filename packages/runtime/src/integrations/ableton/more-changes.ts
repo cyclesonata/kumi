@@ -474,8 +474,10 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "write_arrangement_clip", since: FULL_CONTROL_BRIDGE, preview: "live_arrangement_midi_clip_preview", apply: "live_arrangement_midi_clip_apply", family: "clip",
     description: "Write a new MIDI clip with its notes straight into the Arrangement: trackRef (a MIDI track from discovery), start and length in beats from the Set's start, notes (pitch, start and duration in beats from the clip's start, velocity), name and looping optional. Several at once: clips, a list of those. No recording, no copying from the Session.",
-    summarize(preview, input, track) {
+    summarize(preview, input, track, result) {
       const clips = Array.isArray(input.clips) ? input.clips.map(record) : [input];
+      // A group that stopped partway made only some: the title says how many.
+      const partial = record(record(result).partial);
       const first = clips[0] ?? {}; const known = track(first.trackRef);
       const notes = clips.reduce((sum, clip) => sum + (Array.isArray(clip.notes) ? clip.notes.length : 0), 0);
       const start = number(first.start); const length = number(first.length);
@@ -485,7 +487,8 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
       });
       void preview;
       const where = start !== undefined ? ` at ${bars(start)}` : "";
-      const title = clips.length > 1 ? `${plural(clips.length, "new Arrangement clip")} · ${plural(notes, "note")}` : `New Arrangement clip ${quoted(first.name, "")}${where} · ${plural(notes, "note")}`.replace("  ", " ");
+      const title = typeof partial.made === "number" && typeof partial.of === "number" ? `${partial.made} of ${plural(partial.of, "new Arrangement clip")} made (Live refused the rest)`
+        : clips.length > 1 ? `${plural(clips.length, "new Arrangement clip")} · ${plural(notes, "note")}` : `New Arrangement clip ${quoted(first.name, "")}${where} · ${plural(notes, "note")}`.replace("  ", " ");
       return { title, ...(known ? { track: known } : {}), ...(clips.length === 1 && length !== undefined && length > 0 && drawn.length ? { clip: { length, notes: drawn } } : {}) };
     },
   },

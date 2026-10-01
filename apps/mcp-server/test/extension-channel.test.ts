@@ -64,6 +64,22 @@ test("the channel connects with the shared secret, runs extension operations and
   await channel.close();
 });
 
+test("Esc after a request was sent stops waiting at once (a long render), and the channel carries on", async () => {
+  const channel = new ExtensionChannel({ storageDirectory: storage });
+  try {
+    assert.equal(await channel.connect(), true);
+    live.renderDelayMs = 2_000;
+    const controller = new AbortController(); const started = Date.now();
+    const rendering = channel.invoke("render.offline", { trackRef: "3:track:2", fromBeat: 0, toBeat: 4, expectedName: "Vox" }, { signal: controller.signal, deadlineMs: Date.now() + 10_000 });
+    setTimeout(() => controller.abort(), 50);
+    await assert.rejects(rendering, /stopped waiting for render\.offline after sending it; Live may still finish it/);
+    assert.ok(Date.now() - started < 1_000, "it didn't wait for the render");
+    live.renderDelayMs = 0;
+    const next = await channel.invoke("render.offline", { trackRef: "3:track:2", fromBeat: 0, toBeat: 4, expectedName: "Vox" }) as { format: string };
+    assert.equal(next.format, "wav", "the channel still works");
+  } finally { live.renderDelayMs = 0; await channel.close(); }
+});
+
 test("a channel looks for the extension only while it's enabled (a real Live is connected)", async () => {
   let real = false; let launched = 0;
   const channel = new ExtensionChannel({ storageDirectory: storage, enabled: () => real, launch: async () => { launched += 1; } });
@@ -161,25 +177,38 @@ setTimeout(() => undefined, 60000);
 test("launching starts Live's Extension Host with Kumi's extension, detached, and waits for its endpoint", { skip: process.platform === "win32" ? "the stand-in host is a shell script" : false }, async () => {
   const host = join(root, "host-answer"); fakeExtensionHost(host, "answer");
   const home = join(root, "launch-answer"); const lines: string[] = [];
-  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 5_000 });
+  const lockPath = join(root, "launch-answer.lock");
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 5_000, lockPath });
   const endpoint = readExtensionEndpoint(home);
   assert.ok(endpoint, lines.join("\n")); assert.match(lines[0]!, /started Live's Extension Host/);
   assert.equal(readFileSync(join(home, "secret"), "utf8").trim().length >= 32, true);
-  assert.equal(existsSync(join(home, "launch.lock")), false);
+  assert.equal(existsSync(lockPath), false, "the lock is let go");
   process.kill(endpoint!.pid);
+});
+
+test("a bridge that finds another starting a host (one lock for the computer) waits for it and uses it, whatever folder it keeps", { skip: process.platform === "win32" ? "the stand-in host is a shell script" : false }, async () => {
+  const host = join(root, "host-wait"); fakeExtensionHost(host, "mute");
+  const lockPath = join(root, "launch-held.lock"); writeFileSync(lockPath, "");
+  let looks = 0; const shared: string[] = [];
+  const outcome = await launchExtension({ storageDirectory: join(root, "second-bridge"), lockPath, extension: extensionDir, liveApp: host, waitMs: 3_000,
+    scan: () => (++looks < 3 ? { kumi: [], live: false } : { kumi: [storage], live: false }), onShared: (folder) => shared.push(folder) });
+  assert.equal(outcome, "shared"); assert.deepEqual(shared, [storage]);
+  assert.equal(existsSync(lockPath), true, "the other bridge's lock is its own to let go");
+  rmSync(lockPath, { force: true });
 });
 
 test("an Extension Host that never reaches Live is stopped, not left waiting", { skip: process.platform === "win32" ? "the stand-in host is a shell script" : false }, async () => {
   const host = join(root, "host-mute"); fakeExtensionHost(host, "mute");
-  const home = join(root, "launch-mute"); const lines: string[] = [];
-  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 400 });
+  const home = join(root, "launch-mute"); const lines: string[] = []; const lockPath = join(root, "launch-mute.lock");
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => lines.push(line), waitMs: 400, lockPath });
   assert.equal(readExtensionEndpoint(home), undefined);
   assert.match(lines.at(-1)!, /didn't reach Live in time; stopping it/);
   // A second bridge arriving while one launches waits for that one instead of starting another.
-  writeFileSync(join(home, "launch.lock"), "");
+  writeFileSync(lockPath, "");
   const waited: string[] = []; const started = Date.now();
-  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => waited.push(line), waitMs: 200 });
+  await launchExtension({ storageDirectory: home, scan: false, extension: extensionDir, liveApp: host, log: (line) => waited.push(line), waitMs: 200, lockPath });
   assert.deepEqual(waited, []); assert.ok(Date.now() - started >= 150);
+  rmSync(lockPath, { force: true });
 });
 
 test("withExtension routes Kumi's extension in once a real Live is connected, and stops looking when closed", async () => {

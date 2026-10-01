@@ -34,7 +34,7 @@ function writeEndpoint(storage: string, endpoint: Record<string, unknown>): void
   renameSync(partial, path);
 }
 
-let running: { server: ExtensionServer; watchdog: NodeJS.Timeout; storage: string } | undefined;
+let running: { server: ExtensionServer; watchdog: NodeJS.Timeout | undefined; storage: string } | undefined;
 
 /** Stops listening and forgets the endpoint (a host unloading the extension, or tests). */
 export async function deactivate(): Promise<void> {
@@ -74,22 +74,22 @@ export function activate(activation: ActivationContext): void {
   }, (error: unknown) => log(`couldn't listen: ${error instanceof Error ? error.message : String(error)}`));
   void registerPointing(context, (payload) => server.broadcast("pointed", payload), log).catch((error: unknown) => log(`right-click actions unavailable: ${error instanceof Error ? error.message : String(error)}`));
 
-  // Live gone (quit, crashed) leaves this host with nothing to talk to: end it, so the next Live gets
-  // a fresh one and no stale endpoint misleads the bridge.
+  // A host Kumi's bridge started (it says so in the environment) outlives a Live that quit or crashed:
+  // then it ends, so the next Live gets a fresh one and no stale endpoint misleads the bridge. Live's own
+  // host ends with Live, and a read that fails meanwhile (a big Set loading) mustn't switch the
+  // extension off for good, so there's no watch in it. Two minutes without an answer, not less: a big
+  // Set can keep Live from answering that long while it loads.
   let misses = 0;
-  const watchdog = setInterval(() => {
+  const watchdog = process.env.KUMI_LAUNCHED_HOST === "1" ? setInterval(() => {
     try { void context.application.song.tempo; misses = 0; }
     catch {
       misses += 1;
-      if (misses < 3) return;
+      if (misses < 24) return;
       clearInterval(watchdog); log("Live is gone; stopping");
       try { rmSync(join(storage, "endpoint.json"), { force: true }); } catch { /* already gone */ }
-      // Kumi's bridge started this Extension Host (it says so in the environment): end it. In Live's own
-      // host (kumi.ablx), only stop serving; that host isn't Kumi's to end.
-      const ownHost = process.env.KUMI_LAUNCHED_HOST === "1";
-      void server.close().finally(() => { if (ownHost) process.exit(0); });
+      void server.close().finally(() => process.exit(0));
     }
-  }, 5_000);
-  watchdog.unref();
+  }, 5_000) : undefined;
+  watchdog?.unref();
   running = { server, watchdog, storage };
 }

@@ -296,6 +296,8 @@ const DEVICE_EDIT_KEPT: Readonly<Record<string, string>> = {
   "slice-clear": "Kumi can't put the slices back; Live's undo can.", "slice-reset": "Kumi can't put the slices back; Live's undo can.",
   "warp-as": "Kumi can't take a warp back; Live's undo can.", "warp-double": "Kumi can't take a warp back; Live's undo can.", "warp-half": "Kumi can't take a warp back; Live's undo can.",
   resend: "Resending changes nothing in the Set: there's nothing to undo.",
+  // Live can't read a modulation amount back, so an undo couldn't tell a later turn of it from Kumi's.
+  modulate: "Kumi can't tell whether the amount was turned since (Live doesn't read it back); Live's undo can take it back.",
 };
 type DeletionKind = "clip" | "scene" | "track" | "locator";
 const DELETION_KINDS: ReadonlySet<string> = new Set(["device-delete", "clip-delete", "scene-delete", "track-delete", "locator-delete", "clip-clear-range"]);
@@ -5910,8 +5912,10 @@ export class McpHost {
       const trackRefs = [...new Set(clips.map((clip) => clip.trackRef))];
       // The extension keeps no replay record: a retry after an unsure answer first looks for what it made.
       let made = reconciliation ? await this.createdArrangementMidiClips(transaction, context) : [];
-      if (reconciliation && made.some(Boolean) && !made.every(Boolean)) throw new Error("only some of the clips are there; look at the Arrangement before making them again");
-      if (!made.every(Boolean) || made.length === 0) {
+      // A group can stop partway (a step Live refused): the clips it made are recorded, so HISTORY can undo
+      // them, and the answer says which weren't made. A retry that finds only some does the same.
+      let partial: string | undefined = reconciliation && made.some(Boolean) && !made.every(Boolean) ? "only some of the clips are there" : undefined;
+      if (!made.some(Boolean)) {
         // About to make them, a retry too: only while the tracks and their Arrangement clips are as previewed.
         {
           const snapshot = await this.viewForAsync(context, trackRefs);
@@ -5920,17 +5924,29 @@ export class McpHost {
         }
         transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
         const adapter = this.asyncAdapter();
-        if (clips.length === 1) await adapter.invokeAsync({ operation: "arrangement.midi-clip.create", args: clips[0]! }, context);
-        else await adapter.invokeAsync({ operation: "transaction.group", args: { label: `Kumi: ${clips.length} Arrangement MIDI clips`, ops: clips.map((clip) => ({ operation: "arrangement.midi-clip.create", args: clip })) } }, context);
-        made = await this.createdArrangementMidiClips(transaction, context);
-        if (!made.every(Boolean)) throw new Error("Live made the clips, but the Arrangement doesn't show every one where it was asked");
+        try {
+          if (clips.length === 1) await adapter.invokeAsync({ operation: "arrangement.midi-clip.create", args: clips[0]! }, context);
+          else await adapter.invokeAsync({ operation: "transaction.group", args: { label: `Kumi: ${clips.length} Arrangement MIDI clips`, ops: clips.map((clip) => ({ operation: "arrangement.midi-clip.create", args: clip })) } }, context);
+        } catch (cause) {
+          if (clips.length === 1 || signal?.aborted) throw cause;
+          made = await this.createdArrangementMidiClips(transaction, context);
+          if (!made.some(Boolean)) throw cause;
+          partial = cause instanceof Error ? cause.message.slice(0, 300) : "a step failed";
+        }
+        if (!partial) {
+          made = await this.createdArrangementMidiClips(transaction, context);
+          if (!made.some(Boolean)) throw new Error("Live made the clips, but the Arrangement doesn't show them where they were asked");
+          if (!made.every(Boolean)) partial = "the Arrangement doesn't show every clip where it was asked";
+        }
       }
       // What undo checks is as it was made: each clip's name, extent and notes (the producer's later edits are theirs).
+      const present = made.flatMap((row, index) => (row ? [{ row, index }] : []));
       const fences: JsonObject[] = [];
-      for (const row of made) fences.push({ objectIdentity: row!.objectIdentity, name: row!.name ?? null, start: row!.start, end: arrangementClipEnd(row!), notesRevision: McpHost.notesRevision(await this.clipNotesAsync(row!.ref as LiveRef, context)) });
-      transaction.created = { clips: made.map((row, index) => ({ ref: row!.ref, objectIdentity: row!.objectIdentity, trackRef: clips[index]!.trackRef, name: row!.name ?? null, start: row!.start, length: row!.length, notes: (clips[index]!.notes as unknown[]).length })), fences };
+      for (const { row } of present) fences.push({ objectIdentity: row.objectIdentity, name: row.name ?? null, start: row.start, end: arrangementClipEnd(row), notesRevision: McpHost.notesRevision(await this.clipNotesAsync(row.ref as LiveRef, context)) });
+      transaction.created = { clips: present.map(({ row, index }) => ({ ref: row.ref, objectIdentity: row.objectIdentity, trackRef: clips[index]!.trackRef, name: row.name ?? null, start: row.start, length: row.length, notes: (clips[index]!.notes as unknown[]).length })), fences };
       transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
-      return this.successText(id, { transactionId: transaction.id, state: "applied", clips: transaction.created.clips, ...(reconciliation ? { reconciled: true } : {}), idempotent: false });
+      const notMade = clips.flatMap((clip, index) => (made[index] ? [] : [{ trackRef: clip.trackRef, start: clip.start, ...(typeof clip.name === "string" ? { name: clip.name } : {}) }]));
+      return this.successText(id, { transactionId: transaction.id, state: "applied", clips: transaction.created.clips, ...(partial ? { partial: { made: present.length, of: clips.length, notMade, reason: partial } } : {}), ...(reconciliation ? { reconciled: true } : {}), idempotent: false });
     } catch (cause) { if (transaction.state === "applying" || reconciliation) transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Whether the clips are there is uncertain: retry with the same key, which looks for them before making any."); }
   }
 
@@ -6302,9 +6318,8 @@ export class McpHost {
       const result = await this.asyncAdapter().invokeAsync({ operation, args }, context) as Record<string, unknown>;
       if (operation === "device.action" ? result.done !== true : operation === "sample.slice" ? !Array.isArray(result.slices) : result.changed !== true) throw new Error("the device edit wasn't confirmed");
       // What undo puts back, and what it checks is still so.
+      // (A modulation amount is kept: Live's API reads none back, so its undo is Live's own.)
       if (edit === "set") transaction.created = { value: result.value ?? args.value };
-      // Live's API reads no modulation amount back: undo is fenced on the target the edit set, at its place in the matrix.
-      else if (edit === "modulate") { const targets = this.deviceEditState(edit, this.deviceRow(await this.viewForAsync(context, [args.ref]), args.ref as LiveRef).device as unknown as Record<string, unknown>).targets as unknown[]; transaction.created = { targetIndex: result.targetIndex, value: result.value, prior: result.prior, target: targets[result.targetIndex as number] ?? null }; }
       else if (edit.startsWith("slice-")) transaction.created = { slices: result.slices };
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, ...(DEVICE_EDIT_KEPT[edit] ? { undo: DEVICE_EDIT_KEPT[edit] } : {}), idempotent: false });
@@ -9752,10 +9767,6 @@ export class McpHost {
         if (edit === "set") {
           if (!reconciliation && !sameLiveValue(state.value, edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
           inverse = { operation: "device.property.set", args: { ref: args.ref, property: args.property, value: (edited.prior as { value: unknown }).value, ...fences } };
-        } else if (edit === "modulate") {
-          if (!reconciliation && ((state.targets as unknown[])[edited.created.targetIndex as number] ?? null) !== edited.created.target) return this.transactionError(id, "Wavetable's modulation matrix changed after the edit (that target isn't where it was); undo refused");
-          // The amount goes back; a parameter the edit added to the matrix stays there (Live can't take one out).
-          inverse = { operation: "wavetable.modulation.set", args: { ref: args.ref, targetIndex: edited.created.targetIndex, source: args.source, value: edited.created.prior, ...fences } };
         } else {
           const sorted = (values: unknown): string => JSON.stringify((Array.isArray(values) ? [...values] as number[] : []).sort((a, b) => a - b));
           if (!reconciliation && sorted(state.slices) !== sorted(edited.created.slices)) return this.transactionError(id, "the slices changed after the edit; undo refused");

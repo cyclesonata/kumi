@@ -133,9 +133,21 @@ test("a device's settings beyond its parameters, Live's own undo as a last resor
     assert.equal(b.records.at(-1)!.state, "kept", "doubling the warping has only Live's undo"); assert.match(b.records.at(-1)!.title, /warp double/);
     await tool(b.tools, "edit_device").execute({ deviceRef: "device:1", action: "modulate", source: 1, target: 2, amount: 0.5 }, signal());
     assert.equal(b.records.at(-1)!.state, "kept", "a modulation amount's undo couldn't tell a later turn of it");
+    const before = b.requests.filter((request) => request.name === "live_undo").length;
+    const keptUndo = await tool(b.tools, "undo_change").execute({ change: b.records.at(-1)!.id }, signal());
+    assert.equal(keptUndo.isError, true); assert.match(keptUndo.text, /Live's own undo can/);
+    assert.equal(b.requests.filter((request) => request.name === "live_undo").length, before, "a kept change's undo isn't tried");
     const undone = await tool(b.tools, "undo_in_live").execute({}, signal());
     assert.deepEqual(JSON.parse(undone.text), { done: true, canUndo: false, canRedo: true });
     assert.deepEqual(b.requests.find((request) => request.name === "live_song_undo")!.args.confirmation, "undo-in-live");
     assert.ok(b.tools.some((item) => item.name === "live_device_read"), "the model reads a plug-in's every parameter name itself");
   } finally { await b.integration.close(); }
+});
+
+test("a group of Arrangement clips that stopped partway is titled by how many it made", async () => {
+  const { MORE_CHANGES } = await import("../src/integrations/ableton/more-changes.js");
+  const kind = MORE_CHANGES.find((item) => item.tool === "write_arrangement_clip")!;
+  const input = { clips: [0, 4, 8].map((start) => ({ trackRef: "track:1", start, length: 4, notes: [{ pitch: 60, start: 0, duration: 1 }] })) };
+  assert.equal(kind.summarize({}, input, () => undefined, { partial: { made: 1, of: 3 } }).title, "1 of 3 new Arrangement clips made (Live refused the rest)");
+  assert.equal(kind.summarize({}, input, () => undefined, {}).title, "3 new Arrangement clips · 3 notes");
 });

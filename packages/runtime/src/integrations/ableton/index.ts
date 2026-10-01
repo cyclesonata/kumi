@@ -118,7 +118,11 @@ interface Options {
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
-interface Applied { record: ChangeRecord; transactionId: string; undoKey?: string; restore?: { ref: string; field: "name" | "color"; value?: string } }
+interface Applied {
+  record: ChangeRecord; transactionId: string; undoKey?: string; restore?: { ref: string; field: "name" | "color"; value?: string };
+  /** Kept from the start: only Live's own undo can take it back, so Kumi's isn't tried. */
+  permanent?: true;
+}
 
 const resultText = (result: CallToolResult) => result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 const uncertain = (result: CallToolResult) => (result.structuredContent as JsonObject | undefined)?.state === "uncertain" || /uncertain/i.test(resultText(result));
@@ -531,7 +535,7 @@ export function createAbletonIntegration(options: Options): Integration {
     try { options.onChange?.(structuredClone(record)); } catch { /* a listener failure must not affect Live */ }
   }
   function remember(record: ChangeRecord, transactionId: string, restore?: Applied["restore"]) {
-    changes.set(record.id, { record, transactionId, ...(restore ? { restore } : {}) });
+    changes.set(record.id, { record, transactionId, ...(restore ? { restore } : {}), ...(record.state === "kept" ? { permanent: true as const } : {}) });
     if (quiet) { quiet.push(record.id); return; }
     if (changes.size > MAX_CHANGE_RECORDS) changes.delete(changes.keys().next().value!);
     emitChange(record);
@@ -1367,6 +1371,9 @@ export function createAbletonIntegration(options: Options): Integration {
     if (!entry) return { text: target === "last" ? "There's no change of Kumi's left to undo." : `There's no change ${target.slice(0, 32)} in this session.`, isError: true };
     if (entry.record.state === "undone") return { record: entry.record, text: JSON.stringify({ undone: entry.record.title, change: entry.record.id, already: true }), isError: false };
     if (entry.record.state === "expired") return { record: entry.record, text: entry.record.note ?? "Kumi can't undo this anymore.", isError: true };
+    // A change only Live's own undo can take back isn't tried. One kept by a refused undo is: what
+    // changed since may have gone back (a track inserted above, taken out again).
+    if (entry.permanent) return { record: entry.record, text: entry.record.note ?? "Kumi can't take this back; Live's own undo (Cmd-Z in Live) can.", isError: true };
     try { await ensureCatalog(signal); } catch { /* reported just below */ }
     if (!available || lost || !tools?.has("live_undo")) return { text: "Kumi can't reach Live right now, so it can't undo.", isError: true };
     signal.throwIfAborted();
