@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, trackMedia, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, trackMedia, refKind, trackIndexOfRef, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveDiscoveryKind, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, semanticCursorArtifactId, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -1743,6 +1743,21 @@ export class McpHost {
     throw new Error("take-lane reference is unknown");
   }
 
+  /** What a rename reads of its target: a track's or scene's identity, name and kind alone (discovered
+   * by its ref), anything else's row as get has it. */
+  private async renameTargetAsync(context: LiveOperationContext | undefined, kind: unknown, reference: LiveRef): Promise<{ ref?: unknown; objectIdentity?: unknown; name?: unknown; kind?: unknown } | undefined> {
+    if (kind === "track") return await this.trackOneAsync(context, reference, ["ref", "objectIdentity", "name", "kind"]);
+    if (kind === "scene") { const scene = await this.discoverOneAsync(context, "scene", reference, ["ref", "objectIdentity", "name"]); return scene ? { ...scene, kind: "scene" } : undefined; }
+    return await this.asyncAdapter().getAsync(reference, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
+  }
+
+  /** The authority a rename is fenced on: a track or scene's own identity and name at its place (the
+   * Remote Script hashes the same), anything else's hierarchy from a focused view. */
+  private async renameRevisionAsync(context: LiveOperationContext | undefined, kind: string, reference: LiveRef, current: { ref?: unknown; objectIdentity?: unknown; name?: unknown }): Promise<string> {
+    if (kind === "track" || kind === "scene") return createHash("sha256").update(canonicalMutationIdentity({ ref: current.ref, objectIdentity: current.objectIdentity, name: current.name })).digest("hex");
+    return this.renameAuthorityRevision(await this.viewForAsync(context, [reference]), kind, reference);
+  }
+
   private renameAuthorityRevision(snapshot: LiveSnapshot, kind: string, reference: LiveRef): string {
     if (kind === "track" || kind === "scene") return this.structureRevision(snapshot);
     if (kind === "locator") return this.locatorRevision(snapshot);
@@ -1758,16 +1773,18 @@ export class McpHost {
     try {
       this.requireConnected("session.read"); const operation = (params.kind === "takeLane" ? "take-lane.rename" : `${params.kind}.rename`) as LiveInvocation["operation"];
       const status = await this.requireOperation(operation);
-      const adapter = this.asyncAdapter(); const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.ref]);
-      if (params.kind === "track" && !snapshot.tracks.some((track) => track.ref === params.ref)) throw new Error("track rename is limited to Set and return tracks");
-      const current = await adapter.getAsync(params.ref as LiveRef, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
+      // A track or scene reads its identity, name and kind alone: nothing else on the track or in the Set.
+      const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
+      const current = await this.renameTargetAsync(context, params.kind, params.ref as LiveRef);
+      if (params.kind === "track" && !["regular", "group", "return", "main"].includes(String(current?.kind))) throw new Error("track rename is limited to Set and return tracks");
+      if (params.kind === "scene" && current?.kind !== "scene") throw new Error("scene reference is not authoritative");
       if (!current || current.ref !== params.ref || !isNonEmptyString(current.objectIdentity, 256) || typeof current.name !== "string") throw new Error("rename target lacks exact authoritative object identity");
       // Live shows return tracks with their letter ("A-Reverb") and prepends it to any name it is given,
       // so the name to expect afterwards carries that prefix whether or not the caller included it.
-      const prefix = params.kind === "track" && snapshot.tracks.find((track) => track.ref === params.ref)?.kind === "return" ? /^[A-Z]-/.exec(current.name)?.[0] ?? "" : "";
+      const prefix = params.kind === "track" && current.kind === "return" ? /^[A-Z]-/.exec(current.name)?.[0] ?? "" : "";
       const name = prefix && !(params.name as string).startsWith(prefix) ? `${prefix}${params.name as string}` : params.name as string;
       if (current.name === name) throw new Error("rename would not change the target");
-      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name, expectedAuthorityRevision: this.renameAuthorityRevision(snapshot, params.kind as string, params.ref as LiveRef) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `rename_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "rename", fence: JSON.stringify({ ref: params.ref, objectIdentity: current.objectIdentity, name: current.name, kind: params.kind }), clipRef: params.ref as LiveRef, payload: { kind: params.kind, name, expectedAuthorityRevision: await this.renameRevisionAsync(context, params.kind as string, params.ref as LiveRef, current) }, prior: { name: current.name, objectIdentity: current.objectIdentity }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "rename");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { kind: params.kind, ref: params.ref, objectIdentity: current.objectIdentity, currentName: current.name }, proposedName: name, impact: "renames-one-live-object", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Rename preview failed without mutation; rediscover the exact target."); }
@@ -1784,7 +1801,7 @@ export class McpHost {
     try {
       const status = reconciliation ? await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) : this.requireConnected("session.read"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const current = await adapter.getAsync(transaction.clipRef, context) as { ref?: unknown; objectIdentity?: unknown; name?: unknown } | undefined;
+      const current = await this.renameTargetAsync(context, transaction.payload.kind, transaction.clipRef);
       const exactIdentity = current?.ref === transaction.clipRef && current?.objectIdentity === transaction.prior?.objectIdentity;
       const priorState = exactIdentity && current?.name === transaction.prior?.name; const appliedState = exactIdentity && current?.name === transaction.payload.name;
       if ((!reconciliation && JSON.stringify({ ref: current?.ref, objectIdentity: current?.objectIdentity, name: current?.name, kind: transaction.payload.kind }) !== transaction.fence) || (reconciliation && !priorState && !appliedState)) return this.transactionError(id, "Rename target identity or name conflicts with the retained transaction");
@@ -1792,7 +1809,7 @@ export class McpHost {
       const operation = (transaction.payload.kind === "takeLane" ? "take-lane.rename" : `${transaction.payload.kind}.rename`) as LiveInvocation["operation"];
       transaction.state = "applying";
       await adapter.invokeAsync({ operation, args: { ref: transaction.clipRef, name: transaction.payload.name, expectedName: transaction.prior?.name, expectedObjectIdentity: transaction.prior?.objectIdentity, expectedAuthorityRevision: transaction.payload.expectedAuthorityRevision } }, context);
-      const verified = await adapter.getAsync(transaction.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
+      const verified = await this.renameTargetAsync(context, transaction.payload.kind, transaction.clipRef);
       if (!verified || verified.objectIdentity !== transaction.prior?.objectIdentity || verified.name !== transaction.payload.name) throw new Error("rename postcondition was not confirmed for the exact target");
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", ref: transaction.clipRef, name: verified.name, ...(reconciliation ? { reconciled: true } : {}), idempotent: false });
@@ -3882,6 +3899,12 @@ export class McpHost {
 
   private mixerRow(snapshot: LiveSnapshot, trackRef: LiveRef): JsonObject { return this.mixerTarget(snapshot, trackRef).mixer; }
 
+  /** A track's mixer as a mixer change reads it: the track's identity and its mixer row, nothing else on it. */
+  private async mixerReadAsync(context: LiveOperationContext | undefined, trackRef: LiveRef): Promise<{ track: JsonObject; mixer: JsonObject }> {
+    const track = await this.trackOneAsync(context, trackRef, ["ref", "objectIdentity", "name", "kind", "mixer"]);
+    return this.mixerTarget({ tracks: track ? [track] : [] } as unknown as LiveSnapshot, trackRef);
+  }
+
   private mixerAuthority(target: { track: JsonObject; mixer: JsonObject }): JsonObject {
     const state = Object.fromEntries(["volume", "pan", "mute", "solo", "cueVolume", "sends"].map((field) => [field, structuredClone(target.mixer[field] ?? null)]));
     return { expectedObjectIdentity: target.track.objectIdentity, expectedVolumeIdentity: target.mixer.volumeIdentity, expectedPanIdentity: target.mixer.panIdentity, expectedCueIdentity: target.mixer.cueIdentity, expectedSendIdentities: structuredClone(target.mixer.sendIdentities), expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
@@ -3901,11 +3924,10 @@ export class McpHost {
     }
     if (Object.keys(proposed).length === 0) return error(id, -32602, "at least one mixer field is required");
     try {
-      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
-      if (!status.connected || !(status.capabilities ?? []).includes("session.read")) throw new Error("session read capability is unavailable");
+      const status = this.requireConnected("session.read");
       if (!(status.operations ?? []).includes("mixer.set")) throw new Error("mixer editing is unavailable");
-      const snapshot = await this.viewForAsync(undefined, [params.trackRef]);
-      const target = this.mixerTarget(snapshot, params.trackRef as LiveRef); const mixer = target.mixer;
+      // The track's mixer and identity, and nothing else on the track or in the Set.
+      const target = await this.mixerReadAsync(undefined, params.trackRef as LiveRef); const mixer = target.mixer;
       if (Array.isArray(proposed.sends) && (proposed.sends as unknown[]).length > (mixer.sends as unknown[]).length) throw new Error("track has fewer sends than proposed");
       if (proposed.cueVolume !== undefined && mixer.cueRef === null) throw new Error("cue volume is unavailable on this track");
       if (proposed.volume !== undefined && mixer.volumeRef === null) throw new Error("volume is unavailable on this track");
@@ -3946,12 +3968,12 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      if (!reconciliation) { const target = this.mixerTarget(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!); const mixer = target.mixer;
+      if (!reconciliation) { const target = await this.mixerReadAsync(context, transaction.clipRef!); const mixer = target.mixer;
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: target.track.objectIdentity, mixer }) !== transaction.fence) return this.transactionError(id, "mixer target or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "mixer.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("mixer change was not confirmed");
-      const verified = this.mixerTarget(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
+      const verified = await this.mixerReadAsync(context, transaction.clipRef!); for (const field of ["volume", "pan", "mute", "solo", "cueVolume", "sends"]) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameLiveValue(verified.mixer[field], transaction.payload[field])) throw new Error("mixer postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       const display = this.mixerDisplays(verified.mixer, Object.keys(transaction.prior ?? {}));
@@ -8494,6 +8516,68 @@ export class McpHost {
     throw new Error("device and parameter references are not authoritative children");
   }
 
+  /**
+   * One object as a change reads it, and only it: discovered by its ref, the only filter (the Remote
+   * Script reads it where the ref puts it, not the list it's in), with only the fields the change
+   * needs. A change on a big Set reads what it touches, not the track's devices or the other tracks.
+   */
+  private async discoverOneAsync(context: LiveOperationContext | undefined, kind: LiveDiscoveryKind, reference: LiveRef, fields?: string[], parent?: LiveRef): Promise<JsonObject | undefined> {
+    const page = await this.asyncAdapter().discoverAsync({ kind, filter: { ref: reference }, limit: 1, ...(fields ? { fields } : {}), ...(parent !== undefined ? { parent } : {}) }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+    return (page.items as JsonObject[]).find((item) => isObject(item) && item.ref === reference);
+  }
+
+  /** A track as a change reads it, by its ref: a regular or group track, a return, or the main track. */
+  private async trackOneAsync(context: LiveOperationContext | undefined, reference: LiveRef, fields: string[]): Promise<JsonObject | undefined> {
+    for (const kind of ["track", "return-track", "main-track"] as const) { const found = await this.discoverOneAsync(context, kind, reference, fields); if (found) return found; }
+    return undefined;
+  }
+
+  /** Device parameters as a change checks them before and after it: each one's row alone, its device's. */
+  private async parameterRowsAsync(context: LiveOperationContext | undefined, deviceRef: LiveRef, parameterRefs: readonly LiveRef[]): Promise<Array<LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]>> {
+    const rows: Array<LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]> = [];
+    for (const reference of parameterRefs) {
+      const row = await this.discoverOneAsync(context, "parameter", reference, undefined, deviceRef);
+      if (!row || (row.parentRef !== undefined && row.parentRef !== deviceRef) || !isNonEmptyString(row.objectIdentity, 256)) throw new Error("device and parameter references are not authoritative children");
+      rows.push(row as unknown as LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]);
+    }
+    return rows;
+  }
+
+  /**
+   * Device parameters as a change's preview reads them: each one's row, its device's light row and
+   * its track, with the authority the change is fenced on (the parameter, its device and its track,
+   * each by identity at its place; no sibling parameters, no other device).
+   */
+  private async parameterTargetsAsync(context: LiveOperationContext | undefined, deviceRef: string, parameterRefs: readonly string[]): Promise<Array<{ device: JsonObject; parameter: LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]; trackRef: LiveRef; authority: JsonObject }>> {
+    const parameters = await this.parameterRowsAsync(context, deviceRef as LiveRef, parameterRefs as LiveRef[]);
+    const device = await this.discoverOneAsync(context, "device", deviceRef as LiveRef, ["ref", "parentRef", "objectIdentity", "name", "kind", "enabled"]);
+    // The device's track: its parent, or (in a rack's chain) the track its place starts with.
+    const index = trackIndexOfRef(deviceRef); const parentRef = typeof device?.parentRef === "string" ? device.parentRef : undefined;
+    const trackRef = parentRef && refKind(parentRef) === "track" ? parentRef : index !== undefined ? `${deviceRef.split(":", 1)[0]}:track:${index}` : undefined;
+    const track = trackRef ? await this.trackOneAsync(context, trackRef as LiveRef, ["ref", "objectIdentity", "name", "kind"]) : undefined;
+    if (!device || !track) throw new Error("device and parameter references are not authoritative children");
+    return parameters.map((parameter) => {
+      const authority = { ref: parameter.ref, parameterIdentity: parameter.objectIdentity, ownerRef: device.ref, ownerIdentity: device.objectIdentity, trackRef: track.ref, trackIdentity: track.objectIdentity };
+      if (Object.values(authority).some((value) => !isNonEmptyString(value, 256))) throw new Error("parameter lacks complete exact hierarchy authority");
+      return { device, parameter, trackRef: track.ref as LiveRef, authority };
+    });
+  }
+
+  /** Parameters as a change checks them: each one's row, and whether it's still the parameter its
+   * authority names, on the same device (`owner`: before a change; after one, its fence held). A
+   * change fenced on its own identities reads the rows and its device's light row alone (a device
+   * replaced at its place, on its track or a moved one, has another identity; the Remote Script checks
+   * the track too when the change runs); one fenced on its sibling parameters, its track's focused view. */
+  private async parameterStateAsync(context: LiveOperationContext, deviceRef: LiveRef, items: ReadonlyArray<{ ref: LiveRef; authority: JsonObject }>, owner = true): Promise<Array<{ parameter: LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]; same: boolean }>> {
+    if (items.every((item) => !Array.isArray(item.authority.siblings) || item.authority.siblings.length === 0)) {
+      const rows = await this.parameterRowsAsync(context, deviceRef, items.map((item) => item.ref));
+      const device = owner ? await this.discoverOneAsync(context, "device", deviceRef, ["ref", "objectIdentity"]) : undefined;
+      return rows.map((parameter, index) => ({ parameter, same: parameter.objectIdentity === items[index]!.authority.parameterIdentity && items[index]!.authority.ownerRef === deviceRef && (!owner || (device !== undefined && device.objectIdentity === items[index]!.authority.ownerIdentity)) }));
+    }
+    const snapshot = await this.viewForAsync(context, [deviceRef, ...items.map((item) => item.ref)]);
+    return items.map((item) => ({ parameter: this.parameterTarget(snapshot, deviceRef, item.ref).parameter, same: JSON.stringify(this.parameterAuthority(snapshot, item.ref)) === JSON.stringify(item.authority) }));
+  }
+
   private parameterRevision(parameter: { ref: LiveRef; value: number; revision?: number }): number { return parameter.revision ?? 1; }
 
   private parameterAuthority(snapshot: LiveSnapshot, parameterRef: LiveRef): JsonObject {
@@ -8503,8 +8587,13 @@ export class McpHost {
   }
 
   private parameterMutationArgs(transaction: DeviceParameterTransaction, value: number, expectedRevision: number): JsonObject {
-    return { ref: transaction.parameterRef, value, expectedRevision, expectedObjectIdentity: transaction.authority.parameterIdentity, expectedOwnerRef: transaction.authority.ownerRef, expectedOwnerIdentity: transaction.authority.ownerIdentity, expectedTrackRef: transaction.authority.trackRef, expectedTrackIdentity: transaction.authority.trackIdentity, expectedSiblings: structuredClone(transaction.authority.siblings) };
+    return { ref: transaction.parameterRef, value, expectedRevision, expectedObjectIdentity: transaction.authority.parameterIdentity, expectedOwnerRef: transaction.authority.ownerRef, expectedOwnerIdentity: transaction.authority.ownerIdentity, expectedTrackRef: transaction.authority.trackRef, expectedTrackIdentity: transaction.authority.trackIdentity, ...McpHost.siblingsFence(transaction.authority) };
   }
+
+  /** The sibling parameters a change is fenced on: those its authority names (realtime targets and the
+   * synchronous tools name them), or none (an empty list) for a change fenced on the parameter, its
+   * device and its track alone, as parameterTargetsAsync reads them. */
+  private static siblingsFence(authority: JsonObject): JsonObject { return { expectedSiblings: structuredClone(Array.isArray(authority.siblings) ? authority.siblings : []) }; }
 
   private validateDeviceParameterPreview(params: unknown): params is { deviceRef: string; parameterRef: string; value: number } {
     return isObject(params) && hasOnly(params, ["deviceRef", "parameterRef", "value"]) && isNonEmptyString(params.deviceRef, 256) && isNonEmptyString(params.parameterRef, 256) && typeof params.value === "number" && Number.isFinite(params.value);
@@ -8519,15 +8608,16 @@ export class McpHost {
     if (!this.validateDeviceParameterPreview(params)) return error(id, -32602, "deviceRef, parameterRef, and finite value are required");
     try {
       const status = this.requireConnected("device.parameter.write");
-      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, params.parameterRef]);
-      const target = this.parameterTarget(snapshot, params.deviceRef, params.parameterRef);
-      const authority = this.parameterAuthority(snapshot, target.parameter.ref);
+      // The parameter, its device and its track, and nothing else on the track: a heavy track reads as fast as a light one.
+      const [target] = await this.parameterTargetsAsync(undefined, params.deviceRef, [params.parameterRef]);
+      if (!target) throw new Error("device and parameter references are not authoritative children");
+      const authority = target.authority;
       const revision = this.parameterRevision(target.parameter);
       if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
       const quantization = target.parameter.quantization ?? 0;
       if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
       if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
-      const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref as LiveRef, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover an enabled published numeric parameter and retry."); }
@@ -8545,12 +8635,13 @@ export class McpHost {
     try {
       const status = this.requireConnected("device.parameter.write");
       if (!(status.operations ?? []).includes("device.parameters.set")) throw new Error("parameter changes on several parameters at once are unavailable");
-      const snapshot = await this.viewForAsync(undefined, [params.deviceRef, ...requested.map((item) => item.parameterRef)]);
+      // Each parameter, its device and its track, and nothing else on the track.
+      const reads = await this.parameterTargetsAsync(undefined, params.deviceRef as string, requested.map((item) => item.parameterRef));
       const parameters: DeviceParametersTransaction["parameters"] = []; const shown: JsonObject[] = [];
-      let device: ReturnType<McpHost["parameterTarget"]> | undefined;
-      for (const item of requested) {
-        const target = this.parameterTarget(snapshot, params.deviceRef as string, item.parameterRef);
-        const authority = this.parameterAuthority(snapshot, target.parameter.ref);
+      let device: (typeof reads)[number] | undefined;
+      for (const [index, item] of requested.entries()) {
+        const target = reads[index]!;
+        const authority = target.authority;
         if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
         const quantization = target.parameter.quantization ?? 0;
         if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
@@ -8561,7 +8652,7 @@ export class McpHost {
         parameters.push({ ref: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: item.value, priorRevision: this.parameterRevision(target.parameter) });
         shown.push({ ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: item.value, min: target.parameter.min, max: target.parameter.max, ...(typeof target.parameter.displayValue === "string" ? { displayValue: target.parameter.displayValue } : {}) });
       }
-      const transaction: DeviceParametersTransaction = { id: `parameters_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: device!.device.ref, parameters, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: DeviceParametersTransaction = { id: `parameters_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: device!.device.ref as LiveRef, parameters, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParametersTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: device!.device.ref, name: device!.device.name, kind: device!.device.kind, trackRef: device!.trackRef, enabled: device!.device.enabled !== false }, parameters: shown, confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Parameter preview failed without mutation; discover enabled published numeric parameters of one device and retry."); }
@@ -8569,7 +8660,7 @@ export class McpHost {
 
   private parametersMutationArgs(transaction: DeviceParametersTransaction, values: (parameter: DeviceParametersTransaction["parameters"][number], index: number) => { value: number; revision: number }): JsonObject {
     const shared = transaction.parameters[0]!.authority;
-    return { expectedOwnerRef: shared.ownerRef, expectedOwnerIdentity: shared.ownerIdentity, expectedTrackRef: shared.trackRef, expectedTrackIdentity: shared.trackIdentity, expectedSiblings: structuredClone(shared.siblings),
+    return { expectedOwnerRef: shared.ownerRef, expectedOwnerIdentity: shared.ownerIdentity, expectedTrackRef: shared.trackRef, expectedTrackIdentity: shared.trackIdentity, ...McpHost.siblingsFence(shared),
       parameters: transaction.parameters.map((parameter, index) => { const next = values(parameter, index); return { ref: parameter.ref, value: next.value, expectedRevision: next.revision, expectedObjectIdentity: parameter.authority.parameterIdentity }; }) };
   }
 
@@ -8588,20 +8679,20 @@ export class McpHost {
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       if (!reconciliation) {
-        const current = await this.viewForAsync(context, [transaction.deviceRef, ...transaction.parameters.map((parameter) => parameter.ref)]);
-        for (const parameter of transaction.parameters) {
-          const target = this.parameterTarget(current, transaction.deviceRef, parameter.ref).parameter;
-          if (this.parameterRevision(target) !== parameter.priorRevision || target.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(current, parameter.ref)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after preview; preview again");
+        const current = await this.parameterStateAsync(context, transaction.deviceRef, transaction.parameters);
+        for (const [index, parameter] of transaction.parameters.entries()) {
+          const target = current[index]!.parameter;
+          if (this.parameterRevision(target) !== parameter.priorRevision || target.value !== parameter.priorValue || !current[index]!.same) return this.transactionError(id, "Device parameter identity or value changed after preview; preview again");
         }
       }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       await adapter.invokeAsync({ operation: "device.parameters.set", args: this.parametersMutationArgs(transaction, (parameter) => ({ value: parameter.proposedValue, revision: parameter.priorRevision })) }, context);
-      const verifiedSnapshot = await this.viewForAsync(context, [transaction.deviceRef, ...transaction.parameters.map((parameter) => parameter.ref)]);
-      for (const parameter of transaction.parameters) {
-        const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, parameter.ref).parameter;
+      const verifiedReads = await this.parameterStateAsync(context, transaction.deviceRef, transaction.parameters, false);
+      for (const [index, parameter] of transaction.parameters.entries()) {
+        const verified = verifiedReads[index]!.parameter;
         const kept = sameLiveValue(verified.value, parameter.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, parameter.proposedValue, verified);
         if (kept !== undefined) parameter.proposedValue = kept;
-        if (!sameLiveValue(verified.value, parameter.proposedValue) || this.parameterRevision(verified) <= parameter.priorRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the parameter changes"); }
+        if (!sameLiveValue(verified.value, parameter.proposedValue) || this.parameterRevision(verified) <= parameter.priorRevision || !verifiedReads[index]!.same) { transaction.state = "uncertain"; throw new Error("Live did not confirm the parameter changes"); }
         parameter.appliedRevision = this.parameterRevision(verified);
         if (typeof verified.displayValue === "string") parameter.appliedDisplay = verified.displayValue;
       }
@@ -8629,17 +8720,15 @@ export class McpHost {
       const status = this.requireConnected("device.parameter.write");
       if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; preview again");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-      const currentSnapshot = await this.viewForAsync(context, [transaction.deviceRef, transaction.parameterRef]);
-      const target = this.parameterTarget(currentSnapshot, transaction.deviceRef, transaction.parameterRef);
-      const currentRevision = reconciliation ? transaction.priorRevision : this.parameterRevision(target.parameter);
-      if (!reconciliation && (currentRevision !== transaction.priorRevision || target.parameter.value !== transaction.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority))) return this.transactionError(id, "Device parameter identity or value changed since preview");
+      const [target] = await this.parameterStateAsync(context, transaction.deviceRef, [{ ref: transaction.parameterRef, authority: transaction.authority }]);
+      const currentRevision = reconciliation ? transaction.priorRevision : this.parameterRevision(target!.parameter);
+      if (!reconciliation && (currentRevision !== transaction.priorRevision || target!.parameter.value !== transaction.priorValue || !target!.same)) return this.transactionError(id, "Device parameter identity or value changed since preview");
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       await adapter.invokeAsync({ operation: "device.parameter.set", args: this.parameterMutationArgs(transaction, transaction.proposedValue, currentRevision) }, context);
-      const verifiedSnapshot = await this.viewForAsync(context, [transaction.deviceRef, transaction.parameterRef]);
-      const verified = this.parameterTarget(verifiedSnapshot, transaction.deviceRef, transaction.parameterRef).parameter;
+      const [read] = await this.parameterStateAsync(context, transaction.deviceRef, [{ ref: transaction.parameterRef, authority: transaction.authority }], false); const verified = read!.parameter;
       const kept = sameLiveValue(verified.value, transaction.proposedValue) ? undefined : wholeNumberLiveKept(verified.value, transaction.proposedValue, verified);
       if (kept !== undefined) transaction.proposedValue = kept;
-      if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= currentRevision || JSON.stringify(this.parameterAuthority(verifiedSnapshot, transaction.parameterRef)) !== JSON.stringify(transaction.authority)) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
+      if (!sameLiveValue(verified.value, transaction.proposedValue) || this.parameterRevision(verified) <= currentRevision || !read!.same) { transaction.state = "uncertain"; throw new Error("Live did not confirm the requested exact device parameter"); }
       transaction.appliedRevision = this.parameterRevision(verified); transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
       if (typeof verified.displayValue === "string") transaction.appliedDisplay = verified.displayValue;
       return this.successText(id, { transactionId: transaction.id, state: "applied", value: verified.value, ...(transaction.appliedDisplay === undefined ? {} : { displayValue: transaction.appliedDisplay }), revision: transaction.appliedRevision, epoch: transaction.epoch, idempotent: false });
@@ -9857,11 +9946,11 @@ export class McpHost {
       try {
         this.beginUndoRecovery(rename, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rename.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rename.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rename, adapter, context);
-        const current = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
+        const current = await this.renameTargetAsync(context, rename.payload.kind, rename.clipRef);
         if (!current || current.objectIdentity !== rename.prior?.objectIdentity || current.name !== (reconciliation ? rename.prior?.name : rename.payload.name)) return this.transactionError(id, reconciliation ? "Rename undo replay did not restore prior name" : "Renamed object identity or name changed after apply; undo refused");
         const operation = (rename.payload.kind === "takeLane" ? "take-lane.rename" : `${rename.payload.kind}.rename`) as LiveInvocation["operation"];
-        if (!reconciliation) { rename.state = "undoing"; await this.invokeUndoRecovery(rename, adapter, operation, { ref: rename.clipRef, name: rename.prior?.name, expectedName: rename.payload.name, expectedObjectIdentity: rename.prior?.objectIdentity, expectedAuthorityRevision: this.renameAuthorityRevision(await this.viewForAsync(context, [rename.clipRef]), rename.payload.kind as string, rename.clipRef) }, context); }
-        const restored = await adapter.getAsync(rename.clipRef, context) as { objectIdentity?: unknown; name?: unknown } | undefined;
+        if (!reconciliation) { rename.state = "undoing"; await this.invokeUndoRecovery(rename, adapter, operation, { ref: rename.clipRef, name: rename.prior?.name, expectedName: rename.payload.name, expectedObjectIdentity: rename.prior?.objectIdentity, expectedAuthorityRevision: await this.renameRevisionAsync(context, rename.payload.kind as string, rename.clipRef, current) }, context); }
+        const restored = await this.renameTargetAsync(context, rename.payload.kind, rename.clipRef);
         if (!restored || restored.objectIdentity !== rename.prior?.objectIdentity || restored.name !== rename.prior?.name) throw new Error("rename undo was not confirmed for the exact target");
         rename.state = "undone";
         return this.successText(id, { transactionId: rename.id, state: "undone", ref: rename.clipRef, name: restored.name, idempotent: false });
@@ -9877,10 +9966,10 @@ export class McpHost {
         this.beginUndoRecovery(mixer, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== mixer.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixer.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixer, adapter, context);
         const mutableFields = ["volume", "pan", "mute", "solo", "cueVolume", "sends"];
-        let currentTarget = this.mixerTarget(await this.viewForAsync(context, [mixer.clipRef]), mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
+        let currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
         for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
         if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
-        currentTarget = this.mixerTarget(await this.viewForAsync(context, [mixer.clipRef]), mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
+        currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
         return this.successText(id, { transactionId: mixer.id, state: "undone", restored: mixer.prior, idempotent: false });
       } catch (cause) { mixer.state = "uncertain"; return this.adapterToolError(id, cause, "Mixer undo is uncertain; perform fresh discovery."); }
@@ -9978,19 +10067,19 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       try {
         this.beginUndoRecovery(batch, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== batch.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; batch.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(batch, adapter, context);
-        const currentSnapshot = await this.viewForAsync(context, [batch.deviceRef, ...batch.parameters.map((item) => item.ref)]);
-        const currents = batch.parameters.map((parameter) => this.parameterTarget(currentSnapshot, batch.deviceRef, parameter.ref).parameter);
-        const unchanged = (index: number) => JSON.stringify(this.parameterAuthority(currentSnapshot, batch.parameters[index]!.ref)) === JSON.stringify(batch.parameters[index]!.authority);
+        const state = await this.parameterStateAsync(context, batch.deviceRef, batch.parameters);
+        const currents = state.map((item) => item.parameter);
+        const unchanged = (index: number) => state[index]!.same;
         if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
         else {
           if (currents.some((current, index) => !sameLiveValue(current.value, batch.parameters[index]!.proposedValue) || this.parameterRevision(current) !== batch.parameters[index]!.appliedRevision || !unchanged(index))) return this.transactionError(id, "A device parameter changed after apply; undo refused");
           batch.state = "undoing";
           await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
         }
-        const restoredSnapshot = await this.viewForAsync(context, [batch.deviceRef, ...batch.parameters.map((item) => item.ref)]);
-        for (const parameter of batch.parameters) {
-          const restored = this.parameterTarget(restoredSnapshot, batch.deviceRef, parameter.ref).parameter;
-          if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.ref)) !== JSON.stringify(parameter.authority)) { batch.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
+        const restoredState = await this.parameterStateAsync(context, batch.deviceRef, batch.parameters, false);
+        for (const [index, parameter] of batch.parameters.entries()) {
+          const restored = restoredState[index]!.parameter;
+          if (restored.value !== parameter.priorValue || !restoredState[index]!.same) { batch.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         }
         batch.state = "undone";
         return this.successText(id, { transactionId: batch.id, state: "undone", idempotent: false });
@@ -10003,11 +10092,11 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       if (!parameter || (parameter.state !== "applied" && !reconciliation) || parameter.appliedRevision === undefined) return this.transactionError(id, "Only an applied or exact-key uncertain device-parameter transaction can be undone");
       try {
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const currentSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const current = this.parameterTarget(currentSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
-        if (reconciliation) { if (current.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) throw new Error("device-parameter undo replay did not restore exact prior state"); }
-        else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || JSON.stringify(this.parameterAuthority(currentSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
-        const restoredSnapshot = await this.viewForAsync(context, [parameter.deviceRef, parameter.parameterRef]); const restored = this.parameterTarget(restoredSnapshot, parameter.deviceRef, parameter.parameterRef).parameter;
-        if (restored.value !== parameter.priorValue || JSON.stringify(this.parameterAuthority(restoredSnapshot, parameter.parameterRef)) !== JSON.stringify(parameter.authority)) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const [currentState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }]); const current = currentState!.parameter;
+        if (reconciliation) { if (current.value !== parameter.priorValue || !currentState!.same) throw new Error("device-parameter undo replay did not restore exact prior state"); }
+        else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || !currentState!.same) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
+        const [restoredState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }], false); const restored = restoredState!.parameter;
+        if (restored.value !== parameter.priorValue || !restoredState!.same) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         parameter.state = "undone";
         return this.successText(id, { transactionId: parameter.id, state: "undone", value: restored.value, revision: this.parameterRevision(restored), idempotent: false });
       } catch (cause) { if (parameter.state === "undoing" || parameter.state === "uncertain") parameter.state = "uncertain"; return this.adapterToolError(id, cause, "Device-parameter undo is uncertain; inspect authoritative parameter state."); }

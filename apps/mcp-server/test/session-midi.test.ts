@@ -49,6 +49,30 @@ test("asynchronous MIDI undo reconciles a lost deletion acknowledgement with the
   const reconciled = await manager.undoAsync(preview.transactionId, "undo", "midi-recovery-undo", { deadlineMs: Date.now() + 5000, idempotencyKey: "midi-recovery-undo", transactionId: preview.transactionId }) as any; assert.equal(reconciled.state, "undone"); assert.equal(deletes, 1);
 });
 
+test("an asynchronous MIDI undo whose check can't read the clip leaves it applied: the same key undoes it next time", async () => {
+  const simulator = midiSimulator(); const adapter = asynchronous(simulator); const read = adapter.getAsync.bind(adapter); let failRead = false; const operations: string[] = [];
+  adapter.getAsync = async (ref, context) => { if (failRead) { failRead = false; throw new Error("remote adapter request timed out"); } return read(ref, context); };
+  const invoke = adapter.invokeAsync.bind(adapter); adapter.invokeAsync = async (invocation, context) => { operations.push(invocation.operation); return invoke(invocation, context); };
+  const manager = new SessionMidiTransactionManager(adapter); const preview = await manager.previewAsync(request);
+  const context = (key: string) => ({ deadlineMs: Date.now() + 5000, idempotencyKey: key, transactionId: preview.transactionId });
+  await manager.applyAsync(preview.transactionId, "apply", "midi-check-apply", context("midi-check-apply"));
+  failRead = true; operations.length = 0;
+  await assert.rejects(manager.undoAsync(preview.transactionId, "undo", "midi-check-undo", context("midi-check-undo")), /timed out/);
+  assert.deepEqual(operations, [], "nothing was sent to Live");
+  const undone = await manager.undoAsync(preview.transactionId, "undo", "midi-check-undo", context("midi-check-undo")) as any;
+  assert.equal(undone.state, "undone"); assert.equal(simulator.snapshot().tracks[0]?.clipSlots?.[1]?.empty, true);
+});
+
+test("a synchronous MIDI undo its check refuses leaves the clip applied, for a later undo", () => {
+  const simulator = midiSimulator(); const manager = new SessionMidiTransactionManager(simulator);
+  const preview = manager.preview(request); manager.apply(preview.transactionId, "apply", "midi-sync-apply");
+  const clip = (simulator as any).state.tracks[0].clips.find((item: { name: string }) => item.name === "Bounded Beat");
+  clip.name = "Edited by hand";
+  assert.throws(() => manager.undo(preview.transactionId, "undo", "midi-sync-undo-1"), /changed/);
+  clip.name = "Bounded Beat";
+  assert.equal((manager.undo(preview.transactionId, "undo", "midi-sync-undo-2") as any).state, "undone");
+});
+
 test("MIDI apply compensation with a lost acknowledgement reconciles without a residual clip", async () => {
   const simulator = midiSimulator(); const adapter = asynchronous(simulator); const original = adapter.invokeAsync.bind(adapter); let cachedDelete: unknown; let deletes = 0;
   adapter.invokeAsync = async (invocation, context) => { if (invocation.operation === "note.add-batch") { const result = await original(invocation, context) as any; return { ...result, added: 0 }; } if (invocation.operation === "clip.delete") { if (deletes === 0) { deletes += 1; cachedDelete = await original(invocation, context); throw new Error("remote adapter request state uncertain after dispatch timeout"); } return cachedDelete; } return original(invocation, context); };
