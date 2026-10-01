@@ -1744,9 +1744,9 @@ class ControlSurfaceTests(unittest.TestCase):
         created_scene = mapper.invoke("scene.create", {"name": "Verse", "index": 1, "expectedStructureRevision": mapper._structure_revision()})
         self.assertEqual(created_track["name"], "Strings"); self.assertTrue(created_track["objectIdentity"])
         self.assertEqual(created_scene["name"], "Verse"); self.assertTrue(created_scene["objectIdentity"])
-        self.assertEqual(mapper.invoke("track.rename", {"ref": created_track["ref"], "name": "Synths", "expectedName": "Strings", "expectedObjectIdentity": created_track["objectIdentity"], "expectedAuthorityRevision": mapper._structure_revision()})["name"], "Synths")
-        with self.assertRaises(ValueError): mapper.invoke("track.rename", {"ref": created_track["ref"], "name": "Wrong", "expectedName": "Strings", "expectedObjectIdentity": created_track["objectIdentity"], "expectedAuthorityRevision": mapper._structure_revision()})
-        self.assertEqual(mapper.invoke("scene.rename", {"ref": created_scene["ref"], "name": "Chorus", "expectedName": "Verse", "expectedObjectIdentity": created_scene["objectIdentity"], "expectedAuthorityRevision": mapper._structure_revision()})["name"], "Chorus")
+        self.assertEqual(mapper.invoke("track.rename", {"ref": created_track["ref"], "name": "Synths", "expectedName": "Strings", "expectedObjectIdentity": created_track["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", created_track["ref"])})["name"], "Synths")
+        with self.assertRaises(ValueError): mapper.invoke("track.rename", {"ref": created_track["ref"], "name": "Wrong", "expectedName": "Strings", "expectedObjectIdentity": created_track["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", created_track["ref"])})
+        self.assertEqual(mapper.invoke("scene.rename", {"ref": created_scene["ref"], "name": "Chorus", "expectedName": "Verse", "expectedObjectIdentity": created_scene["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("scene", created_scene["ref"])})["name"], "Chorus")
         created_track_object = mapper.song.tracks[1]; replacement = FakeTrack(); replacement.name = "Synths"; mapper.song.tracks[1] = replacement
         with self.assertRaises(ValueError): mapper.invoke("track.delete", {"ref": created_track["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": created_track["objectIdentity"]})
         mapper.song.tracks[1] = created_track_object
@@ -8359,7 +8359,7 @@ class FlatChangeTests(unittest.TestCase):
         song = self.watched_song(); mapper = LiveObjectMapper(song)
         row = mapper.snapshot()["tracks"][2]; before = mapper._structure_revision()
         with patch.object(ListenTrack, "notify", lambda self, name: None):
-            mapper.invoke("track.rename", {"ref": row["ref"], "name": "Bass", "expectedName": row["name"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": before})
+            mapper.invoke("track.rename", {"ref": row["ref"], "name": "Bass", "expectedName": row["name"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", row["ref"])})
             after = mapper._structure_revision()
         self.assertNotEqual(after, before, "the revision has the new name though no listener told")
         mapper._structure_held = None
@@ -8373,8 +8373,12 @@ class FlatChangeTests(unittest.TestCase):
         song.tracks[1].devices.append(LeanDevice("Utility", "StereoGain", 20)); song.tracks[1].devices[0]._parameters[0].value = 0.9
         self.assertEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "what the track holds isn't what a rename depends on")
         self.assertEqual(LeanDevice.parameter_reads, 0)
-        song.tracks[1].arm = True
-        self.assertNotEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "the track's own state is")
+        # Nor is the rest of its state, the Set's other tracks or its scenes: its identity and name at its place are.
+        song.tracks[1].arm = True; song.tracks[0].name = "Lead"; song.scenes[0].name = "Intro"
+        self.assertEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "only its identity and name are")
+        song.tracks[1].name = "Bass 2"
+        self.assertNotEqual(_authority_state_digest(mapper, args, "track.rename"), digest, "its name is")
+        song.tracks[1].name = "Bass"
         self.assertEqual(mapper.invoke("track.rename", args), {"renamed": row["ref"], "name": "Sub"})
         # A device rename's authority, from the light walk, is the one whole rows gave.
         device = mapper.snapshot()["tracks"][0]["devices"][4]["chains"][1]["devices"][0]
@@ -8475,3 +8479,115 @@ class MeasuredSetBenchmarkTests(unittest.TestCase):
             self.assertEqual(mapper.song.tracks[100].name, "Renamed 1"); self.assertEqual(rows, [], "a rename builds no track's whole row")
             line(f"track.rename, one mutate, 200 tracks ({'watched' if watched else 'unwatched'} structure)", elapsed)
         print("\n  the measured Set (200 tracks, 1800 devices, a 20000-note Arrangement clip), Remote Script side:\n" + "\n".join(report))
+
+
+class OneObjectChangeTests(unittest.TestCase):
+    """A parameter, mixer or rename change reads what it touches, however big the Set and its tracks:
+    the parameter with its device's and track's identities, the track's mixer, the track's or scene's
+    name. Its checks stay: each object's identity at its place, its expected values, and a digest of
+    what it names. Discovering one object by its ref reads that object, as the whole list has it."""
+
+    @staticmethod
+    def counted(work):
+        """What work returns, and how many attributes it read off the Set's objects (Live's are LOM reads)."""
+        reads = [0]
+        def counting(cls):
+            original = cls.__getattribute__
+            def getattribute(self, name):
+                if not name.startswith("__"): reads[0] += 1
+                return original(self, name)
+            return getattribute
+        patches = [patch.object(cls, "__getattribute__", counting(cls)) for cls in (LeanParameter, LeanChain, LeanDevice, LeanPad, FakeTrack, FakeMixerDevice, FakeSlot, FakeParameter, FakeSong, FakeScene)]
+        for item in patches: item.start()
+        try: result = work()
+        finally:
+            for item in patches: item.stop()
+        return result, reads[0]
+
+    @staticmethod
+    def one(mapper, kind, reference, fields=None, parent=None):
+        """The object a ref names, discovered by its ref as the host reads it."""
+        page = mapper.discover(kind, 1, None, parent, {"ref": reference}, fields, budgeted=True)
+        validate_operation_payload("discover", "result", page)
+        return page["items"]
+
+    def test_a_parameter_change_reads_its_parameter_its_device_and_its_track(self):
+        costs = []
+        for size in (20, 200):
+            mapper = LiveObjectMapper(measured_set(size, 10), provenance="real-live"); epoch = mapper.refs.epoch
+            parameter = f"{epoch}:parameter:{epoch}:device:10:0:3"; whole = mapper._whole_track_row(10); device = whole["devices"][0]; row = device["parameters"][3]
+            # Fenced on the parameter, its device and its track, and none of the device's other parameters.
+            args = {"ref": parameter, "value": 0.25, "expectedRevision": row["revision"], "expectedObjectIdentity": row["objectIdentity"], "expectedOwnerRef": device["ref"], "expectedOwnerIdentity": device["objectIdentity"], "expectedTrackRef": whole["ref"], "expectedTrackIdentity": whole["objectIdentity"], "expectedSiblings": []}
+            validate_operation_payload("device.parameter.set", "request", args)
+            LeanDevice.parameter_reads = 0
+            with patch.object(LiveObjectMapper, "_whole_track_row", side_effect=AssertionError("a parameter change builds no whole track row")):
+                _, digesting = self.counted(lambda: _authority_state_digest(mapper, args, "device.parameter.set"))
+                changed, changing = self.counted(lambda: mapper.invoke("device.parameter.set", args, "transaction-one-parameter"))
+                self.assertEqual(changed["value"], 0.25); self.assertLessEqual(LeanDevice.parameter_reads, 2, "Operator's parameter list, no other device's")
+                (read, reading) = self.counted(lambda: (self.one(mapper, "parameter", parameter, parent=device["ref"]), self.one(mapper, "device", device["ref"], ["ref", "parentRef", "objectIdentity", "name", "kind", "enabled"]), self.one(mapper, "track", whole["ref"], ["ref", "objectIdentity", "name", "kind"])))
+            self.assertEqual(read[0], [mapper._whole_track_row(10)["devices"][0]["parameters"][3]], "the row the list has")
+            self.assertEqual(read[1], [{"ref": device["ref"], "parentRef": whole["ref"], "objectIdentity": device["objectIdentity"], "name": "Operator", "kind": "device", "enabled": True}])
+            self.assertEqual(read[2], [{"ref": whole["ref"], "parentRef": whole["parentRef"], "objectIdentity": whole["objectIdentity"], "name": whole["name"], "kind": "regular"}])
+            costs.append((digesting, changing, reading))
+        self.assertEqual(costs[0], costs[1], "as many reads on 200 tracks as on 20"); self.assertLess(sum(costs[1]), 400)
+        for wrong in ({"expectedObjectIdentity": "live:other"}, {"expectedOwnerIdentity": "live:other"}, {"expectedTrackIdentity": "live:other"}, {"expectedOwnerRef": f"{epoch}:device:10:1"}):
+            with self.assertRaisesRegex(ValueError, "identity or hierarchy changed"): mapper.invoke("device.parameter.set", {**args, **wrong, "expectedRevision": mapper.refs.revision(parameter)}, "transaction-one-parameter-wrong")
+        # Another device at the parameter's place now: refused.
+        devices = mapper.song.tracks[10].devices; devices[0], devices[1] = devices[1], devices[0]
+        with self.assertRaisesRegex(ValueError, "identity or hierarchy changed"): mapper.invoke("device.parameter.set", {**args, "expectedRevision": mapper.refs.revision(parameter)}, "transaction-one-parameter-moved")
+        # A nested device's parameter, through its racks' chains.
+        nested = f"{epoch}:device:10:4:1:0:0:0"; row = self.one(mapper, "parameter", f"{epoch}:parameter:{nested}:2", parent=nested)[0]
+        self.assertEqual((row["parentRef"], self.one(mapper, "device", nested, ["name"])), (nested, [{"ref": nested, "parentRef": f"{epoch}:chain:10:4:1:0:0", "name": "Utility"}]))
+
+    def test_a_mixer_change_reads_its_tracks_mixer(self):
+        costs = []
+        for size in (20, 200):
+            mapper = LiveObjectMapper(measured_set(size, 10), provenance="real-live"); epoch = mapper.refs.epoch; track = f"{epoch}:track:10"
+            whole = mapper._whole_track_row(10); mixer = whole["mixer"]; state = {field: mixer.get(field) for field in ("volume", "pan", "mute", "solo", "cueVolume", "sends")}
+            args = {"ref": track, "volume": 0.4, "expectedObjectIdentity": whole["objectIdentity"], "expectedVolumeIdentity": mixer["volumeIdentity"], "expectedPanIdentity": mixer["panIdentity"], "expectedCueIdentity": mixer["cueIdentity"], "expectedSendIdentities": mixer["sendIdentities"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode("utf-8")).hexdigest()}
+            with patch.object(LiveObjectMapper, "_whole_track_row", side_effect=AssertionError("a mixer change builds no whole track row")):
+                _, digesting = self.counted(lambda: _authority_state_digest(mapper, args, "mixer.set"))
+                _, changing = self.counted(lambda: mapper.invoke("mixer.set", args, "transaction-one-mixer"))
+                read, reading = self.counted(lambda: self.one(mapper, "track", track, ["ref", "objectIdentity", "name", "kind", "mixer"]))
+            self.assertEqual(mapper.song.tracks[10].mixer_device.volume.value, 0.4)
+            self.assertEqual(read, [{"ref": track, "parentRef": whole["parentRef"], "objectIdentity": whole["objectIdentity"], "name": whole["name"], "kind": "regular", "mixer": mapper._whole_track_row(10)["mixer"]}], "the mixer row a whole row has")
+            costs.append((digesting, changing, reading))
+        self.assertEqual(costs[0], costs[1], "as many reads on 200 tracks as on 20"); self.assertLess(sum(costs[1]), 800)
+        # Another track at the ref's place now: refused.
+        mapper.song.tracks[10], mapper.song.tracks[11] = mapper.song.tracks[11], mapper.song.tracks[10]
+        with self.assertRaisesRegex(ValueError, "identity changed"): mapper.invoke("mixer.set", args, "transaction-one-mixer-moved")
+
+    def test_a_rename_reads_its_tracks_or_scenes_name_and_identity(self):
+        costs = []
+        for size in (20, 200):
+            mapper = LiveObjectMapper(measured_set(size, 10), provenance="real-live"); epoch = mapper.refs.epoch; rows = []
+            for kind, reference, name in (("track", f"{epoch}:track:10", "Track 11"), ("scene", f"{epoch}:scene:2", "Scene 3")):
+                identity = mapper._positional_identity(reference)
+                args = {"ref": reference, "name": f"{name} renamed", "expectedName": name, "expectedObjectIdentity": identity, "expectedAuthorityRevision": hashlib.sha256(mapper._bounded_canonical({"ref": reference, "objectIdentity": identity, "name": name}).encode("utf-8")).hexdigest()}
+                with patch.object(LiveObjectMapper, "_structure_revision", side_effect=AssertionError("a rename reads no Set structure")), patch.object(LiveObjectMapper, "_whole_track_row", side_effect=AssertionError("a rename builds no whole track row")):
+                    _, digesting = self.counted(lambda: _authority_state_digest(mapper, args, f"{kind}.rename"))
+                    renamed, renaming = self.counted(lambda: mapper.invoke(f"{kind}.rename", args))
+                    read, reading = self.counted(lambda: self.one(mapper, kind, reference, ["ref", "objectIdentity", "name"]))
+                self.assertEqual(renamed["name"], f"{name} renamed")
+                self.assertEqual([{key: value for key, value in item.items() if key != "parentRef"} for item in read], [{"ref": reference, "objectIdentity": identity, "name": f"{name} renamed"}])
+                rows.append((digesting, renaming, reading))
+            costs.append(rows)
+        self.assertEqual(costs[0], costs[1], "as many reads on 200 tracks as on 20"); self.assertLess(sum(sum(item) for item in costs[1]), 200)
+        # Its name changed by hand since the preview: refused.
+        mapper.song.tracks[10].name = "By hand"
+        with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("track.rename", {"ref": f"{epoch}:track:10", "name": "Again", "expectedName": "Track 11 renamed", "expectedObjectIdentity": mapper._positional_identity(f"{epoch}:track:10"), "expectedAuthorityRevision": mapper._rename_authority_revision("track", f"{epoch}:track:10")})
+
+    def test_one_object_by_its_ref_is_the_whole_lists_page_filtered_to_it(self):
+        mapper = LiveObjectMapper(measured_set(12, 10), provenance="real-live"); epoch = mapper.refs.epoch
+        def listed(kind, reference, fields=None, parent=None):
+            page = mapper.discover(kind, 100000, None, parent, {"ref": reference, "name": None} if False else None, fields, budgeted=False)
+            return [item for item in page["items"] if item["ref"] == reference]
+        cases = [("track", f"{epoch}:track:3", ["ref", "objectIdentity", "name", "kind"], None), ("track", f"{epoch}:track:3", ["ref", "mixer"], None), ("scene", f"{epoch}:scene:1", None, None),
+                 ("device", f"{epoch}:device:3:4", ["ref", "parentRef", "name", "chainList"], None), ("device", f"{epoch}:device:3:4:0:1", ["ref", "parentRef", "name"], f"{epoch}:chain:3:4:0"),
+                 ("parameter", f"{epoch}:parameter:{epoch}:device:3:2:7", None, f"{epoch}:device:3:2")]
+        for kind, reference, fields, parent in cases:
+            self.assertEqual(self.one(mapper, kind, reference, fields, parent), listed(kind, reference, fields, parent), reference)
+        # A ref of another kind, a stale place or a parent not its own: nothing.
+        self.assertEqual(self.one(mapper, "return_track", f"{epoch}:track:3"), [])
+        self.assertEqual(self.one(mapper, "track", f"{epoch}:track:99"), [])
+        self.assertEqual(self.one(mapper, "device", f"{epoch}:device:3:4:0:1", parent=f"{epoch}:track:3"), [])

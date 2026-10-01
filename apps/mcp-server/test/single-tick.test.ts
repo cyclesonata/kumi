@@ -40,14 +40,14 @@ async function mixerChange(mutationPath: "mutate" | "authority") {
 test("one change is one mutate request carrying the preview's state digest, instead of preflight, prepare, invoke and retire", async () => {
   const before = await mixerChange("authority");
   const after = await mixerChange("mutate");
-  // Before: the preview reads; the apply reads, mints authority twice, invokes, verifies and retires.
-  assert.deepEqual(before.preview, ["status", "snapshot"]);
-  assert.deepEqual(before.apply, ["snapshot", "preflight", "prepare", "invoke mixer.set", "snapshot", "retire"]);
+  // Before: the preview reads the track's mixer; the apply reads, mints authority twice, invokes, verifies and retires.
+  assert.deepEqual(before.preview, ["discover"]);
+  assert.deepEqual(before.apply, ["discover", "preflight", "prepare", "invoke mixer.set", "discover", "retire"]);
   // After: the preview also asks for the change's state digest; the apply sends it with one mutate.
-  assert.deepEqual(after.preview.filter((label) => label !== "invoke authority.digest"), ["status", "snapshot"]);
+  assert.deepEqual(after.preview.filter((label) => label !== "invoke authority.digest"), ["discover"]);
   assert.deepEqual([...after.preview, ...after.apply].filter((label) => label === "invoke authority.digest"), ["invoke authority.digest"]);
-  assert.deepEqual(after.apply.filter((label) => label !== "invoke authority.digest"), ["snapshot", "mutate mixer.set", "snapshot"]);
-  assert.equal(before.requests.length, 8); assert.equal(after.requests.length, 6);
+  assert.deepEqual(after.apply.filter((label) => label !== "invoke authority.digest"), ["discover", "mutate mixer.set", "discover"]);
+  assert.equal(before.requests.length, 7); assert.equal(after.requests.length, 5);
   const digest = after.requests.find((request) => request.method === "invoke" && request.operation === "authority.digest")!;
   const mutate = after.requests.find((request) => request.method === "mutate")!;
   assert.match(mutate.stateDigest ?? "", /^[a-f0-9]{64}$/);

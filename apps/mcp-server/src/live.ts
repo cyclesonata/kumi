@@ -1023,7 +1023,8 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         else if (operation === "device.rename") target = this.state.tracks.flatMap((item) => item.devices).find((item) => item.ref === reference);
         else target = this.state.arrangement.locators.find((item) => item.ref === reference);
         let authorityRevision: string | undefined;
-        if (operation === "track.rename" || operation === "scene.rename") authorityRevision = structureRevision();
+        // A track or scene is renamed as previewed: its identity and name at its place, as the Remote Script fences it.
+        if (operation === "track.rename" || operation === "scene.rename") authorityRevision = target ? simulatorRevision({ ref: target.ref, objectIdentity: target.objectIdentity, name: target.name }) : undefined;
         else if (operation === "locator.rename") authorityRevision = this.state.arrangement.locatorRevision;
         else if (operation === "clip.rename") authorityRevision = reference.startsWith("arrangement-clip:") ? simulatorRevision({ expectedObjectIdentity: target?.objectIdentity, expectedAuthorityRevision: arrangementAuthorityRevision(reference) }) : simulatorRevision(this.sessionClipAuthority(reference));
         else { const track = this.state.tracks.find((item) => item.devices.some((device) => device.ref === reference)); const device = track?.devices.find((item) => item.ref === reference); if (track && device) authorityRevision = simulatorRevision({ ref: device.ref, objectIdentity: device.objectIdentity, trackRef: track.ref, trackIdentity: track.objectIdentity, ownerRef: track.ref, ownerIdentity: track.objectIdentity, siblings: track.devices.map((item) => ({ ref: item.ref, objectIdentity: item.objectIdentity })) }); }
@@ -2484,7 +2485,9 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   /** How many items a discovery page holds before its budget runs out (then truncated, with nextCursor); undefined: its limit. */
   discoveryBudgetItems: number | undefined;
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = this.discoveryRows(request);
+    // Filtered on exact values and narrowed to the requested fields (with ref and parentRef), as the Remote Script lists them.
+    const filter = request.filter;
+    const rows = filter ? this.discoveryRows(request).filter((row) => Object.entries(filter).every(([key, value]) => row[key] === value)) : this.discoveryRows(request);
     // Pages as the Remote Script's: a cursor names where to go on in this list as it is, and nowhere else;
     // a note page's, the notes listed before it too (by id, in order).
     const revision = `${this.epoch}:${request.kind}:${request.parent ?? ""}:${rows.length}`;
@@ -2498,7 +2501,9 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     }
     const page = rows.slice(offset, offset + Math.max(1, Math.min(request.limit ?? 50, this.discoveryBudgetItems ?? Number.POSITIVE_INFINITY)));
     const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length, ...(request.kind === "note" ? { listed: listed(offset + page.length) } : {}) })).toString("base64url") : undefined;
-    return { epoch: this.epoch, items: structuredClone(page), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
+    const fields = request.fields ? new Set([...request.fields, "ref", "parentRef"]) : undefined;
+    const items = fields ? page.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => fields.has(key)))) : page;
+    return { epoch: this.epoch, items: structuredClone(items), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
   }
   /** What a discovery lists, before paging: a clip's notes (Session or Arrangement) by their parent clip. */
   private discoveryRows(request: LiveDiscoveryRequest): Record<string, unknown>[] {
@@ -2507,7 +2512,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       if (request.parent === undefined) throw new Error("a kind-specific parent reference is required");
       return (clip?.notes ?? []).map((note, index) => ({ ...note, ref: `${request.parent}:note:${index}`, parentRef: request.parent }));
     }
-    return (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
+    return (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? (request.parent === undefined ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : (this.findDevice(request.parent as LiveRef)?.parameters ?? []).map((parameter) => ({ ...parameter, parentRef: request.parent }))) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
   async invokeAsync(invocation: LiveInvocation): Promise<unknown> { return this.invoke(invocation); }
@@ -2683,7 +2688,10 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     if (typeof reference !== "string" || !reference || reference.length > 256) throw new TypeError("ref must be a non-empty string");
     const target = this.find(reference as LiveRef) as Parameter;
     if (!target || typeof requested !== "number" || !Number.isFinite(requested) || requested < target.min || requested > target.max) throw new RangeError("parameter value is outside numeric bounds");
-    const currentAuthority = this.parameterAuthority(target.ref); const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, siblings: args.expectedSiblings };
+    // With no siblings named (an empty list), the parameter, its device and its track are fenced by identity alone, as the Remote Script fences them.
+    const lean = Array.isArray(args.expectedSiblings) && args.expectedSiblings.length === 0;
+    const { siblings, ...own } = this.parameterAuthority(target.ref); const currentAuthority = lean ? own : { ...own, siblings };
+    const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, ...(lean ? {} : { siblings: args.expectedSiblings }) };
     if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
     if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
     const quantization = target.quantization ?? 0;

@@ -69,6 +69,7 @@ test("over the wire, a fused change costs what its preview and apply cost, in on
     const changed = await call("live_change", { tool: "live_mixer_preview", args: { trackRef: "track:track-1", volume: 0.5 } });
     assert.equal(changed.body.state, "applied", JSON.stringify(changed.body));
     const label = (request: { method: string; operation?: string }) => request.method === "invoke" || request.method === "mutate" ? `${request.method} ${request.operation}` : request.method;
-    assert.deepEqual(live.requests.slice(start).map(label), ["status", "snapshot", "invoke authority.digest", "snapshot", "mutate mixer.set", "snapshot"]);
+    // The track's mixer is read by its ref, alone: no status, no snapshot of its track.
+    assert.deepEqual(live.requests.slice(start).map(label), ["discover", "invoke authority.digest", "discover", "mutate mixer.set", "discover"]);
   } finally { await adapter.close(); await live.close(); }
 });

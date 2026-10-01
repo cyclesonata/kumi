@@ -100,11 +100,12 @@ test("changes read only the tracks they name: no whole-Set snapshot in any previ
   assert.deepEqual(Object.fromEntries(table), {
     // The Set's tempo is the Set's own: its preview reads the Set part alone; apply and undo read the Set object.
     "tempo preview": tally(0, 0, 1), "tempo apply": tally(0), "tempo undo": tally(0),
-    "mixer preview": tally(1), "mixer apply": tally(2), "mixer undo": tally(2),
-    "device parameter preview": tally(1), "device parameter apply": tally(2), "device parameter undo": tally(2),
-    "parameters preview": tally(1), "parameters apply": tally(2), "parameters undo": tally(2),
-    // A rename's apply checks the object itself; its preview and undo take the structure revision from the track list.
-    "rename preview": tally(1), "rename apply": tally(0), "rename undo": tally(1),
+    // A mixer change, a parameter change and a rename read what they touch, by its ref (a track's mixer; the
+    // parameter, its device and its track; the track's name): no snapshot at all.
+    "mixer preview": tally(0), "mixer apply": tally(0), "mixer undo": tally(0),
+    "device parameter preview": tally(0), "device parameter apply": tally(0), "device parameter undo": tally(0),
+    "parameters preview": tally(0), "parameters apply": tally(0), "parameters undo": tally(0),
+    "rename preview": tally(0), "rename apply": tally(0), "rename undo": tally(0),
     "clip set preview": tally(1), "clip set apply": tally(2), "clip set undo": tally(2),
     "note update preview": tally(1), "note update apply": tally(2), "note update undo": tally(2),
     "device insert preview": tally(1), "device insert apply": tally(2), "device insert undo": tally(2),

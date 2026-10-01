@@ -116,6 +116,10 @@ export function canonical(value: unknown): string { if (value === null || typeof
 export function fingerprint(value: unknown): string { return createHash("sha256").update(canonical(value)).digest("hex"); }
 export function isNonEmptyString(value: unknown, maxLength: number): value is string { return typeof value === "string" && value.length >= 1 && value.length <= maxLength; }
 
+/** A track's or scene's rename authority: its own identity and name at its place, which is what the
+ * Remote Script fences a rename on (not the Set's structure). */
+function renameRevision(row: Row): string { return fingerprint({ ref: row.ref, objectIdentity: row.objectIdentity, name: row.name }); }
+
 function structureRevision(snapshot: LiveSnapshot): string {
   const identity = { tracks: snapshot.tracks.map((item, index) => [item.ref, item.objectIdentity, item.name, item.kind, index]), scenes: snapshot.scenes.map((item, index) => [item.ref, item.objectIdentity, item.name, index]) };
   return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
@@ -501,12 +505,12 @@ export class BatchTransactionManager {
       case "track.rename": {
         const track = (snapshot.tracks as unknown as Row[]).find((item) => item.ref === operation.trackRef);
         if (!track || track.objectIdentity !== plan.target.trackIdentity || track.name !== plan.prior.name) throw new Error(`transaction batch step ${index} track identity or name changed since preview`);
-        return { operation: "track.rename", args: { ref: operation.trackRef, name: operation.name, expectedName: plan.prior.name, expectedObjectIdentity: plan.target.trackIdentity, expectedAuthorityRevision: structureRevision(snapshot) } };
+        return { operation: "track.rename", args: { ref: operation.trackRef, name: operation.name, expectedName: plan.prior.name, expectedObjectIdentity: plan.target.trackIdentity, expectedAuthorityRevision: renameRevision(track) } };
       }
       case "scene.rename": {
         const scene = (snapshot.scenes as unknown as Row[]).find((item) => item.ref === operation.sceneRef);
         if (!scene || scene.objectIdentity !== plan.target.sceneIdentity || scene.name !== plan.prior.name) throw new Error(`transaction batch step ${index} scene identity or name changed since preview`);
-        return { operation: "scene.rename", args: { ref: operation.sceneRef, name: operation.name, expectedName: plan.prior.name, expectedObjectIdentity: plan.target.sceneIdentity, expectedAuthorityRevision: structureRevision(snapshot) } };
+        return { operation: "scene.rename", args: { ref: operation.sceneRef, name: operation.name, expectedName: plan.prior.name, expectedObjectIdentity: plan.target.sceneIdentity, expectedAuthorityRevision: renameRevision(scene) } };
       }
       case "track.create": {
         const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
@@ -665,7 +669,7 @@ export class BatchTransactionManager {
           const identity = operation.kind === "track.rename" ? plan.target.trackIdentity : plan.target.sceneIdentity;
           const row = rows.find((item) => item.ref === reference);
           if (!row || row.objectIdentity !== identity || row.name !== operation.name) throw new Error(`transaction batch ${mode} step ${index} rename target identity or name changed after apply`);
-          checkpoint.invocation = { operation: operation.kind, args: { ref: reference, name: plan.prior.name, expectedName: operation.name, expectedObjectIdentity: identity, expectedAuthorityRevision: structureRevision(snapshot) } };
+          checkpoint.invocation = { operation: operation.kind, args: { ref: reference, name: plan.prior.name, expectedName: operation.name, expectedObjectIdentity: identity, expectedAuthorityRevision: renameRevision(row) } };
           await invokeCheckpoint(adapter, checkpoint, context);
           const verified = (operation.kind === "track.rename" ? (await this.recordView(context, record)).tracks : (await this.recordView(context, record)).scenes) as unknown as Row[];
           if (verified.find((item) => item.ref === reference)?.name !== plan.prior.name) throw new Error(`transaction batch ${mode} step ${index} rename prior-name restoration was not confirmed`);
