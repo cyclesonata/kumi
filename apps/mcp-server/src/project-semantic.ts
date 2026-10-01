@@ -477,6 +477,14 @@ function encodeCursor(artifactId: string, profile: SemanticPrivacyProfile, offse
   return Buffer.from(canonicalSemanticJson({ ...payload, checksum }), "utf8").toString("base64url");
 }
 
+/** The artifact a continuation cursor pages, by its id; undefined for a cursor that isn't one. */
+export function semanticCursorArtifactId(cursor: string): string | undefined {
+  try {
+    const row = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    return row && typeof row === "object" && !Array.isArray(row) && typeof (row as Record<string, unknown>).artifactId === "string" ? (row as Record<string, unknown>).artifactId as string : undefined;
+  } catch { return undefined; }
+}
+
 function decodeCursor(cursor: string, artifact: SemanticProjectArtifact): number {
   let value: unknown;
   try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { throw new Error("semantic snapshot cursor is malformed"); }

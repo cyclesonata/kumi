@@ -819,6 +819,22 @@ test("routes configured adapter calls through the asynchronous host boundary", a
   assert.equal(simulator.snapshot().set.tempo, 126);
 });
 
+test("a paged semantic export reads the Set once: its later pages come from the first page's read, even after a change", async () => {
+  const simulator = new DeterministicLiveSimulator(); const liveHost = new McpHost(simulator); ready(liveHost);
+  const views = (liveHost as any).views; const wholeSet = views.wholeSet.bind(views); let reads = 0;
+  views.wholeSet = (...args: unknown[]) => { reads++; return wholeSet(...args); };
+  let id = 960;
+  const exported = async (cursor?: string) => JSON.parse((await liveHost.handleAsync({ jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "live_project_snapshot_export", arguments: { profile: "strict", limit: 3, ...(cursor ? { cursor } : {}) } } }) as any).result.content[0].text);
+  const pages: any[] = [await exported()];
+  // A change while paging: the pages still describe the Set as the first page read it.
+  (simulator as any).state.tracks[0].name = "Renamed meanwhile";
+  while (pages.at(-1).page.nextCursor) pages.push(await exported(pages.at(-1).page.nextCursor));
+  assert.ok(pages.length > 2); assert.equal(pages.at(-1).page.complete, true);
+  assert.equal(reads, 1, "one read of the Set for the whole export");
+  assert.ok(pages.every((page) => page.artifact.id === pages[0].artifact.id));
+  await exported(); assert.equal(reads, 2, "a new export reads the Set again");
+});
+
 test("exports paged semantic snapshots and diffs complete bundles offline without authority", async () => {
   const liveHost = new McpHost(new DeterministicLiveSimulator()); ready(liveHost);
   const pages: any[] = []; let cursor: string | undefined; let id = 900;

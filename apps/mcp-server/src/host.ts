@@ -12,7 +12,7 @@ import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagn
 import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, trackMedia, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
-import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
+import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, semanticCursorArtifactId, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
 import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project-semantic-diff.js";
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
@@ -240,6 +240,9 @@ const AUDITION_TTL_MS = 600_000;
 // must cover snapshot + dispatch + polled verification. Every deadline is its
 // base plus 20 ms per track in the Set (see McpHost.deadline).
 const AUDITION_DEADLINE_MS = 15_000;
+/** A semantic export's artifact, kept for its later pages: how long, and how many exports at once. */
+const SEMANTIC_EXPORT_KEEP_MS = 5 * 60_000;
+const SEMANTIC_EXPORTS_KEPT = 2;
 // Mirrors the Remote Script's _LOCATOR_JUMP_CONFIRMATION_TOLERANCE_BEATS: a
 // momentary jump can land a few milliseconds off the cue-point time, so the
 // host confirms within the same absolute beat tolerance instead of exact
@@ -598,6 +601,7 @@ export class McpHost {
   private readonly transportTransactions = new BoundedTransactionMap<TransportTransaction>(this.retention);
   private readonly clipLaunchTransactions = new BoundedTransactionMap<ClipLaunchTransaction>(this.retention);
   private readonly noteEditTransactions = new BoundedTransactionMap<NoteEditTransaction>(this.retention);
+  private readonly semanticExports = new Map<string, { artifact: SemanticProjectArtifact; at: number; epoch: number }>();
   private readonly clipLifecycleTransactions = new BoundedTransactionMap<ClipLifecycleTransaction>(this.retention, (value) => {
     if ((value.kind === "session-audio-create" || value.kind === "simpler") && typeof value.payload?.filePath === "string") this.releaseStagedImportFile(value.payload.filePath);
     if ((value.kind === "device" || value.kind === "drum-pad") && typeof value.payload?.samplePath === "string") this.releaseStagedImportFile(value.payload.samplePath);
@@ -2609,9 +2613,17 @@ export class McpHost {
     try {
       const status = this.requireConnected("session.read");
       if (!(status.operations ?? []).includes("snapshot")) throw new Error("snapshot operation is unavailable");
+      // Later pages come from the artifact the first page built: one read of the Set for the whole export
+      // (a big Set's read takes many requests, each its own moment of Live's thread), and pages that agree.
+      const kept = typeof params.cursor === "string" ? this.semanticExports.get(semanticCursorArtifactId(params.cursor) ?? "") : undefined;
+      if (kept && kept.epoch === status.epoch && Date.now() - kept.at < SEMANTIC_EXPORT_KEEP_MS) {
+        return this.successText(id, pageSemanticProjectSnapshot(kept.artifact, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), cursor: params.cursor as string }));
+      }
       const snapshot = await this.wholeSetAsync(undefined);
       const projectPath = typeof snapshot.set.filePath === "string" && snapshot.set.filePath.length > 0 ? snapshot.set.filePath : undefined;
       const artifact = createSemanticProjectSnapshot(snapshot, { profile: (params.profile ?? "collaboration") as SemanticPrivacyProfile, exporterVersion: SERVER_VERSION, live: { protocol: status.protocol, adapter: status.adapter, provenance: status.provenance, registryHash: status.registryHash }, ...(projectPath ? { projectPath } : {}) });
+      this.semanticExports.set(artifact.artifact.id, { artifact, at: Date.now(), epoch: status.epoch as number });
+      while (this.semanticExports.size > SEMANTIC_EXPORTS_KEPT) this.semanticExports.delete(this.semanticExports.keys().next().value!);
       return this.successText(id, pageSemanticProjectSnapshot(artifact, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), ...(params.cursor !== undefined ? { cursor: params.cursor as string } : {}) }));
     } catch (cause) { return this.adapterToolError(id, cause, "Semantic snapshot export is read-only; retry only after a fresh readable snapshot or restart paging from the first page."); }
   }
