@@ -285,6 +285,10 @@ const MAX_QUEUED_EVENTS = 65_536;
 const KEPT_DELETION = "Kumi can't bring this back; Live's undo can.";
 /** How many notes one page of a clip's notes holds at most, whoever asks: sending ten thousand held Live's thread for 300 ms. */
 const NOTE_PAGE = 2_000;
+/** A change on up to this many parameters reads each one by its ref, a request each; on more, their device's list,
+ * PARAMETER_PAGE a page (one request for most devices, however many change: each request waits on Live's thread). */
+const PARAMETER_ROWS_BY_REF = 4;
+const PARAMETER_PAGE = 1_024;
 /** What each live_device_edit action takes, besides deviceRef. */
 const DEVICE_EDIT_TAKES: Readonly<Record<string, readonly string[]>> = { set: ["setting", "value"], modulate: ["source", "value", "targetIndex", "parameterRef"], "slice-insert": ["time"], "slice-move": ["time", "toTime"], "slice-remove": ["time"], "slice-clear": [], "slice-reset": [], "warp-as": ["beats"], "warp-double": [], "warp-half": [], resend: [] };
 /** The device edits Kumi's undo doesn't take back, and why. */
@@ -8542,8 +8546,11 @@ export class McpHost {
   /** Device parameters as a change checks them before and after it: each one's row alone, its device's. */
   private async parameterRowsAsync(context: LiveOperationContext | undefined, deviceRef: LiveRef, parameterRefs: readonly LiveRef[]): Promise<Array<LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]>> {
     const rows: Array<LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]> = [];
+    // A few parameters: each one's row alone, by its ref. More: the device's list, a page at a time (one
+    // request for most devices), each picked from it, so a change on many costs a few requests, not one each.
+    const listed = parameterRefs.length > PARAMETER_ROWS_BY_REF ? new Map((await this.views.discoverAll({ kind: "parameter", parent: deviceRef, limit: PARAMETER_PAGE }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) })).map((row) => [row.ref, row as JsonObject])) : undefined;
     for (const reference of parameterRefs) {
-      const row = await this.discoverOneAsync(context, "parameter", reference, undefined, deviceRef);
+      const row = listed ? listed.get(reference) : await this.discoverOneAsync(context, "parameter", reference, undefined, deviceRef);
       if (!row || (row.parentRef !== undefined && row.parentRef !== deviceRef) || !isNonEmptyString(row.objectIdentity, 256)) throw new Error("device and parameter references are not authoritative children");
       rows.push(row as unknown as LiveSnapshot["tracks"][number]["devices"][number]["parameters"][number]);
     }

@@ -84,3 +84,18 @@ test("a parameter change stays fenced on its device and its track: another devic
   state(simulator).tracks[1]!.name = "By hand";
   assert.equal((await apply("live_object_rename_apply", renamed)).isError, true); assert.equal(state(simulator).tracks[1]!.name, "By hand");
 });
+
+test("a change on many parameters reads their device's list, a page at a time, not one request each", async () => {
+  const simulator = new DeterministicLiveSimulator(); const device = state(simulator).tracks[0]!.devices[0];
+  for (let index = 0; index < 40; index += 1) device.parameters.push({ ref: `parameter:knob-${index}`, objectIdentity: `simulator:parameter:knob-${index}`, name: `Knob ${index}`, value: 0, min: 0, max: 1, automatable: true, quantization: 0, enabled: true, revision: 1 });
+  const { adapter, seen } = watched(simulator); const { call, apply, undo } = hosted(adapter);
+  const knob = (index: number) => device.parameters.find((parameter: Record<string, unknown>) => parameter.ref === `parameter:knob-${index}`);
+  const previewed = await call("live_device_parameter_preview", { deviceRef: "device:utility-1", values: Array.from({ length: 30 }, (_, index) => ({ parameterRef: `parameter:knob-${index}`, value: 0.5 })) });
+  assert.ok(previewed.transactionId, JSON.stringify(previewed));
+  assert.equal((await apply("live_device_parameter_apply", previewed)).state, "applied"); assert.equal(knob(29).value, 0.5);
+  assert.equal((await undo(previewed.transactionId)).state, "undone"); assert.equal(knob(29).value, 0);
+  // The preview, the apply's check and confirmation, the undo's check and confirmation: the device's list once each.
+  const lists = seen.filter((item) => item.method === "discover" && item.request!.kind === "parameter");
+  assert.equal(lists.length, 5);
+  for (const { request } of lists) { assert.equal(request!.parent, "device:utility-1"); assert.equal(request!.filter, undefined); }
+});
