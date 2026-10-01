@@ -12,9 +12,9 @@ import type { KernelTool } from "../core/contracts.js";
 import { encodeAmxd } from "./amxd.js";
 import { lowDisk, MB } from "../core/disk.js";
 import { checkMidiDeviceIsolated } from "./harness.js";
-import { audioEffectPatcher, instrumentPatcher, MIX, OUTPUT } from "./gen.js";
+import { audioEffectPatcher, instrumentPatcher, MAX_VOICES, MIX, OUTPUT } from "./gen.js";
 import { midiDevicePatcher } from "./midi.js";
-import { checkSpec, DEVICE_KINDS, MAX_CONTROLS, UNITS, type Control } from "./spec.js";
+import { checkSpec, DEVICE_KINDS, MAX_CODE, MAX_CONTROLS, MAX_TESTS, UNITS, type Control } from "./spec.js";
 
 export const MAKE_DEVICE_TOOL = "make_device";
 
@@ -24,6 +24,7 @@ const DESCRIPTION = [
   "Then give its type, name, what it does, its controls (knobs, menus and switches, which become ordinary Live parameters) and its code:",
   "JavaScript for a MIDI effect (with tests Kumi runs), GenExpr (Max's gen~) for an audio effect or one voice of an instrument.",
   "Kumi builds the device around the code, checks it, and refuses a device that breaks a rule, saying why so you can fix it.",
+  "Build what the producer asks for, as fully as they ask: as many controls as it needs, and the original's behaviour when recreating one. Kumi's rules keep a device safe and loadable; they don't limit its scope, and its ceilings are generous.",
   "Then load it with load_device and the itemId it returns, and hear an audio effect or instrument with audition.",
 ].join(" ");
 
@@ -46,9 +47,9 @@ What your code can use:
 
 Rules Kumi checks, refusing the device and saying which it broke:
 - Every note-on the device sends gets a note-off. When you delay, transpose or replace notes, send the note-off for the pitch you sent, not the one that arrived, and forget a pending note whose note-off comes first.
-- Once every note is released, nothing is left running: cancel timers, or let them end.
-- It runs without an error on a chord, a single note, a controller, a bend and aftertouch.
-- At most ${MAX_CONTROLS} controls, each named in up to 24 letters, digits and spaces (the producer's own words), with a range, a unit (${UNITS.filter(Boolean).join(", ")}, or none) and a default that works on load.
+- Once every note is released, nothing is left running: cancel timers, or let them end. A device that runs free (an LFO, a clock, a generator that keeps sending on its own) gives runs_free: true instead: start its timer in the code and again in reset(), since an all-notes-off stops every timer.
+- It runs without an error on a chord, a single note, a controller, a bend and aftertouch, and doesn't send without end.
+- As many controls as the device needs (up to ${MAX_CONTROLS}), each named in up to 32 characters (the producer's own words: letters, digits, spaces and . _ ( ) & ' + / # % -), with a range, a unit (${UNITS.filter(Boolean).join(", ")}, or none) and a default that works on load. Past eight, the face shows them in up to three rows.
 
 Craft:
 - JavaScript in Max runs on its low-priority thread, so its timing can wander by a few milliseconds: right for grouping chords or delays of tens of milliseconds, not for sample-accurate work.
@@ -68,16 +69,17 @@ const GENEXPR = `GenExpr is the language of Max's gen~: C-like, run once per sam
 - History x(0); keeps x from one sample to the next (filters, envelopes, feedback). Delay d(samplerate); is a delay line up to one second long (d.write(v); y = d.read(mstosamps(ms)); interp="linear" in the declaration or the read makes it smooth). Data t(512); is a table (peek, poke).
 - Operators you'll use: mix(a, b, t), clamp(x, lo, hi), tanh, abs, sqrt, pow, exp, sin, cos, dbtoa, atodb, mtof, ftom, mstosamps, phasor(hz), cycle(hz), triangle(phase, duty), noise(), slide(x, up, down), dcblock, latch, sah, change(x), delta, scale, fold, wrap, interp, and the constants samplerate, pi, twopi.
 - Use samplerate, never 44100: Live runs at whatever rate the producer set.
-- Kumi's output stage follows your code and can't be changed: your output has NaN, denormals and DC taken out and is held under +6 dBFS (hard: a safety net against a runaway patch, not a limiter to lean on); on an effect, Mix blends it with the dry signal, which passes untouched; Output sets the level.`;
+- Kumi's output stage follows your code: your output has NaN, denormals and DC taken out and is held under +6 dBFS (hard: a safety net against a runaway patch at the device's output, not a limiter to lean on); on an effect, Mix blends it with the dry signal, which passes untouched; Output sets the level. Inside your code nothing is capped: feedback, gain and self-oscillation are yours.
+- Give the device as many controls as it needs (up to ${MAX_CONTROLS}): when recreating a device, all of the original's. Past eight, the face shows them in up to three rows.`;
 
 const GUIDE_AUDIO = `Making an audio effect
 
 ${GENEXPR}
 
-An audio effect: in1 and in2 are the left and right input; assign out1 and out2 (left, right) every sample. Kumi adds Mix (dry against your output) and Output knobs, so don't make your own. Up to ${MAX_CONTROLS - 2} controls of yours.
+An audio effect: in1 and in2 are the left and right input; assign out1 and out2 (left, right) every sample. Kumi adds Mix (dry against your output) and Output knobs, so don't make your own.
 
 Craft:
-- Feedback: keep its gain under 1 (clamp it), and damp it (a one-pole lowpass in the loop), or it rings forever.
+- Feedback: under 1 it dies away; at 1 or more it holds or self-oscillates, which some devices are made for (an infinite reverb, a delay that runs away, a resonator). Damp it (a one-pole lowpass in the loop), and at 1 or more put a saturator (tanh) in the loop too, so it settles at a level instead of growing without end.
 - Smooth any control that changes delay times or gains quickly (slide, or a one-pole: y = mix(y, target, 0.001)), or it clicks.
 - Reverbs: a few allpass diffusers into a feedback delay network, damped in the loop (Schroeder, Moorer, or a Dattorro plate). Delays: a Delay with feedback and a filter in the loop; ping-pong swaps channels. Saturation: tanh or a polynomial, with gain before and makeup after. Filters: one-poles and biquads from History.
 - Choose sensible defaults, so it sounds right when it loads.
@@ -88,12 +90,12 @@ const GUIDE_INSTRUMENT = `Making an instrument
 
 ${GENEXPR}
 
-An instrument: you write one voice, and Kumi plays up to 8 copies of it (voices; 1 for a mono synth), sharing out the notes and taking the oldest voice when all are busy. Each voice gets, besides your controls:
+An instrument: you write one voice, and Kumi plays copies of it (voices: 8 when left out, up to ${MAX_VOICES}, 1 for a mono synth), sharing out the notes and taking the oldest voice when all are busy. Each voice gets, besides your controls:
 - note: the MIDI note it plays (mtof(note + bend) is its frequency)
 - velocity: 0–127, and 0 once the key is released (start the release then)
 - strike: a new number for every note played: change(strike) != 0 is the moment a note starts, even when a busy voice is taken for one at the same velocity (start the attack then)
 - bend: pitch bend in semitones (±2); mod_wheel: 0–1
-Assign out1 and out2 (left, right). There's no audio input. Kumi adds an Output knob; up to ${MAX_CONTROLS - 1} controls of yours.
+Assign out1 and out2 (left, right). There's no audio input. Kumi adds an Output knob.
 
 Craft:
 - Envelopes from History: on a strike, restart the attack; while velocity > 0, rise to the sustain; once it's 0, fall (exp(-1 / (seconds * samplerate)) per sample makes an exponential decay).
@@ -149,9 +151,10 @@ export function deviceTool(options: DeviceToolOptions): KernelTool {
       controls: { type: "array", maxItems: MAX_CONTROLS, items: { type: "object", properties: {
         name: { type: "string" }, type: { type: "string", enum: ["number", "integer", "choice", "switch"] }, min: { type: "number" }, max: { type: "number" },
         default: { description: "A number, one of the options, or true/false" }, unit: { type: "string", enum: [...UNITS] }, options: { type: "array", items: { type: "string" } } } } },
-      code: { type: "string", maxLength: 24_000, description: "A MIDI effect's JavaScript (function midi(event) and helpers), or an audio effect's or one instrument voice's GenExpr (see the guide)" },
-      voices: { type: "integer", minimum: 1, maximum: 8, description: "An instrument's voices: how many notes play at once, 1 for mono (8 when left out)" },
-      tests: { type: "array", maxItems: 12, description: "A MIDI effect's tests", items: { type: "object", properties: { name: { type: "string" }, set: { type: "object" }, input: { type: "array", items: EVENT }, expect: { type: "array", items: EVENT } } } } } },
+      code: { type: "string", maxLength: MAX_CODE, description: "A MIDI effect's JavaScript (function midi(event) and helpers), or an audio effect's or one instrument voice's GenExpr (see the guide)" },
+      voices: { type: "integer", minimum: 1, maximum: MAX_VOICES, description: "An instrument's voices: how many notes play at once, 1 for mono (8 when left out)" },
+      runs_free: { type: "boolean", description: "A MIDI effect that keeps sending on its own once every note is released (an LFO, a clock, a generator)" },
+      tests: { type: "array", maxItems: MAX_TESTS, description: "A MIDI effect's tests", items: { type: "object", properties: { name: { type: "string" }, set: { type: "object" }, input: { type: "array", items: EVENT }, expect: { type: "array", items: EVENT } } } } } },
     async execute(input, signal) {
       if (input.guide === true) return { text: guideFor(input.type) };
       const checked = checkSpec(input);
@@ -162,7 +165,7 @@ export function deviceTool(options: DeviceToolOptions): KernelTool {
         // In a process of its own: the code is the model's, and may be steered by text Kumi read (a video, a name).
         const verified = await checkMidiDeviceIsolated(spec);
         if (verified.problems.length) return { text: JSON.stringify({ problems: verified.problems, passed: `${verified.passed} of ${verified.of} of its tests`, next: "Fix the code (or a test that's wrong) and call make_device again." }), isError: true };
-        tested = `${verified.passed} of ${verified.of} of its tests passed, and Kumi's checks (no errors, no hanging notes)`;
+        tested = `${verified.passed} of ${verified.of} of its tests passed, and Kumi's checks (${spec.runsFree ? "no errors; it runs free" : "no errors, no hanging notes"})`;
       } else tested = "Kumi's checks passed (its outputs, its inputs, its controls); Max compiles the code when Live loads it";
       signal.throwIfAborted();
       // Where Live's Browser looks: a folder that stays, so new files are noticed quickly.

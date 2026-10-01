@@ -130,15 +130,22 @@ const PROBE: MidiEvent[] = [
 
 export interface Checked { passed: number; of: number; problems: string[] }
 
-/** The device's tests and Kumi's checks; problems say what went wrong, for the model to fix. */
-export function checkMidiDevice(spec: Pick<MidiSpec, "controls" | "code" | "tests">): Checked {
+/** More events than this out of Kumi's probe (11 in, over about 4 s) is a runaway, not a busy device. */
+const FLOOD = 2_000;
+
+/**
+ * The device's tests and Kumi's checks; problems say what went wrong, for the model to fix. A device
+ * that runs free (an LFO, a clock, a generator) keeps sending once every note is released, so it's
+ * held only to running without errors and not flooding; an all-notes-off still silences it.
+ */
+export function checkMidiDevice(spec: Pick<MidiSpec, "controls" | "code" | "tests" | "runsFree">): Checked {
   const problems: string[] = [];
   const probe = run(spec, PROBE);
   if (probe.errors.length) problems.push(`Kumi's check: it threw: ${[...new Set(probe.errors)].slice(0, 3).join("; ")}`);
-  const loose = hanging(probe.output);
+  const loose = spec.runsFree ? [] : hanging(probe.output);
   if (loose.length) problems.push(`Kumi's check: once every note is released, it leaves notes hanging (pitch ${loose.join(", ")}); send a noteoff for every noteon it sent.`);
-  if (probe.pending) problems.push("Kumi's check: its timers keep running after every note is released; stop them (cancel) when nothing is held.");
-  if (probe.output.length > 200) problems.push(`Kumi's check: it sent ${probe.output.length} events for 11 in; a MIDI effect shouldn't flood.`);
+  if (probe.pending && !spec.runsFree) problems.push("Kumi's check: its timers keep running after every note is released; stop them (cancel) when nothing is held, or give runs_free: true if it's meant to keep sending on its own.");
+  if (probe.output.length > FLOOD) problems.push(`Kumi's check: it sent ${probe.output.length} events for 11 in, in about 4 s; something sends without end.`);
   let passed = 0;
   for (const test of spec.tests) {
     const result = run(spec, test.input, test.set);
@@ -158,7 +165,7 @@ export const CHECK_TIMEOUT_MS = 10_000;
  * environment (no keys), code can't be made from strings (an escape from the device's frame can't
  * compile anything), and it's stopped at the deadline. Only plain data goes in and comes out.
  */
-export function checkMidiDeviceIsolated(spec: Pick<MidiSpec, "controls" | "code" | "tests">, options: { timeoutMs?: number } = {}): Promise<Checked> {
+export function checkMidiDeviceIsolated(spec: Pick<MidiSpec, "controls" | "code" | "tests" | "runsFree">, options: { timeoutMs?: number } = {}): Promise<Checked> {
   const child = fileURLToPath(new URL("./harness-child.js", import.meta.url));
   const permission = process.allowedNodeEnvironmentFlags.has("--permission") ? "--permission" : "--experimental-permission";
   const args = [permission, `--allow-fs-read=${dirname(dirname(child))}`, "--disallow-code-generation-from-strings", "--max-old-space-size=128", child];
@@ -174,6 +181,6 @@ export function checkMidiDeviceIsolated(spec: Pick<MidiSpec, "controls" | "code"
       try { const result = JSON.parse(out) as Checked; done({ passed: Number(result.passed) || 0, of: Number(result.of) || 0, problems: Array.isArray(result.problems) ? result.problems.map(String).slice(0, 20) : [] }); }
       catch { done({ passed: 0, of: spec.tests.length, problems: ["Kumi's check: it stopped before saying how it went (the code may have ended its process)."] }); }
     });
-    worker.stdin.end(JSON.stringify({ controls: spec.controls, code: spec.code, tests: spec.tests }));
+    worker.stdin.end(JSON.stringify({ controls: spec.controls, code: spec.code, tests: spec.tests, runsFree: spec.runsFree === true }));
   });
 }

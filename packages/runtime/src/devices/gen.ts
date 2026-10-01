@@ -15,7 +15,7 @@
  * GenExpr's order is fixed: function definitions, then declarations (Param, History…), then
  * statements. Kumi's Params go after the model's functions, ahead of the rest of its code.
  */
-import { devicePatcher, type Box, type Line } from "./amxd.js";
+import { devicePatcher, faceLayout, type Box, type Line } from "./amxd.js";
 import { unitStyle } from "./midi.js";
 import type { Control } from "./spec.js";
 
@@ -168,23 +168,25 @@ function genBox(id: string, code: string, rect: number[]): Box {
       rect: [100.0, 100.0, 720.0, 600.0], gridsize: [15.0, 15.0], boxes: inner, lines } } };
 }
 
-/** Builds the face's controls: each sends "<param> <value>" to its targets. */
+/** Builds the face's `total` controls: each sends "<param> <value>" to its targets. */
 class Face {
   readonly boxes: Box[] = []; readonly lines: Line[] = [];
   private count = 0;
+  private readonly layout: ReturnType<typeof faceLayout>;
+  constructor(total: number) { this.layout = faceLayout(total); }
   add(control: Control, param: string, targets: readonly string[]): void {
-    const index = this.count++; const id = `obj-control-${index + 1}`; const x = 8.0 + index * 52.0;
+    const index = this.count++; const id = `obj-control-${index + 1}`; const { x, y } = this.layout.at(index);
     const valueof: Record<string, unknown> = { parameter_longname: control.name, parameter_shortname: control.name.slice(0, 12), parameter_initial_enable: 1 };
     let box: Record<string, unknown>;
     if (control.type === "choice") {
-      box = { maxclass: "live.menu", numinlets: 1, numoutlets: 3, outlettype: ["", "", "float"], presentation_rect: [x, 24.0, 48.0, 15.0] };
+      box = { maxclass: "live.menu", numinlets: 1, numoutlets: 3, outlettype: ["", "", "float"], presentation_rect: [x, y + 24.0, 48.0, 15.0] };
       Object.assign(valueof, { parameter_type: 2, parameter_enum: control.options, parameter_mmax: control.options.length - 1, parameter_initial: [control.options.indexOf(control.default)] });
     } else if (control.type === "switch") {
-      box = { maxclass: "live.toggle", numinlets: 1, numoutlets: 1, outlettype: [""], presentation_rect: [x + 12.0, 24.0, 20.0, 20.0] };
+      box = { maxclass: "live.toggle", numinlets: 1, numoutlets: 1, outlettype: [""], presentation_rect: [x + 12.0, y + 24.0, 20.0, 20.0] };
       Object.assign(valueof, { parameter_type: 2, parameter_enum: ["off", "on"], parameter_mmax: 1, parameter_initial: [control.default ? 1 : 0] });
     } else {
       const unit = unitStyle(control);
-      box = { maxclass: "live.dial", numinlets: 1, numoutlets: 2, outlettype: ["", "float"], presentation_rect: [x, 8.0, 44.0, 48.0] };
+      box = { maxclass: "live.dial", numinlets: 1, numoutlets: 2, outlettype: ["", "float"], presentation_rect: [x, y + 8.0, 44.0, 48.0] };
       Object.assign(valueof, { parameter_type: control.type === "integer" ? 1 : 0, parameter_mmin: control.min, parameter_mmax: control.max, parameter_initial: [control.default],
         parameter_unitstyle: unit.style, ...(unit.units ? { parameter_units: unit.units } : {}),
         ...((control.unit === "Hz" || control.unit === "ms") && control.min > 0 && control.max / control.min >= 20 ? { parameter_exponent: 3.0 } : {}) });
@@ -196,7 +198,7 @@ class Face {
     this.lines.push({ patchline: { source: [id, 0], destination: [prepend, 0] } });
     for (const target of targets) this.lines.push({ patchline: { source: [prepend, 0], destination: [target, 0] } });
   }
-  get width(): number { return Math.max(140, 16 + this.count * 52); }
+  get width(): number { return Math.max(140, 16 + this.layout.columns * 52); }
 }
 
 /** Kumi's own knobs: Mix (effects) and Output. */
@@ -205,6 +207,9 @@ export const OUTPUT: Control = { name: "Output", type: "number", min: -36, max: 
 
 export interface GenSpec { name: string; about: string; controls: Control[]; code: string; voices?: number }
 
+/** An instrument's most voices, each a gen~ of its own. */
+export const MAX_VOICES = 32;
+
 /** The effect's code as its gen~ holds it. */
 export const effectCode = (spec: GenSpec) => withParams(spec.code, paramLines(spec.controls), `Made by Kumi: ${spec.name}`);
 /** One voice's code as each voice's gen~ holds it. */
@@ -212,7 +217,7 @@ export const voiceCode = (spec: GenSpec) => withParams(spec.code, [...VOICE_PARA
 
 /** An audio effect's patcher. */
 export function audioEffectPatcher(spec: GenSpec): object {
-  const boxes: Box[] = []; const lines: Line[] = []; const face = new Face();
+  const boxes: Box[] = []; const lines: Line[] = []; const face = new Face(spec.controls.length + 2);
   boxes.push({ box: { id: "obj-plugin", maxclass: "newobj", text: "plugin~ 1 2", numinlets: 1, numoutlets: 2, outlettype: ["signal", "signal"], patching_rect: [40.0, 30.0, 80.0, 22.0] } });
   const effect = genBox("obj-effect", effectCode(spec), [40.0, 120.0, 300.0, 22.0]);
   const ins = inputsRead(spec.code);
@@ -232,8 +237,8 @@ export function audioEffectPatcher(spec: GenSpec): object {
 
 /** An instrument's patcher: `voices` copies of the model's voice, the notes shared out by poly. */
 export function instrumentPatcher(spec: GenSpec): object {
-  const voices = Math.min(8, Math.max(1, Math.round(spec.voices ?? 8)));
-  const boxes: Box[] = []; const lines: Line[] = []; const face = new Face();
+  const voices = Math.min(MAX_VOICES, Math.max(1, Math.round(spec.voices ?? 8)));
+  const boxes: Box[] = []; const lines: Line[] = []; const face = new Face(spec.controls.length + 1);
   const obj = (id: string, text: string, ins: number, outs: number, rect: number[], outlettype: string[] = Array.from({ length: outs }, () => "")) =>
     boxes.push({ box: { id, maxclass: "newobj", text, numinlets: ins, numoutlets: outs, outlettype, patching_rect: rect } });
   const wire = (source: string, outlet: number, destination: string, inlet = 0) => lines.push({ patchline: { source: [source, outlet], destination: [destination, inlet] } });
