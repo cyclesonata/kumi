@@ -176,6 +176,12 @@ export function bridge(options: Options = {}) {
         if (name === "live_browser_load_preview") return wrap({ ...base, trackRef: args.trackRef ?? "7:track:0", item: { name: String(args.itemId).split("/").at(-1) }, ...(args.chainRef ? { chainRef: args.chainRef, chainName: "Keys", rackName: "Instrument Rack" } : {}) });
         if (name === "live_rack_preview") return wrap({ ...base, action: args.action, rackRef: args.rackRef, rackName: "Instrument Rack", prior: args.action === "add-macro" ? { visibleMacroCount: 8 } : {}, impact: args.action === "insert-chain" ? "momentary-rack-action-no-undo" : "edits-rack" });
         if (name === "live_chain_mixer_preview") return wrap({ ...base, chainRef: args.chainRef, chainName: "Pad", rackName: "Instrument Rack", prior: { volume: 0.85, pan: 0 }, proposed: { volume: args.volume, pan: args.pan } });
+        if (name === "live_track_delete_preview") {
+          // As the bridge has it: a group goes with the tracks in it, which the track it names lists.
+          const index = Number(String(args.trackRef).split(":").at(-1)); const big = index - 2;
+          const inside = options.bigSet && big >= 0 && big % 4 === 0 ? tracks.slice(index + 1, index + 4).map((track) => track.name) : [];
+          return wrap({ ...base, track: { ref: args.trackRef, name: tracks[index]?.name, kind: inside.length ? "group" : "regular", ...(inside.length ? { alsoDeletes: inside } : {}) }, impact: "deletes-track-no-undo" });
+        }
         if (name === "live_device_parameter_preview") {
           const device = { ref: args.deviceRef, name: "Operator", trackRef: "7:track:0" };
           // Live's own checks: a finite value, within the parameter's range (these are 0 to 1).

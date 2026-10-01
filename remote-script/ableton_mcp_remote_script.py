@@ -864,6 +864,8 @@ class LiveObjectMapper:
         self._playback_revision_counter = 0
         # Set while reads share one snapshot (see _shared_reads).
         self._read_cache: dict[str, Any] | None = None
+        # The tracks' places by identity, found once within a read (see _group_track_ref).
+        self._track_places: dict[str, int] | None = None
         # The Live undo step a client opened ({stepId, expiresAt, owner, label}): closed by the client,
         # or by a guard (its deadline, its connection closing, a reconnect, the bridge shutting down).
         self._undo_step: dict[str, Any] | None = None
@@ -2099,8 +2101,28 @@ class LiveObjectMapper:
         seconds, growing with the Set."""
         if self._read_cache is not None: return work()
         self._read_cache = {}
-        try: return work()
+        try: return self._with_track_places(work)
         finally: self._read_cache = None
+
+    def _with_track_places(self, work: Callable[[], Any]) -> Any:
+        """Runs a read (it changes nothing) finding the tracks' places at most once, however many
+        grouped tracks' rows it builds."""
+        if self._track_places is not None: return work()
+        self._track_places = {}
+        try: return work()
+        finally: self._track_places = None
+
+    def _group_track_ref(self, group: Any) -> str | None:
+        """The group a track sits in, by the group's own ref (its place among the Set's tracks): the
+        ref the group's row has. None outside a group, or for a group not among the tracks."""
+        if group is None: return None
+        places = self._track_places
+        if not places:
+            found = {self._capture_object_identity(track): index for index, track in enumerate(self._items(getattr(self.song, "tracks", [])))}
+            if places is not None: places.update(found)
+            places = found
+        index = places.get(self._capture_object_identity(group))
+        return self.refs.put("track", group, str(index)) if index is not None else None
 
     def _track_entries(self, kinds: bool = True) -> list[tuple[Any, Any]]:
         """Every track in snapshot order (regular and group tracks, returns, then the main track) with
@@ -2303,7 +2325,7 @@ class LiveObjectMapper:
             "monitoringState": self._monitoring_state(self._read_attr(track, "current_monitoring_state", "monitoring")),
             "playingSlotIndex": self._slot_index(self._read_attr(track, "playing_slot_index")),
             "firedSlotIndex": self._slot_index(self._read_attr(track, "fired_slot_index")),
-            "groupTrackRef": self.refs.put("track", group, f"group:{index}") if group is not None else None,
+            "groupTrackRef": self._group_track_ref(group),
             "colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None,
             "color": int(color_rgb) if isinstance(color_rgb, int) and not isinstance(color_rgb, bool) and 0 <= color_rgb <= 0xFFFFFF else None,
             "isVisible": optional_bool("is_visible"),
@@ -2318,6 +2340,9 @@ class LiveObjectMapper:
         return range(min(window["from"], total), min(window["from"] + window["count"], total))
 
     def _build_snapshot(self, args: dict[str, Any] | None = None, budget: "_ReadBudget | None" = None) -> dict[str, Any]:
+        return self._with_track_places(lambda: self._snapshot_rows(args, budget))
+
+    def _snapshot_rows(self, args: dict[str, Any] | None, budget: "_ReadBudget | None") -> dict[str, Any]:
         args = args or {}
         parts = set(args["parts"]) if "parts" in args else set(self._SNAPSHOT_PARTS)
         track_window, scene_window = args.get("tracks"), args.get("scenes")
@@ -2650,6 +2675,9 @@ class LiveObjectMapper:
     _DISCOVERY_TRACK_KINDS = {"track": {"regular", "group"}, "group_track": {"group"}, "return_track": {"return"}, "main_track": {"main"}}
 
     def discover(self, kind: str, limit: int = 100, cursor: str | None = None, parent: str | None = None, filters: dict[str, Any] | None = None, requested_fields: list[str] | None = None, traversal_budget: int = MAX_TRAVERSAL, budgeted: bool = False) -> dict[str, Any]:
+        return self._with_track_places(lambda: self._discover_page(kind, limit, cursor, parent, filters, requested_fields, traversal_budget, budgeted))
+
+    def _discover_page(self, kind: str, limit: int, cursor: str | None, parent: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, budgeted: bool) -> dict[str, Any]:
         """A page of one kind of object. What it reads follows what it lists: a parent's track alone
         for what lives under a track; light rows for the Set's tracks (whole rows only for the page,
         and only when the requested fields need them); scene rows; the locators. A Set-wide list's
@@ -6599,7 +6627,7 @@ class LiveObjectMapper:
             value = self._read_attr(obj, name)
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         group = self._read_attr(track, "group_track")
-        group_ref = self.refs.put("track", group, f"group:{track_index}") if group is not None else None
+        group_ref = self._group_track_ref(group)
         view = getattr(track, "view", None)
         color_index = self._read_attr(track, "color_index")
         color_rgb = self._read_attr(track, "color")

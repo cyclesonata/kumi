@@ -55,6 +55,15 @@ test("deleting a track is asked for explicitly, and HISTORY keeps it: Live's own
   } finally { await older.integration.close(); }
 });
 
+test("deleting a group says it takes the tracks in it, as the bridge's preview lists them", async () => {
+  const b = await opened({ fullControl: true, version: FULL, bigSet: 8 });
+  try {
+    const result = await tool(b.tools, "delete_track").execute({ trackRef: "track:3" }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.match(b.records.at(-1)!.title, /^Deleted track “Bus 1” and the 3 tracks in it$/);
+  } finally { await b.integration.close(); }
+});
+
 test("render gives an audio track's own clips as a file for listen, without touching Live", async () => {
   const b = await opened({ fullControl: true, version: FULL });
   try {

@@ -6821,6 +6821,24 @@ class ExplicitDeletionTests(unittest.TestCase):
         song = grouped_song(live_keeps_members=True); mapper = LiveObjectMapper(song, provenance="real-live"); group = mapper.snapshot()["tracks"][1]
         with self.assertRaisesRegex(ValueError, "did not preserve exact remaining sibling order"): mapper.invoke("track.delete", {"ref": group["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": group["objectIdentity"], "explicitDeletion": True}, "transaction-group")
 
+    def test_a_grouped_track_names_its_group_by_the_group_rows_own_ref(self):
+        """A track in a group points at the group's own row, nested groups too: whole and light rows,
+        snapshots and discovery pages alike."""
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(6)]
+        group, nested = song.tracks[1], song.tracks[3]; group.is_foldable = True; nested.is_foldable = True
+        song.tracks[2].group_track = group; nested.group_track = group; song.tracks[4].group_track = nested
+        mapper = LiveObjectMapper(song, provenance="real-live")
+        def parents(rows):
+            refs = {row["ref"]: index for index, row in enumerate(rows)}
+            return [refs.get(row.get("groupTrackRef")) if row.get("groupTrackRef") is not None else None for row in rows]
+        expected = [None, None, 1, 1, 3, None]
+        self.assertEqual(parents(mapper.snapshot()["tracks"][:6]), expected)
+        self.assertEqual(parents(mapper.snapshot({"focus": [0]})["tracks"][:6]), expected)
+        self.assertEqual(parents(mapper.discover("track", limit=6)["items"]), expected)
+        for index in (2, 4):
+            row = mapper.snapshot({"tracks": {"from": index, "count": 1}})["tracks"][0]
+            self.assertEqual(row["groupTrackRef"], mapper.snapshot()["tracks"][expected[index]]["ref"])
+
     def test_objects_an_explicit_deletion_moved_lose_their_ownership(self):
         song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack()]; mapper = LiveObjectMapper(song, provenance="real-live")
         made = mapper.invoke("track.create", {"name": "Made later", "kind": "midi", "index": 2, "expectedStructureRevision": mapper._structure_revision()}, "transaction-maker")
