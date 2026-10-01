@@ -177,6 +177,26 @@ checkout with uncommitted changes, add `--allow-dirty` (developers only). The
 [delivery guide](DELIVERY.md) has the lifecycle in full, for Windows, repair,
 rollback and removal.
 
+On Live 12.4 and later, `kumi bridge` also puts Kumi's Live extension into Live's
+Extensions folder (`~/Library/Application Support/Ableton/Extensions/kumi.kumi`
+on macOS). Live starts it the next time it opens; it writes MIDI clips with
+their notes straight into the Arrangement, clears a stretch of a track, renders
+an audio track's clips to a file without playing them, and adds **Ask Kumi
+about this** to Live's right-click menu (under **Extensions**), which pins what
+you clicked for your next message. Nothing else to set up: no Developer Mode,
+no file to drop into Settings. Kumi works without it (older Live, or before Live
+restarts), and `kumi doctor` says which:
+
+```text
+  ok    Kumi's extension is running in Live
+  note  Live hasn't started Kumi's extension
+        → Restart Live: it starts extensions when it opens. With Developer Mode on (Settings → Extensions), Kumi starts it itself while Kumi runs
+  fix   Kumi's extension isn't in Live (it renders tracks without playing them and writes MIDI clips in the Arrangement)
+        → Run: kumi bridge, then restart Live
+```
+
+`kumi uninstall` takes the extension out of Live along with the bridge.
+
 Once installed and selected in Live, a plain `npm run kumi` finds the bridge
 through the installed Remote Script (`AbletonMcpBridge/bridge-reference.json`)
 and connects; there is nothing to configure. Without it, Kumi starts anyway,
@@ -587,10 +607,9 @@ sending, when you choose.
 - Undo lasts as long as Live and Kumi's bridge connection: after Live restarts, a
   fresh bridge (a reconnect) or a Kumi restart, earlier changes show **no undo**
   and can be undone only in Live (Cmd-Z). `/new` keeps the bridge, so they can
-  still be undone. One answer makes at most 40 changes.
+  still be undone. One answer makes at most 500 changes (a batch of pads or parameters counts once).
 - Catching up needs a saved Set; a Set is recognized by its file path (Save As
-  starts afresh). Very large Sets (a comparison over about 1.5 MB) get "changed,
-  too big to compare yet". Look-alike items the bridge can't match (empty tracks,
+  starts afresh). Look-alike items the bridge can't match (empty tracks,
   say) are read by name and position, so a rename can occasionally show as a
   removal and an addition.
 - After a disconnect, observations are discarded and the conversation carries on

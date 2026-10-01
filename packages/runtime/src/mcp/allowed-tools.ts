@@ -111,8 +111,8 @@ export class AllowedTools {
     if (this.closed) throw new Error("MCP catalog is closed");
     if (!options.host && !this.isValid) throw new Error("MCP catalog is invalid; refresh before calling tools");
     if (!options.host && !this.catalog.has(name)) throw new Error("Tool is not currently available or permitted");
-    // The model's arguments stay small; Kumi's own calls can carry a Set comparison.
-    if (Buffer.byteLength(JSON.stringify(args)) > (options.host ? 1_536 * 1024 : 16 * 1024)) throw new Error("Tool arguments are too large; narrow the request");
+    // The model's arguments stay small; Kumi's own calls can carry a Set comparison, however big the Set.
+    if (Buffer.byteLength(JSON.stringify(args)) > (options.host ? MAX_HOST_RESULT_BYTES : 16 * 1024)) throw new Error("Tool arguments are too large; narrow the request");
     const invalidation = this.invalidation;
     // A Remote Script older than its host (Live keeps the one it loaded when it started) refuses
     // discovery pages over 100 rows: such a page is asked again at 100, and from then on for this bridge.
