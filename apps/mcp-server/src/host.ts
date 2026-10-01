@@ -5928,7 +5928,9 @@ export class McpHost {
           if (clips.length === 1) await adapter.invokeAsync({ operation: "arrangement.midi-clip.create", args: clips[0]! }, context);
           else await adapter.invokeAsync({ operation: "transaction.group", args: { label: `Kumi: ${clips.length} Arrangement MIDI clips`, ops: clips.map((clip) => ({ operation: "arrangement.midi-clip.create", args: clip })) } }, context);
         } catch (cause) {
-          if (clips.length === 1 || signal?.aborted) throw cause;
+          // Only the extension's answer that a step failed says the rest won't come. A timeout or a dropped
+          // connection may still be making them: that stays uncertain, and the same-key retry finds them.
+          if (clips.length === 1 || signal?.aborted || !/^(?:Kumi's Live extension: )?step \d+ failed \(/.test(cause instanceof Error ? cause.message : "")) throw cause;
           made = await this.createdArrangementMidiClips(transaction, context);
           if (!made.some(Boolean)) throw cause;
           partial = cause instanceof Error ? cause.message.slice(0, 300) : "a step failed";

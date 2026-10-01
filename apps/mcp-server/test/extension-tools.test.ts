@@ -85,6 +85,29 @@ test("a group of clips that stops partway records the ones it made (HISTORY undo
   assert.equal(stateOf(simulator).arrangementClips.length, 0, "the clip it made is gone with the undo");
 });
 
+test("a group of clips that timed out partway stays uncertain, and the same-key retry records the clips Live made", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { call } = hosted(simulator);
+  // Live makes the first clip, then the answer never comes.
+  const adapter = simulator as unknown as { invokeAsync(invocation: { operation: string; args: Record<string, any> }, context: unknown): Promise<unknown> };
+  const original = adapter.invokeAsync.bind(simulator);
+  adapter.invokeAsync = async (invocation, context) => {
+    if (invocation.operation !== "transaction.group") return original(invocation, context);
+    await original({ operation: invocation.args.ops[0].operation, args: invocation.args.ops[0].args }, context);
+    throw new Error("Kumi's Live extension didn't answer transaction.group in time");
+  };
+  const notes = [{ pitch: 60, start: 0, duration: 1 }];
+  const preview = await call("live_arrangement_midi_clip_preview", { clips: [0, 4].map((start, index) => ({ trackRef: "track:track-1", start, length: 4, name: `Part ${index + 1}`, notes })) });
+  const apply = () => call("live_arrangement_midi_clip_apply", { transactionId: preview.body.transactionId, confirmation: "apply", idempotencyKey: "timed-out-group" });
+  const first = await apply();
+  assert.equal(first.isError, true); assert.match(JSON.stringify(first.body), /uncertain/i);
+  const retried = await apply();
+  assert.equal(retried.body.state, "applied", JSON.stringify(retried.body));
+  assert.deepEqual(retried.body.clips.map((clip: { name: string }) => clip.name), ["Part 1"]);
+  assert.deepEqual(retried.body.partial.notMade.map((clip: { name: string }) => clip.name), ["Part 2"]);
+  assert.deepEqual(stateOf(simulator).arrangementClips.map((item) => item.clip.name), ["Part 1"], "the retry made nothing more");
+});
+
 test("a cleared range loses the clips inside and cuts the ones crossing it, and the clearing is kept", async () => {
   const simulator = new DeterministicLiveSimulator();
   const { call, change, undo } = hosted(simulator);

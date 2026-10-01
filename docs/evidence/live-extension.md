@@ -75,7 +75,8 @@ Live renamed "1-MIDI" to "1-Drum Rack" when a Drum Rack went in: names used as f
 - **The SDK's `withinTransaction`** groups only what starts inside its synchronous callback. A clip
   is made asynchronously and its notes need the clip, so a clip with notes is two Cmd-Z steps (the
   clip, then its notes and name). `transaction.group` makes all its clips in one transaction and gives
-  them their notes in one more: two Cmd-Z for the whole group, checked in Live.
+  them their notes in one more: two Cmd-Z for the whole group, checked in Live. On bridge 1.0.65, two
+  clips with four notes each: the first Cmd-Z took the notes and names off both, the second both clips.
 - **The Remote Script's undo step** (`undo.step.begin`/`end`, Live's `begin_undo_step`) groups
   Kumi's Remote Script changes across separate requests: two track renames inside one step were one
   Cmd-Z.

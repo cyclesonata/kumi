@@ -487,7 +487,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
       });
       void preview;
       const where = start !== undefined ? ` at ${bars(start)}` : "";
-      const title = typeof partial.made === "number" && typeof partial.of === "number" ? `${partial.made} of ${plural(partial.of, "new Arrangement clip")} made (Live refused the rest)`
+      const title = typeof partial.made === "number" && typeof partial.of === "number" ? `${partial.made} of ${plural(partial.of, "new Arrangement clip")} made; the others aren't there`
         : clips.length > 1 ? `${plural(clips.length, "new Arrangement clip")} · ${plural(notes, "note")}` : `New Arrangement clip ${quoted(first.name, "")}${where} · ${plural(notes, "note")}`.replace("  ", " ");
       return { title, ...(known ? { track: known } : {}), ...(clips.length === 1 && length !== undefined && length > 0 && drawn.length ? { clip: { length, notes: drawn } } : {}) };
     },

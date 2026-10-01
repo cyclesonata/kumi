@@ -148,6 +148,6 @@ test("a group of Arrangement clips that stopped partway is titled by how many it
   const { MORE_CHANGES } = await import("../src/integrations/ableton/more-changes.js");
   const kind = MORE_CHANGES.find((item) => item.tool === "write_arrangement_clip")!;
   const input = { clips: [0, 4, 8].map((start) => ({ trackRef: "track:1", start, length: 4, notes: [{ pitch: 60, start: 0, duration: 1 }] })) };
-  assert.equal(kind.summarize({}, input, () => undefined, { partial: { made: 1, of: 3 } }).title, "1 of 3 new Arrangement clips made (Live refused the rest)");
+  assert.equal(kind.summarize({}, input, () => undefined, { partial: { made: 1, of: 3 } }).title, "1 of 3 new Arrangement clips made; the others aren't there");
   assert.equal(kind.summarize({}, input, () => undefined, {}).title, "3 new Arrangement clips · 3 notes");
 });

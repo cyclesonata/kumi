@@ -8,7 +8,7 @@ each Kumi release names the bridge it ships with.
 Kumi takes full control of Live and stays quick on big Sets. It deletes what you ask for, writes MIDI
 straight into the Arrangement, renders offline, and answers for what you point at in Live. A 200-track
 Set answers about as fast as a small one. Web search no longer leans on one free service. Ships with
-bridge 1.0.65.
+bridge 1.0.66.
 
 ### Full control of Live
 
