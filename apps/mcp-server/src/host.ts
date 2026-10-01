@@ -5926,6 +5926,8 @@ export class McpHost {
       if (!(status.operations ?? []).includes("device.duplicate") || !(status.operations ?? []).includes("device.delete")) throw new Error("copying a device is unavailable on this Live shape");
       const row = this.deviceRow(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.deviceRef]), params.deviceRef as LiveRef);
       if (!isNonEmptyString(row.device.objectIdentity, 256)) throw new Error("device identity is not authoritative");
+      // Live keeps one instrument to a chain and refuses to copy one beside itself.
+      if (row.device.deviceType === "instrument") return this.adapterToolError(id, new Error(`a chain holds one instrument, so Live can't copy "${String(row.device.name ?? "").slice(0, 80)}" beside itself`), "No device was copied: duplicate its track instead.");
       const payload = { ref: params.deviceRef, expectedName: row.device.name, expectedObjectIdentity: row.device.objectIdentity, expectedOwnerRef: row.ownerRef, expectedOwnerIdentity: row.ownerIdentity, expectedSiblings: row.siblings };
       const fence = JSON.stringify({ ref: params.deviceRef, objectIdentity: row.device.objectIdentity, ownerRef: row.ownerRef, ownerIdentity: row.ownerIdentity, siblings: row.siblings, trackRef: row.track.ref, trackIdentity: row.track.objectIdentity });
       const transaction: ClipLifecycleTransaction = { id: `devdup_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "device-duplicate", fence, clipRef: params.deviceRef as LiveRef, payload, prior: { trackRef: row.track.ref, siblings: row.siblings }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };

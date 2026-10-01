@@ -89,6 +89,16 @@ test("a device is copied straight after itself, and undo deletes the copy", asyn
   assert.deepEqual(devices().map((device) => device.ref), ["device:utility-1"]);
 });
 
+test("an instrument isn't copied beside itself: a chain holds one, so the preview says to duplicate its track", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { call } = hosted(simulator);
+  Object.assign(stateOf(simulator).tracks[0]!.devices[0]!, { name: "Drift", deviceType: "instrument" });
+  const refused = await call("live_device_duplicate_preview", { deviceRef: "device:utility-1" });
+  assert.equal(refused.body.reason, "a chain holds one instrument, so Live can't copy \"Drift\" beside itself", JSON.stringify(refused.body));
+  assert.equal(refused.body.remediation, "No device was copied: duplicate its track instead.");
+  assert.equal((stateOf(simulator).tracks[0]!.devices as unknown[]).length, 1);
+});
+
 test("a sample goes onto an empty pad without the Browser, through a new chain, and undo clears the pad", async () => {
   const simulator = new DeterministicLiveSimulator();
   const managed = mkdtempSync(join(tmpdir(), "chain-staging-"));

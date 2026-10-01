@@ -512,7 +512,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "duplicate_device", since: FULL_CONTROL_BRIDGE, preview: "live_device_duplicate_preview", apply: "live_device_duplicate_apply", family: "device",
-    description: "Copy a device with its settings, straight after itself in its chain (deviceRef from discovery).",
+    description: "Copy an effect with its settings, straight after itself in its chain (deviceRef from discovery). Not an instrument: a chain holds one, so for a second one duplicate its track (change_structure duplicate-track).",
     produces: (applied) => { const created = record(applied.created); return typeof created.ref === "string" ? { ref: created.ref, kind: "device" } : undefined; },
     summarize(preview, input, track) {
       const device = record(preview.device ?? preview.target); const known = ownerTrack(input.deviceRef, track);

@@ -88,13 +88,14 @@ async function acceptFullControl(change) {
   const pad = await padOf();
   if (!pad) { say(false, undefined, "the pad track is gone"); return; }
   if (tool("write_arrangement_clip")) {
-    const written = await change("write_arrangement_clip", { trackRef: pad.ref, start: SPOT, length: 8, name: "Kumi Arrangement", notes: [60, 63, 67].map((pitch, index) => ({ pitch, start: index, duration: 2, velocity: 90 })) });
+    // At the start of the pad track: the run copied the pad's clip to the Arrangement at SPOT already.
+    const written = await change("write_arrangement_clip", { trackRef: pad.ref, start: 0, length: 8, name: "Kumi Arrangement", notes: [60, 63, 67].map((pitch, index) => ({ pitch, start: index, duration: 2, velocity: 90 })) });
     if (written?.ok && !stopping) {
-      if (tool("clear_range")) await change("clear_range", { trackRef: pad.ref, fromBeat: SPOT + 6, toBeat: SPOT + 8 }); else skip("clear_range");
+      if (tool("clear_range")) await change("clear_range", { trackRef: pad.ref, fromBeat: 6, toBeat: 8 }); else skip("clear_range");
       if (tool("delete_clip")) {
         observation = await integration.observe(signal());
         const again = await padOf();
-        const clips = again ? (await all("arrangement-clip", { parent: again.ref, fields: ["name"] })).items : [];
+        const clips = again ? (await all("arrangement-clip", { parent: again.ref, fields: ["name"] })).items.filter((clip) => clip.name === "Kumi Arrangement") : [];
         for (const clip of clips) if (!stopping) await change("delete_clip", { clipRef: clip.ref });
         if (written.body?.changed) expectedKept.add(written.body.changed);
       } else skip("delete_clip");
@@ -103,8 +104,15 @@ async function acceptFullControl(change) {
   if (tool("duplicate_device") && !stopping) {
     observation = await integration.observe(signal());
     const again = await padOf();
-    const device = again ? (await all("device", { parent: again.ref, fields: ["name"] })).items[0] : undefined;
-    if (device) await change("duplicate_device", { deviceRef: device.ref }); else say(false, undefined, "no device on the pad to copy");
+    // A chain holds one instrument: copying the pad's is refused, plainly, and nothing changes. An effect is copied.
+    const instrument = again ? (await all("device", { parent: again.ref, fields: ["name", "deviceType"] })).items.find((row) => row.deviceType === "instrument") : undefined;
+    if (instrument) {
+      const refused = await run("duplicate_device", { deviceRef: instrument.ref });
+      say(!refused.ok && /one instrument/.test(refused.error ?? ""), refused.ms, `an instrument isn't copied beside itself${refused.ok ? ", but it was" : ""}`);
+    }
+    const page = await run("live_discover", { kind: "device", limit: 100, fields: ["name", "deviceType"] });
+    const effect = (contentOf(page.body).items ?? []).find((row) => row.deviceType === "audio_effect" || row.deviceType === "midi_effect");
+    if (effect) await change("duplicate_device", { deviceRef: effect.ref }); else say(false, undefined, "no effect in the Set's first devices to copy");
   } else if (!tool("duplicate_device")) skip("duplicate_device");
   if (tool("render") && !stopping) {
     const bounce = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === BOUNCE).at(-1);

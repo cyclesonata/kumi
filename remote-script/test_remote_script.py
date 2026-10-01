@@ -7742,6 +7742,23 @@ class DeviceDuplicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "device name changed since preview"): mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"], expectedName="Old Name"))
         with self.assertRaisesRegex(ValueError, "owner or siblings changed"): mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"][:1]))
 
+    def test_an_instrument_isnt_copied_and_a_copy_live_refuses_leaves_the_chain_as_it_was(self):
+        # Measured on real Live: duplicate_device on Drift raises RuntimeError (a chain holds one instrument).
+        song = FakeSong(); track = duplicable(song.tracks[0]); drift, saturator = FakeDevice(), FakeDevice(); drift.name = "Drift"; drift.type = 1; saturator.name = "Saturator"; saturator.type = 2
+        track.devices = [drift, saturator]; asked = []
+        original = track.duplicate_device
+        track.duplicate_device = lambda index: (asked.append(index), original(index))
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        with self.assertRaisesRegex(ValueError, r'^a chain holds one instrument, so Live can\'t copy "Drift" beside itself: duplicate its track instead; nothing changed$'):
+            mapper.invoke("device.duplicate", self.request(mapper, row["devices"][0], row, row["devices"]))
+        self.assertEqual((asked, track.devices), ([], [drift, saturator]))
+        def refuses(index): raise RuntimeError("Live's own words")
+        track.duplicate_device = refuses
+        with self.assertRaisesRegex(ValueError, r'^Live refused to copy "Saturator"; nothing changed$'):
+            mapper.invoke("device.duplicate", self.request(mapper, row["devices"][1], row, row["devices"]))
+        self.assertEqual(track.devices, [drift, saturator])
+        self.assertEqual(remote_module._failure_summary(ValueError('Live refused to copy "Saturator"; nothing changed')), 'request failed: Live refused to copy "Saturator"; nothing changed')
+
     def test_a_device_in_a_rack_chain_is_copied_within_its_chain(self):
         song = FakeSong(); rack = FakeRackDevice(); inner = FakeDevice(); inner.name = "Saturator"
         chain = duplicable(type("Chain", (), {"name": "Chain 1", "mute": False, "solo": False})()); chain.devices = [inner]; rack.chains = [chain]; song.tracks[0].devices = [rack]

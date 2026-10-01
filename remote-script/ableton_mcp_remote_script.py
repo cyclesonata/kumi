@@ -9739,6 +9739,9 @@ class LiveObjectMapper:
         if "expectedName" in args and args["expectedName"] != name: raise ValueError("device name changed since preview")
         duplicator, deleter = getattr(owner, "duplicate_device", None), getattr(owner, "delete_device", None)
         if not callable(duplicator) or not callable(deleter): raise ValueError("device duplication is unavailable on this Live shape")
+        label = f'"{name[:80]}"' if name else "this device"
+        # Live keeps one instrument to a chain and refuses to copy one beside itself (a RuntimeError, measured).
+        if self._device_type(device) == "instrument": raise ValueError(f"a chain holds one instrument, so Live can't copy {label} beside itself: duplicate its track instead{UNRUN_SUFFIX}")
         before = self._items(self._read_attr(owner, "devices") or []); before_order = [self._capture_object_identity(candidate) for candidate in before]; known = set(before_order)
         kind = self._read_attr(device, "class_name"); checkpoint = self.refs.checkpoint()
         try:
@@ -9756,7 +9759,10 @@ class LiveObjectMapper:
                 try: deleter(position)
                 except BaseException: pass
             if [self._capture_object_identity(candidate) for candidate in self._items(self._read_attr(owner, "devices") or [])] != before_order: raise ValueError("device duplication failed and exact cleanup failed") from error
-            self.refs.restore(checkpoint); raise
+            self.refs.restore(checkpoint)
+            if not isinstance(error, Exception): raise
+            # The chain is exactly as it was, so the refusal says nothing changed; Live's own text isn't echoed.
+            raise (_unrun(error) if isinstance(error, (ValueError, TimeoutError)) else ValueError(f"Live refused to copy {label}{UNRUN_SUFFIX}")) from error
 
     def _browser(self) -> Any:
         try:
