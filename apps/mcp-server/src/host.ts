@@ -5741,16 +5741,27 @@ export class McpHost {
   }
 
   /** A file copied into the project folder, which Live then manages as Collect All and Save would. */
+  /**
+   * An audio file copied into the Set's project folder. Checked as an audio import is: under the allowed root,
+   * a real file (not a link), of an audio type its content agrees with; Live copies a verified copy of it, so
+   * what lands in the project is what was checked. No network paths.
+   */
   private async liveProjectImportAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["filePath"]) || !isNonEmptyString(params.filePath, 4096) || !isAbsolute(params.filePath) || params.filePath.includes("\0")) return error(id, -32602, "filePath, an absolute path to a file, is required");
+    if (!isObject(params) || !hasOnly(params, ["filePath", "allowedRoot"]) || !isNonEmptyString(params.filePath, 1024) || !isNonEmptyString(params.allowedRoot, 1024) || params.filePath.includes("\0") || params.allowedRoot.includes("\0")) return error(id, -32602, "filePath and allowedRoot (the folder it must be in) are required");
+    if ([params.filePath, params.allowedRoot].some((path) => /^(?:\\\\|\/\/)/.test(path))) return error(id, -32602, "files on a network share aren't imported: copy the file onto this computer first");
+    let staged: string | undefined;
     try {
-      let file: ReturnType<typeof statSync>;
-      try { file = statSync(params.filePath); } catch { throw new Error("there's no file at that path"); }
-      if (!file.isFile()) throw new Error("that path isn't a file");
+      let file: ReturnType<typeof lstatSync>;
+      try { file = lstatSync(params.filePath); } catch { throw new Error("there's no file at that path"); }
+      if (file.isSymbolicLink()) throw new Error("that path is a link: import the file itself, from where it is");
+      const authority = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
       await this.requireOperation("project.import");
-      const imported = await this.asyncAdapter().invokeAsync({ operation: "project.import", args: { filePath: params.filePath } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
-      return this.successText(id, { filePath: params.filePath, path: imported.path });
+      staged = await this.stageVerifiedImportFile(authority.canonicalPath, authority);
+      const imported = await this.asyncAdapter().invokeAsync({ operation: "project.import", args: { filePath: staged } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
+      return this.successText(id, { filePath: authority.canonicalPath, path: imported.path, bytes: authority.size, sha256: authority.sha256 });
     } catch (cause) { return this.adapterToolError(id, cause, "Nothing was copied into the project."); }
+    // The project has its own copy now (or none was made): the verified copy goes.
+    finally { if (staged !== undefined) this.releaseStagedImportFile(staged); }
   }
 
   /** The clips an Arrangement MIDI clip change asks for: one (its fields), or several (clips). */

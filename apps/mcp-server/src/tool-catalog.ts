@@ -883,8 +883,8 @@ const toolDescriptors = [
   },
   {
     name: "live_project_import",
-    description: "Copy a file (an absolute path) into the Set's project folder, which Live then manages as Collect All and Save would; answers where the copy is. Nothing in the Set changes. Needs Kumi's Live extension.",
-    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["filePath"], additionalProperties: false },
+    description: "Copy an audio file into the Set's project folder, which Live then manages as Collect All and Save would; answers where the copy is. The file must be in allowedRoot (a folder the producer named), a real file (not a link, not on a network share) of an audio type (WAV, AIFF, FLAC, MP3, OGG...). Nothing in the Set changes. Needs Kumi's Live extension.",
+    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["filePath", "allowedRoot"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
