@@ -8068,6 +8068,22 @@ class TargetedDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(mapper.discover("note", 100, None, song_level)["items"]), 50)
         self.assertEqual(mapper.discover("note", 100, None, f"{mapper.refs.epoch}:arrangement_clip:1:7")["items"], [])
 
+    def test_a_tracks_arrangement_clips_page_on_while_the_set_plays(self):
+        """A list of clips binds its cursors to what it lists, not to where playback is: page 2
+        follows page 1 while the clips play; a clip that changed ends them."""
+        song = FakeSong(); song.tracks = [lean_track("Keys")]
+        clips = [FakeClip(4.0) for _ in range(3)]
+        for index, clip in enumerate(clips): clip.start_time = index * 4.0; clip.name = f"C{index}"; clip.is_playing = False; clip.playing_position = 0.0
+        song.tracks[0].arrangement_clips = clips
+        mapper = LiveObjectMapper(song); track_ref = mapper.snapshot()["tracks"][0]["ref"]
+        first = mapper.discover("arrangement_clip", 2, None, track_ref)
+        clips[0].is_playing = True; clips[0].playing_position = 1.5
+        second = mapper.discover("arrangement_clip", 2, first["nextCursor"], track_ref)
+        self.assertEqual([item["name"] for item in first["items"] + second["items"]], ["C0", "C1", "C2"])
+        self.assertEqual(first["items"][0]["isPlaying"], False)
+        clips[1].name = "Renamed"
+        with self.assertRaisesRegex(ValueError, "invalid discovery cursor"): mapper.discover("arrangement_clip", 2, first["nextCursor"], track_ref)
+
     def test_arrangement_clip_rows_hold_their_notes_only_when_asked(self):
         song, _, long_clip = self.song(); mapper = LiveObjectMapper(song); long_clip.note_reads = 0
         row = mapper.snapshot({"focus": [1], "parts": ["tracks", "arrangement"]})["arrangement"]["clips"][0]

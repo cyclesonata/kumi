@@ -2795,7 +2795,8 @@ class LiveObjectMapper:
         if filters:
             items = [item for item in items if all(item.get(key) == value for key, value in filters.items())]
         items = items[:traversal_budget]
-        basis = [[item.get(field) for field in identity_fields] for item in items] if identity_fields is not None else items
+        # A list of clips or slots binds its cursors to them, not to where playback is (it moves every tick).
+        basis = [[item.get(field) for field in identity_fields] for item in items] if identity_fields is not None else _without_fields(items, _VOLATILE_CLIP_FIELDS | _VOLATILE_SLOT_FIELDS) if kind in {"arrangement_clip", "clip", "session_clip", "clip_slot"} else items
         fingerprint = hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
         revision = f"{self.refs.epoch}:{kind}:{len(items)}:{fingerprint}"
         offset = 0
