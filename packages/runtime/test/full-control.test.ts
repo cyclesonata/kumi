@@ -114,3 +114,17 @@ test("an Esc while the plan's undo step is opening still closes it", async () =>
     assert.equal(b.requests.some((request) => request.name === "live_tempo_apply"), false, "the plan itself stopped");
   } finally { await b.integration.close(); }
 });
+
+test("a device's settings beyond its parameters, Live's own undo as a last resort, and a plug-in's every parameter name", async () => {
+  const b = await opened({ fullControl: true, version: FULL, parameters: true });
+  try {
+    const set = await tool(b.tools, "edit_device").execute({ deviceRef: "device:1", action: "set", setting: "simpler.playback_mode", value: 2 }, signal());
+    assert.equal(set.isError, false, set.text); assert.equal(b.records.at(-1)!.state, "applied");
+    await tool(b.tools, "edit_device").execute({ deviceRef: "device:1", action: "warp-double" }, signal());
+    assert.equal(b.records.at(-1)!.state, "kept", "doubling the warping has only Live's undo"); assert.match(b.records.at(-1)!.title, /warp double/);
+    const undone = await tool(b.tools, "undo_in_live").execute({}, signal());
+    assert.deepEqual(JSON.parse(undone.text), { done: true, canUndo: false, canRedo: true });
+    assert.deepEqual(b.requests.find((request) => request.name === "live_song_undo")!.args.confirmation, "undo-in-live");
+    assert.ok(b.tools.some((item) => item.name === "live_device_read"), "the model reads a plug-in's every parameter name itself");
+  } finally { await b.integration.close(); }
+});

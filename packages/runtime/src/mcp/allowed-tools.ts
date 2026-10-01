@@ -1,16 +1,19 @@
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonObject } from "../core/contracts.js";
-import type { McpEndpoint } from "./client.js";
+import { MAX_BRIDGE_MESSAGE_BYTES, type McpEndpoint } from "./client.js";
 
 /** Tools the model may call directly: reads. */
-export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read",
-  "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect"]);
+// Not live_snapshot: a whole big Set in one answer is more than the link carries (discovery pages instead).
+export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_discover", "live_browser_search", "live_note_read",
+  "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect",
+  // Bridge 1.0.58: a plug-in's every parameter name and a device's banks, a clip's automation at a time, a clip's time in samples and seconds.
+  "live_device_read", "live_automation_read", "live_clip_time_convert"]);
 const MAX_RESULT_BYTES = 64 * 1024;
 /** The page older Remote Scripts allow (see `call`). */
 const SMALL_PAGE = 100;
 // Kumi's own reads of a big Set (every track, every parameter of a plug-in) come whole; what the model
 // sees stays within MAX_RESULT_BYTES, because tokens cost the producer money.
-const MAX_HOST_RESULT_BYTES = 256 * 1024 * 1024;
+const MAX_HOST_RESULT_BYTES = MAX_BRIDGE_MESSAGE_BYTES;
 const MAX_CATALOG_BYTES = 1024 * 1024;
 
 /** Host-owned authorization boundary; model instructions and annotations confer no authority. */

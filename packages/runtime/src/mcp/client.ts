@@ -5,13 +5,48 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolResultSchema, ErrorCode, McpError, ListToolsResultSchema, ToolListChangedNotificationSchema,
-  type CallToolResult, type Implementation, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
+  type CallToolResult, type Implementation, type JSONRPCMessage, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
+import { deserializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { JsonObject } from "../core/contracts.js";
+
+/** The most one message from the bridge may hold: a big Set's reads come in pages well under it. */
+export const MAX_BRIDGE_MESSAGE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The bridge's messages, read in linear time: the SDK's own buffer joins everything so far with each
+ * chunk the pipe delivers, which for a message of megabytes is quadratic. Over the limit, the message
+ * is refused (and the link closes, as the SDK's does).
+ */
+class LinearReadBuffer {
+  private pieces: Buffer[] = []; private size = 0;
+  constructor(private readonly limit: number) {}
+  append(chunk: Buffer): void {
+    if (this.size + chunk.length > this.limit) { this.clear(); throw new Error(`ReadBuffer exceeded maximum size of ${this.limit} bytes`); }
+    this.pieces.push(chunk); this.size += chunk.length;
+  }
+  readMessage(): JSONRPCMessage | null {
+    for (let index = 0; index < this.pieces.length; index++) {
+      const at = this.pieces[index]!.indexOf(10);
+      if (at < 0) continue;
+      const head = Buffer.concat([...this.pieces.slice(0, index), this.pieces[index]!.subarray(0, at)]);
+      const rest = this.pieces[index]!.subarray(at + 1);
+      this.pieces = [...(rest.length ? [rest] : []), ...this.pieces.slice(index + 1)];
+      this.size = this.pieces.reduce((sum, piece) => sum + piece.length, 0);
+      return deserializeMessage(head.toString("utf8").replace(/\r$/, ""));
+    }
+    return null;
+  }
+  clear(): void { this.pieces = []; this.size = 0; }
+}
 
 // SDK 1.30.1 starts an unawaited close on initialize failure, and its stdio
 // close clears pid before exit. Share ONE close promise and retain owned identity.
 class OwnedStdioTransport extends StdioClientTransport {
   ownedPid: number | null = null;
+  constructor(...parameters: ConstructorParameters<typeof StdioClientTransport>) {
+    super(...parameters);
+    (this as unknown as { _readBuffer: LinearReadBuffer })._readBuffer = new LinearReadBuffer(MAX_BRIDGE_MESSAGE_BYTES);
+  }
   private shutdown: Promise<void> | undefined;
   override async start() { await super.start(); this.ownedPid = this.pid; }
   override close(): Promise<void> {
@@ -72,7 +107,7 @@ export async function connectMcp(options: Options): Promise<McpEndpoint> {
   const transport = new OwnedStdioTransport({ command: process.execPath,
     args: [entry, ...(options.bridgeConfig ? ["--config", options.bridgeConfig] : []), ...(options.args ?? [])],
     // The standalone bridge resolves protocol assets from the repository root.
-    env: environment, stderr: "pipe", cwd: options.cwd ?? fileURLToPath(new URL("../../../../../", import.meta.url)), maxBufferSize: 2 * 1024 * 1024,
+    env: environment, stderr: "pipe", cwd: options.cwd ?? fileURLToPath(new URL("../../../../../", import.meta.url)), maxBufferSize: MAX_BRIDGE_MESSAGE_BYTES,
   });
   const client = new Client({ name: "kumi", version: KUMI_VERSION }, { capabilities: {} });
   const catalogListeners = new Set<() => void>();

@@ -24,7 +24,7 @@ test("real SDK stdio initialization, bounded pagination and exact four-tool sche
   const { client, tools } = await open(); const pid = client.pid;
   try {
     await tools.refresh(freshSignal());
-    assert.deepEqual(tools.list().map((tool) => tool.name).sort(), ["live_discover", "live_snapshot", "live_status", "server_status"]);
+    assert.deepEqual(tools.list().map((tool) => tool.name).sort(), ["live_discover", "live_note_read", "live_status", "server_status"]);
     assert.deepEqual(tools.list()[0]?.inputSchema, { type: "object", properties: { action: { type: "string" } }, additionalProperties: true });
     const result = await tools.call("live_status", {}, freshSignal());
     assert.equal(data(result).provenance, "synthetic-fixture");
@@ -42,10 +42,10 @@ test("unknown and mutation calls never reach the server; fresh call-time catalog
     for (const name of ["mutation_0", "live_tempo_apply", "tools/call", "new_unsafe_tool"]) await assert.rejects(tools.call(name, {}, freshSignal()), /allowed tool list|not currently available/);
     assert.deepEqual(data(await tools.call("server_status", {}, freshSignal())).calls, ["server_status"]);
     await client.call("server_status", { action: "notify" }, freshSignal());
-    await assert.rejects(tools.call("live_snapshot", {}, freshSignal()), /catalog/);
+    await assert.rejects(tools.call("live_note_read", {}, freshSignal()), /catalog/);
     await tools.refresh(freshSignal());
-    assert(!tools.list().some((tool) => tool.name === "live_snapshot"));
-    await assert.rejects(tools.call("live_snapshot", {}, freshSignal()), /allowed tool list|not currently available/);
+    assert(!tools.list().some((tool) => tool.name === "live_note_read"));
+    await assert.rejects(tools.call("live_note_read", {}, freshSignal()), /allowed tool list|not currently available/);
     await assert.rejects(tools.call("new_unsafe_tool", {}, freshSignal()), /allowed tool list|not currently available/);
     assert.deepEqual(data(await tools.call("server_status", {}, freshSignal())).calls, ["server_status", "server_status", "server_status"]);
   } finally { await tools.close(); }
@@ -263,4 +263,17 @@ test("a discovery page the Remote Script refuses as too big is asked again at 10
   assert.equal((await tools.call("live_discover", { kind: "device", limit: 100_000 }, freshSignal(), { host: true })).isError, undefined);
   assert.deepEqual(limits, [100_000, 100, 100]);
   await tools.close();
+});
+
+test("a bridge message of megabytes (a big Set's page) arrives whole, read in linear time", async () => {
+  const { tools } = await open();
+  try {
+    await tools.refresh(freshSignal());
+    const started = performance.now();
+    const large = await tools.call("server_status", { action: "large" }, freshSignal(), { host: true });
+    const text = large.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    assert.equal(text.length, 5 * 1024 * 1024);
+    assert.ok(performance.now() - started < 5_000, "no quadratic joining");
+    assert.ok((data(await tools.call("server_status", {}, freshSignal())) as { calls: unknown[] }).calls.length > 0, "the link is still up");
+  } finally { await tools.close(); }
 });

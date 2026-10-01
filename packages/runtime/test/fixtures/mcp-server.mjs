@@ -16,7 +16,7 @@ server.setRequestHandler(ListToolsRequestSchema, async (request) => {
   if (mode === "duplicate") return { tools: [descriptor("live_status"), descriptor("live_status")] };
   if (mode === "missing") return { tools: [descriptor("server_status")] };
   if (mode === "catalog-bytes") return { tools: [{ ...descriptor("server_status"), description: "x".repeat(1024 * 1024) }] };
-  const all = ["server_status", "live_status", "live_discover", ...(changed ? ["new_unsafe_tool"] : ["live_snapshot"]), ...Array.from({ length: 100 }, (_, i) => `mutation_${i}`)].map(descriptor);
+  const all = ["server_status", "live_status", "live_discover", ...(changed ? ["new_unsafe_tool"] : ["live_note_read"]), ...Array.from({ length: 100 }, (_, i) => `mutation_${i}`)].map(descriptor);
   const offset = Number(request.params?.cursor ?? 0);
   return { tools: all.slice(offset, offset + 40), ...(offset + 40 < all.length ? { nextCursor: String(offset + 40) } : {}) };
 });
@@ -39,7 +39,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   if (args.action === "error") return { isError: true, content: [{ type: "text", text: "fixture failure" }], structuredContent: { fixture: true, reason: "expected-error" } };
   if (args.action === "invalid-params") throw new McpError(ErrorCode.InvalidParams, "trackRef is required");
   if (args.action === "oversized") return { content: [{ type: "text", text: "x".repeat(70 * 1024) }] };
-  if (args.action === "frame") return { content: [{ type: "text", text: "x".repeat(3 * 1024 * 1024) }] };
+  if (args.action === "frame") return { content: [{ type: "text", text: "x".repeat(65 * 1024 * 1024) }] };
+  if (args.action === "large") return { content: [{ type: "text", text: "x".repeat(5 * 1024 * 1024) }] };
   const value = { fixture: true, calls: [...calls], cancelled, provenance: "synthetic-fixture", toolPolicy: process.env.ABLETON_MCP_TOOL_POLICY ?? null, toolAllow: process.env.ABLETON_MCP_TOOL_ALLOW ?? null, secretPresent: ["AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "KUMI_AUTH_FILE", "NODE_OPTIONS"].some((key) => Boolean(process.env[key])) };
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
 });

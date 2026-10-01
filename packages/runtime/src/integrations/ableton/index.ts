@@ -2244,7 +2244,19 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         return { text: JSON.stringify({ file: rendered.path, seconds: rendered.seconds, channels: rendered.channels, sampleRate: rendered.sampleRate,
           note: "The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to." }), isError: false };
       } }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders];
+    // Live's own undo, for what the producer did in Live; Kumi's changes undo exactly through undo_change.
+    const liveUndo: KernelTool[] = supported({ since: FULL_CONTROL_BRIDGE }) && tools!.has("live_song_undo") && tools!.has("live_song_redo") ? [{ name: "undo_in_live",
+      description: "Live's own undo (or redo, with redo: true), once, exactly like Cmd-Z in Live: only when the producer asks to undo something they did in Live themselves. Never for Kumi's own changes: undo_change undoes those exactly, and this undoes whatever Live did last.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { redo: { type: "boolean", description: "Live's redo instead" } } },
+      execute: async (input, signal) => {
+        const redo = input.redo === true;
+        const result = await tools!.call(redo ? "live_song_redo" : "live_song_undo", { confirmation: redo ? "redo-in-live" : "undo-in-live", idempotencyKey: randomUUID() }, AbortSignal.any([signal, lifetime.signal]), { host: true });
+        if (result.isError) return { text: resultText(result), isError: true };
+        const done = payload(result);
+        try { options.onAction?.({ title: done.done === true ? (redo ? "Redid in Live" : "Undid in Live") : redo ? "Nothing to redo in Live" : "Nothing to undo in Live" }); } catch { /* a listener failure must not affect Live */ }
+        return { text: JSON.stringify(done), isError: false };
+      } }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo];
   }
   return {
     async start(signal) {
