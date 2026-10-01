@@ -118,7 +118,11 @@ function withBridge(dir: string) {
   writeFileSync(config, JSON.stringify({ version: 2, server: { command: process.execPath, args: [join(packageRoot, "dist", "src", "cli.js"), "--config", config] } }));
   writeFileSync(join(scripts, "AbletonMcpBridge", "bridge-reference.json"), JSON.stringify({ config }));
   writeFileSync(join(home, "auth.json"), "{}");
-  return { home, env: { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: scripts, HOME: join(dir, "user") } };
+  // Kumi's extension in Live, beside the bridge.
+  const extensions = join(dir, "Ableton", "Extensions");
+  mkdirSync(join(extensions, "kumi.kumi", "dist"), { recursive: true }); writeFileSync(join(extensions, "kumi.kumi", "manifest.json"), "{}");
+  mkdirSync(join(dir, "Ableton", "Extensions Data", "kumi.kumi"), { recursive: true });
+  return { home, extensions, env: { KUMI_HOME: home, KUMI_REMOTE_SCRIPTS_DIR: scripts, HOME: join(dir, "user"), KUMI_LIVE_EXTENSIONS_DIR: extensions } };
 }
 
 test("uninstall keeps the bridge's files while Live still loads the bridge from them, and takes them once it's out", async () => {
@@ -133,6 +137,8 @@ test("uninstall keeps the bridge's files while Live still loads the bridge from 
     assert.equal(existsSync(join(kumi.home, "bridge", "1.0.52-1")), true, "and its package");
     assert.equal(existsSync(join(kumi.home, "app")) || existsSync(join(kumi.home, "auth.json")), false, "everything else goes with --all");
     assert.match(kept.text(), /The bridge's files stay in .*bridge while Live uses it\./);
+    assert.equal(existsSync(join(kumi.extensions, "kumi.kumi")), true, "Kumi's extension stays in Live with the bridge");
+    assert.ok(kept.text().includes(`remove AbletonMcpBridge from Live's Remote Scripts folder, and kumi.kumi from ${kumi.extensions}`), "and how to take both out by hand is said");
     rmSync(dir, { recursive: true, force: true }); mkdirSync(dir);
     // Taken out of Live by its own uninstaller: its files go too.
     kumi = withBridge(dir);
@@ -141,6 +147,8 @@ test("uninstall keeps the bridge's files while Live still loads the bridge from 
     assert.equal(await uninstallInstalled({ out: gone.stream, env: kumi.env, confirm: async () => true, liveRunning: async () => false,
       run: async (_command, args) => { ran.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; } }, { all: false, yes: true }), 0);
     assert.ok(ran.some((line) => line.includes("uninstall")), "the bridge's own uninstaller ran");
+    assert.equal(existsSync(join(kumi.extensions, "kumi.kumi")) || existsSync(join(kumi.extensions, "..", "Extensions Data", "kumi.kumi")), false, "Kumi's extension leaves Live with the bridge");
+    assert.match(gone.text(), /The bridge and Kumi's extension are out of Live\./);
     assert.equal(existsSync(join(kumi.home, "bridge")), false);
     assert.equal(existsSync(join(kumi.home, "auth.json")), true, "the producer's files stay without --all");
   } finally { rmSync(dir, { recursive: true, force: true }); }

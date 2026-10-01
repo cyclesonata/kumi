@@ -56,13 +56,11 @@ export async function serveStdio(input: Readable, output: Writable, handler: Rec
   const maxQueuedWrites = maxPending * 4;
   const framer = new NdjsonFramer();
   const controllers = new Map<string, AbortController>();
-  const pending = new Map<number, { id: string | number; task: Promise<string | null>; controller?: AbortController }>();
+  const pending = new Map<number, { id: string | number; task: Promise<void> }>();
   let nextSequence = 0;
-  let nextWrite = 0;
   let active = 0;
   const waiters: Array<() => void> = [];
   let closed = false;
-  let flushPromise: Promise<void> | undefined;
 
   const acquire = async (): Promise<void> => {
     if (active < maxInFlight) { active += 1; return; }
@@ -170,8 +168,29 @@ export async function serveStdio(input: Readable, output: Writable, handler: Rec
     }
     const key = requestKey(id)!;
     const sequence = nextSequence++;
+    // Each answer is written as soon as its work is done (JSON-RPC matches answers to requests by id), so
+    // a slow request, such as a big Set's export, doesn't hold up the answers to the requests after it.
+    const emit = async (result: string | null, controller?: AbortController): Promise<void> => {
+      // A client may already have reused this ID while the old write's callback/drain is pending; never
+      // remove that newer controller.
+      const retireController = (): void => { if (controller && controllers.get(key) === controller) controllers.delete(key); };
+      try {
+        if (!closed && result !== null && !controller?.signal.aborted) await write(result, () => {
+          // An earlier write (including a busy reply) can delay emission long after the handler
+          // completes. Cancellation still owns that window.
+          if (closed || controller?.signal.aborted) return false;
+          // Retire before output.write can synchronously expose the response. Callback
+          // completion/backpressure must not delay sequential reuse.
+          retireController();
+          return true;
+        });
+      } finally {
+        retireController();
+      }
+    };
+    let delivered: Promise<void>;
     if (controllers.has(key)) {
-      pending.set(sequence, { id, task: Promise.resolve(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message: "Duplicate in-flight request identifier" } })) });
+      delivered = emit(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message: "Duplicate in-flight request identifier" } }));
     } else {
       const controller = new AbortController();
       controllers.set(key, controller);
@@ -187,43 +206,10 @@ export async function serveStdio(input: Readable, output: Writable, handler: Rec
           release();
         }
       })();
-      pending.set(sequence, { id, task, controller });
+      delivered = task.then((result) => emit(result, controller));
     }
-    const flush = async (): Promise<void> => {
-      while (pending.has(nextWrite)) {
-        const current = pending.get(nextWrite)!;
-        const result = await current.task;
-        pending.delete(nextWrite++);
-        const retireController = (): void => {
-          const key = requestKey(current.id)!;
-          // A client may already have reused this ID while the old write's
-          // callback/drain is pending; never remove that newer controller.
-          if (current.controller && controllers.get(key) === current.controller) controllers.delete(key);
-        };
-        try {
-          if (!closed && result !== null && !current.controller?.signal.aborted) await write(result, () => {
-            // An earlier write (including a busy reply) can delay emission long
-            // after the handler completes. Cancellation still owns that window.
-            if (closed || current.controller?.signal.aborted) return false;
-            // Retire before output.write can synchronously expose the response.
-            // Callback completion/backpressure must not delay sequential reuse.
-            retireController();
-            return true;
-          });
-        } finally {
-          retireController();
-        }
-      }
-    };
-    const scheduleFlush = (): void => {
-      if (flushPromise) return;
-      flushPromise = flush().finally(() => {
-        flushPromise = undefined;
-        if (!closed && pending.has(nextWrite)) scheduleFlush();
-      });
-      void flushPromise.catch(failOutput);
-    };
-    scheduleFlush();
+    pending.set(sequence, { id, task: delivered });
+    void delivered.catch(failOutput).finally(() => pending.delete(sequence));
   };
   try {
     for await (const chunk of input) {
@@ -232,7 +218,6 @@ export async function serveStdio(input: Readable, output: Writable, handler: Rec
     }
     for (const event of framer.end()) await process(event);
     await Promise.all([...pending.values()].map((entry) => entry.task));
-    if (flushPromise) await flushPromise;
     await writeTail;
   } catch (cause) {
     failOutput(cause);

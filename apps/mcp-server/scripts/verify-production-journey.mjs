@@ -481,19 +481,30 @@ def apply_control(command):
             song.is_playing = True; song.tracks[1].playing_slot_index = 1; song.tracks[1].fired_slot_index = 1
         else:
             song.is_playing = False; song.tracks[1].playing_slot_index = -1; song.tracks[1].fired_slot_index = -1
+    # The producer's own edits in Live: a track inserted or deleted (the ones after it move), a track muted.
+    elif name == "insertTrack": song.create_midi_track(int(command.get("index", 0))); song._notify("tracks")
+    elif name == "deleteTrack": song.delete_track(song.tracks[int(command.get("index", 0))]); song._notify("tracks")
+    elif name == "muteTrack": song.tracks[int(command.get("index", 0))].mute = bool(command.get("value"))
     else: raise RuntimeError("unknown control command")
 
 # The bridge serves its sockets on Live's main thread (update_display) and runs requests
 # inline there; count those requests as well as queued callbacks for pauseDrainAfterNext.
-dispatched = {"count": 0}
+# Once the counted ones ran, Live's thread is held before the next request: a tick serves a
+# client's next request at once when it comes quickly, so pausing after the tick would be too late.
+pause_after = {"callbacks": 0, "seconds": 0.0, "due": False}
+def _counted(count):
+    if pause_after["callbacks"] > 0 and count > 0:
+        pause_after["callbacks"] -= count
+        if pause_after["callbacks"] <= 0: pause_after["due"] = True
 _dispatch_with_holder = bridge._dispatch_with_holder
 def _counted_dispatch(method, request, holder):
+    if pause_after["due"]:
+        pause_after["due"] = False; time.sleep(pause_after["seconds"]); pause_after["seconds"] = 0.0
     try: return _dispatch_with_holder(method, request, holder)
-    finally: dispatched["count"] += 1
+    finally: _counted(1)
 bridge._dispatch_with_holder = _counted_dispatch
 
 try:
-    pause_after = {"callbacks": 0, "seconds": 0.0}
     while True:
         if control_path.exists():
             try:
@@ -507,13 +518,8 @@ try:
                 ack_temporary = ack_path.with_name(ack_path.name + ".tmp")
                 ack_temporary.write_text(json.dumps({"error": str(error)}), encoding="utf-8")
                 os.replace(ack_temporary, ack_path)
-        before = dispatched["count"]
         # One Control Surface tick, as Live's update_display runs it.
-        bridge._pump(); drained = bridge.queue.drain() + dispatched["count"] - before; bridge.mapper.capture_tick()
-        if pause_after["callbacks"] > 0:
-            pause_after["callbacks"] -= drained
-            if pause_after["callbacks"] <= 0 and drained > 0:
-                time.sleep(pause_after["seconds"]); pause_after["seconds"] = 0.0
+        bridge._pump(); _counted(bridge.queue.drain()); bridge.mapper.capture_tick()
         time.sleep(0.01)
 except KeyboardInterrupt: pass
 finally: bridge.disconnect()
@@ -684,6 +690,16 @@ class EnvelopeEvent:
   const textOf = async (client, name, args, timeoutMs) => {
     const response = await client.call(name, args, timeoutMs);
     return response;
+  };
+  // A clip's notes come a page at a time (each page within the Remote Script's read budget, which a
+  // slow machine or a busy tick shortens): every page, as a client reads them.
+  const notesOf = async (client, parent) => {
+    const notes = []; let cursor;
+    do {
+      const page = (await textOf(client, "live_discover", { kind: "note", parent, limit: 100, ...(cursor ? { cursor } : {}) })).parsed;
+      notes.push(...(page.items ?? [])); cursor = page.nextCursor;
+    } while (cursor);
+    return notes;
   };
   const requiredTool = async (client, name, args, timeoutMs) => {
     const response = await client.call(name, args, timeoutMs);
@@ -1054,7 +1070,7 @@ class EnvelopeEvent:
     const songApplied = await requiredTool(client, "live_midi_clip_apply", { transactionId: songPreview.transactionId, confirmation: "apply", idempotencyKey: "journey-song-midi" });
     const structureApplied = await requiredTool(client, "live_session_structure_apply", { transactionId: structurePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-song-structure" });
     const songClipRef = songApplied.clipRef;
-    const songNotes = (await textOf(client, "live_discover", { kind: "note", parent: songClipRef, limit: 100 })).parsed.items;
+    const songNotes = (await notesOf(client, songClipRef));
     assert(typeof songClipRef === "string" && structureApplied.created?.length === 1 && songNotes.length === songEvents.length, "beat/song MIDI/structure creation failed");
     journeyProgress("create-beat-or-song", "apply-create", "verifying", { midiRef: songClipRef, structureRefs: structureApplied.created.map((item) => item.ref), authoritativeNoteCount: songNotes.length });
     journeyProgress("create-beat-or-song", "apply-create", "completed", { midiTarget: songClipRef, structureRefs: structureApplied.created.map((item) => item.ref), verifiedNotes: songNotes.length, guidanceKind: songGuidance.kind });
@@ -1071,7 +1087,7 @@ class EnvelopeEvent:
     journeyProgress("sequence-advanced-drums", "apply-write", "applying", { idempotencyKeyPresent: true });
     const drumApplied = await requiredTool(client, "live_midi_clip_apply", { transactionId: drumPreview.transactionId, confirmation: "apply", idempotencyKey: "journey-drum-midi" });
     const clipRef = drumApplied.clipRef;
-    const notes = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const notes = (await notesOf(client, clipRef));
     assert(typeof clipRef === "string" && notes.length === drumEvents.length && notes.every((item) => typeof item.id === "number"), "advanced drum clip/notes failed verification");
     journeyProgress("sequence-advanced-drums", "apply-write", "verifying", { clipRef, authoritativeNoteCount: notes.length, stableIds: true });
     journeyProgress("sequence-advanced-drums", "apply-write", "completed", { clipRef, verifiedNotes: notes.length, guidanceKind: drumGuidance.kind });
@@ -1081,16 +1097,16 @@ class EnvelopeEvent:
     journeyProgress("sequence-advanced-drums", "expressive-revision", "applying", { noteId: firstId, idempotencyKeyPresent: true });
     const updated = (await textOf(client, "live_note_update_apply", { transactionId: updatePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-note-update" })).parsed;
     assert(updated.updated === 1, "note update failed");
-    const afterUpdate = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const afterUpdate = (await notesOf(client, clipRef));
     const edited = afterUpdate.find((item) => item.id === firstId);
     assert(edited.velocity === 66 && edited.probability === 0.5 && edited.velocityDeviation === 10 && edited.releaseVelocity === 32 && edited.mute === true, `note fields did not land: ${JSON.stringify(edited)}`);
     journeyProgress("sequence-advanced-drums", "expressive-revision", "verifying", { noteId: firstId, authoritativeReadback: true });
     journeyProgress("sequence-advanced-drums", "expressive-revision", "completed", { noteId: firstId, verifiedFields: ["velocity", "probability", "velocityDeviation", "releaseVelocity", "mute"] });
     const deletePreview = (await textOf(client, "live_note_delete_preview", { clipRef, noteIds: [firstId] })).parsed;
     const deleted = (await textOf(client, "live_note_delete_apply", { transactionId: deletePreview.transactionId, confirmation: "apply", idempotencyKey: "journey-note-delete" })).parsed;
-    assert(deleted.deleted === 1 && (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items.length === drumEvents.length - 1, "note was not removed");
+    assert(deleted.deleted === 1 && (await notesOf(client, clipRef)).length === drumEvents.length - 1, "note was not removed");
     const undone = (await textOf(client, "live_undo", { transactionId: deletePreview.transactionId, confirmation: "undo", idempotencyKey: "journey-note-delete-undo" })).parsed;
-    const afterDeleteUndo = (await textOf(client, "live_discover", { kind: "note", parent: clipRef, limit: 100 })).parsed.items;
+    const afterDeleteUndo = (await notesOf(client, clipRef));
     assert(undone.state === "undone" && afterDeleteUndo.length === drumEvents.length, `note-delete undo did not restore the note: ${JSON.stringify({ undone, count: afterDeleteUndo.length, expected: drumEvents.length })}`);
     const drumSlots = (await textOf(client, "live_discover", { kind: "clip-slot", parent: freshTracks[0].ref })).parsed.items;
     const drumSlot = drumSlots.find((slot) => slot.clipRef === clipRef);
@@ -1170,7 +1186,7 @@ class EnvelopeEvent:
     journeyProgress("create-beat-or-song", "audition", "verifying", { started: true, authoritativeStopState: songAuditionStopped.state });
     journeyProgress("create-beat-or-song", "audition", "completed", { slotRef: songSlot.ref, started: true, stopped: true });
     const songClipRef = songSlot.clipRef;
-    const songNotes = (await textOf(client, "live_discover", { kind: "note", parent: songClipRef, limit: 100 })).parsed.items;
+    const songNotes = (await notesOf(client, songClipRef));
     const revisePreview = (await textOf(client, "live_note_update_preview", { clipRef: songClipRef, notes: [{ id: songNotes[0].id, velocity: 77 }] })).parsed;
     journeyProgress("create-beat-or-song", "revise", "awaiting_confirmation", { clipRef: songClipRef, noteId: songNotes[0].id, mechanism: "fixed-apply" });
     journeyProgress("create-beat-or-song", "revise", "applying", { clipRef: songClipRef, noteId: songNotes[0].id, idempotencyKeyPresent: true });
@@ -1213,6 +1229,40 @@ class EnvelopeEvent:
     assert(envUndo.state === "undone", "envelope undo failed");
     const finalRead = await adapter_call(client, "automation.envelope.read", { clipRef, parameterRef: volumeRef });
     assert(finalRead.points.length === 2, "envelope undo did not restore points");
+  });
+
+  await step("a mixer undo after a track is inserted above changes nothing there, and the change stays applied", async () => {
+    // Kumi unmutes Bass; the producer inserts a track above, which puts Drums (unmuted, as the change
+    // left Bass) at Bass's place. The undo must not mute Drums: it is refused before anything is sent,
+    // and once the inserted track is gone the same undo mutes Bass again.
+    // Every page: a slow machine's tick budget can end a page after a track or two.
+    const tracks = async () => {
+      const items = []; let cursor;
+      do {
+        const page = (await textOf(client, "live_discover", { kind: "track", ...(cursor ? { cursor } : {}) })).parsed;
+        items.push(...(page.items ?? [])); cursor = page.nextCursor;
+      } while (cursor);
+      return items;
+    };
+    const byName = async (name) => (await tracks()).find((track) => track.name === name);
+    await control({ command: "muteTrack", index: 1, value: true });
+    const bass = await byName("Journey Bass");
+    assert(bass?.mixer?.mute === true, `Bass did not start muted: ${JSON.stringify(bass?.mixer)}`);
+    const preview = (await textOf(client, "live_mixer_preview", { trackRef: bass.ref, mute: false })).parsed;
+    const applied = (await textOf(client, "live_mixer_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "journey-moved-mixer" })).parsed;
+    assert(applied.state === "applied", `unmuting Bass failed: ${JSON.stringify(applied)}`);
+    await control({ command: "insertTrack", index: 0 });
+    const atPlace = (await tracks()).find((track) => track.ref === bass.ref);
+    assert(atPlace?.name === "Journey Drums" && atPlace.mixer.mute === false, `Drums is not at Bass's place: ${JSON.stringify(atPlace)}`);
+    const refused = await textOf(client, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "journey-moved-mixer-undo" });
+    assert(refused.isError === true && /isn't the one this change was made on any more/.test(refused.parsed.reason ?? ""), `the undo was not refused: ${JSON.stringify(refused.parsed)}`);
+    assert((await byName("Journey Drums")).mixer.mute === false, "the undo muted Drums");
+    assert((await byName("Journey Bass")).mixer.mute === false, "Bass lost the change");
+    await control({ command: "deleteTrack", index: 0 });
+    const undone = (await textOf(client, "live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "journey-moved-mixer-undo-2" })).parsed;
+    assert(undone.state === "undone", `the undo once Bass is back failed: ${JSON.stringify(undone)}`);
+    assert((await byName("Journey Bass")).mixer.mute === true, "the undo did not mute Bass again");
+    await control({ command: "muteTrack", index: 1, value: false });
   });
 
   await step("browser search/load and device lifecycle through the packaged path", async () => {
@@ -1427,8 +1477,8 @@ class EnvelopeEvent:
     const finalSlots = (await textOf(client, "live_discover", { kind: "clip-slot", parent: finalTracks[0].ref })).parsed.items;
     const songClip = finalSlots.find((slot) => slot.sceneIndex === 1)?.clipRef;
     const drumClip = finalSlots.find((slot) => slot.sceneIndex === 2)?.clipRef;
-    const songFinalNotes = songClip ? (await textOf(client, "live_discover", { kind: "note", parent: songClip, limit: 100 })).parsed.items : [];
-    const drumFinalNotes = drumClip ? (await textOf(client, "live_discover", { kind: "note", parent: drumClip, limit: 100 })).parsed.items : [];
+    const songFinalNotes = songClip ? (await notesOf(client, songClip)) : [];
+    const drumFinalNotes = drumClip ? (await notesOf(client, drumClip)) : [];
     const realtime = await adapter_call(client, "realtime.stats", {});
     assert(finalTracks[0].armed === false && finalTracks[0].monitoringState === "off" && realtime.armed === false, "routing or realtime authority remained active");
     journeyProgress("create-beat-or-song", "final-readback", "completed", { clipRef: songClip, notes: songFinalNotes.length, playback: "stopped", recording: "stopped" });
@@ -1480,6 +1530,6 @@ const accessibilityEvidence = {
 };
 const packageIdentityPassed = packageEvidence?.version === "npm-packed-artifact/v1" && packageEvidence?.name === packageMetadata.name && packageEvidence?.packageVersion === packageMetadata.version && /^[a-f0-9]{64}$/.test(packageEvidence?.sha256 ?? "") && Number.isSafeInteger(packageEvidence?.sizeBytes);
 const accessibilityPassed = accessibilityChecks.length === 5 && accessibilityChecks.every((entry) => entry.contentType === "text" && entry.orderedStages && !entry.ansiControlBytes && entry.nonColorGuidance && !entry.pointerInputUsedByVerifier);
-const summary = { schemaVersion: "phase-9-packaged-journeys/v1", generatedAt: new Date().toISOString(), package: packageEvidence, journey: "packaged-production-boundary", provenance: "fake-live", progressEvidence: "derived-from-actual-purpose-specific-tool-results-not-plan-template-flags", accessibilityEvidence, userJourneys: executionRows, steps: results, passed: !failed && results.every((entry) => entry.passed) && results.length === 25 && userJourneyEvidence.length === 5 && representativeJourneysPassed && accessibilityPassed && packageIdentityPassed };
+const summary = { schemaVersion: "phase-9-packaged-journeys/v1", generatedAt: new Date().toISOString(), package: packageEvidence, journey: "packaged-production-boundary", provenance: "fake-live", progressEvidence: "derived-from-actual-purpose-specific-tool-results-not-plan-template-flags", accessibilityEvidence, userJourneys: executionRows, steps: results, passed: !failed && results.every((entry) => entry.passed) && results.length === 26 && userJourneyEvidence.length === 5 && representativeJourneysPassed && accessibilityPassed && packageIdentityPassed };
 console.log(JSON.stringify(summary));
 if (!summary.passed) process.exitCode = 1;

@@ -26,6 +26,7 @@
 - **Listens:** loudness, tonal balance, width, tempo and key of a mix, a sample or its own bounce, and how your mix compares with a reference.
 - **Watches tutorials** from YouTube or a file, then builds what they show on a new track.
 - **Plays, records and resamples** when you ask.
+- **Takes full control of Live:** deletes what you ask for, writes MIDI straight into the Arrangement, renders offline, and answers for what you right-click in Live ("Ask Kumi about this"). A whole plan is one Cmd-Z. Big Sets of hundreds of tracks stay quick.
 - **Makes Max for Live devices** you describe in plain words (MIDI effects, audio effects and instruments) and puts them on your tracks.
 - **Looks things up:** searches the web and reads pages, PDFs, manuals and code on GitHub, so it can build an effect like one it has read about.
 - **Shows where you are:** FOCUS follows what you touch in Live, as a device tree, a piano roll or a Session or Arrangement strip. Click a device to point at it: "this Saturator's too harsh".
@@ -69,7 +70,7 @@ Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` st
 
 ## Status
 
-Kumi 1.1 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
+Kumi 1.2 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
 
 ## Development
 

@@ -3,6 +3,67 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.2.0 — 2026-10-01
+
+Kumi takes full control of Live and stays quick on big Sets. It deletes what you ask for, writes MIDI
+straight into the Arrangement, renders offline, and answers for what you point at in Live. A 200-track
+Set answers about as fast as a small one. Web search no longer leans on one free service. Ships with
+bridge 1.0.66.
+
+### Full control of Live
+
+- `kumi bridge` puts Kumi's own Live extension into Live's Extensions folder, and Live runs it.
+  `kumi doctor` says whether it's running, and `kumi uninstall` takes it out again. Through it:
+  - MIDI with its notes goes straight into the Arrangement (`write_arrangement_clip`).
+  - A stretch of a track's Arrangement can be cleared (`clear_range`).
+  - A device can be copied with its settings (`duplicate_device`).
+  - `render` renders an audio track's clips offline in a fraction of a second, without playing the Set:
+    the clips' own audio, before the track's effects.
+  - A sample goes onto a Drum Rack pad without the Browser.
+- **Right-click to point.** Right-click a track, clip, scene or Arrangement selection in Live, then
+  Extensions › "kumi: Ask Kumi about this". Kumi pins it, and "this" in your next message means it.
+- **Deletions.** Clips, scenes, tracks, locators, devices and returns go when you ask for it. HISTORY
+  keeps what only Live's own undo can bring back.
+- **A plan is one step in Live's undo.** One Cmd-Z takes back everything the plan changed through Live's
+  scripting.
+- **More of each device.** Settings beyond knobs (Roar, Shifter, Spectral Resonator, Hybrid Reverb,
+  CC Control, Simpler's slices and warping, Wavetable's modulation), a plug-in's every parameter by
+  name, and a clip's automation. Live's own undo and redo are there for what you did in Live.
+- **FOCUS follows your selection in Live** the moment it changes.
+
+### Big Sets
+
+- No limit on a Set's size. Kumi reads a big Set a page at a time, each page short enough that Live
+  never waits on it, and folds what the model sees each turn to about the size of a small Set's.
+- **One change takes about 20–120 ms** on 19 tracks or on 200. It took half a second or more before,
+  and seconds on big Sets. Live's own work, such as adding a track or the moment after a rename, still
+  costs what it costs when you do it yourself.
+- Kumi's catch-up snapshot of a 200-track Set takes about 11 s in the background, and nothing waits
+  behind it.
+
+### Looking things up
+
+- **Web search takes turns among free search services** (Exa, Parallel, Keenable, Firecrawl), the
+  way Hermes Agent does:
+  - a busy one hands the search on and rests;
+  - DuckDuckGo answers when none of them can;
+  - the same search within 20 minutes isn't made again.
+- Pages Kumi can't read itself go through those services' readers in turn.
+- An address that carries a key or token isn't read.
+- When nothing answers, Kumi says why and when to try again, or asks whether the computer is online.
+
+### Fixes
+
+- **Undoing a change goes only to what it was made on.** Before, undoing a mixer change (and 21 other
+  kinds) after tracks had moved could change another track. This was so in 1.0 and 1.1 too.
+- An undo whose check failed once could skip its checks on the next try and change what you'd edited
+  since. This was so in 1.0 and 1.1 too.
+- After an install, `kumi bridge` sees Live connect, instead of waiting ten minutes and saying it hadn't.
+- Copying an instrument beside itself is refused plainly (a chain holds one instrument). Before, Live's
+  refusal left the change uncertain.
+- A big message from the bridge no longer closes Kumi's connection. Past 2 MiB it used to.
+- Watching a big Set names lookalike tracks once, with how many there are.
+
 ## 1.1.0 — 2026-09-30
 
 Kumi installs with one line and keeps itself up to date, makes audio effects and

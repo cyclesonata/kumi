@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import type { AuditionEvent, AuditionRequest, ChangeRecord, KernelEvent, Observation, SessionController, SessionEvent, TurnResult } from "../src/core/contracts.js";
-import { MatchRun, type MatchBudget, type MatchStatus } from "../src/core/match-run.js";
+import { MATCH_BUDGET, MatchRun, type MatchBudget, type MatchStatus } from "../src/core/match-run.js";
+import { MIX_CANDIDATE } from "../src/core/contracts.js";
 import { createSession } from "../src/core/session.js";
 import { createPlaybookStore, matchedFrom, playbookBrief, type Lesson, type PlaybookStore } from "../src/core/playbook.js";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
@@ -210,4 +211,12 @@ test("a gap no knob closes leads the next round: change the structure, not the k
   const next = String((run.decide() as { next: string }).next);
   assert.match(next, /Knobs can't close this: sub −20\.0 dB against the reference\. Change the structure: add a sub layer/);
   assert.doesNotMatch(next, /Keep going/);
+});
+
+test("a run whose best is the whole mix knows it's the mix, and never hands it to the knob search", () => {
+  const run = new MatchRun("match my mix to the reference", { ...MATCH_BUDGET, polishMs: 60_000 });
+  const request = { candidates: [{ track: MIX_CANDIDATE, mix: true }], fromBeat: 0, beats: 16, reference: "/ref.wav" };
+  run.auditioned({ type: "auditioned", round: 1, best: { label: "The whole mix", score: 71 }, takes: [{ label: "The whole mix", score: 71, where: { track: MIX_CANDIDATE } }], gaps: [], request }, request);
+  assert.deepEqual(run.bestCandidate, { track: MIX_CANDIDATE, label: "The whole mix", mix: true });
+  assert.equal(run.polishes, false, "a goal turns one track's knobs, not Main's");
 });

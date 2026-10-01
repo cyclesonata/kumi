@@ -204,7 +204,7 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     assert.deepEqual(pads.map((args) => [args.deviceRef, args.note]), [["7:device:2:0", 36], ["7:device:2:0", 37], ["7:device:2:0", 38]]);
     assert.equal(new Set(pads.map((args) => args.filePath)).size, 3, "three different samples");
     assert.deepEqual(b.records.slice(-3).map((record) => record.title.replace(/“.*”/, "“…”")), ["Loaded “…” onto Drum Rack pad C1", "Loaded “…” onto Drum Rack pad C#1", "Loaded “…” onto Drum Rack pad D1"]);
-    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 49 }, () => 120) } }] }, signal());
+    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 501 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
@@ -528,10 +528,10 @@ test("new tracks go after the last one; references after a new track are retired
   } finally { await b.integration.close(); }
 });
 
-test("one answer can make at most 40 changes", async () => {
+test("one answer can make up to 500 changes, then checks with the producer", async () => {
   const b = await opened();
   try {
-    for (let count = 0; count < 40; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + count }, signal())).isError, false);
+    for (let count = 0; count < 500; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + count }, signal())).isError, false);
     const over = await tool(b.tools, "set_tempo").execute({ tempo: 150 }, signal());
     assert.equal(over.isError, true); assert.match(over.text, /check with the producer/);
     const next = await b.integration.observe(signal());
@@ -555,6 +555,17 @@ test("every change kind has its own tool, a family, host-only bridge tools and a
   // Playing and recording are Kumi's tools now (used when the producer asks); capture, files, projects and realtime control stay off.
   assert(HOST_TOOLS.has("live_transport_apply") && HOST_TOOLS.has("live_recording_apply") && HOST_TOOLS.has("live_transport_action_apply"));
   for (const off of ["live_audio_capture_apply", "live_project_backup_apply", "live_realtime_arm_apply", "live_application_dialog_apply", "live_device_state_save"]) assert(!HOST_TOOLS.has(off), off);
+});
+
+test("note selections, note ranges and automation steps get titles of their own, and a selection no undo", () => {
+  const notes = CHANGES.find((item) => item.tool === "edit_notes")!; const automation = CHANGES.find((item) => item.tool === "set_automation")!;
+  assert.equal(notes.summarize({ action: "select", notes: 3 }, { action: "select", all: true }, () => undefined).title, "Clip: 3 notes selected");
+  assert.equal(notes.summarize({ action: "delete-range", notes: 2 }, { action: "delete-range", fromPitch: 36, pitchSpan: 12, fromTime: 0, timeSpan: 4 }, () => undefined).title, "Clip: 2 notes deleted in a range");
+  assert.equal(notes.summarize({ action: "duplicate" }, { action: "duplicate" }, () => undefined).title, "Clip: notes duplicated");
+  assert.equal(notes.permanent?.({ action: "select", all: true }), "Selecting notes changes no notes: there's nothing to undo.");
+  assert.equal(notes.permanent?.({ action: "delete-range" }), undefined, "a range deletion has its undo");
+  assert.equal(automation.summarize({ action: "insert-step" }, { action: "insert-step", start: 0, length: 1, value: 0.5 }, () => undefined).title, "Clip: automation step drawn");
+  assert.equal(automation.summarize({ action: "delete-envelope" }, { action: "delete-envelope" }, () => undefined).title, "Clip: automation lane removed");
 });
 
 test("a new clip's record carries its notes, for NOW's picture", () => {

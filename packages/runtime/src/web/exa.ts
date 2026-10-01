@@ -1,8 +1,9 @@
 /**
  * Exa's search, which anyone may use without a key through its public MCP server: it finds pages by
  * what they're about, with the passages that matter, and reads a page as text (a PDF too, and a
- * page a browser would build). Kumi reads pages itself first; Exa's reader is for the rest.
+ * page a browser would build). It's one of the free services Kumi takes turns with (free.ts).
  */
+import { mcpTool } from "./mcp-call.js";
 import { WebError, type WebClient } from "./net.js";
 
 export const EXA_URL = "https://mcp.exa.ai/mcp";
@@ -15,25 +16,7 @@ export interface Found {
   text?: string;
 }
 
-async function call(client: WebClient, tool: string, args: Record<string, unknown>, signal: AbortSignal | undefined, timeoutMs: number): Promise<string> {
-  const response = await client.fetch(EXA_URL, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }), timeoutMs, maxBytes: 8 * 1024 * 1024, ...(signal ? { signal } : {}) });
-  if (response.status !== 200) throw new WebError(response.status === 429 ? "Exa has had too many searches from here for now." : `Exa answered ${response.status}.`, response.status);
-  const raw = response.body.toString("utf8");
-  // Streamable HTTP: one JSON-RPC message, as JSON or as a server-sent event.
-  const message = response.contentType === "text/event-stream"
-    ? raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).reverse().find((line) => /"(result|error)"/.test(line))
-    : raw;
-  let parsed: { result?: { content?: { type?: string; text?: unknown }[]; isError?: boolean }; error?: { message?: unknown } };
-  try { parsed = JSON.parse(message ?? "") as typeof parsed; } catch { throw new WebError("Exa answered in a way Kumi doesn't follow."); }
-  if (parsed.error) throw new WebError(`Exa refused: ${String(parsed.error.message ?? "an error").slice(0, 200)}`);
-  const text = (parsed.result?.content ?? []).map((item) => (item.type === "text" && typeof item.text === "string" ? item.text : "")).filter(Boolean).join("\n");
-  if (parsed.result?.isError) {
-    const reason = /CRAWL_NOT_FOUND|NOT_FOUND/.test(text) ? "found nothing at that address" : /TIMEOUT/i.test(text) ? "timed out" : text.replace(/^Error[^:]*:\s*/, "").slice(0, 200) || "failed";
-    throw new WebError(`Exa ${reason}.`);
-  }
-  return text;
-}
+const explain = (text: string) => (/CRAWL_NOT_FOUND|NOT_FOUND/.test(text) ? "found nothing at that address" : /TIMEOUT/i.test(text) ? "timed out" : undefined);
 
 /** Exa's results as text: a block for each, "Title:", "URL:", "Published:", then "Highlights:". */
 export function parseExaResults(text: string): Found[] {
@@ -50,13 +33,14 @@ export function parseExaResults(text: string): Found[] {
 }
 
 export async function exaSearch(client: WebClient, query: string, options: { about?: string; count: number; signal?: AbortSignal }): Promise<Found[]> {
-  const text = await call(client, "web_search_exa", { query, numResults: options.count, objective: options.about || `The pages that best answer: ${query}` }, options.signal, 30_000);
+  const text = await mcpTool(client, EXA_URL, "Exa", "web_search_exa", { query, numResults: options.count, objective: options.about || `The pages that best answer: ${query}` },
+    { timeoutMs: 20_000, explain, ...(options.signal ? { signal: options.signal } : {}) });
   return parseExaResults(text);
 }
 
 /** A page as Exa reads it: its title and its text as Markdown. */
 export async function exaRead(client: WebClient, url: string, signal?: AbortSignal): Promise<{ title?: string; text: string }> {
-  const text = await call(client, "web_fetch_exa", { urls: [url], maxCharacters: 400_000 }, signal, 90_000);
+  const text = await mcpTool(client, EXA_URL, "Exa", "web_fetch_exa", { urls: [url], maxCharacters: 400_000 }, { timeoutMs: 90_000, explain, ...(signal ? { signal } : {}) });
   const lines = text.split("\n");
   const title = /^# (.+)$/.exec(lines[0] ?? "")?.[1]?.trim();
   // Its heading lines (the title, then URL, Published and Author) say what Kumi says already.

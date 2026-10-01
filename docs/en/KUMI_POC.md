@@ -177,6 +177,26 @@ checkout with uncommitted changes, add `--allow-dirty` (developers only). The
 [delivery guide](DELIVERY.md) has the lifecycle in full, for Windows, repair,
 rollback and removal.
 
+On Live 12.4 and later, `kumi bridge` also puts Kumi's Live extension into Live's
+Extensions folder (`~/Library/Application Support/Ableton/Extensions/kumi.kumi`
+on macOS). Live starts it the next time it opens; it writes MIDI clips with
+their notes straight into the Arrangement, clears a stretch of a track, renders
+an audio track's clips to a file without playing them, and adds **Ask Kumi
+about this** to Live's right-click menu (under **Extensions**), which pins what
+you clicked for your next message. Nothing else to set up: no Developer Mode,
+no file to drop into Settings. Kumi works without it (older Live, or before Live
+restarts), and `kumi doctor` says which:
+
+```text
+  ok    Kumi's extension is running in Live
+  note  Live hasn't started Kumi's extension
+        → Restart Live: it starts extensions when it opens. With Developer Mode on (Settings → Extensions), Kumi starts it itself while Kumi runs
+  fix   Kumi's extension isn't in Live (it renders tracks without playing them and writes MIDI clips in the Arrangement)
+        → Run: kumi bridge, then restart Live
+```
+
+`kumi uninstall` takes the extension out of Live along with the bridge.
+
 Once installed and selected in Live, a plain `npm run kumi` finds the bridge
 through the installed Remote Script (`AbletonMcpBridge/bridge-reference.json`)
 and connects; there is nothing to configure. Without it, Kumi starts anyway,
@@ -438,8 +458,12 @@ Kumi can search the web and read what it finds, to build or explain what you
 name and it doesn't know well enough: a hardware unit, a plugin, a synth, an
 effect's algorithm, an artist's technique.
 
-- `search_web` searches the web through Exa's free search, or DuckDuckGo when
-  Exa can't answer, and GitHub's repositories when it's looking for code.
+- `search_web` searches the web through free search services that need no key,
+  taking turns as Hermes Agent does: Exa, Parallel, Keenable and Firecrawl, each
+  search starting with the next. One that's busy or doesn't answer hands the search
+  to the next and rests (as long as it asks, when it says), and DuckDuckGo answers
+  when none of them can. The same search within 20 minutes isn't made again. For
+  code it searches GitHub's repositories.
 - `read_web` reads a page, a PDF, a text or code file, a GitHub repository (its
   files and README) or a file in one, a Max patch or Max for Live device (its
   controls and its gen~ code first), or a picture, which the model sees. A long
@@ -587,10 +611,9 @@ sending, when you choose.
 - Undo lasts as long as Live and Kumi's bridge connection: after Live restarts, a
   fresh bridge (a reconnect) or a Kumi restart, earlier changes show **no undo**
   and can be undone only in Live (Cmd-Z). `/new` keeps the bridge, so they can
-  still be undone. One answer makes at most 40 changes.
+  still be undone. One answer makes at most 500 changes (a batch of pads or parameters counts once).
 - Catching up needs a saved Set; a Set is recognized by its file path (Save As
-  starts afresh). Very large Sets (a comparison over about 1.5 MB) get "changed,
-  too big to compare yet". Look-alike items the bridge can't match (empty tracks,
+  starts afresh). Look-alike items the bridge can't match (empty tracks,
   say) are read by name and position, so a rename can occasionally show as a
   removal and an addition.
 - After a disconnect, observations are discarded and the conversation carries on
@@ -623,9 +646,11 @@ selected inference provider. Track/device names and tool results are untrusted
 data, not instructions or permission grants. Reading Live is not local-only.
 Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only by
 you; terminal scrollback and the provider's retention policies are separate.
-When Kumi looks something up, its searches go to Exa (or DuckDuckGo), and it reads
-pages itself; a PDF, a page built by scripts, or a site that turns Kumi away is
-read through Exa's reader, which then sees that address. The
+When Kumi looks something up, its searches go to Exa, Parallel, Keenable or
+Firecrawl (or DuckDuckGo), and it reads pages itself; a PDF, a page built by
+scripts, or a site that turns Kumi away is read through those services' readers in
+turn, and each one asked sees that address. Kumi doesn't read an address that
+carries a key or token. The
 credential store intentionally persists.
 
 Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25

@@ -135,7 +135,7 @@ Implemented workflows:
 - Device discovery traverses racks/chains recursively with canonical parent refs. Browser loading requires a fresh exact `browser.inspect` result, rejects non-device items, and targets an empty device owner so any failed-load cleanup cannot affect an unrelated sibling.
 - `live_session_audition_preview/apply/stop` — one guarded, potentially audible Session scene launch. Preview is read-only and requires the exact Set name, authoritative stopped/non-recording playback, no armed or input-monitored tracks, safe launch quantization, callable launch/stop operations, and explicit output-safety evidence. Apply requires the exact preview confirmation and idempotency key, launches once, and verifies fresh fired/playing state. Stop requires the returned stop confirmation, stops only mapper-owned playback, and verifies the stopped baseline.
 
-Preview records expire after 30 seconds. A lost acknowledgement, timeout,
+Preview records expire after 10 minutes. A lost acknowledgement, timeout,
 disconnect, failed verification, or failed compensation is **uncertain state**.
 Never submit new authority or a new idempotency key. In the same bridge and
 Live epoch, the still-running host may reconcile only the exact original

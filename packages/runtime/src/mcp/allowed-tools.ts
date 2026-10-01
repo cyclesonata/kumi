@@ -1,12 +1,19 @@
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonObject } from "../core/contracts.js";
-import type { McpEndpoint } from "./client.js";
+import { MAX_BRIDGE_MESSAGE_BYTES, type McpEndpoint } from "./client.js";
 
 /** Tools the model may call directly: reads. */
-export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_snapshot", "live_discover", "live_browser_search", "live_note_read",
-  "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect"]);
+// Not live_snapshot: a whole big Set in one answer is more than the link carries (discovery pages instead).
+export const MODEL_TOOLS: ReadonlySet<string> = new Set(["server_status", "live_status", "live_discover", "live_browser_search", "live_note_read",
+  "live_song_state", "live_performance_read", "live_key_estimate", "live_take_lane_read", "live_warp_marker_read", "live_arrangement_automation_read", "live_browser_roots", "live_browser_inspect",
+  // Bridge 1.0.58: a plug-in's every parameter name and a device's banks, a clip's automation at a time, a clip's time in samples and seconds.
+  "live_device_read", "live_automation_read", "live_clip_time_convert"]);
 const MAX_RESULT_BYTES = 64 * 1024;
-const MAX_HOST_RESULT_BYTES = 4 * 1024 * 1024;
+/** The page older Remote Scripts allow (see `call`). */
+const SMALL_PAGE = 100;
+// Kumi's own reads of a big Set (every track, every parameter of a plug-in) come whole; what the model
+// sees stays within MAX_RESULT_BYTES, because tokens cost the producer money.
+const MAX_HOST_RESULT_BYTES = MAX_BRIDGE_MESSAGE_BYTES;
 const MAX_CATALOG_BYTES = 1024 * 1024;
 
 /** Host-owned authorization boundary; model instructions and annotations confer no authority. */
@@ -14,6 +21,8 @@ export class AllowedTools {
   private catalog = new Map<string, Tool>();
   private valid = false;
   private closed = false;
+  /** This bridge's Remote Script refused a page over 100 rows: ask for 100 at a time. */
+  private smallPages = false;
   private invalidation = 0;
   private signature = "";
   private revision = 0;
@@ -105,10 +114,17 @@ export class AllowedTools {
     if (this.closed) throw new Error("MCP catalog is closed");
     if (!options.host && !this.isValid) throw new Error("MCP catalog is invalid; refresh before calling tools");
     if (!options.host && !this.catalog.has(name)) throw new Error("Tool is not currently available or permitted");
-    // The model's arguments stay small; Kumi's own calls can carry a Set comparison.
-    if (Buffer.byteLength(JSON.stringify(args)) > (options.host ? 1_536 * 1024 : 16 * 1024)) throw new Error("Tool arguments are too large; narrow the request");
+    // The model's arguments stay small; Kumi's own calls can carry a Set comparison, however big the Set.
+    if (Buffer.byteLength(JSON.stringify(args)) > (options.host ? MAX_HOST_RESULT_BYTES : 16 * 1024)) throw new Error("Tool arguments are too large; narrow the request");
     const invalidation = this.invalidation;
-    const result = await this.endpoint.call(name, args, signal);
+    // A Remote Script older than its host (Live keeps the one it loaded when it started) refuses
+    // discovery pages over 100 rows: such a page is asked again at 100, and from then on for this bridge.
+    const big = name === "live_discover" && typeof args.limit === "number" && args.limit > SMALL_PAGE;
+    let result = await this.endpoint.call(name, big && this.smallPages ? { ...args, limit: SMALL_PAGE } : args, signal);
+    if (big && !this.smallPages && result.isError) {
+      const retried = await this.endpoint.call(name, { ...args, limit: SMALL_PAGE }, signal);
+      if (!retried.isError) { this.smallPages = true; result = retried; }
+    }
     signal.throwIfAborted();
     if (!options.host && (!this.isValid || invalidation !== this.invalidation)) throw new Error("MCP catalog changed during the call; result discarded");
     // Kumi's own calls (a Set export, a large clip's apply) may be bigger; what reaches the model is bounded where it's encoded.

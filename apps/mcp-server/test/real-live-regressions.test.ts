@@ -48,7 +48,7 @@ function checkingArguments(simulator: DeterministicLiveSimulator, seen: LiveInvo
 /** Live 12.4 applies transport writes and a track's arm on its next tick: the change shows only from
  * the second fresh read after the write; the write's own answer can't confirm it. */
 function applyingOnNextTick(simulator: DeterministicLiveSimulator, operations: readonly string[]): DeterministicLiveSimulator {
-  const invoke = simulator.invokeAsync.bind(simulator); const snapshot = simulator.snapshotAsync.bind(simulator);
+  const invoke = simulator.invokeAsync.bind(simulator); const snapshot = simulator.snapshotAsync.bind(simulator); const discover = simulator.discoverAsync.bind(simulator);
   const pending: Array<{ reads: number; apply: () => Promise<unknown> }> = [];
   simulator.invokeAsync = async (invocation: LiveInvocation) => {
     if (!operations.includes(invocation.operation)) return invoke(invocation);
@@ -56,10 +56,10 @@ function applyingOnNextTick(simulator: DeterministicLiveSimulator, operations: r
     pending.push({ reads: 0, apply: () => invoke(invocation) });
     return invocation.operation === "transport.set" ? { changed: true, revision: before.playback.revision } : invocation.operation === "scene.fire-selected" ? { fired: true } : { changed: true, revision: 1 };
   };
-  simulator.snapshotAsync = async (): Promise<LiveSnapshot> => {
-    for (const entry of [...pending]) if (entry.reads++ >= 1) { pending.splice(pending.indexOf(entry), 1); await entry.apply(); }
-    return snapshot();
-  };
+  // Any fresh read counts: a whole or focused snapshot, or Session playback alone.
+  const tick = async (): Promise<void> => { for (const entry of [...pending]) if (entry.reads++ >= 1) { pending.splice(pending.indexOf(entry), 1); await entry.apply(); } };
+  simulator.snapshotAsync = async (...args: Parameters<DeterministicLiveSimulator["snapshotAsync"]>): Promise<LiveSnapshot> => { await tick(); return snapshot(...args); };
+  simulator.discoverAsync = async (...args: Parameters<DeterministicLiveSimulator["discoverAsync"]>) => { await tick(); return discover(...args); };
   return simulator;
 }
 

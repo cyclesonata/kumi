@@ -129,10 +129,15 @@ test("list-changed notifications fire on connect, operation-set change, and poli
   assert.equal(emitted.filter((line) => line.includes("notifications/tools/list_changed")).length, 4);
 });
 
-test("policy specs validate profiles, patterns, and unknown-tool references", () => {
+test("policy specs validate profiles and patterns, and ignore names no tool has", () => {
   assert.throws(() => parseToolPolicySpec({ profile: "everything" }), /profile is unknown/);
   assert.throws(() => parseToolPolicySpec({ profile: "full", deny: ["not a tool"] }), /deny list is invalid/);
-  assert.throws(() => parseToolPolicySpec({ profile: "full", allow: ["live_nonexistent_*"] }), /matches no known tool/);
+  // A tool this bridge doesn't have (renamed, or from a newer one) is ignored: it matches nothing.
+  const named = (spec: ReturnType<typeof parseToolPolicySpec>) => resolveToolVisibility(new DeterministicLiveSimulator().status(), spec).filter((row) => row.policyAllowed).map((row) => row.entry.name);
+  const narrowed = parseToolPolicySpec({ profile: "full", allow: ["live_nonexistent_*", "live_status", "live_retired_tool"] });
+  assert.deepEqual(named(narrowed).filter((name) => name.startsWith("live_")), ["live_status"]);
+  assert.deepEqual(named(parseToolPolicySpec({ profile: "full", deny: ["live_retired_tool"] })), named(DEFAULT_TOOL_POLICY));
+  assert.equal(named(parseToolPolicySpec({ profile: "full", allow: ["live_retired_tool"] })).filter((name) => name.startsWith("live_")).length, 0);
   assert.throws(() => parseToolPolicySpec({ profile: "full", extra: true }), /unknown keys/);
   const spec = parseToolPolicySpec({ profile: "read-only", deny: ["live_browser_*"] });
   assert.equal(spec.profile, "read-only");

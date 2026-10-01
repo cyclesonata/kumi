@@ -79,17 +79,17 @@
       "minLength": 1,
       "maxLength": 64
      },
-     "maxItems": 32
+     "maxItems": 256
     },
     "budget": {
      "type": "integer",
      "minimum": 1,
-     "maximum": 10000
+     "maximum": 10000000
     },
     "limit": {
      "type": "integer",
      "minimum": 1,
-     "maximum": 100
+     "maximum": 100000
     },
     "cursor": {
      "type": "string",
@@ -119,7 +119,7 @@
       "minLength": 1,
       "maxLength": 1024
      },
-     "maxItems": 256,
+     "maxItems": 100000,
      "description": "Exact active playback target keys (trackRef|clipSlotRef|sceneRef) observed in a fresh live_discover/live_snapshot read."
     },
     "expectedRecording": {
@@ -383,7 +383,6 @@
     },
     "notes": {
      "type": "array",
-     "maxItems": 512,
      "items": {
       "type": "object",
       "properties": {
@@ -486,7 +485,6 @@
     },
     "noteIds": {
      "type": "array",
-     "maxItems": 512,
      "items": {
       "type": "integer",
       "minimum": 0
@@ -550,7 +548,7 @@
     "targetSceneIndex": {
      "type": "integer",
      "minimum": 0,
-     "maximum": 10000
+     "maximum": 100000
     },
     "arrangementPosition": {
      "type": "number",
@@ -702,7 +700,7 @@
     "targetSceneIndex": {
      "type": "integer",
      "minimum": 0,
-     "maximum": 10000
+     "maximum": 100000
     }
    },
    "required": [
@@ -863,7 +861,6 @@
     },
     "sends": {
      "type": "array",
-     "maxItems": 64,
      "items": {
       "type": "number",
       "minimum": 0,
@@ -910,7 +907,7 @@
  },
  {
   "name": "live_automation_preview",
-  "description": "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing.",
+  "description": "Read-only preflight for bounded Session clip envelope edits (create/delete envelope, insert/delete points) with conflict-aware fencing. insert-step: one value held from start for length (beats), as drawing a step does; it makes the envelope when there's none, and undo takes the step (or that envelope) away.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -920,8 +917,20 @@
       "create-envelope",
       "delete-envelope",
       "insert",
+      "insert-step",
       "delete-range"
      ]
+    },
+    "start": {
+     "type": "number",
+     "minimum": 0
+    },
+    "length": {
+     "type": "number",
+     "minimum": 0.001
+    },
+    "value": {
+     "type": "number"
     },
     "clipRef": {
      "type": "string",
@@ -935,7 +944,6 @@
     },
     "points": {
      "type": "array",
-     "maxItems": 512,
      "items": {
       "type": "object",
       "properties": {
@@ -1137,7 +1145,7 @@
     "index": {
      "type": "integer",
      "minimum": -1,
-     "maximum": 256
+     "maximum": 100000
     },
     "enabled": {
      "type": "boolean"
@@ -1296,6 +1304,16 @@
      "minLength": 1,
      "maxLength": 256
     },
+    "alsoTrackRefs": {
+     "type": "array",
+     "maxItems": 7,
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "description": "On start: more armed tracks recorded at the same time (renders of several sources in one pass); exactly these and the destination may be armed"
+    },
     "outputSafety": {
      "type": "object",
      "properties": {
@@ -1414,7 +1432,7 @@
     "beforePages": {
      "type": "array",
      "minItems": 1,
-     "maxItems": 512,
+     "maxItems": 2048,
      "items": {
       "type": "object"
      }
@@ -1422,7 +1440,7 @@
     "afterPages": {
      "type": "array",
      "minItems": 1,
-     "maxItems": 512,
+     "maxItems": 2048,
      "items": {
       "type": "object"
      }
@@ -1446,8 +1464,65 @@
   }
  },
  {
+  "name": "live_project_backup_preview",
+  "description": "Read-only preflight for one verified atomic backup of the current set inside its own directory.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "backup"
+     ]
+    },
+    "allowedRoot": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 4096,
+     "description": "Explicit absolute directory allowlisting the current Set for this backup."
+    }
+   },
+   "required": [
+    "confirmation",
+    "allowedRoot"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_project_backup_apply",
+  "description": "Apply an exact, unexpired project backup preview with confirmation and idempotency.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionId": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 128
+    },
+    "confirmation": {
+     "type": "string",
+     "enum": [
+      "apply"
+     ]
+    },
+    "idempotencyKey": {
+     "type": "string",
+     "minLength": 8,
+     "maxLength": 128
+    }
+   },
+   "required": [
+    "transactionId",
+    "confirmation",
+    "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
   "name": "live_device_parameter_preview",
-  "description": "Discover an authoritative device parameter and preview a bounded numeric change without mutation. values (instead of parameterRef and value) previews up to 64 parameters of the device as one change: one apply sets them all or none, and one undo restores them.",
+  "description": "Discover an authoritative device parameter and preview a bounded numeric change without mutation. values (instead of parameterRef and value) previews many parameters of the device (up to 10000) as one change: one apply sets them all or none, and one undo restores them.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -1467,7 +1542,7 @@
     "values": {
      "type": "array",
      "minItems": 1,
-     "maxItems": 64,
+     "maxItems": 10000,
      "items": {
       "type": "object",
       "properties": {
@@ -1531,7 +1606,7 @@
    "properties": {
     "tracks": {
      "type": "array",
-     "maxItems": 16,
+     "maxItems": 1000,
      "items": {
       "type": "object",
       "properties": {
@@ -1550,7 +1625,7 @@
        "index": {
         "type": "integer",
         "minimum": 0,
-        "maximum": 1024,
+        "maximum": 100000,
         "description": "Insertion index in the regular-track collection; omitted entries default to request order."
        }
       },
@@ -1563,7 +1638,7 @@
     },
     "scenes": {
      "type": "array",
-     "maxItems": 32,
+     "maxItems": 1000,
      "items": {
       "type": "object",
       "properties": {
@@ -1575,7 +1650,7 @@
        "index": {
         "type": "integer",
         "minimum": 0,
-        "maximum": 1024,
+        "maximum": 100000,
         "description": "Insertion index in the scene collection; omitted entries default to request order."
        }
       },
@@ -1701,7 +1776,7 @@
     "sceneIndex": {
      "type": "integer",
      "minimum": 0,
-     "maximum": 1023
+     "maximum": 100000
     },
     "name": {
      "type": "string",
@@ -1715,7 +1790,6 @@
     },
     "notes": {
      "type": "array",
-     "maxItems": 512,
      "items": {
       "type": "object",
       "properties": {
@@ -1944,12 +2018,39 @@
      "type": "string",
      "minLength": 8,
      "maxLength": 128
+    },
+    "discard": {
+     "type": "boolean",
+     "description": "For a track the client made as scratch (a render it recorded): delete it though it changed since"
     }
    },
    "required": [
     "transactionId",
     "confirmation",
     "idempotencyKey"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "live_transaction_release",
+  "description": "Give up the undo of applied transactions the client will never undo (a render's own steps, a search's settings), so they stop holding the host's transaction capacity. Nothing changes in Live.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "transactionIds": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 64,
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+     }
+    }
+   },
+   "required": [
+    "transactionIds"
    ],
    "additionalProperties": false
   }
@@ -2187,7 +2288,7 @@
     "sceneIndex": {
      "type": "integer",
      "minimum": 0,
-     "maximum": 10000
+     "maximum": 100000
     },
     "takeLaneRef": {
      "type": "string",
@@ -2385,7 +2486,7 @@
  },
  {
   "name": "live_note_edit_preview",
-  "description": "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs.",
+  "description": "Read-only preflight for clip note quantization (timing or pitch) and targeted note duplication by stable note IDs. select: select notes in the clip as a click in its editor would (exactly one of noteIds, all: true, none: true; nothing to undo). delete-range: delete the notes starting inside a region of pitch (fromPitch, pitchSpan) and time (fromTime, timeSpan, in beats); the preview counts them, and undo puts them back.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -2399,12 +2500,13 @@
      "enum": [
       "quantize",
       "quantize-pitch",
-      "duplicate"
+      "duplicate",
+      "select",
+      "delete-range"
      ]
     },
     "noteIds": {
      "type": "array",
-     "maxItems": 512,
      "items": {
       "type": "integer",
       "minimum": 0
@@ -2423,6 +2525,32 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 127
+    },
+    "all": {
+     "type": "boolean",
+     "const": true
+    },
+    "none": {
+     "type": "boolean",
+     "const": true
+    },
+    "fromPitch": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 127
+    },
+    "pitchSpan": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 128
+    },
+    "fromTime": {
+     "type": "number",
+     "minimum": 0
+    },
+    "timeSpan": {
+     "type": "number",
+     "minimum": 0.001
     }
    },
    "required": [
@@ -2476,7 +2604,6 @@
     },
     "noteIds": {
      "type": "array",
-     "maxItems": 1024,
      "items": {
       "type": "integer",
       "minimum": 0
@@ -2505,7 +2632,6 @@
     },
     "notes": {
      "type": "array",
-     "maxItems": 4096,
      "items": {
       "type": "object",
       "properties": {
@@ -2888,7 +3014,7 @@
  },
  {
   "name": "live_song_settings_preview",
-  "description": "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
+  "description": "Read-only preflight for song playback settings (global time signature, swing amount, clip-trigger quantization, MIDI recording quantization, and whether launching a clip or scene selects it) with exact prior-value capture. Signature and trigger-quantization changes affect playback feel immediately.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -2916,6 +3042,9 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 8
+    },
+    "selectOnLaunch": {
+     "type": "boolean"
     }
    },
    "additionalProperties": false
@@ -2954,7 +3083,7 @@
  },
  {
   "name": "live_transport_action_preview",
-  "description": "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). Audible actions are fenced but not undoable; emergency stop stays separate.",
+  "description": "Read-only preflight for momentary transport actions (start, continue, stop, play selection, scrub, tap tempo, nudge, re-enable automation, trigger Session record, force Link beat time). jump-by moves the song position by beats (negative jumps back); jump-in-running-clip (trackRef, beats) jumps in the Session clip playing on a track. Audible actions are fenced but not undoable; emergency stop stays separate.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -2972,11 +3101,24 @@
       "re-enable-automation",
       "trigger-session-record",
       "force-link-beat-time",
-      "stop-all-clips"
+      "stop-all-clips",
+      "back-to-arrangement",
+      "jump-by",
+      "jump-in-running-clip"
      ]
     },
     "beatTime": {
      "type": "number"
+    },
+    "beats": {
+     "type": "number",
+     "minimum": -1000000,
+     "maximum": 1000000
+    },
+    "trackRef": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 256
     }
    },
    "required": [
@@ -3392,7 +3534,6 @@
     },
     "sends": {
      "type": "array",
-     "maxItems": 64,
      "items": {
       "type": "number",
       "minimum": 0,
@@ -3557,7 +3698,7 @@
     "index": {
      "type": "integer",
      "minimum": 0,
-     "maximum": 256
+     "maximum": 100000
     },
     "targetTrackRef": {
      "type": "string",
@@ -3672,7 +3813,7 @@
  },
  {
   "name": "live_drum_pad_preview",
-  "description": "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad). load-samples does that for up to 16 pads of one rack as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
+  "description": "Read-only preflight for drum pad note and solo, deleting all chains inside one pad (explicitly non-undoable), or loading a sample onto an empty pad as a new Simpler (load-sample: the rack's deviceRef, the pad's note and a sample file with its allowedRoot; undo clears the pad; sample-chain does the same without Live's Browser, through Kumi's Live extension). load-samples does that for up to 128 pads of one rack (a whole Drum Rack) as one change (deviceRef and pads, each with its note, filePath and allowedRoot): all load or none, and one undo clears them. instrument Drum Sampler loads the sample into Live 12's Drum Sampler instead of Simpler, through a preset the bridge writes to the User Library's Kumi folder for Live's Browser and removes once loaded.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3682,6 +3823,7 @@
       "set",
       "delete-all-chains",
       "load-sample",
+      "sample-chain",
       "load-samples"
      ]
     },
@@ -3723,7 +3865,7 @@
     "pads": {
      "type": "array",
      "minItems": 1,
-     "maxItems": 16,
+     "maxItems": 128,
      "items": {
       "type": "object",
       "properties": {
@@ -3824,12 +3966,12 @@
     "selectedVariationIndex": {
      "type": "integer",
      "minimum": -1,
-     "maximum": 256
+     "maximum": 100000
     },
     "index": {
      "type": "integer",
      "minimum": -1,
-     "maximum": 256
+     "maximum": 100000
     },
     "sourceIndex": {
      "type": "integer",
@@ -3882,7 +4024,7 @@
  },
  {
   "name": "live_device_specialized_preview",
-  "description": "Read-only preflight for specialized device families: Drift, Drum Cell, Eq8, Hybrid Reverb, Meld, and plug-ins (presets and editor state).",
+  "description": "Read-only preflight for specialized device families: Drift (including its modulation matrix: each slot's source or target index, from the device row's drift mod*List names), Drum Cell, Eq8, Hybrid Reverb, Meld, plug-ins (presets and editor state), a Simpler's sample (sample: its Beats, Complex Pro, Texture and Tones warp settings and its slicing settings, as the device row's sample shows them), and Wavetable (wavetable: each oscillator's wavetable category and index, from the row's categories and oscillator*Wavetables, and effect mode, the filter routing and unison).",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -3894,8 +4036,115 @@
       "eq8",
       "hybrid-reverb",
       "meld",
-      "plugin"
+      "plugin",
+      "sample",
+      "wavetable"
      ]
+    },
+    "beatsGranulationResolution": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "beatsTransientEnvelope": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "beatsTransientLoopMode": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "complexProEnvelope": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "complexProFormants": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "textureFlux": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "textureGrainSize": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "tonesGrainSize": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingStyle": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingBeatDivision": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingRegionCount": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "slicingSensitivity": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "oscillator1WavetableCategory": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator1WavetableIndex": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2WavetableCategory": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2WavetableIndex": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator1EffectMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "oscillator2EffectMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "filterRouting": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "unisonMode": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
+    },
+    "unisonVoiceCount": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100000
     },
     "deviceRef": {
      "type": "string",
@@ -3916,6 +4165,66 @@
      "type": "integer",
      "minimum": 0,
      "maximum": 8
+    },
+    "modFilterSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modFilterSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modLfoSource": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modPitchSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modPitchSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modShapeSource": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modSource3": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget1": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget2": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
+    },
+    "modTarget3": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000
     },
     "gain": {
      "type": "number",
@@ -4267,7 +4576,7 @@
       "sceneIndex": {
        "type": "integer",
        "minimum": 0,
-       "maximum": 10000
+       "maximum": 100000
       }
      },
      "required": [

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { AsyncLiveAdapter, LiveAdapter, LiveOperationContext, LiveSnapshot, LiveStatus } from "../live.js";
+import { LiveViews, type AsyncLiveAdapter, type LiveAdapter, type LiveOperationContext, type LiveSnapshot, type LiveStatus } from "../live.js";
 import { canonical, fingerprint, flattenDeviceRows, invokeCheckpoint, isNonEmptyString, isObject, parameterAuthority, parameterRevision, parameterTarget, sameParameterValue, type MutationCheckpoint } from "./batch.js";
 
 /**
@@ -288,7 +288,9 @@ export class DeviceStateTransactionManager {
   private static readonly MAX_RECORDS = 64;
   private readonly records = new Map<string, DeviceStateRecord>();
   private readonly idempotency = new Map<string, { transactionId: string; result: unknown }>();
-  constructor(private readonly adapter: LiveAdapter) {}
+  private readonly views: LiveViews;
+  /** `views` are the host's shared reads (see LiveViews); a manager of its own reads through its own. */
+  constructor(private readonly adapter: LiveAdapter, views?: LiveViews) { this.views = views ?? new LiveViews(() => this.asyncAdapter()); }
 
   private retain(record: DeviceStateRecord): void {
     const now = Date.now(); const protectedStates = new Set(["applying", "applied", "undoing", "uncertain"]);
@@ -320,7 +322,7 @@ export class DeviceStateTransactionManager {
    *  hierarchy-authority digests for every applicable parameter. */
   async previewAsync(plan: DeviceStatePlan, mode: "recall" | "morph", amount?: number): Promise<unknown> {
     const status = this.require();
-    const snapshot = await this.asyncAdapter().snapshotAsync();
+    const snapshot = await this.views.viewFor(undefined, [plan.deviceRef, ...plan.dispositions.map((row) => row.parameterRef)]);
     const steps: DeviceStateStep[] = plan.dispositions.filter((row) => row.disposition === "applicable").map((row) => {
       const target = parameterTarget(snapshot, row.deviceRef as string, row.parameterRef as string);
       const authority = parameterAuthority(snapshot, row.parameterRef as string);
@@ -346,14 +348,14 @@ export class DeviceStateTransactionManager {
       if (record.undoSteps[index]?.completed) continue;
       const checkpoint = record.undoSteps[index]!;
       if (!checkpoint.invocation) {
-        const snapshot = await adapter.snapshotAsync(context);
+        const snapshot = await this.views.viewFor(context, [step.deviceRef, step.parameterRef]);
         const target = parameterTarget(snapshot, step.deviceRef, step.parameterRef);
         const authority = parameterAuthority(snapshot, step.parameterRef);
         if (!sameParameterValue(target.parameter.value, step.proposedValue) || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) parameter value or identity changed after apply`);
         checkpoint.invocation = { operation: "device.parameter.set", args: this.stepArgs(snapshot, step, step.priorValue, parameterRevision(target.parameter)) };
       }
       await invokeCheckpoint(adapter, checkpoint, context);
-      const verifiedSnapshot = await adapter.snapshotAsync(context);
+      const verifiedSnapshot = await this.views.viewFor(context, [step.deviceRef, step.parameterRef]);
       const verified = parameterTarget(verifiedSnapshot, step.deviceRef, step.parameterRef);
       if (!sameParameterValue(verified.parameter.value, step.priorValue) || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state ${mode} step ${index} (${step.path}) prior-value restoration identity or value was not confirmed`);
       checkpoint.completed = true;
@@ -373,7 +375,7 @@ export class DeviceStateTransactionManager {
     if (record.state === "uncertain" && !reconciliation) throw new Error("device state is uncertain; reconcile with the exact original idempotency key");
     if (record.state !== "previewed" && !reconciliation) throw new Error("device state transaction is no longer applicable");
     const adapter = this.asyncAdapter();
-    if (reconciliation) await adapter.snapshotAsync(context);
+    if (reconciliation) await this.views.view(context, [], ["set"]);
     const status = this.require();
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; preview again");
     if (reconciliation && record.recoveryMode === "compensate") {
@@ -390,14 +392,14 @@ export class DeviceStateTransactionManager {
         if (step.completed) continue;
         const replayed = step.invocation !== undefined;
         if (!step.invocation) {
-          const snapshot = await adapter.snapshotAsync(context);
+          const snapshot = await this.views.viewFor(context, [step.deviceRef, step.parameterRef]);
           const target = parameterTarget(snapshot, step.deviceRef, step.parameterRef);
           const authority = parameterAuthority(snapshot, step.parameterRef);
           if (!sameParameterValue(target.parameter.value, step.priorValue) || parameterRevision(target.parameter) !== step.priorRevision || fingerprint(authority) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) parameter identity, value, or revision changed since preview`);
           step.invocation = { operation: "device.parameter.set", args: this.stepArgs(snapshot, step, step.proposedValue, step.priorRevision) };
         }
         await invokeCheckpoint(adapter, step, context);
-        const verifiedSnapshot = await adapter.snapshotAsync(context);
+        const verifiedSnapshot = await this.views.viewFor(context, [step.deviceRef, step.parameterRef]);
         const verified = parameterTarget(verifiedSnapshot, step.deviceRef, step.parameterRef);
         if (!sameParameterValue(verified.parameter.value, step.proposedValue) || parameterRevision(verified.parameter) <= step.priorRevision || fingerprint(parameterAuthority(verifiedSnapshot, step.parameterRef)) !== step.authorityDigest) throw new Error(`device state step ${index} (${step.path}) identity or postcondition was not confirmed`);
         step.completed = true; step.result = { index, path: step.path, value: verified.parameter.value, revision: parameterRevision(verified.parameter), ...(replayed ? { replayed: true } : {}) };
@@ -439,7 +441,7 @@ export class DeviceStateTransactionManager {
     const reconciliation = record.state === "uncertain" && record.recoveryMode === "undo" && record.undoKey === idempotencyKey;
     if (!reconciliation && record.state !== "applied") throw new Error("Only an applied or exact-key uncertain device-state transaction can be undone");
     const adapter = this.asyncAdapter();
-    if (reconciliation) await adapter.snapshotAsync(context);
+    if (reconciliation) await this.views.view(context, [], ["set"]);
     const status = this.require();
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
     record.state = "undoing"; record.recoveryMode = "undo"; record.undoKey = idempotencyKey;
