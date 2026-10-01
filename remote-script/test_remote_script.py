@@ -6795,6 +6795,32 @@ class ExplicitDeletionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "locator collection changed"): mapper.invoke("locator.delete", {**locator_request, "expectedCollectionRevision": "0" * 64}, transaction)
         self.assertEqual(mapper.invoke("locator.delete", locator_request, transaction), {"deleted": locator["ref"]}); self.assertEqual(song.cue_points, [])
 
+    def test_a_group_track_goes_with_every_track_inside_it(self):
+        """Live deletes a group with what's inside it, nested groups too: the deletion expects exactly that."""
+        def grouped_song(live_keeps_members=False):
+            song = FakeSong(); song.tracks = [FakeTrack() for _ in range(6)]
+            for index, track in enumerate(song.tracks): track.name = f"T{index}"
+            group, nested = song.tracks[1], song.tracks[3]; group.is_foldable = True; nested.is_foldable = True
+            song.tracks[2].group_track = group; nested.group_track = group; song.tracks[4].group_track = nested
+            def delete_track(index):
+                gone = song.tracks[index]
+                def inside(track):
+                    parent, depth = track, 0
+                    while parent is not None and depth < 8:
+                        if parent is gone: return True
+                        parent, depth = getattr(parent, "group_track", None), depth + 1
+                    return False
+                song.tracks = [track for track in song.tracks if track is not gone and (live_keeps_members or not inside(track))]
+            song.delete_track = delete_track
+            return song
+        song = grouped_song(); mapper = LiveObjectMapper(song, provenance="real-live"); group = mapper.snapshot()["tracks"][1]
+        request = {"ref": group["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": group["objectIdentity"], "explicitDeletion": True}
+        self.assertEqual(mapper.invoke("track.delete", request, "transaction-group"), {"deleted": group["ref"]})
+        self.assertEqual([track.name for track in song.tracks], ["T0", "T5"])
+        # A Live that left the tracks inside behind would have done something else than asked: refused.
+        song = grouped_song(live_keeps_members=True); mapper = LiveObjectMapper(song, provenance="real-live"); group = mapper.snapshot()["tracks"][1]
+        with self.assertRaisesRegex(ValueError, "did not preserve exact remaining sibling order"): mapper.invoke("track.delete", {"ref": group["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": group["objectIdentity"], "explicitDeletion": True}, "transaction-group")
+
     def test_objects_an_explicit_deletion_moved_lose_their_ownership(self):
         song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack()]; mapper = LiveObjectMapper(song, provenance="real-live")
         made = mapper.invoke("track.create", {"name": "Made later", "kind": "midi", "index": 2, "expectedStructureRevision": mapper._structure_revision()}, "transaction-maker")

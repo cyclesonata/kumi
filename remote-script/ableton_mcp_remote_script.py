@@ -4529,13 +4529,26 @@ class LiveObjectMapper:
         if not hmac.compare_digest(expected_identity, self._capture_object_identity(obj)): raise ValueError("Session object identity changed; deletion refused")
         deleter = getattr(self.song, "delete_track" if operation == "track.delete" else "delete_scene", None)
         if not callable(deleter): raise ValueError("object deletion is unavailable")
-        before_identity_order = [self._capture_object_identity(item) for item in collection]; expected_identity_order = list(before_identity_order); expected_identity_order.pop(index); deletion_error: BaseException | None = None
+        # Live deletes a group track with every track inside it (nested groups' too), as its UI does.
+        gone = {index} | (self._grouped_under(collection, obj) if kind == "track" and self._track_kind(obj) == "group" else set())
+        before_identity_order = [self._capture_object_identity(item) for item in collection]; expected_identity_order = [identity for position, identity in enumerate(before_identity_order) if position not in gone]; deletion_error: BaseException | None = None
         try: deleter(index)
         except BaseException as error: deletion_error = error
         after = self._items(getattr(self.song, "tracks" if kind == "track" else "scenes", [])); after_identity_order = [self._capture_object_identity(item) for item in after]
         if after_identity_order != expected_identity_order: raise ValueError("Session object deletion did not preserve exact remaining sibling order") from deletion_error
         self.refs.delete(reference)
         return {"deleted": reference}
+
+    def _grouped_under(self, tracks: list[Any], group: Any) -> set[int]:
+        """The positions of the tracks inside a group track, nested groups' too (each track's
+        group_track, up to the top)."""
+        identity = self._capture_object_identity(group); inside: set[int] = set()
+        for position, track in enumerate(tracks):
+            parent, depth = self._read_attr(track, "group_track"), 0
+            while parent is not None and depth < 64:
+                if self._capture_object_identity(parent) == identity: inside.add(position); break
+                parent, depth = self._read_attr(parent, "group_track"), depth + 1
+        return inside
 
     def _locator_mutate(self, args: dict[str, Any], delete: bool) -> dict[str, Any]:
         if not self._locator_supported():

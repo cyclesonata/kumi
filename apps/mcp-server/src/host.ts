@@ -5658,8 +5658,9 @@ export class McpHost {
     if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
     if (track.kind === "return") throw new Error("a return track is deleted with live_track_structure (action delete-return)");
     if (track.kind === "main") throw new Error("the Main track can't be deleted");
-    // Deleting a group deletes the tracks in it too: say which.
-    const grouped = snapshot.tracks.filter((candidate) => (candidate as unknown as { groupTrackRef?: unknown }).groupTrackRef === reference).map((candidate) => candidate.name);
+    // Live deletes a group track with every track inside it, nested groups' too: say which.
+    const inside = (group: string, depth: number): string[] => depth > 64 ? [] : snapshot.tracks.filter((candidate) => (candidate as unknown as { groupTrackRef?: unknown }).groupTrackRef === group).flatMap((candidate) => [candidate.name, ...inside(candidate.ref, depth + 1)]);
+    const grouped = inside(reference, 0);
     return { operation: "track.delete", payload: { ref: reference, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: track.objectIdentity, explicitDeletion: true }, target: { ref: reference, name: track.name, kind: track.kind, ...(grouped.length ? { alsoDeletes: grouped } : {}) } };
   }
 

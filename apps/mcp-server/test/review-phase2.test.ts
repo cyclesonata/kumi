@@ -131,3 +131,12 @@ test("a Wavetable modulation's undo is refused once the matrix's targets changed
   assert.equal((await undo(set.previewed.transactionId)).state, "undone");
 });
 
+test("a group track goes with every track inside it, nested groups' too, as Live deletes a group", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  track(simulator, "track:bus", "group"); track(simulator, "track:kick", "regular", "audio", { groupTrackRef: "track:bus" });
+  track(simulator, "track:tops", "group", undefined, { groupTrackRef: "track:bus" }); track(simulator, "track:hat", "regular", "audio", { groupTrackRef: "track:tops" }); track(simulator, "track:vox", "regular", "audio");
+  const { change } = hosted(simulator);
+  const deleted = await change("live_track_delete_preview", { trackRef: "track:bus" });
+  assert.deepEqual(deleted.previewed.track.alsoDeletes, ["kick", "tops", "hat"]);
+  assert.deepEqual(state(simulator).tracks.map((row) => row.name), ["Drums", "vox"]);
+});

@@ -853,7 +853,7 @@ const toolDescriptors = [
   },
   {
     name: "live_track_delete_preview",
-    description: "Preview deleting one audio, MIDI or group track (trackRef from discovery) with its clips and devices; a group takes the tracks in it (alsoDeletes names them). Fenced to the track and the Set's tracks and scenes as they are now. Return tracks go with live_track_structure; Main stays. The deletion is kept: Kumi can't bring it back; Live's undo can.",
+    description: "Preview deleting one audio, MIDI or group track (trackRef from discovery) with its clips and devices; a group goes with every track inside it, nested groups' too, as Live deletes a group (alsoDeletes names them). Fenced to the track and the Set's tracks and scenes as they are now. Return tracks go with live_track_structure; Main stays. The deletion is kept: Kumi can't bring it back; Live's undo can.",
     inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["trackRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: true, openWorldHint: true },
   },

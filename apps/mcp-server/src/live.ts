@@ -983,7 +983,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const index = this.state.tracks.findIndex((track) => track.ref === trackRef);
         if (index < 0) throw new Error(`unknown track reference: ${trackRef}`);
         if (args.expectedObjectIdentity !== this.state.tracks[index]!.objectIdentity) throw new Error("track object identity changed; deletion refused");
+        // As Live: a group track goes with every track inside it, nested groups' too.
+        const inside = (group: LiveRef): LiveRef[] => this.state.tracks.filter((track) => track.groupTrackRef === group).flatMap((track) => [track.ref, ...inside(track.ref)]);
+        const members = new Set(this.state.tracks[index]!.kind === "group" ? inside(trackRef) : []);
         const [deleted] = this.state.tracks.splice(index, 1);
+        if (members.size) this.state.tracks = this.state.tracks.filter((track) => !members.has(track.ref));
         this.emit({ type: "object", ref: trackRef, payload: { operation, track: deleted } });
         return { deleted: trackRef };
       }
