@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname } from "node:path";
+import { basename, dirname, extname, isAbsolute } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -13,7 +13,7 @@ import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
 import { AllowedTools, MODEL_TOOLS } from "../../mcp/allowed-tools.js";
 import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, ObservationError, PARENTS, payload, queryKey, setIdentity, statusPayload } from "./context.js";
 import { foldTracks } from "./fold.js";
-import { defaultSampleFolders, findSamples, folderPath, userLibrary, type Sample } from "./samples.js";
+import { defaultSampleFolders, findSamples, folderPath, SAMPLE_EXTENSIONS, userLibrary, type Sample } from "./samples.js";
 import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
@@ -55,7 +55,18 @@ const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: 
   limit: { type: "integer", minimum: 1, maximum: 50, description: "How many to return (20 when unset)" },
 } };
 
-const MAX_CHANGES_PER_TURN = 500;
+const MAX_CHANGES_PER_TURN = 5_000;
+
+/** Any audio file on this computer by its path (absolute, or from ~), as a sample for a change. */
+function audioFileAt(path: string): Sample | undefined {
+  const full = path.startsWith("~/") || path.startsWith("~\\") ? `${homedir()}${path.slice(1)}` : path;
+  if (!isAbsolute(full) || !SAMPLE_EXTENSIONS.has(extname(full).toLowerCase())) return undefined;
+  try {
+    const stat = statSync(full);
+    return stat.isFile() ? { name: basename(full).replace(/\.[^.]+$/, ""), path: full, folder: dirname(full), bytes: stat.size } : undefined;
+  } catch { return undefined; }
+}
+
 /** What a tool says when Live went away (or the Set changed) during the answer. */
 const NO_CURRENT_LIVE = "Kumi has no current view of Live: it disconnected, or the Set changed. Kumi reconnects on its own when Live is back; tell the producer, and don't describe earlier readings as current.";
 const MAX_CHANGE_RECORDS = 20_000;
@@ -166,7 +177,7 @@ export function createAbletonIntegration(options: Options): Integration {
   const known = new Map<string, KnownTrack>();
   /** Kumi's changes while this bridge connection lives; its transactions are what undo uses. */
   const changes = new Map<string, Applied>();
-  /** Samples find_samples returned, by path, with the folder searched: what load_sample may load. */
+  /** Samples find_samples returned, by path, with the folder searched (any other audio file loads by its path too). */
   const samples = new Map<string, Sample>();
   let changesThisTurn = 0;
   /** Samples Kumi picked itself in this answer, so random picks don't repeat. */
@@ -667,7 +678,7 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Preview and apply one change as a single step, then record it for HISTORY. */
   function changeContext(signal: AbortSignal): ChangeContext {
     return {
-      sample: (path) => samples.get(path),
+      sample: (path) => samples.get(path) ?? audioFileAt(path),
       async parameters(deviceRef) {
         return (await deviceParameters(deviceRef, ["ref", "name"], signal))
           .filter((row): row is JsonObject & { ref: string; name: string } => typeof row.ref === "string" && typeof row.name === "string").map((row) => ({ ref: row.ref, name: row.name }));
@@ -991,7 +1002,7 @@ export function createAbletonIntegration(options: Options): Integration {
         if (item.tool === WAIT) {
           // Recording and listening take as long as they take: wait by the clock, or by the beat at the Set's tempo.
           const seconds = typeof stepInput.seconds === "number" ? stepInput.seconds : typeof stepInput.beats === "number" && currentTempo ? stepInput.beats * 60 / currentTempo : NaN;
-          if (!(seconds > 0 && seconds <= 120)) return stop("wait takes seconds (up to 120) or beats");
+          if (!(seconds > 0 && seconds <= 1_800)) return stop("wait takes seconds (up to 1800) or beats");
           await delay(seconds * 1000, undefined, { signal });
           done.push({ step, changed: `waited ${Math.round(seconds * 10) / 10} s`, change: null });
           index++;
@@ -1093,7 +1104,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) { await tools.refresh(signal); assertLease(lease, signal); }
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
-      if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; stop and check with the producer before changing more`);
+      if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; carry on in the next one`);
       requireFreshReferences(input);
       const prepared = kind.prepare ? await kind.prepare(input, changeContext(signal)) : input;
       if (typeof prepared === "string") return { text: prepared, isError: true };
@@ -1257,7 +1268,7 @@ export function createAbletonIntegration(options: Options): Integration {
       if (typeof prepared === "string") return { text: prepared, isError: true };
       // Live records into the Set's folder (an unsaved Set's into its own, on the system disk).
       if (kind.tool === "record" && input.action === "start" && !cleanup) {
-        const full = await (options.lowDisk ?? lowDisk)(project?.path ? dirname(project.path) : homedir(), 500 * MB, "Live records to");
+        const full = await (options.lowDisk ?? lowDisk)(project?.path ? dirname(project.path) : homedir(), 100 * MB, "Live records to");
         if (full) return { text: `${full} Nothing was recorded.`, isError: true };
       }
       const previewed = await tools.call(kind.preview, prepared, signal, { host: true }); if (!cleanup) assertLease(lease, signal);
@@ -2253,7 +2264,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       } }] : [];
     // Live's own undo, for what the producer did in Live; Kumi's changes undo exactly through undo_change.
     const liveUndo: KernelTool[] = supported({ since: FULL_CONTROL_BRIDGE }) && tools!.has("live_song_undo") && tools!.has("live_song_redo") ? [{ name: "undo_in_live",
-      description: "Live's own undo (or redo, with redo: true), once, exactly like Cmd-Z in Live: only when the producer asks to undo something they did in Live themselves. Never for Kumi's own changes: undo_change undoes those exactly, and this undoes whatever Live did last.",
+      description: "Live's own undo (or redo, with redo: true), once, exactly like Cmd-Z in Live: for something the producer did in Live themselves, or a change of Kumi's that undo_change can't take back (a deletion, a crop). For Kumi's other changes use undo_change, which undoes exactly that change; this undoes whatever Live did last.",
       inputSchema: { type: "object", additionalProperties: false, properties: { redo: { type: "boolean", description: "Live's redo instead" } } },
       execute: async (input, signal) => {
         const redo = input.redo === true;

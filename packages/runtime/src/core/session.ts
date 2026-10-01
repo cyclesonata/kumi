@@ -24,7 +24,7 @@ interface Options {
   onEvent: (event: SessionEvent) => void;
   /** How long starting, refreshing or undoing may take. */
   timeoutMs?: number;
-  /** How long a turn may go without progress (streamed text, tool steps) before it stops; timeoutMs, or 3 minutes. */
+  /** How long a turn may go without progress (streamed text, tool steps) before it stops; timeoutMs, or 10 minutes (long thinking, or a long device written in one call). */
   idleTimeoutMs?: number;
   /** However much progress it makes, a turn stops after this long. */
   turnLimitMs?: number;
@@ -96,8 +96,8 @@ const span = (ms: number) => {
 
 export function createSession(options: Options): SessionController {
   const timeoutMs = options.timeoutMs ?? 120_000;
-  const idleMs = options.idleTimeoutMs ?? options.timeoutMs ?? 180_000;
-  const turnLimitMs = options.turnLimitMs ?? 20 * 60_000;
+  const idleMs = options.idleTimeoutMs ?? options.timeoutMs ?? 600_000;
+  const turnLimitMs = options.turnLimitMs ?? 60 * 60_000;
   const budget: MatchBudget = { ...MATCH_BUDGET, ...(options.match || {}) };
   /** The match run this answer is in, and the last one (for "keep going"). */
   let matching: MatchRun | undefined; let lastRun: MatchRun | undefined;
@@ -845,6 +845,8 @@ export function createSession(options: Options): SessionController {
         const carried = options.match !== false && !startsMatch(input) && KEEP_GOING.test(input) && lastRun !== undefined;
         if (!carried) judgeLesson(input);
         const run = options.match === false ? undefined : startsMatch(input) ? new MatchRun(input, budget) : carried ? MatchRun.carryOn(lastRun!, budget) : undefined;
+        // "keep going" carries on the run just before; another request in between ends it.
+        if (!run) lastRun = undefined;
         matching = run;
         // A new run reads what won in earlier ones first.
         const brief = run && !carried ? playbookBrief(await playbookSerial((store) => store.list()) ?? [], input) : "";

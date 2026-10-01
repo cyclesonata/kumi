@@ -109,15 +109,15 @@ test("find_samples is offered alongside Live's reads and finds samples in the fo
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 
-test("load_sample puts a sample find_samples returned into a new Simpler, as one change with its undo", async () => {
+test("load_sample puts a sample (one find_samples returned, or any audio file by its path) into a new Simpler, as one change with its undo", async () => {
   const b = await opened();
   const folder = mkdtempSync(join(tmpdir(), "kumi-load-"));
   try {
     writeFileSync(join(folder, "Kick Deep.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
     await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
-    const invented = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(folder, "Kick Deep.wav") }, signal());
-    assert.equal(invented.isError, true); assert.match(invented.text, /find_samples/);
-    assert(!b.requests.some((request) => request.name === "live_device_preview"), "a path search didn't return goes nowhere");
+    const missing = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(folder, "Missing.wav") }, signal());
+    assert.equal(missing.isError, true); assert.match(missing.text, /path of an audio file/);
+    assert(!b.requests.some((request) => request.name === "live_device_preview"), "a file that isn't there goes nowhere");
     await tool(b.tools, "find_samples").execute({ folders: [folder], words: ["kick"] }, signal());
     const result = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(folder, "Kick Deep.wav") }, signal());
     assert.equal(result.isError, false, result.text);
@@ -126,6 +126,13 @@ test("load_sample puts a sample find_samples returned into a new Simpler, as one
     const change = b.records.at(-1)!;
     assert.equal(change.title, "Loaded “Kick Deep” into a new Simpler on Fixture Bass"); assert.equal(change.family, "device");
     assert.equal((await b.integration.undo!(change.id, signal())).state, "undone");
+    // Any audio file on the computer loads by its path, without a search first.
+    const own = mkdtempSync(join(tmpdir(), "kumi-own-"));
+    writeFileSync(join(own, "Snare Own.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
+    const direct = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(own, "Snare Own.wav") }, signal());
+    assert.equal(direct.isError, false, direct.text);
+    assert.deepEqual(b.requests.filter((request) => request.name === "live_device_preview").at(-1)!.args, { action: "insert", trackRef: "7:track:0", deviceName: "Simpler", filePath: join(own, "Snare Own.wav"), allowedRoot: own });
+    rmSync(own, { recursive: true, force: true });
     const schema = b.tools.find((item) => item.name === "load_sample")!.inputSchema as { required: string[] };
     assert.deepEqual(schema.required, ["trackRef", "sample"], "the model names a track and a found sample, nothing about files or roots");
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
@@ -204,7 +211,7 @@ test("a Drum Rack kit is one make_changes call: a step with each runs once per p
     assert.deepEqual(pads.map((args) => [args.deviceRef, args.note]), [["7:device:2:0", 36], ["7:device:2:0", 37], ["7:device:2:0", 38]]);
     assert.equal(new Set(pads.map((args) => args.filePath)).size, 3, "three different samples");
     assert.deepEqual(b.records.slice(-3).map((record) => record.title.replace(/“.*”/, "“…”")), ["Loaded “…” onto Drum Rack pad C1", "Loaded “…” onto Drum Rack pad C#1", "Loaded “…” onto Drum Rack pad D1"]);
-    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 501 }, () => 120) } }] }, signal());
+    const wrong = await tool(b.tools, "make_changes").execute({ steps: [{ tool: "set_tempo", input: {}, each: { tempo: Array.from({ length: 5_001 }, () => 120) } }] }, signal());
     assert.equal(wrong.isError, true, "an each that runs past a turn's changes is refused whole"); assert.match(wrong.text, /steps in all/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
@@ -528,12 +535,12 @@ test("new tracks go after the last one; references after a new track are retired
   } finally { await b.integration.close(); }
 });
 
-test("one answer can make up to 500 changes, then checks with the producer", async () => {
+test("one answer can make up to 5,000 changes, then carries on in the next", async () => {
   const b = await opened();
   try {
-    for (let count = 0; count < 500; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + count }, signal())).isError, false);
+    for (let count = 0; count < 5_000; count++) assert.equal((await tool(b.tools, "set_tempo").execute({ tempo: 100 + (count % 100) }, signal())).isError, false);
     const over = await tool(b.tools, "set_tempo").execute({ tempo: 150 }, signal());
-    assert.equal(over.isError, true); assert.match(over.text, /check with the producer/);
+    assert.equal(over.isError, true); assert.match(over.text, /carry on in the next one/);
     const next = await b.integration.observe(signal());
     assert.equal((await tool(next.tools, "set_tempo").execute({ tempo: 150 }, signal())).isError, false, "the next answer starts a fresh count");
   } finally { await b.integration.close(); }

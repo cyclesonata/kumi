@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import type { AuditionEvent, AuditionRequest, ChangeRecord, KernelEvent, Observation, SessionController, SessionEvent, TurnResult } from "../src/core/contracts.js";
-import { MATCH_BUDGET, MatchRun, type MatchBudget, type MatchStatus } from "../src/core/match-run.js";
+import { KEEP_GOING, MATCH_BUDGET, MatchRun, startsMatch, type MatchBudget, type MatchStatus } from "../src/core/match-run.js";
 import { MIX_CANDIDATE } from "../src/core/contracts.js";
 import { createSession } from "../src/core/session.js";
 import { createPlaybookStore, matchedFrom, playbookBrief, type Lesson, type PlaybookStore } from "../src/core/playbook.js";
@@ -81,18 +81,28 @@ test("a plateau is accepted only after something genuinely different was tried; 
   await r.session.close();
 });
 
-test("the budget bounds a run that keeps creeping up; a request that isn't matching runs once; keep going carries a run on", async () => {
-  const r = rig([listens(50), listens(54), listens(58), () => {}, () => {}, listens(70), () => {}], { budget: { rounds: 2 } });
+test("the budget bounds a run that keeps creeping up; keep going right after carries it on; a request that isn't matching runs once and ends it", async () => {
+  const r = rig([listens(50), listens(54), listens(58), () => {}, listens(70), () => {}, () => {}, () => {}, () => {}, () => {}], { budget: { rounds: 2 } });
   await r.session.start();
   await r.session.submit("match this reference");
   assert.equal(r.status().at(-1)!.stop, "budget");
   assert.match(r.asked[3]!, /That's the run's budget spent/);
-  await r.session.submit("make a bass");
-  assert.equal(r.asked.length, 5, "one call, no run");
   await r.session.submit("keep going");
-  assert.match(r.asked[6]!, /^\[Kumi\] Score 70% \(best: Drift\)/, "the run carried on from where it got to");
+  assert.match(r.asked[5]!, /^\[Kumi\] Score 70% \(best: Drift\)/, "the run carried on from where it got to");
   assert.equal(r.status().at(-1)!.first, 50);
+  const before = r.asked.length;
+  await r.session.submit("make a bass");
+  assert.equal(r.asked.length, before + 1, "one call, no run");
+  await r.session.submit("keep going");
+  assert.equal(r.asked.length, before + 2, "after another request, keep going is just a request");
   await r.session.close();
+});
+
+test("only a request with something to match starts a run: a reference, a file, a link, \"like this\"", () => {
+  for (const request of ["match this reference", "recreate the sound from https://youtu.be/x", "make it sound like this", "make my pad sound like ~/ref.wav", "recreate this sound"]) assert.ok(startsMatch(request), request);
+  for (const request of ["match the kick level to the snare", "make it sound like a cathedral", "recreate the chorus with more energy"]) assert.ok(!startsMatch(request), request);
+  for (const request of ["keep going", "Carry on.", "keep trying with a wavetable"]) assert.ok(KEEP_GOING.test(request), request);
+  for (const request of ["more reverb", "again, but darker", "continue the bassline into bar 9"]) assert.ok(!KEEP_GOING.test(request), request);
 });
 
 test("when something changed since the last audition, the harness auditions it itself before deciding", async () => {
