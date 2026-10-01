@@ -485,15 +485,22 @@ def apply_control(command):
 
 # The bridge serves its sockets on Live's main thread (update_display) and runs requests
 # inline there; count those requests as well as queued callbacks for pauseDrainAfterNext.
-dispatched = {"count": 0}
+# Once the counted ones ran, Live's thread is held before the next request: a tick serves a
+# client's next request at once when it comes quickly, so pausing after the tick would be too late.
+pause_after = {"callbacks": 0, "seconds": 0.0, "due": False}
+def _counted(count):
+    if pause_after["callbacks"] > 0 and count > 0:
+        pause_after["callbacks"] -= count
+        if pause_after["callbacks"] <= 0: pause_after["due"] = True
 _dispatch_with_holder = bridge._dispatch_with_holder
 def _counted_dispatch(method, request, holder):
+    if pause_after["due"]:
+        pause_after["due"] = False; time.sleep(pause_after["seconds"]); pause_after["seconds"] = 0.0
     try: return _dispatch_with_holder(method, request, holder)
-    finally: dispatched["count"] += 1
+    finally: _counted(1)
 bridge._dispatch_with_holder = _counted_dispatch
 
 try:
-    pause_after = {"callbacks": 0, "seconds": 0.0}
     while True:
         if control_path.exists():
             try:
@@ -507,13 +514,8 @@ try:
                 ack_temporary = ack_path.with_name(ack_path.name + ".tmp")
                 ack_temporary.write_text(json.dumps({"error": str(error)}), encoding="utf-8")
                 os.replace(ack_temporary, ack_path)
-        before = dispatched["count"]
         # One Control Surface tick, as Live's update_display runs it.
-        bridge._pump(); drained = bridge.queue.drain() + dispatched["count"] - before; bridge.mapper.capture_tick()
-        if pause_after["callbacks"] > 0:
-            pause_after["callbacks"] -= drained
-            if pause_after["callbacks"] <= 0 and drained > 0:
-                time.sleep(pause_after["seconds"]); pause_after["seconds"] = 0.0
+        bridge._pump(); _counted(bridge.queue.drain()); bridge.mapper.capture_tick()
         time.sleep(0.01)
 except KeyboardInterrupt: pass
 finally: bridge.disconnect()
