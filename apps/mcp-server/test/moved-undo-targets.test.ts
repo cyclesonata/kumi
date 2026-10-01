@@ -114,3 +114,45 @@ test("an undo its own check refuses leaves the change applied, and the next undo
   const undone = await undo(previewed.transactionId);
   assert.equal(undone.state, "undone", JSON.stringify(undone)); assert.equal(drums(simulator).mixer.volume, 0.85);
 });
+
+test("every single-object undo goes only to the object its change was made on", async () => {
+  const cases: Array<{ label: string; preview: string; args: (simulator: DeterministicLiveSimulator) => Record<string, unknown>; setup?: (simulator: DeterministicLiveSimulator) => void; place: (simulator: DeterministicLiveSimulator) => () => void }> = [
+    { label: "track view", preview: "live_track_view_preview", args: () => ({ ref: "track:track-1", collapsed: true }), place: (simulator) => another(drums(simulator)) },
+    { label: "extended mixer", preview: "live_mixer_extended_preview", args: () => ({ trackRef: "track:track-1", trackActivator: false }), place: (simulator) => both(another(drums(simulator)), another(drums(simulator).mixer, ["mixerIdentity"])) },
+    { label: "text saved on a track", preview: "live_data_preview", args: () => ({ key: "kumi.role", value: "lead", trackRef: "track:track-1" }), place: (simulator) => another(drums(simulator)) },
+    { label: "clip view", preview: "live_clip_view_preview", args: () => ({ clipRef: "clip:clip-1", gridQuantization: 4 }), place: (simulator) => another(clip(simulator)) },
+    { label: "clip properties", preview: "live_clip_properties_preview", args: () => ({ clipRef: "clip:clip-1", muted: true }), place: (simulator) => another(clip(simulator)) },
+    { label: "note duplication", preview: "live_note_edit_preview", args: () => ({ clipRef: "clip:clip-1", action: "duplicate", noteIds: [1] }), place: (simulator) => another(clip(simulator)) },
+    { label: "MIDI transform", preview: "live_midi_transform_preview", args: () => ({ clipRef: "clip:clip-1", transform: "transpose", params: { semitones: -4 } }), place: (simulator) => another(clip(simulator)) },
+    { label: "audio clip", preview: "live_audio_clip_preview", args: () => ({ clipRef: "clip:audio-1", gain: 0.5 }), setup: audio, place: (simulator) => another(clip(simulator, "clip:audio-1")) },
+    { label: "warp marker", preview: "live_warp_marker_preview", args: () => ({ clipRef: "clip:audio-1", action: "add", beatTime: 2 }), setup: audio, place: (simulator) => another(clip(simulator, "clip:audio-1")) },
+    { label: "device on/off", preview: "live_device_preview", args: () => ({ action: "enable", deviceRef: "device:utility-1", enabled: false }), place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "device view", preview: "live_device_view_preview", args: () => ({ ref: "device:utility-1", collapsed: true }), place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "device IO", preview: "live_device_io_preview", args: () => ({ action: "routing", deviceRef: "device:utility-1", routingType: "Main", routingChannel: "1/2" }), setup: rack, place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "rack variation", preview: "live_rack_preview", args: () => ({ action: "set", rackRef: "device:utility-1", selectedVariationIndex: 1 }), setup: rack, place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "rack macro", preview: "live_rack_preview", args: () => ({ action: "add-macro", rackRef: "device:utility-1" }), setup: rack, place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "rack view", preview: "live_rack_view_preview", args: () => ({ rackRef: "device:utility-1", padScrollPosition: 4 }), setup: rack, place: (simulator) => another(device(simulator, "device:utility-1")) },
+    { label: "chain mixer", preview: "live_chain_mixer_preview", args: () => ({ chainRef: "chain:rack-1:0", volume: 0.5 }), setup: rack, place: (simulator) => both(another(chain(simulator)), another(chain(simulator).mixer, ["mixerIdentity"])) },
+    { label: "chain", preview: "live_chain_preview", args: () => ({ chainRef: "chain:rack-1:0", colorIndex: 9 }), setup: rack, place: (simulator) => another(chain(simulator)) },
+    { label: "drum pad", preview: "live_drum_pad_preview", args: () => ({ action: "set", padRef: "drum-pad:rack-1:0", solo: true }), setup: rack, place: (simulator) => another(drums(simulator).devices[0].drumPads[0]) },
+    { label: "specialized device", preview: "live_device_specialized_preview", args: () => ({ family: "drift", deviceRef: "device:drift-1", pitchBendRange: 24 }), setup: devices, place: (simulator) => another(device(simulator, "device:drift-1")) },
+    { label: "looper", preview: "live_looper_preview", args: () => ({ action: "set", deviceRef: "device:looper-1", overdubAfterRecord: true }), setup: devices, place: (simulator) => another(device(simulator, "device:looper-1")) },
+    { label: "simpler sample", preview: "live_simpler_preview", args: () => ({ deviceRef: "device:simpler-1", ...sample() }), setup: devices, place: (simulator) => another(device(simulator, "device:simpler-1")) },
+    { label: "device setting", preview: "live_device_edit_preview", args: () => ({ deviceRef: "device:roar-1", action: "set", setting: "roar.routing_mode_index", value: 2 }), setup: devices, place: (simulator) => another(device(simulator, "device:roar-1")) },
+    { label: "groove", preview: "live_groove_preview", args: () => ({ action: "edit", grooveRef: "groove:groove-1", name: "MPC 57", timingAmount: 0.57 }), place: (simulator) => another(state(simulator).groovePool.grooves[0]) },
+  ];
+  const failures: string[] = [];
+  for (const entry of cases) {
+    const simulator = new DeterministicLiveSimulator(); entry.setup?.(simulator);
+    const { adapter, writes } = watched(simulator); const { call, apply, undo } = hosted(adapter);
+    const previewed = await call(entry.preview, entry.args(simulator)); assert.ok(previewed.transactionId, `${entry.label}: ${JSON.stringify(previewed)}`);
+    const applied = await apply(entry.preview.replace(/_preview$/, "_apply"), previewed); assert.equal(applied.state, "applied", `${entry.label}: ${JSON.stringify(applied)}`);
+    const back = entry.place(simulator); writes.length = 0;
+    const refused = await undo(previewed.transactionId);
+    if (refused.isError !== true || !/isn't the one this change was made on any more/.test(String(refused.reason)) || writes.length > 0) { failures.push(`${entry.label}: ${JSON.stringify(refused).slice(0, 240)}; sent ${JSON.stringify(writes)}`); continue; }
+    back();
+    const undone = await undo(previewed.transactionId);
+    if (undone.state !== "undone") failures.push(`${entry.label} once back at its place: ${JSON.stringify(undone).slice(0, 240)}`);
+  }
+  assert.deepEqual(failures, []);
+});

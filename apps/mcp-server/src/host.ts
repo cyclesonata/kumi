@@ -224,6 +224,8 @@ interface ClipLifecycleTransaction {
   inflight?: Promise<Record<string, unknown>>;
   /** A track-properties apply's verified colour (0xRRGGBB), repeated on an idempotent replay. */
   appliedColor?: number;
+  /** The identity of the object the change was made on, where its payload carries none: its undo goes only to that object. */
+  targetIdentity?: string;
 }
 
 const REQUEST_ID_MAX_LENGTH = 128;
@@ -4572,7 +4574,7 @@ export class McpHost {
       const fence = JSON.stringify({ ref: params.clipRef, markers, authorityDigest, collectionRevision });
       const payload: Record<string, unknown> = { ref: params.clipRef, beatTime: params.beatTime, expectedClipAuthorityDigest: authorityDigest, expectedMarkerCollectionRevision: collectionRevision };
       if (params.action === "move") payload.distance = params.distance;
-      const transaction: ClipLifecycleTransaction = { id: `warp_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "warp-marker", fence, clipRef: params.clipRef as LiveRef, payload: { action: params.action, ...payload }, prior: { markers: structuredClone(markers) }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `warp_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "warp-marker", fence, clipRef: params.clipRef as LiveRef, payload: { action: params.action, ...payload }, prior: { markers: structuredClone(markers) }, ...(isNonEmptyString(row.clip.objectIdentity, 256) ? { targetIdentity: row.clip.objectIdentity } : {}), expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "warp marker");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, clipRef: params.clipRef, markers, impact: "edits-warp-markers", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Warp-marker preview requires fresh authoritative state."); }
@@ -4910,7 +4912,8 @@ export class McpHost {
    * chunks stay distinct), and a step whose effect is already present — a lost
    * acknowledgement that did dispatch — is adopted without re-dispatching, so
    * an exact-key retry after a post-dispatch failure converges. */
-  private async executeNotePlan(record: object | null, adapter: AsyncLiveAdapter, context: LiveOperationContext, clipRef: LiveRef, steps: Array<{ operation: "note.update" | "note.add-batch" | "note.delete"; items: Array<Record<string, unknown>> | number[] }>, initialNotes: Array<Record<string, unknown>>, idBound: boolean): Promise<void> {
+  /** `clipIdentity`, when given, is the clip the plan goes to: each step first checks the clip at clipRef is still that one. */
+  private async executeNotePlan(record: object | null, adapter: AsyncLiveAdapter, context: LiveOperationContext, clipRef: LiveRef, steps: Array<{ operation: "note.update" | "note.add-batch" | "note.delete"; items: Array<Record<string, unknown>> | number[] }>, initialNotes: Array<Record<string, unknown>>, idBound: boolean, clipIdentity?: string): Promise<void> {
     let plan: Array<{ operation: string; args: Record<string, unknown>; completed: boolean; result?: unknown }> | undefined;
     if (record !== null) {
       const begun = this.beginUndoRecovery(record, context.idempotencyKey ?? "");
@@ -4923,6 +4926,7 @@ export class McpHost {
       const recorded = plan !== undefined && plan.length > index && plan[index]!.operation === step.operation && JSON.stringify(plan[index]!.args[field]) === JSON.stringify(step.items) ? plan[index] : undefined;
       if (recorded?.completed) continue;
       const fresh = this.noteClip(await this.viewForAsync(context, [clipRef]), clipRef);
+      const moved = clipIdentity === undefined ? undefined : McpHost.movedTarget("clip", clipRef, fresh.authority.expectedObjectIdentity, clipIdentity); if (moved) throw new Error(moved);
       const currentDigest = digestOf(fresh.notes);
       if (currentDigest === this.notePlanInterimDigest(initialNotes, steps, index + 1, idBound)) {
         if (recorded) recorded.completed = true;
@@ -6039,10 +6043,13 @@ export class McpHost {
       if (!(status.operations ?? []).includes("data.get") || !(status.operations ?? []).includes("data.set")) throw new Error("data saved in the Set is unavailable on this Live shape");
       const context = { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) };
       const owner = (params.trackRef as string | undefined) ?? (await this.viewAsync(context, [], ["set"])).set.ref;
+      // Text saved with a track goes back to that track only: its undo checks the track at the ref is still this one.
+      const ownerIdentity = params.trackRef === undefined ? undefined : (await this.trackOneAsync(context, params.trackRef as LiveRef, ["ref", "objectIdentity"]))?.objectIdentity;
+      if (params.trackRef !== undefined && !isNonEmptyString(ownerIdentity, 256)) throw new Error("track reference is stale or invalid");
       const read = await this.asyncAdapter().invokeAsync({ operation: "data.get", args: { ref: owner, key: params.key } }, context) as { value?: unknown };
       const current = typeof read.value === "string" ? read.value : null;
       const payload = { ref: owner, key: params.key, value: params.value, expectedValue: current };
-      const transaction: ClipLifecycleTransaction = { id: `data_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "data-set", fence: JSON.stringify({ ref: owner, key: params.key, value: current }), payload, prior: { value: current }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `data_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "data-set", fence: JSON.stringify({ ref: owner, key: params.key, value: current }), payload, prior: { value: current }, ...(isNonEmptyString(ownerIdentity, 256) ? { targetIdentity: ownerIdentity } : {}), expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "saved text");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, ref: owner, key: params.key, prior: current, proposed: params.value, impact: "saves-text-in-the-set", confirmation: "apply", expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Nothing was saved; preview again from a fresh track reference."); }
@@ -9108,6 +9115,7 @@ export class McpHost {
         this.beginUndoRecovery(warp, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== warp.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; warp.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(warp, adapter, context);
         const snapshot = await this.viewForAsync(context, [warp.clipRef]); const read = await adapter.invokeAsync({ operation: "audio.warp-marker.read", args: { ref: warp.clipRef } }, context) as { markers?: Array<{ beatTime: number; sampleTime: number }> };
+        const moved = this.undoTargetMoved(id, warp, "clip", warp.clipRef, this.clipRow(snapshot, warp.clipRef).clip.objectIdentity, warp.targetIdentity); if (moved) return moved;
         const action = warp.payload.action as string;
         const inverse = action === "add" ? { operation: "audio.warp-marker.delete", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : action === "delete" ? { operation: "audio.warp-marker.add", args: { ref: warp.clipRef, beatTime: warp.payload.beatTime } } : { operation: "audio.warp-marker.move", args: { ref: warp.clipRef, beatTime: (warp.payload.beatTime as number) + (warp.payload.distance as number), distance: -(warp.payload.distance as number) } };
         const priorMarkers = (warp.prior as { markers: Array<{ beatTime: number }> }).markers;
@@ -9137,6 +9145,7 @@ export class McpHost {
         this.beginUndoRecovery(noteTarget, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== noteTarget.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; noteTarget.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(noteTarget, adapter, context);
         const current = this.noteClip(await this.viewForAsync(context, [noteTarget.clipRef]), noteTarget.clipRef);
+        const moved = this.undoTargetMoved(id, noteTarget, "clip", noteTarget.clipRef, current.authority.expectedObjectIdentity, (noteTarget.payload.expectedClipAuthority as JsonObject | undefined)?.expectedObjectIdentity); if (moved) return moved;
         const prior = (noteTarget.prior as { notes: Array<Record<string, unknown>> }).notes;
         const action = noteTarget.payload.action as string;
         if (action === "duplicate") {
@@ -9191,8 +9200,10 @@ export class McpHost {
           transform.state = "undoing";
           await this.deleteOwnedClipAsync(adapter, transform.created.ref as LiveRef, transform.created.objectIdentity as string, context, typeof transform.created.fingerprint === "string" ? transform.created.fingerprint : undefined, transform, reconciliation);
         } else {
+          const clipIdentity = (transform.payload.authority as JsonObject | undefined)?.expectedObjectIdentity as string | undefined;
           if (!reconciliation) {
             const current = this.noteClip(await this.viewForAsync(context, [transform.clipRef]), transform.clipRef);
+            const moved = this.undoTargetMoved(id, transform, "clip", transform.clipRef, current.authority.expectedObjectIdentity, clipIdentity); if (moved) return moved;
             const currentIds = new Set(current.notes.map((note) => note.id));
             if (currentIds.size !== prior.length || prior.some((note) => !currentIds.has(note.id))) return this.transactionError(id, "notes changed after apply; undo refused");
             // The exact verified post-transform state (identity-bound) must
@@ -9208,7 +9219,7 @@ export class McpHost {
           const restoreRows = updatedRows.map((row) => priorById.get(row.id)).filter((note): note is Record<string, unknown> => note !== undefined).map((note) => this.midiTransformPatch(note));
           const steps: Array<{ operation: "note.update"; items: Array<Record<string, unknown>> }> = [];
           for (let offset = 0; offset < restoreRows.length; offset += 256) steps.push({ operation: "note.update", items: restoreRows.slice(offset, offset + 256) });
-          await this.executeNotePlan(transform, adapter, context, transform.clipRef!, steps, appliedNotes, true);
+          await this.executeNotePlan(transform, adapter, context, transform.clipRef!, steps, appliedNotes, true, clipIdentity);
           const verified = this.noteClip(await this.viewForAsync(context, [transform.clipRef]), transform.clipRef);
           if (noteIdentityDigest(verified.notes) !== noteIdentityDigest(prior)) throw new Error("MIDI-transform undo did not restore exact prior notes");
         }
@@ -9321,6 +9332,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; trackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(trackview, adapter, context);
         const snapshot = await this.viewForAsync(context, [trackview.payload.ref]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === trackview.payload.ref);
         if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track identity is unavailable");
+        const moved = this.undoTargetMoved(id, trackview, "track", trackview.payload.ref, track.objectIdentity, trackview.payload.expectedObjectIdentity); if (moved) return moved;
         if (!reconciliation) { const view = track.view as JsonObject | undefined;
           if (trackview.payload.collapsed !== undefined && view?.isCollapsed !== trackview.payload.collapsed) return this.transactionError(id, "track view changed after apply; undo refused");
           if (trackview.payload.deviceInsertMode !== undefined && view?.deviceInsertMode !== trackview.payload.deviceInsertMode) return this.transactionError(id, "track view changed after apply; undo refused");
@@ -9373,6 +9385,7 @@ export class McpHost {
         this.beginUndoRecovery(clipview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipview, adapter, context);
         const snapshot = await this.viewForAsync(context, [clipview.clipRef]); const row = this.clipRow(snapshot, clipview.clipRef);
+        const moved = this.undoTargetMoved(id, clipview, "clip", clipview.clipRef, row.clip.objectIdentity, clipview.payload.expectedObjectIdentity); if (moved) return moved;
         if (!reconciliation) { const view = row.clip.clipView as JsonObject | undefined;
           for (const field of ["gridQuantization", "gridIsTriplet"]) if (clipview.payload[field] !== undefined && view?.[field] !== clipview.payload[field]) return this.transactionError(id, "clip view changed after apply; undo refused"); }
         const viewState = { gridQuantization: (row.clip.clipView as JsonObject | undefined)?.gridQuantization ?? null, gridIsTriplet: (row.clip.clipView as JsonObject | undefined)?.gridIsTriplet ?? null };
@@ -9395,6 +9408,7 @@ export class McpHost {
         this.beginUndoRecovery(devview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devview, adapter, context);
         const snapshot = await this.viewForAsync(context, [devview.payload.ref]); const row = this.deviceRow(snapshot, devview.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, devview, "device", devview.payload.ref, row.device.objectIdentity, devview.payload.expectedObjectIdentity); if (moved) return moved;
         const current = (row.device.view as JsonObject | undefined)?.isCollapsed ?? null;
         if (!reconciliation && current !== devview.payload.collapsed) return this.transactionError(id, "device view changed after apply; undo refused");
         const prior = (devview.prior as { collapsed: boolean | null }).collapsed;
@@ -9416,6 +9430,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; mixerext.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(mixerext, adapter, context);
         const snapshot = await this.viewForAsync(context, [mixerext.clipRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((candidate) => candidate.ref === mixerext.clipRef); const mixer = track?.mixer as JsonObject | undefined;
         if (!track || !mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("extended mixer authority is unavailable");
+        const moved = this.undoTargetMoved(id, mixerext, "track", mixerext.clipRef, { track: track.objectIdentity ?? null, mixer: mixer.mixerIdentity }, { track: mixerext.payload.expectedObjectIdentity ?? null, mixer: mixerext.payload.expectedMixerIdentity ?? null }); if (moved) return moved;
         if (!reconciliation) { for (const [field, value] of Object.entries(mixerext.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "extended mixer changed after apply; undo refused"); } }
         const state = { crossfadeAssign: mixer.crossfadeAssign ?? null, panningMode: mixer.panningMode ?? null };
         mixerext.state = "undoing";
@@ -9436,6 +9451,7 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainmix.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainmix, adapter, context);
         const snapshot = await this.viewForAsync(context, [chainmix.clipRef]); const found = this.chainRow(snapshot, chainmix.clipRef); const mixer = found.chain.mixer as JsonObject | undefined;
         if (!mixer || !isNonEmptyString(mixer.mixerIdentity as string, 256)) throw new Error("chain mixer authority is unavailable");
+        const moved = this.undoTargetMoved(id, chainmix, "chain", chainmix.clipRef, { chain: found.chain.objectIdentity ?? null, mixer: mixer.mixerIdentity }, { chain: chainmix.payload.expectedObjectIdentity ?? null, mixer: chainmix.payload.expectedMixerIdentity ?? null }); if (moved) return moved;
         if (!reconciliation) { for (const [field, value] of Object.entries(chainmix.payload)) { if (["ref", "expectedObjectIdentity", "expectedMixerIdentity", "expectedStateRevision"].includes(field)) continue; if (!sameLiveValue(mixer[field], value)) return this.transactionError(id, "chain mixer changed after apply; undo refused"); } }
         chainmix.state = "undoing";
         const chainPriorFields = Object.fromEntries(Object.entries(chainmix.prior as Record<string, unknown>).filter(([, value]) => value !== null));
@@ -9454,6 +9470,7 @@ export class McpHost {
         this.beginUndoRecovery(devio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== devio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; devio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(devio, adapter, context);
         const snapshot = await this.viewForAsync(context, [devio.payload.ref]); const row = this.deviceRow(snapshot, devio.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, devio, "device", devio.payload.ref, row.device.objectIdentity, devio.payload.expectedObjectIdentity); if (moved) return moved;
         const device = row.device as unknown as { deviceIo?: { routingType?: unknown; routingChannel?: unknown }; sidechainRoutingType?: unknown };
         const operation = devio.payload.action === "routing" ? "device-io.set" : "compressor.sidechain.set";
         const current = devio.payload.action === "routing" ? { routingType: device.deviceIo?.routingType ?? null, routingChannel: device.deviceIo?.routingChannel ?? null } : { routingType: device.sidechainRoutingType };
@@ -9517,6 +9534,7 @@ export class McpHost {
         this.beginUndoRecovery(chainset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== chainset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; chainset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(chainset, adapter, context);
         const snapshot = await this.viewForAsync(context, [chainset.clipRef]); const found = this.chainRow(snapshot, chainset.clipRef);
+        const moved = this.undoTargetMoved(id, chainset, "chain", chainset.clipRef, found.chain.objectIdentity, chainset.payload.expectedObjectIdentity); if (moved) return moved;
         if (!reconciliation) { for (const [field, value] of Object.entries(chainset.payload)) { if (["ref", "expectedObjectIdentity", "expectedStateRevision"].includes(field)) continue; if (found.chain[field] !== value) return this.transactionError(id, "chain changed after apply; undo refused"); } }
         const state = { colorIndex: found.chain.colorIndex ?? null, autoColor: found.chain.autoColor ?? null, mute: found.chain.mute ?? null, solo: found.chain.solo ?? null };
         chainset.state = "undoing";
@@ -9626,6 +9644,7 @@ export class McpHost {
           this.releaseStagedImportFor(drumpad);
           drumpad.state = "undone"; return this.successText(id, { transactionId: drumpad.id, state: "undone", idempotent: false });
         }
+        const moved = this.undoTargetMoved(id, drumpad, "drum pad", drumpad.payload.ref, pad.objectIdentity, drumpad.payload.expectedObjectIdentity); if (moved) return moved;
         if (!reconciliation) { if (drumpad.payload.solo !== undefined && pad.solo !== drumpad.payload.solo) return this.transactionError(id, "drum pad changed after apply; undo refused"); }
         const state = { note: pad.note ?? null, solo: pad.solo ?? null };
         drumpad.state = "undoing";
@@ -9646,6 +9665,7 @@ export class McpHost {
         this.beginUndoRecovery(rackview, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rackview.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rackview.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rackview, adapter, context);
         const snapshot = await this.viewForAsync(context, [rackview.payload.ref]); const row = this.deviceRow(snapshot, rackview.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, rackview, "device", rackview.payload.ref, row.device.objectIdentity, rackview.payload.expectedObjectIdentity); if (moved) return moved;
         const view = row.device.rackView as JsonObject | undefined;
         if (!reconciliation) { for (const field of ["padScrollPosition", "showChainDevices"]) if (rackview.payload[field] !== undefined && view?.[field] !== rackview.payload[field]) return this.transactionError(id, "rack view changed after apply; undo refused"); }
         const state = { padScrollPosition: view?.padScrollPosition ?? null, showChainDevices: view?.showChainDevices ?? null };
@@ -9670,6 +9690,7 @@ export class McpHost {
         this.beginUndoRecovery(rack, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== rack.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; rack.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(rack, adapter, context);
         const snapshot = await this.viewForAsync(context, [rack.payload.ref]); const row = this.deviceRow(snapshot, rack.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, rack, "device", rack.payload.ref, row.device.objectIdentity, rack.payload.expectedObjectIdentity); if (moved) return moved;
         if (!reconciliation) { if (rack.payload.selectedVariationIndex !== undefined && row.device.selectedVariationIndex !== rack.payload.selectedVariationIndex) return this.transactionError(id, "rack changed after apply; undo refused"); }
         if (macroAction) {
           const left = (rack.created as { visibleMacroCount?: unknown } | undefined)?.visibleMacroCount; const prior = (rack.prior as { visibleMacroCount?: unknown }).visibleMacroCount;
@@ -9696,8 +9717,9 @@ export class McpHost {
       try {
         const status = this.requireConnected(); if (status.epoch !== saved.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
-        // Put back only while the key still holds what this change saved.
+        // Put back only while the key still holds what this change saved, on the track it was saved with.
         const prior = (saved.prior as { value: string | null }).value;
+        if (saved.targetIdentity !== undefined) { const moved = this.undoTargetMoved(id, saved, "track", saved.payload.ref, (await this.trackOneAsync(context, saved.payload.ref as LiveRef, ["ref", "objectIdentity"]))?.objectIdentity, saved.targetIdentity); if (moved) return moved; }
         saved.state = "undoing"; saved.undoKey = params.idempotencyKey as string;
         const result = await this.asyncAdapter().invokeAsync({ operation: "data.set", args: { ref: saved.payload.ref, key: saved.payload.key, value: prior, expectedValue: saved.payload.value } }, context) as { value?: unknown };
         if (result.value !== prior) throw new Error("the text that was there wasn't confirmed");
@@ -9716,8 +9738,9 @@ export class McpHost {
         const status = this.requireConnected(); if (status.epoch !== edited.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
         const row = this.deviceRow(await this.viewForAsync(context, [args.ref]), args.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, edited, "device", args.ref, row.device.objectIdentity, args.expectedObjectIdentity); if (moved) return moved;
         const state = this.deviceEditState(edit, row.device as unknown as Record<string, unknown>, args.property as string | undefined);
-        const fences = { expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
+        const fences ={ expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
         let inverse: LiveInvocation;
         if (edit === "set") {
           if (!reconciliation && !sameLiveValue(state.value, edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
@@ -9750,6 +9773,7 @@ export class McpHost {
         const family = devspec.payload.family as string;
         const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
         const snapshot = await this.viewForAsync(context, [devspec.payload.ref]); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, devspec, "device", devspec.payload.ref, row.device.objectIdentity, devspec.payload.expectedObjectIdentity); if (moved) return moved;
         const undoFamilyRow = ((row.device as unknown as Record<string, unknown>)[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>;
         if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && !sameLiveValue(undoFamilyRow[field], devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
         const state = Object.fromEntries(fields.map((field) => [field, undoFamilyRow[field] ?? null]));
@@ -9771,6 +9795,7 @@ export class McpHost {
         const prior = simpler.prior as { samplePath: string };
         if (typeof prior.samplePath !== "string" || prior.samplePath.length < 1) return this.transactionError(id, "prior sample path is unavailable");
         const snapshot = await this.viewForAsync(context, [simpler.payload.ref]); const row = this.deviceRow(snapshot, simpler.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, simpler, "device", simpler.payload.ref, row.device.objectIdentity, simpler.payload.expectedObjectIdentity); if (moved) return moved;
         const currentPath = ((row.device as unknown as { samplePath?: string }).samplePath) ?? "";
         if (!reconciliation && currentPath !== (simpler.created?.samplePath ?? simpler.payload.filePath)) return this.transactionError(id, "simpler sample changed after apply; undo refused");
         simpler.state = "undoing";
@@ -9791,6 +9816,7 @@ export class McpHost {
         this.beginUndoRecovery(looper, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== looper.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; looper.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(looper, adapter, context);
         const snapshot = await this.viewForAsync(context, [looper.payload.ref]); const row = this.deviceRow(snapshot, looper.payload.ref as LiveRef);
+        const moved = this.undoTargetMoved(id, looper, "device", looper.payload.ref, row.device.objectIdentity, looper.payload.expectedObjectIdentity); if (moved) return moved;
         const looperRow = (((row.device as unknown as Record<string, unknown>).looper) ?? {}) as Record<string, unknown>;
         if (!reconciliation) { for (const field of ["overdubAfterRecord", "recordLengthIndex"]) if (looper.payload[field] !== undefined && looperRow[field] !== looper.payload[field]) return this.transactionError(id, "looper changed after apply; undo refused"); }
         const state = { overdubAfterRecord: looperRow.overdubAfterRecord ?? null, recordLengthIndex: looperRow.recordLengthIndex ?? null };
@@ -9822,8 +9848,9 @@ export class McpHost {
             for (const field of ["name", "base", "quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"]) if (groove.payload[field] !== undefined && !sameLiveValue(row[field], groove.payload[field])) return this.transactionError(id, "groove changed after apply; undo refused");
           }
         }
-        const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown };
+        const before = await adapter.invokeAsync({ operation: "groove.read", args: { setRef: snapshot.set.ref } }, context) as { revision?: unknown; grooves?: Array<Record<string, unknown>> };
         if (!isNonEmptyString(before.revision, 64)) throw new Error("groove undo authority is unavailable");
+        if (action !== "set-amount") { const moved = this.undoTargetMoved(id, groove, "groove", groove.payload.ref, (before.grooves ?? []).find((candidate) => candidate.ref === groove.payload.ref)?.objectIdentity, groove.payload.expectedObjectIdentity); if (moved) return moved; }
         groove.state = "undoing";
         if (action === "set-amount") {
           const priorAmount = (groove.prior as { grooveAmount: number | null }).grooveAmount;
@@ -9880,6 +9907,7 @@ export class McpHost {
       try {
         this.beginUndoRecovery(clipset, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== clipset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.viewForAsync(context, [clipset.clipRef]); const row = this.clipRow(snapshot, clipset.clipRef);
+        const moved = this.undoTargetMoved(id, clipset, "clip", clipset.clipRef, row.clip.objectIdentity, clipset.payload.expectedObjectIdentity); if (moved) return moved;
         const expected = reconciliation ? clipset.prior : clipset.payload; for (const [field, value] of Object.entries(expected)) { if (field === "ref" || field.startsWith("expected")) continue; if (field === "grooveRef") { const observedRef = (row.clip.groove as { ref?: unknown } | null | undefined)?.ref ?? null; if (observedRef !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (field === "groove") { if (JSON.stringify(row.clip.groove ?? null) !== JSON.stringify(value)) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); continue; } if (row.clip[field] !== value) return this.transactionError(id, reconciliation ? "Clip-properties undo replay did not restore exact prior state" : "Clip changed after apply; undo refused"); }
         if (!reconciliation) { clipset.state = "undoing"; const priorFields = { ...(clipset.prior as Record<string, unknown>) }; if (Object.prototype.hasOwnProperty.call(priorFields, "groove")) { const priorGroove = priorFields.groove as { ref?: unknown } | null; delete priorFields.groove; priorFields.grooveRef = priorGroove?.ref ?? null; } const result = await this.invokeUndoRecovery(clipset, adapter, "clip.set", { ref: clipset.clipRef, ...priorFields, ...this.clipPropertiesMutationAuthority(snapshot, clipset.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Clip-properties restoration was not confirmed"); }
         const restoredRow = this.clipRow(await this.viewForAsync(context, [clipset.clipRef]), clipset.clipRef); for (const [field, value] of Object.entries(clipset.prior)) { if (field === "groove") { if (JSON.stringify(restoredRow.clip.groove ?? null) !== JSON.stringify(value)) throw new Error("Clip exact prior state was not restored"); } else if (restoredRow.clip[field] !== value) throw new Error("Clip exact prior state was not restored"); }
@@ -9895,6 +9923,7 @@ export class McpHost {
       try {
         this.beginUndoRecovery(audio, params.idempotencyKey as string); const status = this.requireConnected("session.read"); if (status.epoch !== audio.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; audio.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(audio, adapter, context); const snapshot = await this.viewForAsync(context, [audio.clipRef]); const row = this.clipRow(snapshot, audio.clipRef);
+        const moved = this.undoTargetMoved(id, audio, "clip", audio.clipRef, row.clip.objectIdentity, audio.payload.expectedObjectIdentity); if (moved) return moved;
         const expected = reconciliation ? audio.prior : audio.payload; for (const [field, value] of Object.entries(expected)) if (field !== "ref" && !field.startsWith("expected") && !sameLiveValue(row.clip[field], value)) return this.transactionError(id, reconciliation ? "Audio clip undo replay did not restore exact prior state" : "Audio clip changed after apply; undo refused");
         if (!reconciliation) { audio.state = "undoing"; const result = await this.invokeUndoRecovery(audio, adapter, "audio.clip.set", { ref: audio.clipRef, ...audio.prior, ...this.audioClipMutationAuthority(snapshot, audio.clipRef) }, context) as JsonObject; if (result.changed !== true) throw new Error("Audio clip restoration was not confirmed"); }
         const restoredRow = this.clipRow(await this.viewForAsync(context, [audio.clipRef]), audio.clipRef); for (const [field, value] of Object.entries(audio.prior)) if (!sameLiveValue(restoredRow.clip[field], value)) throw new Error("Audio clip exact prior state was not restored");
@@ -9930,6 +9959,7 @@ export class McpHost {
           this.releaseStagedImportFor(device);
         } else {
           const reference = (action === "move" ? device.created?.ref : device.payload.ref) as LiveRef; const located = this.deviceRow(await this.viewForAsync(context, [reference]), reference);
+          if (action === "enable") { const moved = McpHost.movedTarget("device", reference, located.device.objectIdentity, device.payload.expectedObjectIdentity); if (moved) throw new Error(moved); }
           if (reconciliation) { if (action === "enable" && located.device.enabled !== device.prior?.enabled) throw new Error("device-enable undo replay did not restore prior state"); if (action === "move" && located.siblings.findIndex((sibling) => sibling.ref === reference) !== device.prior?.index) throw new Error("device-move undo replay did not restore prior location"); }
           else { const args: JsonObject = { ref: reference, expectedObjectIdentity: located.device.objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
             if (action === "enable") { if (located.device.enabled !== device.payload.enabled || typeof device.prior?.enabled !== "boolean") throw new Error("device enable state changed after apply"); args.enabled = device.prior.enabled; args.expectedStateRevision = createHash("sha256").update(canonicalMutationIdentity({ enabled: located.device.enabled })).digest("hex"); }
