@@ -271,7 +271,7 @@ export const LIVE_OPERATIONS = [
   "track.set", "track.view.set", "transport.action", "transport.set", "groove.edit", "groove.read", "groove.set", "take-lane.create", "take-lane.rename", "take-lane.clip.create",
   "take-lane.audio-clip.create", "tuning.read", "tuning.set", "view.control", "view.set", "subscribe", "application.message", "automation.step.insert", "automation.value-at",
   "clip.time-convert", "data.get", "data.set", "device.action", "device.banks.read", "device.property.set", "fire-button.set", "note.delete-range", "note.select",
-  "plugin.parameter-names", "sample.set", "sample.slice", "track.action", "wavetable.modulation.set", "wavetable.set",
+  "plugin.parameter-names", "sample.set", "sample.slice", "track.action", "wavetable.modulation.set", "wavetable.set", "python.run",
 ] as const;
 export type LiveOperation = typeof LIVE_OPERATIONS[number];
 
@@ -766,11 +766,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       if (!args.outputSafety || typeof args.outputSafety !== "object" || (args.outputSafety as { safe?: unknown }).safe !== true || !["string"].includes(typeof (args.outputSafety as { provenance?: unknown }).provenance) || ["", "unknown", "simulator"].includes(String((args.outputSafety as { provenance?: unknown }).provenance))) throw new Error("authoritative output safety is required");
       if (args.action === "start") {
         const destination = this.findTrack(objectRef("destinationTrackRef")); const armed = this.state.tracks.filter((track) => track.armed === true);
-        // Tracks recorded alongside: each armed, and together with the destination exactly the armed ones.
+        // Tracks recorded alongside: each armed. Others may be armed too, as in Live.
         const alsoRefs = Array.isArray(args.alsoTrackRefs) ? args.alsoTrackRefs as LiveRef[] : []; const alsoIdentities = Array.isArray(args.alsoTrackIdentities) ? args.alsoTrackIdentities : [];
         const also = alsoRefs.map((ref) => this.findTrack(ref));
         if (also.some((track, index) => !track || track.objectIdentity !== alsoIdentities[index] || track.armed !== true)) throw new Error("a track recorded alongside changed identity or is not armed");
-        if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || armed.length !== 1 + also.length || !armed.every((track) => track === destination || also.includes(track))) throw new Error(also.length ? "recording tracks must be exactly the armed ones" : "recording destination identity must be the only armed track");
+        if (!destination || destination.objectIdentity !== args.destinationTrackIdentity || destination.armed !== true || !armed.includes(destination)) throw new Error("recording destination isn't armed; arm it first");
       }
       else if (args.destinationTrackRef !== null || args.destinationTrackIdentity !== null) throw new Error("recording stop destination authority must be null");
     };
@@ -971,7 +971,6 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const name = stringArg("name");
         const index = args.index === undefined ? this.state.tracks.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.tracks.length) throw new RangeError("track index is invalid");
-        if (this.state.tracks.some((track) => track.name === name)) throw new Error("track name already exists");
         const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind: "regular", mediaKind: kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
         this.state.tracks.splice(index as number, 0, track);
         this.emit({ type: "object", ref: track.ref, payload: { operation, track } });
@@ -995,7 +994,6 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         requireStructureRevision(); const name = stringArg("name");
         const index = args.index === undefined ? this.state.scenes.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.scenes.length) throw new RangeError("scene index is invalid");
-        if (this.state.scenes.some((scene) => scene.name === name)) throw new Error("scene name already exists");
         const scene: Scene = { ref: ref("scene", `scene-${this.state.scenes.length + this.sequence + 1}`), objectIdentity: `sim-object:scene:${this.state.scenes.length + this.sequence + 1}`, name, index: index as number };
         this.state.scenes.splice(index as number, 0, scene);
         this.state.scenes.forEach((item, itemIndex) => { item.index = itemIndex; });
@@ -2693,7 +2691,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     const { siblings, ...own } = this.parameterAuthority(target.ref); const currentAuthority = lean ? own : { ...own, siblings };
     const expectedAuthority = { ref: target.ref, parameterIdentity: args.expectedObjectIdentity, ownerRef: args.expectedOwnerRef, ownerIdentity: args.expectedOwnerIdentity, trackRef: args.expectedTrackRef, trackIdentity: args.expectedTrackIdentity, ...(lean ? {} : { siblings: args.expectedSiblings }) };
     if (simulatorCanonical(currentAuthority) !== simulatorCanonical(expectedAuthority)) throw new Error("parameter identity or hierarchy changed since preview");
-    if (target.enabled === false || target.automatable === false) throw new Error("parameter is disabled or not automatable");
+    if (target.enabled === false) throw new Error("parameter is greyed out in Live right now");
     const quantization = target.quantization ?? 0;
     if (quantization > 0 && Math.abs((requested - target.min) / quantization - Math.round((requested - target.min) / quantization)) > 1e-9) throw new RangeError("parameter value violates quantization");
     if ((target.revision ?? 1) !== args.expectedRevision) throw new Error("parameter revision changed since preview");

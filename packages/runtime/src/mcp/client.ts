@@ -94,7 +94,8 @@ interface Options {
 
 export async function connectMcp(options: Options): Promise<McpEndpoint> {
   options.signal.throwIfAborted();
-  const timeout = options.timeoutMs ?? 15_000;
+  // Past the bridge's own longest deadline (60 s): a long render or a big Set's read finishes.
+  const timeout = options.timeoutMs ?? 65_000;
   const connectTimeout = options.connectTimeoutMs ?? timeout;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || !Number.isSafeInteger(connectTimeout) || connectTimeout < 1) throw new Error("Invalid MCP timeout");
   const entry = options.entry ?? bridgeEntry;

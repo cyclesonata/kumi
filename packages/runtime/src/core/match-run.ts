@@ -24,10 +24,12 @@ export interface MatchBudget {
 /** Generous: the producer cares about the result, and every round is shown. */
 export const MATCH_BUDGET: MatchBudget = { rounds: 12, ms: 45 * 60_000, target: 92, plateauChecks: 2, minGain: 2, polishMs: 8 * 60_000 };
 
-/** A request that starts a match run. */
-export const startsMatch = (request: string) => MATCHING.test(request);
-/** "keep going" after a run: it carries on, with a fresh budget. */
-export const KEEP_GOING = /^\s*(keep going|carry on|continue|go on|more|keep trying|try more|again)\b/i;
+/** Something to match in a request: a reference, a file, a link, "like this", this sound or that video. */
+const SOMETHING_TO_MATCH = /https?:\/\/|\.(wav|wave|aiff?|flac|mp3|ogg|m4a|mp4|mov|webm|mkv)\b|\breferences?\b|\blike (this|that)\b|\b(this|that) (sound|track|clip|sample|recording|video|tutorial|song|tune|part|loop)\b|\bthe (sound|recording|video|tutorial|song) (from|in|of|at)\b/i;
+/** A request that starts a match run: asking to match something, and naming what. "Sound like a cathedral" isn't one. */
+export const startsMatch = (request: string) => MATCHING.test(request) && SOMETHING_TO_MATCH.test(request);
+/** "keep going" right after a run: it carries on, with a fresh budget. A message of its own, or one that starts by saying to keep trying. */
+export const KEEP_GOING = /^\s*(keep going|carry on|continue|go on|keep trying|try more|more|again)\s*[.!]*\s*$|^\s*(keep going|carry on|keep trying|try more)\b/i;
 
 export type MatchStop = "reached" | "plateau" | "budget" | "no-audition";
 export type MatchDecision = { stop: MatchStop; wrapUp?: string } | { next: string };

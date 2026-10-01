@@ -325,7 +325,7 @@ function batchTargetKey(operation: BatchOperation): string | undefined {
 }
 
 export class BatchTransactionManager {
-  private static readonly MAX_RECORDS = 64;
+  private static readonly MAX_RECORDS = 512;
   private readonly records = new Map<string, BatchRecord>();
   private readonly idempotency = new Map<string, { transactionId: string; result: unknown }>();
   private readonly views: LiveViews;
@@ -337,7 +337,8 @@ export class BatchTransactionManager {
     for (const [id, candidate] of this.records) if (candidate.expiresAt <= now && !protectedStates.has(candidate.state)) this.records.delete(id);
     for (const [key, candidate] of this.idempotency) if (!this.records.has(candidate.transactionId)) this.idempotency.delete(key);
     while (this.records.size >= BatchTransactionManager.MAX_RECORDS) {
-      const oldest = [...this.records].find(([, candidate]) => !protectedStates.has(candidate.state));
+      // Past capacity, the oldest applied change gives up its undo before new work is refused.
+      const oldest = [...this.records].find(([, candidate]) => !protectedStates.has(candidate.state)) ?? [...this.records].find(([, candidate]) => candidate.state === "applied");
       if (!oldest) throw new Error("transaction batch capacity is exhausted by recovery-protected work");
       this.records.delete(oldest[0]);
     }

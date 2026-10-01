@@ -102,17 +102,18 @@ test("a mixer undo after a track is inserted above is refused: the track now at 
   assert.equal((await undo(previewed.transactionId)).state, "undone"); assert.equal(bass.mixer.mute, true);
 });
 
-test("an undo its own check refuses leaves the change applied, and the next undo, with any key, starts over", async () => {
+test("a mixer undo puts the fader back however it moved since; one already back is undone without a write", async () => {
   const simulator = new DeterministicLiveSimulator(); const { adapter, writes } = watched(simulator); const { call, apply, undo } = hosted(adapter);
   const previewed = await call("live_mixer_preview", { trackRef: "track:track-1", volume: 0.5 });
   assert.equal((await apply("live_mixer_apply", previewed)).state, "applied");
-  drums(simulator).mixer.volume = 0.6; drums(simulator).volume = 0.6; writes.length = 0;
-  const refused = await undo(previewed.transactionId);
-  assert.equal(refused.isError, true); assert.match(refused.reason, /mixer changed after apply/); assert.deepEqual(writes, []);
-  // The producer puts the fader back: the change is Kumi's again, and a new undo (another key) goes, not refused for its key.
-  drums(simulator).mixer.volume = 0.5; drums(simulator).volume = 0.5;
+  // The producer moved the fader on since: undo still takes the change back.
+  drums(simulator).mixer.volume = 0.6; drums(simulator).volume = 0.6;
   const undone = await undo(previewed.transactionId);
   assert.equal(undone.state, "undone", JSON.stringify(undone)); assert.equal(drums(simulator).mixer.volume, 0.85);
+  const again = await call("live_mixer_preview", { trackRef: "track:track-1", volume: 0.5 });
+  assert.equal((await apply("live_mixer_apply", again)).state, "applied");
+  drums(simulator).mixer.volume = 0.85; drums(simulator).volume = 0.85; writes.length = 0;
+  assert.equal((await undo(again.transactionId)).state, "undone"); assert.deepEqual(writes, [], "nothing to write");
 });
 
 test("every single-object undo goes only to the object its change was made on", async () => {

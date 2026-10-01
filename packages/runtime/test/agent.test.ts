@@ -184,11 +184,15 @@ test("provider HTTP failures become Kumi-written messages without credentials or
   }
 });
 
-test("retries once before any output escapes, but never after text was delivered", async () => {
+test("retries up to three times before any output escapes, but never after text was delivered", async () => {
   const unavailable = () => new APICallError({ message: "down", url: "u", requestBodyValues: {}, statusCode: 503, isRetryable: true, responseHeaders: { "retry-after-ms": "1" } });
-  const retried = harness((_options, n) => n === 1 ? Promise.reject(unavailable()) : [...text("ok"), finish()]);
+  const retried = harness((_options, n) => n <= 3 ? Promise.reject(unavailable()) : [...text("ok"), finish()]);
   assert.equal((await retried.kernel.run("q", new AbortController().signal, () => {})).stopReason, "completed");
-  assert.equal(retried.requests.length, 2);
+  assert.equal(retried.requests.length, 4);
+  const gaveUp = harness(() => Promise.reject(unavailable()));
+  await assert.rejects(gaveUp.kernel.run("q", new AbortController().signal, () => {}), /overloaded right now/);
+  assert.equal(gaveUp.requests.length, 4, "the first try and three more");
+  await gaveUp.kernel.close();
   const streamed = harness(() => [...text("partial"), { type: "error", error: unavailable() }]);
   await assert.rejects(streamed.kernel.run("q", new AbortController().signal, () => {}), /overloaded right now \(HTTP 503\)/);
   assert.equal(streamed.requests.length, 1);

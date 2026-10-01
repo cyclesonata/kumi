@@ -31,8 +31,8 @@ export interface RecipeStore {
   remove(name: string): Promise<boolean>;
 }
 
-export const MAX_RECIPES = 64;
-export const MAX_RECIPE_STEPS = 40;
+export const MAX_RECIPES = 500;
+export const MAX_RECIPE_STEPS = 500;
 const PARAM = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**

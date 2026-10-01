@@ -431,20 +431,23 @@ Kumi decides the details you wouldn't spell out (a chord is notes within about
 like one that exists, it first [looks up](#looking-things-up) how the original
 works: its manual, a paper on its design, or open source code of it. It writes
 the device's code and makes it: a Max for Live device in your User Library's
-Kumi folder, which Live's Browser lists like any other. Its knobs are ordinary
-Live parameters, so you can automate and map them, and Kumi can turn them.
+Kumi folder, which Live's Browser lists like any other. It gets as many knobs as
+it needs (past eight, in up to three rows), and they're ordinary Live
+parameters, so you can automate and map them, and Kumi can turn them.
 Loading it is a change in HISTORY with its undo. A second device of the same
 name gets a number rather than replacing the first, which a Set may use.
 
 A MIDI effect is JavaScript. Before it's made, Kumi runs its code on your
 computer: the tests Kumi wrote for it, and Kumi's own checks. Those are no
 errors, every note it plays is released, and nothing keeps running once you let
-go. A device that fails isn't made; Kumi fixes it first. The code can't reach
+go, unless it's meant to run free (an LFO, a clock, a generator). A device that
+fails isn't made; Kumi fixes it first. The code can't reach
 your files, the network, or the rest of Max and Live.
 
 An audio effect or an instrument is written in GenExpr, the language of Max's
 gen~, and Kumi checks the code before building the device around it. An effect
-gets Mix and Output knobs; an instrument plays up to 8 notes at once. Every
+gets Mix and Output knobs; an instrument plays 8 notes at once, or up to 32 if
+you ask. Inside, nothing is capped: feedback can sustain or self-oscillate. Every
 device ends in Kumi's output stage, which keeps the device's own output safe (no
 NaN, denormals or DC, held under +6 dBFS); on an effect the dry signal passes
 untouched, so at Mix 0 your track sounds exactly as it did without it. Kumi

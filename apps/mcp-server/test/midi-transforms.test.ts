@@ -56,10 +56,14 @@ test("every stochastic transform is byte-for-byte repeatable under an explicit s
   }
 });
 
-test("stochastic transforms refuse a missing or invalid seed", () => {
-  const source = [note(60, 0, 1)];
-  for (const type of ["humanize-velocity", "humanize-timing", "ratchet", "seeded-variation"] as const) {
-    assert.throws(() => applyMidiTransform(source, { type, params: {} }), /seed/);
+test("stochastic transforms without a seed draw one from the request (the same each time); an invalid seed is refused", () => {
+  const source = [note(60, 0, 1), note(64, 1, 1), note(67, 2, 1)];
+  const cases = [["humanize-velocity", { maxDelta: 12 }], ["humanize-timing", { maxOffset: 0.125 }], ["ratchet", { subdivisions: 4, probability: 0.6 }], ["seeded-variation", { velocityMax: 10, timingMax: 0.05, probabilityDepth: 0.4 }]] as const;
+  for (const [type, params] of cases) {
+    const first = applyMidiTransform(structuredClone(source), { type, params });
+    assert.match(String(first.seed), /^auto-[0-9a-f]{16}$/);
+    assert.deepEqual(applyMidiTransform(structuredClone(source), { type, params }).notes, first.notes, `${type} repeats without a seed`);
+    assert.throws(() => applyMidiTransform(source, { type, params: { ...params, seed: "" } }), /seed/);
   }
 });
 

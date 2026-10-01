@@ -19,9 +19,9 @@ the model, runs the bridge's previews and applies: the model asks for a change b
 name, Kumi previews it, keeps the preview's confirmation to itself, applies it,
 and records it in HISTORY with its undo. Undo and verification are the safety net
 producers rely on; ceremony that only defended against a hostile MCP client has
-gone where it cost Kumi speed (a change is one request; see below). The bridge
-can't prove a human supplied an output-safety statement, so Kumi gives one only
-when the producer asked to hear, record or play something.
+gone where it cost Kumi speed (a change is one request; see below). Output-safety
+evidence is optional: a client that gives none gets the bridge's own, so playing,
+launching and recording never wait on it.
 
 ## Universal mutation boundary
 
@@ -61,9 +61,7 @@ proves only that the retry didn't run: the first attempt may have, so the change
 stays uncertain. An undo that fails its checks before sending anything to Live
 leaves the change applied, and the next undo checks again. The bridge keeps a bounded executed-result
 ledger across TCP reconnections, so a lost response is reconciled exactly by its
-idempotency key instead of replayed. Audible launch, capture-start, recording
-and realtime-arm contracts also revalidate output-safety evidence on the bridge
-side. (The earlier three-step authority, a read-only `authority.preflight`, its
+idempotency key instead of replayed. (The earlier three-step authority, a read-only `authority.preflight`, its
 one-use confirmation through `authority.prepare`, then the invoke, is still
 there for the tests that exercise it.)
 
@@ -71,8 +69,10 @@ Deletions are explicit. Deleting something no transaction of Kumi's made (a clip
 an Arrangement clip, a scene, a track, a locator, a device, a return) needs
 `explicitDeletion: true` and exact identity fences for the object and where it
 lives; HISTORY keeps the deletion, since only Live's own undo brings it back.
-Undo of what a transaction made is the transaction's own, fenced to the content
-it left: if the producer changed it since, undo is refused.
+Undo of what a transaction made is the transaction's own, fenced to the object's
+identity, not its content: it takes back the change however the object changed
+since (a renamed track, a knob moved again), and refuses only when the reference
+now holds another object.
 
 A plan is also one step in Live's own undo: Kumi opens a step before the plan's
 first change and closes it after its last. The Remote Script owns the open step
@@ -181,21 +181,20 @@ referencing clips are gone.
 
 ## Audible Session actions
 
-Scene/clip launch requires explicit output-safety evidence, exact eligible
-targets, a stopped non-recording baseline, safe monitoring/arm state, fresh
-playback revision, bounded launch quantization, and preview-captured
-track/scene/slot/clip identities that are carried to and rechecked on Live's
-thread. Owned stop clears only the preflighted target;
+A clip launches whatever plays or records, like pressing its slot in Live; its
+preview-captured track/scene/slot/clip identities are carried to and rechecked on
+Live's thread. Scene audition (`live_session_audition_*`) still requires a stopped,
+unarmed, unmonitored baseline. Owned stop clears only the preflighted target;
 `live_session_emergency_stop` independently requires exact fresh active target
 keys and recording state, atomically clears Session clips, transport, Session
 Record, and Arrangement Record, and survives host restart.
 
 ## Recording authority
 
-A recording start preview requires explicit intent, output-safety evidence, and
-an exact armed destination for either lane. Apply carries the exact prior
-Session/Arrangement recording booleans, destination identity, and output-safety
-evidence into the mapper; all are rechecked on Live's mutation thread before
+A recording start preview requires explicit intent and an exact armed
+destination for either lane; other tracks may be armed too (Live records onto
+every armed track). Apply carries the exact prior Session/Arrangement recording
+booleans and destination identity into the mapper; all are rechecked on Live's mutation thread before
 record state changes. Acknowledgement loss is uncertain and never blindly
 replayed. Stop uses the same fenced operation; independent emergency stop
 clears both modes.

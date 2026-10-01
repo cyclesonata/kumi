@@ -110,10 +110,10 @@ test("the song jumps by beats, and a track jumps in the clip playing there (Live
   assert.equal((await change("live_transport_action_preview", { action: "jump-in-running-clip", trackRef: "track:track-1", beats: 2 })).previewed.playing, true);
 });
 
-test("a launch button is pressed and let go with output-safety evidence; live_change won't fuse it and there's nothing to undo", async () => {
+test("a launch button is pressed and let go, with or without output-safety evidence; live_change won't fuse it and there's nothing to undo", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, change, undo } = hosted(simulator);
-  const unsafe = await call("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: { safe: true, provenance: "unknown" } });
-  assert.equal(unsafe.isError, true);
+  const unsure = await call("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: { safe: true, provenance: "unknown" } });
+  assert.notEqual(unsure.isError, true, JSON.stringify(unsure));
   const pressed = await change("live_fire_button_preview", { ref: "clip-slot:track-1:0", pressed: true, outputSafety: safety });
   assert.equal(pressed.previewed.target.kind, "clip-slot"); assert.match(pressed.applied.held, /30 s/);
   assert.ok(simulator.heldFireButtons.has("clip-slot:track-1:0"));
@@ -217,4 +217,15 @@ test("over the Remote Script's wire, saved text is one mutate carrying the previ
     assert.match(mutations[0]!.stateDigest ?? "", /^[0-9a-f]{64}$/);
     assert.equal((await call("live_data_read", { key: "kumi.plan" })).value, "verse, chorus");
   } finally { await adapter.close(); await live.close(); }
+});
+
+test("a track or scene may take a name the Set already has, as in Live, and undo still takes back exactly what was made", async () => {
+  const simulator = new DeterministicLiveSimulator(); const { change, undo } = hosted(simulator);
+  const tracks = () => ((simulator as any).state.tracks as any[]).filter((track) => track.name === "Drums").length;
+  assert.equal(tracks(), 1);
+  const made = await change("live_session_structure_preview", { tracks: [{ name: "Drums", kind: "midi" }, { name: "Drums", kind: "audio" }], scenes: [{ name: "Drums" }] });
+  assert.equal(made.applied.state, "applied");
+  assert.equal(tracks(), 3);
+  assert.equal((await undo(made.previewed.transactionId)).state, "undone");
+  assert.equal(tracks(), 1, "the original stays");
 });

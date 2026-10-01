@@ -305,7 +305,7 @@ class RemoteScriptTests(unittest.TestCase):
         unsigned = remote.bound({"version": PROTOCOL, "id": "one", "method": "snapshot", "nonce": "0000000000000001", "sequence": 1})
         result = remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "request failed: RuntimeError", "foreign exception text is not echoed")
+        self.assertEqual(result["error"], "request failed: RuntimeError: not available", "Live's own reason comes through")
         validation = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: (_ for _ in ()).throw(ValueError("structure changed since preview\x1b[2J")))
         unsigned = validation.bound({"version": PROTOCOL, "id": "two", "method": "snapshot", "nonce": "0000000000000002", "sequence": 1})
         self.assertEqual(validation.dispatch({**unsigned, "mac": validation.sign(unsigned)})["error"], "request failed: structure changed since preview [2J")
@@ -639,7 +639,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "ac87e255f7396663f66d11965f42df57ddde755c6872e7370ed14f9eded87909")
+        self.assertEqual(digest, "265d7d77208a58a88ffbebc0054c16e53c3d9ee6c29cf616027402b64c40593d")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -1600,8 +1600,10 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25])
         self.assertEqual([row["revision"] for row in result["parameters"]], [2, 2])
         rows = mapper.discover("parameter", parent=device_row["ref"])["items"]
-        with self.assertRaisesRegex(ValueError, "parameter 2 of 2: parameter value is outside authoritative bounds"):
-            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.75), item(rows[2], 5.0)]})
+        device.parameters[2].is_enabled = False
+        with self.assertRaisesRegex(ValueError, "parameter 2 of 2: parameter is greyed out in Live right now"):
+            mapper.invoke("device.parameters.set", {**shared, "parameters": [item(rows[1], 0.75), item(rows[2], 0.5)]})
+        device.parameters[2].is_enabled = True
         self.assertEqual([parameter.value for parameter in device.parameters], [0.75, 0.5, 0.25], "the first one went back")
         stale = item(rows[0], 0.5); stale["expectedRevision"] = 1
         with self.assertRaisesRegex(ValueError, "revision changed since preview"):
@@ -1666,18 +1668,21 @@ class ControlSurfaceTests(unittest.TestCase):
         returned = rows[1]; mapper.invoke("track.rename", {"ref": returned["ref"], "name": "Return Renamed", "expectedName": returned["name"], "expectedObjectIdentity": returned["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("track", returned["ref"])})
         self.assertEqual(song.return_tracks[0].name, "Return Renamed")
 
-    def test_recording_takes_tracks_alongside_when_exactly_they_and_the_destination_are_armed(self):
+    def test_recording_starts_with_other_tracks_armed_too_and_needs_the_destination_armed(self):
         song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack(), FakeTrack()]
         for index, track in enumerate(song.tracks): track._live_ptr = 400 + index; track.arm = index < 2
         mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"]
         args = {"action": "start", "expectedSessionRecord": False, "expectedArrangementRecord": False, "destinationTrackRef": rows[0]["ref"], "destinationTrackIdentity": "live:400", "outputSafety": {"safe": True, "provenance": "unit-test"}}
-        with self.assertRaisesRegex(ValueError, "only unambiguous armed track"): mapper._recording_authority(args, "arrangement")
+        # Another track armed too: Live records onto both, as when the producer presses Record.
+        self.assertEqual(mapper._recording_authority(args, "arrangement"), "start")
         both = {**args, "alsoTrackRefs": [rows[1]["ref"]], "alsoTrackIdentities": ["live:401"]}
         self.assertEqual(mapper._recording_authority(both, "arrangement"), "start")
         song.tracks[2].arm = True
-        with self.assertRaisesRegex(ValueError, "exactly the armed ones"): mapper._recording_authority(both, "arrangement")
+        self.assertEqual(mapper._recording_authority(both, "arrangement"), "start")
         song.tracks[1].arm = False; song.tracks[2].arm = False
         with self.assertRaisesRegex(ValueError, "not armed"): mapper._recording_authority(both, "arrangement")
+        song.tracks[0].arm = False
+        with self.assertRaisesRegex(ValueError, "isn't armed"): mapper._recording_authority(args, "arrangement")
 
     def test_duplicate_proxy_identities_and_route_labels_are_refused(self):
         song = FakeSong(); first, second = FakeDevice(), FakeDevice(); first._live_ptr = 301; second._live_ptr = 302; song.tracks[0].devices = [first, second]; mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; device = track["devices"][0]; siblings = [{"ref": row["ref"], "objectIdentity": row["objectIdentity"]} for row in track["devices"]]
@@ -1688,16 +1693,15 @@ class ControlSurfaceTests(unittest.TestCase):
         rack = FakeDevice(); rack.can_have_chains = True; chain = type("Chain", (), {})(); chain.devices = [rack]; rack.chains = [chain]; song.tracks[0].devices = [rack]
         with self.assertRaisesRegex(ValueError, "cyclic"): LiveObjectMapper(song).snapshot()
 
-    def test_destructive_cleanup_requires_unforgeable_unchanged_creation_ownership(self):
+    def test_destructive_cleanup_requires_unforgeable_creation_ownership_of_the_same_object(self):
         song = FakeSong(); mapper = LiveObjectMapper(song); transaction = "structure-ownership-transaction"; created = mapper.invoke("track.create", {"name": "Owned", "kind": "midi", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, transaction)
         self.assertIn("ownershipToken", created)
         delete_args = {"ref": created["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": created["objectIdentity"]}
         with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", delete_args, "attacker-transaction")
         song.tracks[1].arrangement_clips = [FakeClip(4.0)]; delete_args["expectedStructureRevision"] = mapper._structure_revision()
-        with self.assertRaisesRegex(ValueError, "changed after creation"): mapper.invoke("track.delete", delete_args, transaction, created["ownershipToken"])
-        # The client's own scratch track, recorded onto: it goes when the client says so, and only with the creating transaction's authority.
-        with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, "attacker-transaction")
-        self.assertEqual(mapper.invoke("track.delete", {**delete_args, "discardChanges": True}, transaction, created["ownershipToken"]), {"deleted": created["ref"]})
+        # A track it made goes though it changed since (recorded onto), only with the creating transaction's authority.
+        with self.assertRaisesRegex(ValueError, "transaction-owned"): mapper.invoke("track.delete", delete_args, "attacker-transaction")
+        self.assertEqual(mapper.invoke("track.delete", delete_args, transaction, created["ownershipToken"]), {"deleted": created["ref"]})
         clean_song = FakeSong(); clean_mapper = LiveObjectMapper(clean_song); clean = clean_mapper.invoke("scene.create", {"name": "Owned Scene", "index": 1, "expectedStructureRevision": clean_mapper._structure_revision()}, transaction); clean_args = {"ref": clean["ref"], "expectedStructureRevision": clean_mapper._structure_revision(), "expectedObjectIdentity": clean["objectIdentity"]}
         self.assertEqual(clean_mapper.invoke("scene.delete", clean_args, transaction, clean["ownershipToken"]), {"deleted": clean["ref"]}); clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"]); clean_mapper.retire_transaction_ownership(transaction)
         with self.assertRaisesRegex(ValueError, "transaction-owned"): clean_mapper._require_cleanup_ownership("scene.delete", clean_args, transaction, clean["ownershipToken"])
@@ -1967,14 +1971,14 @@ class ControlSurfaceTests(unittest.TestCase):
         snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; slot = track["clipSlots"][0]; scene = snapshot["scenes"][0]
         clip = next(item for item in track["clips"] if item["ref"] == slot["clipRef"])
         authority = {"slotRef": slot["ref"], "trackRef": track["ref"], "sceneRef": scene["ref"], "sceneIndex": scene["index"], "clipRef": slot["clipRef"], "trackIdentity": track["objectIdentity"], "sceneIdentity": scene["objectIdentity"], "slotIdentity": slot["objectIdentity"], "clipIdentity": clip["objectIdentity"], "playbackRevision": snapshot["playback"]["revision"], "outputSafety": {"safe": True, "provenance": "unit-test-operator"}}
-        stale = dict(authority); stale["playbackRevision"] = "stale"
-        with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", stale)
+        # Playback moving on since the preview doesn't stop a launch (it launches whatever plays); a target that isn't the one previewed does.
         cross_wired = dict(authority); cross_wired["sceneRef"] = snapshot["scenes"][1]["ref"]; cross_wired["sceneIndex"] = 1
         with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", cross_wired)
         launched = mapper.invoke("session.clip-launch", authority)
         self.assertEqual(launched["launched"], slot["ref"])
+        # Launching again while it plays isn't refused, as pressing the slot again in Live.
         layered = dict(authority); layered["playbackRevision"] = mapper.snapshot()["playback"]["revision"]
-        with self.assertRaises(ValueError): mapper.invoke("session.clip-launch", layered)
+        self.assertEqual(mapper.invoke("session.clip-launch", layered)["launched"], slot["ref"])
         stopped = mapper.invoke("session.clip-stop", {key: value for key, value in authority.items() if key != "playbackRevision"})
         self.assertTrue(stopped["stopped"])
 
@@ -2880,13 +2884,13 @@ class RealtimePlaneTests(unittest.TestCase):
         frame = {"version": 1, "id": "async-1", "ok": True, "result": snapshot}
         self.assertTrue(AuthenticatedRemoteScript._canonical(frame))
 
-    def test_stepped_parameters_report_whole_steps_and_refuse_fractions(self):
+    def test_stepped_parameters_report_whole_steps_and_take_the_nearest_one(self):
         mapper = LiveObjectMapper(FakeSong())
         switch = mapper.song.tracks[0].devices[0].parameters[0]
         del switch.quantization; switch.is_quantized = True; switch.value = 0.0; switch.value_items = ["Off", "On"]
         row = mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
         self.assertEqual(row["quantization"], 1.0); self.assertEqual(row["valueItems"], ["Off", "On"])
-        with self.assertRaisesRegex(ValueError, "quantization"): mapper._set_parameter_value(row["ref"], 0.75)
+        self.assertEqual(mapper._set_parameter_value(row["ref"], 0.75)["value"], 1.0, "between steps: the nearest one")
         self.assertEqual(mapper._set_parameter_value(row["ref"], 1.0)["value"], 1.0)
         switch.is_quantized = False; switch.value = 0.25
         self.assertEqual(mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]["quantization"], 0.0)
@@ -6693,8 +6697,9 @@ class SingleRequestMutationTests(unittest.TestCase):
         delete = lambda row, key, owner=transaction: {"operation": "track.delete", "transactionId": owner, "idempotencyKey": key, "ownershipToken": row["ownershipToken"], "args": {"ref": row["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": row["objectIdentity"]}}
         refused("destructive cleanup lacks exact transaction-owned authority", delete(made[1], "delete-key-0001", "transaction-other"))
         refused("transaction-owned structure cleanup must proceed from the highest positional authority", delete(made[0], "delete-key-0002"))
-        mapper.song.tracks[2].arrangement_clips = [FakeClip(4.0)]
-        refused("transaction-owned object changed after creation; cleanup refused", delete(made[1], "delete-key-0003"))
+        owned_b = mapper.song.tracks[2]; mapper.song.tracks[2] = FakeTrack()
+        refused("the object at this reference isn't the one this transaction made any more; cleanup refused", delete(made[1], "delete-key-0003"))
+        mapper.song.tracks[2] = owned_b
         self.assertEqual([track.name for track in mapper.song.tracks], ["Drums", "Owned A", "Owned B"]); self.assertEqual(bridge._pending_mutations, {})
         # A queue that refused it before Live's thread ran it (its deadline had passed).
         queued = immediate_bridge(); queued.queue = remote_module._MainThreadQueue()
@@ -6736,6 +6741,141 @@ class FakeUndoSong(FakeSong):
     def end_undo_step(self): self.calls.append("end")
     def undo(self): self.calls.append("undo"); self.can_redo = True
     def redo(self): self.calls.append("redo"); self.can_redo = False
+
+
+class PythonRunTests(unittest.TestCase):
+    def setUp(self):
+        self.song = FakeUndoSong()
+        self.song.tempo = 120
+        self.song.tracks[0].clip_slots[0].create_clip(4)
+        self.mapper = LiveObjectMapper(self.song)
+        self.application = types.SimpleNamespace(marker="app")
+        self.live = types.SimpleNamespace(
+            marker="Live", Application=types.SimpleNamespace(get_application=lambda: self.application),
+            Track=types.SimpleNamespace(Track=FakeTrack), Scene=types.SimpleNamespace(Scene=FakeScene),
+            ClipSlot=types.SimpleNamespace(ClipSlot=FakeSlot), Clip=types.SimpleNamespace(Clip=FakeClip),
+            Device=types.SimpleNamespace(Device=FakeDevice), DeviceParameter=types.SimpleNamespace(DeviceParameter=FakeParameter),
+        )
+        self.live_patch = patch.dict(sys.modules, {"Live": self.live})
+        self.live_patch.start()
+        self.addCleanup(self.live_patch.stop)
+
+    def run_python(self, code, **args):
+        request = {"code": code, **args}
+        validate_operation_payload("python.run", "request", request)
+        result = self.mapper.invoke("python.run", request)
+        validate_operation_payload("python.run", "result", result)
+        json.dumps(result, allow_nan=False)
+        return result
+
+    def test_eval_has_the_live_namespace_and_json_values(self):
+        result = self.run_python("(Live.marker, song.tempo, app.marker, obj is None, bridge.song is song)", mode="eval")
+        self.assertEqual(result, {"ok": True, "result": ["Live", 120, "app", True, True], "stdout": "", "error": None})
+        self.assertEqual(self.song.calls, ["begin", "end"])
+        self.assertTrue(self.mapper._operation_supported("python.run"))
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("python.run"))
+        with patch.dict(sys.modules, {"Live": None}): self.assertFalse(self.mapper._operation_supported("python.run"))
+
+    def test_exec_captures_stdout_returns_result_and_mutates_without_rollback(self):
+        result = self.run_python("print('renaming')\nsong.tracks[0].name = 'Python Bass'\nresult = {'name': song.tracks[0].name, 'tuple': (1, 2), 'set': {3}, 'frozen': frozenset([4])}")
+        self.assertEqual(result, {"ok": True, "result": {"name": "Python Bass", "tuple": [1, 2], "set": [3], "frozen": [4]}, "stdout": "renaming\n", "error": None})
+        self.assertEqual(self.song.tracks[0].name, "Python Bass")
+        self.assertIsNone(self.run_python("print('no result')")["result"])
+        # Exec globals and locals are shared, including functions defined by the script.
+        self.assertEqual(self.run_python("x = 3\ndef answer(): return x + song.tempo\nresult = answer()")["result"], 123)
+
+    def test_live_objects_return_refs_consumed_by_the_typed_mapper(self):
+        result = self.run_python("(song, song.tracks[0], song.scenes[0], song.tracks[0].devices[0], song.tracks[0].devices[0].parameters[0], song.tracks[0].clip_slots[0], song.tracks[0].clip_slots[0].clip)", mode="eval")
+        self.assertTrue(result["ok"], result)
+        objects = [self.song, self.song.tracks[0], self.song.scenes[0], self.song.tracks[0].devices[0], self.song.tracks[0].devices[0].parameters[0], self.song.tracks[0].clip_slots[0], self.song.tracks[0].clip_slots[0].clip]
+        for row, obj, kind in zip(result["result"], objects, ["set", "track", "scene", "device", "parameter", "clip_slot", "clip"]):
+            self.assertEqual(set(row), {"ref", "type", "name"})
+            self.assertIn(f":{kind}:", row["ref"])
+            self.assertIs(self.mapper.refs.get(row["ref"]), obj)
+            if kind != "clip_slot": self.assertEqual(self.mapper.get(row["ref"])["ref"], row["ref"])
+        reference = result["result"][1]["ref"]
+        self.assertEqual(self.run_python("obj.name", mode="eval", ref=reference)["result"], "Drums")
+        # A script can shift the positions registered by earlier discovery.
+        shifted = self.run_python("song.create_midi_track(0)\nresult = song.tracks")
+        self.assertTrue(shifted["ok"], shifted)
+        self.assertEqual([row["ref"] for row in shifted["result"]], [f"{self.mapper.refs.epoch}:track:0", f"{self.mapper.refs.epoch}:track:1"])
+        self.assertEqual(self.mapper.get(shifted["result"][1]["ref"])["name"], "Drums")
+
+    def test_exceptions_and_exit_are_data_and_restore_stdout_trace_and_undo(self):
+        previous_stdout, previous_trace = sys.stdout, sys.gettrace()
+        for expression, name, message in [("raise ValueError('broken')", "ValueError", "broken"), ("raise SystemExit(9)", "SystemExit", "9"), ("raise KeyboardInterrupt('stop')", "KeyboardInterrupt", "stop"), ("raise GeneratorExit('exit')", "GeneratorExit", "exit")]:
+            with self.subTest(name=name):
+                result = self.run_python("song.tempo = 126\nprint('before failure')\n" + expression)
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["result"])
+                self.assertEqual(result["stdout"], "before failure\n")
+                self.assertEqual((result["error"]["type"], result["error"]["message"]), (name, message))
+                self.assertIn("<python.run>", result["error"]["traceback"])
+                self.assertEqual(self.song.tempo, 126, "failed scripts keep the changes they made")
+                self.assertEqual(self.song.calls[-2:], ["begin", "end"])
+                self.assertIs(sys.stdout, previous_stdout)
+                self.assertIs(sys.gettrace(), previous_trace)
+                self.assertIsNone(self.mapper._undo_step)
+        syntax = self.run_python("result =")
+        self.assertEqual(syntax["error"]["type"], "SyntaxError")
+
+    def test_timeout_interrupts_a_loop_and_cleans_up(self):
+        started = time.perf_counter()
+        result = self.run_python("print('started')\nwhile True: pass", timeoutMs=10)
+        self.assertLess(time.perf_counter() - started, 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "TimeoutError")
+        self.assertIn("10 ms", result["error"]["message"])
+        self.assertEqual(result["stdout"], "started\n")
+        self.assertEqual(self.song.calls, ["begin", "end"])
+        self.assertIsNone(self.mapper._undo_step)
+        self.assertEqual(self.run_python("2 + 2", mode="eval")["result"], 4)
+
+    def test_an_open_undo_step_is_kept_and_a_previous_trace_restored(self):
+        step = self.mapper.invoke("undo.step.begin", {"label": "Plan"})
+        previous = sys.gettrace()
+        def prior_trace(frame, event, arg): return prior_trace
+        try:
+            sys.settrace(prior_trace)
+            self.assertTrue(self.run_python("result = 1")["ok"])
+            self.assertIs(sys.gettrace(), prior_trace)
+            self.assertFalse(self.run_python("raise SystemExit()", timeoutMs=10)["ok"])
+            self.assertIs(sys.gettrace(), prior_trace)
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(self.song.calls, ["begin"])
+        self.assertEqual(self.mapper._undo_step["stepId"], step["stepId"])
+        self.mapper.invoke("undo.step.end", {"stepId": step["stepId"]})
+        self.assertEqual(self.song.calls, ["begin", "end"])
+
+    def test_non_json_results_and_unprintable_exceptions_are_data(self):
+        for code in ["float('nan')", "float('inf')", "2 ** 100", "object()"]:
+            with self.subTest(code=code): self.assertFalse(self.run_python(code, mode="eval")["ok"])
+        self.assertFalse(self.run_python("result = []; result.append(result)")["ok"])
+        bad_error = self.run_python("class BadError(BaseException):\n def __str__(self): raise SystemExit()\nraise BadError()")
+        self.assertEqual(bad_error["error"]["type"], "BadError")
+        self.assertEqual(bad_error["error"]["message"], "Error message unavailable")
+
+    def test_authenticated_invoke_needs_no_authority_and_runs_on_the_live_queue(self):
+        self.assertIn("python.run", remote_module._AUTHORITY_FREE_INVOKES)
+        self.assertNotIn("python.run", remote_module._READ_ONLY_INVOKES)
+        bridge = immediate_bridge(self.song)
+        bridge.queue = _MainThreadQueue()
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
+        unsigned = remote.bound({"version": PROTOCOL, "id": "python", "method": "invoke", "operation": "python.run", "args": {"code": "import threading\nprint(threading.get_ident())\nraise SystemExit('exit')"}, "nonce": "python-nonce-0001", "sequence": 1})
+        replies = []
+        worker = threading.Thread(target=lambda: replies.append(remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})))
+        worker.start()
+        deadline = time.perf_counter() + 1
+        while bridge.queue.items.empty() and time.perf_counter() < deadline: time.sleep(0.001)
+        self.assertEqual(bridge.queue.drain(), 1)
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(replies[0]["ok"], replies)
+        result = replies[0]["result"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "SystemExit")
+        self.assertEqual(result["stdout"], str(threading.get_ident()) + "\n")
 
 
 class LiveUndoTests(unittest.TestCase):
@@ -7905,7 +8045,8 @@ class ExtendedOperationTests(unittest.TestCase):
         parameter = bridge.mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
         args = lambda value: {"ref": parameter["ref"], "value": value, "gesture": True, "expectedRevision": bridge.mapper.refs.revision(parameter["ref"]), **ControlSurfaceTests.parameter_authority(bridge.mapper, parameter["ref"])}
         self.assertEqual(mutate_through(bridge, "device.parameter.set", args(0.75), "gesture-key-0001")["value"], 0.75); self.assertEqual(calls, ["begin", "end"])
-        with self.assertRaisesRegex(ValueError, "outside authoritative bounds"): bridge.mapper.invoke("device.parameter.set", args(2.0))
+        # Past its range: held at the top of it.
+        self.assertEqual(bridge.mapper.invoke("device.parameter.set", args(2.0))["value"], 1.0)
         self.assertEqual(calls, ["begin", "end", "begin", "end"])
         def stuck(): raise RuntimeError("Live kept the gesture")
         parameter_object.end_gesture = stuck

@@ -4,7 +4,7 @@
  * code. The frame parses MIDI into events, sends events back as bytes, keeps count of the notes the
  * device holds (so all-notes-off silences them), and runs timers; the device's code only decides.
  */
-import { devicePatcher, type Box, type Line } from "./amxd.js";
+import { devicePatcher, faceLayout, type Box, type Line } from "./amxd.js";
 import type { Control, MidiSpec } from "./spec.js";
 
 /** The frame, with __CONTROLS__ and __DEFAULTS__ for the device's controls and __CODE__ for its code. */
@@ -127,7 +127,7 @@ export function unitStyle(control: Extract<Control, { type: "number" | "integer"
   }
 }
 
-/** The patcher of a MIDI effect for `spec`: its face shows the controls in a row. */
+/** The patcher of a MIDI effect for `spec`: its face shows the controls in a row, or in rows past eight. */
 export function midiDevicePatcher(spec: MidiSpec): object {
   const boxes: Box[] = []; const lines: Line[] = [];
   const text = (id: string, content: string, rect: number[], extra: Record<string, unknown> = {}) =>
@@ -138,19 +138,20 @@ export function midiDevicePatcher(spec: MidiSpec): object {
     numinlets: 2, numoutlets: 1, outlettype: [""], patching_rect: [40.0, 120.0, 520.0, 280.0], saved_object_attributes: { parameter_enable: 0 } } });
   lines.push({ patchline: { source: ["obj-midiin", 0], destination: ["obj-code", 0] } });
   lines.push({ patchline: { source: ["obj-code", 0], destination: ["obj-midiout", 0] } });
+  const face = faceLayout(spec.controls.length);
   spec.controls.forEach((control, index) => {
-    const id = `obj-control-${index + 1}`; const x = 8.0 + index * 52.0;
+    const id = `obj-control-${index + 1}`; const { x, y } = face.at(index);
     const valueof: Record<string, unknown> = { parameter_longname: control.name, parameter_shortname: control.name.slice(0, 12), parameter_initial_enable: 1 };
     let box: Record<string, unknown>;
     if (control.type === "choice") {
-      box = { maxclass: "live.menu", numinlets: 1, numoutlets: 3, outlettype: ["", "", "float"], presentation_rect: [x, 24.0, 48.0, 15.0] };
+      box = { maxclass: "live.menu", numinlets: 1, numoutlets: 3, outlettype: ["", "", "float"], presentation_rect: [x, y + 24.0, 48.0, 15.0] };
       Object.assign(valueof, { parameter_type: 2, parameter_enum: control.options, parameter_mmax: control.options.length - 1, parameter_initial: [control.options.indexOf(control.default)] });
     } else if (control.type === "switch") {
-      box = { maxclass: "live.toggle", numinlets: 1, numoutlets: 1, outlettype: [""], presentation_rect: [x + 12.0, 24.0, 20.0, 20.0] };
+      box = { maxclass: "live.toggle", numinlets: 1, numoutlets: 1, outlettype: [""], presentation_rect: [x + 12.0, y + 24.0, 20.0, 20.0] };
       Object.assign(valueof, { parameter_type: 2, parameter_enum: ["off", "on"], parameter_mmax: 1, parameter_initial: [control.default ? 1 : 0] });
     } else {
       const unit = unitStyle(control);
-      box = { maxclass: "live.dial", numinlets: 1, numoutlets: 2, outlettype: ["", "float"], presentation_rect: [x, 8.0, 44.0, 48.0] };
+      box = { maxclass: "live.dial", numinlets: 1, numoutlets: 2, outlettype: ["", "float"], presentation_rect: [x, y + 8.0, 44.0, 48.0] };
       Object.assign(valueof, { parameter_type: control.type === "integer" ? 1 : 0, parameter_mmin: control.min, parameter_mmax: control.max, parameter_initial: [control.default],
         parameter_unitstyle: unit.style, ...(unit.units ? { parameter_units: unit.units } : {}),
         // Frequencies and times spread over decades turn more evenly on a curve.
@@ -163,5 +164,5 @@ export function midiDevicePatcher(spec: MidiSpec): object {
     lines.push({ patchline: { source: [id, 0], destination: [prepend, 0] } });
     lines.push({ patchline: { source: [prepend, 0], destination: ["obj-code", 1] } });
   });
-  return devicePatcher("midi_effect", { title: spec.name, description: spec.about, width: Math.max(120, 16 + spec.controls.length * 52), boxes, lines });
+  return devicePatcher("midi_effect", { title: spec.name, description: spec.about, width: Math.max(120, 16 + face.columns * 52), boxes, lines });
 }

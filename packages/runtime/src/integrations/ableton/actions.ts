@@ -42,7 +42,7 @@ const WORDS: Record<string, { title: string; playing?: boolean; recording?: bool
 export const ACTIONS: readonly ActionKind[] = [
   {
     tool: "play", since: FIXED_BRIDGE, preview: "live_transport_action_preview", apply: "live_transport_action_apply",
-    description: "Play, stop and the like: start (from the start marker; set it first with set_transport's position), continue (from where it stopped), stop, play-selection, stop-all-clips, back-to-arrangement (Live's Back to Arrangement button: tracks that followed their Session clips play the Arrangement again), tap-tempo, nudge-up and nudge-down, re-enable-automation, trigger-session-record. Only when the producer asks to hear or stop something, or before recording from the Arrangement.",
+    description: "Play, stop and the like: start (from the start marker; set it first with set_transport's position), continue (from where it stopped), stop, play-selection, stop-all-clips, back-to-arrangement (Live's Back to Arrangement button: tracks that followed their Session clips play the Arrangement again), tap-tempo, nudge-up and nudge-down, re-enable-automation, trigger-session-record. Use it whenever hearing or stopping helps: to check or show what you built, or to record.",
     inputSchema: { type: "object", additionalProperties: false, required: ["action"], properties: { action: { type: "string", enum: [...TRANSPORT] } } },
     newer: { "back-to-arrangement": ARRANGEMENT_BRIDGE },
     summarize(_preview, input) { return WORDS[String(input.action)] ?? { title: "Transport" }; },
@@ -54,7 +54,7 @@ export const ACTIONS: readonly ActionKind[] = [
   },
   {
     tool: "launch_clip", preview: "live_clip_launch_preview", apply: "live_clip_launch_apply",
-    description: "Launch one Session clip to hear it: slotRef is its clip slot, from discovery. The Set has to be stopped first (Live plays just that clip).",
+    description: "Launch one Session clip to hear it: slotRef is its clip slot, from discovery.",
     inputSchema: { type: "object", additionalProperties: false, required: ["slotRef"], properties: { slotRef: REF } },
     prepare(input) { return { slotRef: input.slotRef ?? null, outputSafety: SAFETY }; },
     summarize(_preview, input, track) {
@@ -65,7 +65,7 @@ export const ACTIONS: readonly ActionKind[] = [
   },
   {
     tool: "record", since: FIXED_BRIDGE, preview: "live_recording_preview", apply: "live_recording_apply",
-    description: "Start or stop recording: action start or stop, lane session or arrangement, and destinationTrackRef, the armed track (arm it with set_routing first). Live records onto one armed track only, so Kumi disarms any other first and says which. Recording keeps what it records in the Set; stop it with action stop.",
+    description: "Start or stop recording: action start or stop, lane session or arrangement, and destinationTrackRef, the armed track (arm it with set_routing first). Live records onto every armed track, so Kumi disarms any other first (only this one records) and says which. Recording keeps what it records in the Set; stop it with action stop.",
     inputSchema: { type: "object", additionalProperties: false, required: ["action", "lane"], properties: {
       action: { type: "string", enum: ["start", "stop"] }, lane: { type: "string", enum: ["session", "arrangement"] }, destinationTrackRef: REF,
       alsoTrackRefs: { type: "array", maxItems: 7, items: REF, description: "More armed tracks recorded at the same time (bridge 1.0.47): several sources rendered in one pass" } } },
@@ -90,7 +90,7 @@ export const ACTIONS: readonly ActionKind[] = [
   },
   {
     tool: "select", since: FIXED_BRIDGE, preview: "live_selection_preview", apply: "live_selection_apply",
-    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view) or chainRef. Use it when they ask where something is, or ask to see it. (Live's scripting can't select a device or a parameter reliably: select its track, or its chain, instead.)",
+    description: "Show the producer something by selecting it in Live: trackRef, sceneRef, slotRef, detailClipRef (opens it in the Clip view) or chainRef. Use it whenever showing something helps: where a thing is, or what you just built. (Live's scripting can't select a device or a parameter reliably: select its track, or its chain, instead.)",
     // What Live's scripting really selects. Song.View.select_device was tried (bridge 1.0.42–1.0.44): on real
     // Live the selection lagged or landed elsewhere, so devices and parameters aren't offered.
     inputSchema: { type: "object", additionalProperties: false, properties: { trackRef: REF, sceneRef: REF, slotRef: REF, detailClipRef: REF, chainRef: REF } },

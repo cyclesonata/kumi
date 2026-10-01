@@ -121,9 +121,12 @@ const bundledBridgeVersion = (() => {
 try {
   // The doctor and the report run on any Node, so they can say that along with everything else.
   const doctor = process.argv.length === 3 && (process.argv[2] === "doctor" || process.argv[2] === "report");
-  if (!doctor && !SUPPORTED_NODE_MAJORS.includes(Number(process.versions.node.split(".")[0]))) {
-    throw new Error(`Kumi needs Node.js 22 or 24 (this is ${process.version}); install Node 24 LTS from https://nodejs.org.`);
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  if (!doctor && nodeMajor < Math.min(...SUPPORTED_NODE_MAJORS)) {
+    throw new Error(`Kumi needs Node.js 22 or newer (this is ${process.version}); install Node 24 LTS from https://nodejs.org.`);
   }
+  // A newer Node than Kumi is tested on runs it anyway.
+  if (!doctor && !SUPPORTED_NODE_MAJORS.includes(nodeMajor)) process.stderr.write(`Kumi is tested on Node.js 22 and 24; this is ${process.version}, which should work too.\n`);
   const config = loadConfig(process.argv.slice(2));
   if (config.mode === "doctor") process.exitCode = await runDoctor({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "update" && config.rollback && !INSTALLED) {
