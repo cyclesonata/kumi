@@ -3288,7 +3288,7 @@ export class McpHost {
         cacheAgeSeconds: Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)),
         cacheTtlSeconds: BROWSER_SEARCH_CACHE_TTL_MS / 1000,
         epoch,
-        note: "Ranked host-side over one bounded candidate traversal per root; searchedRoots are the roots that contributed candidates, so a bound-limited traversal may not have reached every requested root. Substring-exact matching remains available with matchMode=substring. Loadability still requires a fresh live_browser_inspect result.",
+        note: "Ranked host-side over one bounded candidate traversal per root; searchedRoots are the roots that contributed candidates, so a bound-limited traversal may not have reached every requested root. Substring-exact matching remains available with matchMode=substring. Load an item straight from these results.",
       });
     } catch (cause) { return this.adapterToolError(id, cause, "Browser search requires an available Live Browser."); }
   }

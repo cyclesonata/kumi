@@ -10142,7 +10142,7 @@ class LiveObjectMapper:
             raise ValueError("track-targeted browser loading is unavailable")
         previous_selection = getattr(view, "selected_track", None); previous_identity = self._capture_object_identity(previous_selection) if previous_selection is not None else None; before_devices = self._items(getattr(track, "devices", []))
         # Live replaces a track's instrument with a new one, which cleanup couldn't bring back.
-        if metadata["category"] in {"instruments", "drums", "sounds"} and any(self._read_attr(device, "type") == 1 for device in before_devices): raise ValueError("this track already has an instrument, which Live would replace; load it onto a new track or into an Instrument Rack")
+        if metadata["category"] in {"instruments", "drums", "sounds"} and any(self._read_attr(device, "type") == 1 for device in before_devices): raise ValueError("this track already has an instrument, which Live would replace: delete it first (then load this), or load onto a new track or into an Instrument Rack")
         # The new device goes after the last one, not wherever the producer last clicked.
         track_view = self._read_attr(track, "view"); previous_device = self._read_attr(track_view, "selected_device") if track_view is not None else None
         before_identities = [self._capture_object_identity(prior) for prior in before_devices]
