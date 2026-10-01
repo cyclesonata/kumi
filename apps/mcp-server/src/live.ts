@@ -2482,8 +2482,13 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length })).toString("base64url") : undefined;
     return { epoch: this.epoch, items: structuredClone(page), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
   }
-  /** What a discovery lists, before paging. */
+  /** What a discovery lists, before paging: a clip's notes (Session or Arrangement) by their parent clip. */
   private discoveryRows(request: LiveDiscoveryRequest): Record<string, unknown>[] {
+    if (request.kind === "note") {
+      const clip = this.state.tracks.flatMap((track) => track.clips).find((item) => item.ref === request.parent) ?? (this.state.arrangementClips ?? []).find((item) => item.clip.ref === request.parent)?.clip;
+      if (request.parent === undefined) throw new Error("a kind-specific parent reference is required");
+      return (clip?.notes ?? []).map((note, index) => ({ ...note, ref: `${request.parent}:note:${index}`, parentRef: request.parent }));
+    }
     return (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }

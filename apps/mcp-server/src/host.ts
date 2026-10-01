@@ -6450,8 +6450,10 @@ export class McpHost {
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio === true || row.clip.kind === "audio") return this.transactionError(id, "key estimation requires a MIDI clip");
-      const notes = ((row.clip.notes as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>) ?? []).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
-      const notesRevision = typeof row.clip.notesRevision === "string" ? row.clip.notesRevision : createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex");
+      // An Arrangement clip's row says how many notes it holds, not which: they come page by page.
+      const listed = Array.isArray(row.clip.notes) ? row.clip.notes as unknown as Array<Record<string, unknown>> : await this.clipNotesAsync(params.clipRef as LiveRef);
+      const notes = (listed as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
+      const notesRevision = typeof row.clip.notesRevision === "string" ? row.clip.notesRevision : createHash("sha256").update(canonicalMutationIdentity(Array.isArray(row.clip.notes) ? notes : listed)).digest("hex");
       if (params.expectedNotesRevision !== undefined && params.expectedNotesRevision !== notesRevision) return this.transactionError(id, "clip notes changed since the fenced revision");
       const estimate = estimateKey(notes);
       return this.successText(id, { ...estimate, evidence: { ...estimate.evidence, clipRef: params.clipRef, notesRevision } } as unknown as JsonObject);
@@ -8340,6 +8342,13 @@ export class McpHost {
   private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(withoutPlaybackState(value))).digest("hex"); }
 
   /** What a MIDI or scene capture is fenced on; the Remote Script's _capture_authority_revision computes the same. */
+  /** Every note of a clip, as its rows are (an Arrangement clip's row carries only its noteCount): through
+   * `discover note`, page after page. */
+  private async clipNotesAsync(clipRef: LiveRef, context?: LiveOperationContext): Promise<Array<Record<string, unknown>>> {
+    const items = await this.views.discoverAll({ kind: "note", parent: clipRef, limit: 100_000 }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+    return items.map(({ ref: _ref, parentRef: _parentRef, ...note }) => note);
+  }
+
   private captureAuthorityRevision(snapshot: LiveSnapshot): string {
     const authority = { tracks: snapshot.tracks.map((track) => ({ ref: track.ref, objectIdentity: track.objectIdentity, clips: track.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity, notesRevision: clip.notesRevision })) })), scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, objectIdentity: scene.objectIdentity, index: scene.index })), playbackRevision: snapshot.playback.revision };
     return createHash("sha256").update(canonicalMutationIdentity(authority)).digest("hex");
