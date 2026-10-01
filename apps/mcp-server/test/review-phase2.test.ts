@@ -84,6 +84,31 @@ test("a retry of an Arrangement clip change that Live made finds the clip on a l
   assert.match((await apply("live_arrangement_midi_clip_apply", next.transactionId, "next-key")).reason, /changed since the preview/);
 });
 
+test("decimal settings Live reads back as float32 are the values set: applied and undone", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const sample: Record<string, any> = { filePath: "/samples/a.wav", warping: true, slices: [], ...Object.fromEntries(SAMPLE_FIELDS.map((field) => [field, 1])) };
+  state(simulator).tracks[0]!.devices.push({ ref: "device:simpler-1", parentRef: "track:track-1", name: "Simpler", kind: "instrument", className: "OriginalSimpler", parameters: [], objectIdentity: "simulator:device:simpler-1", enabled: true, simpler: { playbackMode: 0 }, sample });
+  // Live keeps them as float32: 0.3 comes back as 0.30000001192092896.
+  const adapter = Object.assign(Object.create(simulator), { invokeAsync: async (invocation: LiveInvocation) => { const result = await simulator.invokeAsync(invocation); if (invocation.operation === "sample.set") for (const field of SAMPLE_FIELDS) sample[field] = Math.fround(sample[field]); return result; } }) as AsyncLiveAdapter;
+  const { change, undo } = hosted(adapter);
+  const set = await change("live_device_specialized_preview", { family: "sample", deviceRef: "device:simpler-1", textureFlux: 0.3, complexProFormants: 0.7 });
+  assert.equal(sample.textureFlux, Math.fround(0.3));
+  assert.equal((await undo(set.previewed.transactionId)).state, "undone"); assert.equal(sample.textureFlux, 1);
+});
+
+test("what Kumi can't take back points to Live's own undo, never to live_song_undo", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  state(simulator).tracks[0]!.devices.push({ ref: "device:cc-1", parentRef: "track:track-1", name: "CC Control", kind: "midi-effect", className: "CcControl", parameters: [], objectIdentity: "simulator:device:cc-1", enabled: true, ccControl: { customBoolTarget: 0, customBoolTargetList: ["None"] } });
+  track(simulator, "track:extra", "regular", "audio");
+  const { change, undo } = hosted(simulator);
+  const resent = await change("live_device_edit_preview", { deviceRef: "device:cc-1", action: "resend" });
+  const deleted = await change("live_track_delete_preview", { trackRef: "track:extra" });
+  for (const transactionId of [resent.previewed.transactionId, deleted.previewed.transactionId]) {
+    const refused = await undo(transactionId);
+    assert.equal(refused.isError, true); assert.doesNotMatch(`${refused.reason} ${refused.remediation}`, /live_song_undo/);
+  }
+});
+
 test("an Arrangement clip's extent is its endTime: a looped clip past its loop length is cut by a range it reaches", async () => {
   const simulator = new DeterministicLiveSimulator();
   const { change } = hosted(simulator);
@@ -92,5 +117,17 @@ test("an Arrangement clip's extent is its endTime: a looped clip past its loop l
   state(simulator).arrangementClips[0]!.clip.endTime = 16;
   const cleared = await change("live_clip_clear_range_preview", { trackRef: "track:track-1", fromBeat: 8, toBeat: 12 });
   assert.deepEqual(cleared.previewed.cuts.map((clip: { name: string; end: number }) => [clip.name, clip.end]), [["Loop", 16]]);
+});
+
+test("a Wavetable modulation's undo is refused once the matrix's targets changed", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const wavetable: Record<string, any> = { visibleModulationTargetNames: ["Osc 1 Pos", "Filter 1 Freq"] };
+  state(simulator).tracks[0]!.devices.push({ ref: "device:wt-1", parentRef: "track:track-1", name: "Wavetable", kind: "instrument", className: "InstrumentVector", parameters: [], objectIdentity: "simulator:device:wt-1", enabled: true, wavetable });
+  const { change, undo } = hosted(simulator);
+  const set = await change("live_device_edit_preview", { deviceRef: "device:wt-1", action: "modulate", targetIndex: 1, source: 0, value: 0.5 });
+  wavetable.visibleModulationTargetNames = ["Osc 1 Pos", "Osc 2 Pos"];
+  assert.match((await undo(set.previewed.transactionId)).reason, /matrix changed after the edit/);
+  wavetable.visibleModulationTargetNames = ["Osc 1 Pos", "Filter 1 Freq"];
+  assert.equal((await undo(set.previewed.transactionId)).state, "undone");
 });
 

@@ -6233,7 +6233,8 @@ export class McpHost {
       if (operation === "device.action" ? result.done !== true : operation === "sample.slice" ? !Array.isArray(result.slices) : result.changed !== true) throw new Error("the device edit wasn't confirmed");
       // What undo puts back, and what it checks is still so.
       if (edit === "set") transaction.created = { value: result.value ?? args.value };
-      else if (edit === "modulate") transaction.created = { targetIndex: result.targetIndex, value: result.value, prior: result.prior };
+      // Live's API reads no modulation amount back: undo is fenced on the target the edit set, at its place in the matrix.
+      else if (edit === "modulate") { const targets = this.deviceEditState(edit, this.deviceRow(await this.viewForAsync(context, [args.ref]), args.ref as LiveRef).device as unknown as Record<string, unknown>).targets as unknown[]; transaction.created = { targetIndex: result.targetIndex, value: result.value, prior: result.prior, target: targets[result.targetIndex as number] ?? null }; }
       else if (edit.startsWith("slice-")) transaction.created = { slices: result.slices };
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, ...(DEVICE_EDIT_KEPT[edit] ? { undo: DEVICE_EDIT_KEPT[edit] } : {}), idempotent: false });
@@ -7551,7 +7552,8 @@ export class McpHost {
       if (result.changed !== true) throw new Error("specialized device change was not confirmed");
       const verifiedDevice = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
       const verified = ((verifiedDevice[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>);
-      for (const field of fields) if (transaction.payload[field] !== undefined && JSON.stringify(verified[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("specialized device postcondition was not confirmed");
+      // Live reads decimal settings back as float32: close is the same value.
+      for (const field of fields) if (transaction.payload[field] !== undefined && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("specialized device postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -9530,7 +9532,7 @@ export class McpHost {
       const edited = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!edited || edited.kind !== "device-edit") return this.transactionError(id, "Unknown or expired device-edit transaction");
       const { edit, args } = edited.payload as { edit: string; args: Record<string, unknown> };
-      const kept = DEVICE_EDIT_KEPT[edit]; if (kept) return this.reasonError(id, kept, "live_song_undo steps back through Live's own history.");
+      const kept = DEVICE_EDIT_KEPT[edit]; if (kept) return this.reasonError(id, kept, "If the producer wants it back, Live's own undo can take it back (Cmd-Z in Live).");
       if (edited.state === "undone" && edited.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: edited.id, state: "undone", idempotent: true });
       const reconciliation = edited.state === "uncertain" && edited.undoKey === params.idempotencyKey;
       if ((edited.state !== "applied" && !reconciliation) || !edited.created) return this.transactionError(id, "Only an applied device edit can be undone");
@@ -9542,9 +9544,10 @@ export class McpHost {
         const fences = { expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
         let inverse: LiveInvocation;
         if (edit === "set") {
-          if (!reconciliation && JSON.stringify(state.value) !== JSON.stringify(edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
+          if (!reconciliation && !sameLiveValue(state.value, edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
           inverse = { operation: "device.property.set", args: { ref: args.ref, property: args.property, value: (edited.prior as { value: unknown }).value, ...fences } };
         } else if (edit === "modulate") {
+          if (!reconciliation && ((state.targets as unknown[])[edited.created.targetIndex as number] ?? null) !== edited.created.target) return this.transactionError(id, "Wavetable's modulation matrix changed after the edit (that target isn't where it was); undo refused");
           // The amount goes back; a parameter the edit added to the matrix stays there (Live can't take one out).
           inverse = { operation: "wavetable.modulation.set", args: { ref: args.ref, targetIndex: edited.created.targetIndex, source: args.source, value: edited.created.prior, ...fences } };
         } else {
@@ -9572,7 +9575,7 @@ export class McpHost {
         const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
         const snapshot = await this.viewForAsync(context, [devspec.payload.ref]); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
         const undoFamilyRow = ((row.device as unknown as Record<string, unknown>)[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>;
-        if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && JSON.stringify(undoFamilyRow[field]) !== JSON.stringify(devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
+        if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && !sameLiveValue(undoFamilyRow[field], devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
         const state = Object.fromEntries(fields.map((field) => [field, undoFamilyRow[field] ?? null]));
         devspec.state = "undoing";
         const result = await this.invokeUndoRecovery(devspec, adapter, `${family}.set` as "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "meld.set" | "plugin.set" | "sample.set" | "wavetable.set", { ref: devspec.payload.ref, ...(devspec.prior as Record<string, unknown>), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") }, context) as { changed?: unknown };
@@ -9954,7 +9957,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     if (!transaction) {
       // A deletion is kept: nothing of the deleted object is left for Kumi to restore it from.
       const deletion = this.clipLifecycleTransactions.get(params.transactionId as string);
-      if (deletion && DELETION_KINDS.has(deletion.kind)) return this.reasonError(id, KEPT_DELETION, "If the producer wants it back, Live's own undo can bring it (Cmd-Z in Live, or live_song_undo when they ask for that).");
+      if (deletion && DELETION_KINDS.has(deletion.kind)) return this.reasonError(id, KEPT_DELETION, "If the producer wants it back, Live's own undo can bring it (Cmd-Z in Live).");
       return this.transactionError(id, "Unknown or expired transaction");
     }
     if (transaction.state === "undone" && transaction.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "undone", tempo: transaction.priorTempo, idempotent: true });
