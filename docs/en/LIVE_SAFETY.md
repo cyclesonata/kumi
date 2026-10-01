@@ -13,13 +13,15 @@ reported operation capability.
 
 ## Deployment trust boundary
 
-This project supports an owner-controlled, local, loopback-only deployment. It
-trusts the local OS account and the MCP client's approval policy. The server
-cannot independently prove that a human, rather than the same model making the
-request, supplied a confirmation or output-safety statement; no out-of-band
-arming UI is provided. Do not auto-approve audible, recording, routing,
-capture, or realtime tools. For unattended clients, use client-side deny rules
-or run without a production bridge, and work only in a disposable Set.
+The bridge is Kumi's own adapter to Live: local, loopback-only, owner-controlled,
+with Kumi as its one client. It trusts the local OS account. Kumi's harness, not
+the model, runs the bridge's previews and applies: the model asks for a change by
+name, Kumi previews it, keeps the preview's confirmation to itself, applies it,
+and records it in HISTORY with its undo. Undo and verification are the safety net
+producers rely on; ceremony that only defended against a hostile MCP client has
+gone where it cost Kumi speed (a change is one request; see below). The bridge
+can't prove a human supplied an output-safety statement, so Kumi gives one only
+when the producer asked to hear, record or play something.
 
 ## Universal mutation boundary
 
@@ -42,19 +44,54 @@ the Remote Script ledger in the same bridge and Live epoch, followed by fresh
 postcondition verification. Unsupported attributes or enum values are
 unavailable evidence, not safe defaults.
 
-Authentication is not mutation authority. Before every mutating bridge
-`invoke`, the production adapter performs a read-only `authority.preflight`,
-echoes its unpredictable one-use confirmation through `authority.prepare`, and
-obtains a one-use 10-second token bound to the exact operation/argument
-digest, connection epoch, fresh authoritative target values, playback/recording
-state, referenced-object revisions, and Session structure. The bridge consumes
-it before Live-thread dispatch and rejects direct authenticated mutation
-frames, preflight or token replay, guessed confirmations, mismatched arguments,
-expiry, and intervening state changes. The bridge keeps a bounded
-executed-result ledger across TCP reconnections, so a lost response can be
-reconciled exactly instead of replayed blindly. Audible launch, capture-start,
-recording, and realtime-arm contracts also revalidate output-safety evidence on
-the bridge side.
+A change reaches Live as one request (`mutate`). After a preview, the host asks
+the Remote Script for the state digest that change will be checked against
+(`authority.digest`): the epoch, the Set's track and scene structure, the song
+state, and the state of exactly what the change names (a track without its
+clips and devices, a clip without its notes, a device's own row), plus playback
+for playback-bound operations, locators for locator operations and the touched
+tracks' Arrangement clips for Arrangement operations. The apply sends the
+operation, its arguments, the transaction and idempotency keys and that digest.
+On Live's main thread, in the same tick, the Remote Script recomputes the digest
+and applies only if nothing changed since the preview; otherwise it refuses with
+"Live state changed since the preview" and nothing has happened. A refusal before
+anything ran always says so ("…; nothing changed"), so the host records it as
+not dispatched rather than uncertain. On a retry with the same key, such a refusal
+proves only that the retry didn't run: the first attempt may have, so the change
+stays uncertain. An undo that fails its checks before sending anything to Live
+leaves the change applied, and the next undo checks again. The bridge keeps a bounded executed-result
+ledger across TCP reconnections, so a lost response is reconciled exactly by its
+idempotency key instead of replayed. Audible launch, capture-start, recording
+and realtime-arm contracts also revalidate output-safety evidence on the bridge
+side. (The earlier three-step authority, a read-only `authority.preflight`, its
+one-use confirmation through `authority.prepare`, then the invoke, is still
+there for the tests that exercise it.)
+
+Deletions are explicit. Deleting something no transaction of Kumi's made (a clip,
+an Arrangement clip, a scene, a track, a locator, a device, a return) needs
+`explicitDeletion: true` and exact identity fences for the object and where it
+lives; HISTORY keeps the deletion, since only Live's own undo brings it back.
+Undo of what a transaction made is the transaction's own, fenced to the content
+it left: if the producer changed it since, undo is refused.
+
+A plan is also one step in Live's own undo: Kumi opens a step before the plan's
+first change and closes it after its last. The Remote Script owns the open step
+and closes it when its connection goes, when its time is up, on reconnect and on
+shutdown, so Live is never left with an open step. Live's own undo and redo
+(`song.undo`, `song.redo`) are offered only for what the producer did in Live,
+never as Kumi's undo.
+
+Reads are bounded by work, not size: a discovery page or a windowed snapshot
+stops when a 30 ms budget on Live's thread is spent and says where to go on
+(`truncated`, `nextCursor`), so no request holds Live's UI however big the Set.
+
+Kumi's Live extension (Live 12.4's Extensions SDK) is a second channel. The bridge
+reaches it on 127.0.0.1 with a secret the extension writes, owner-only, into its
+data folder; every request is signed, registry-validated and refused past its
+deadline. Its changes are verified and undone through the Remote Script where
+Live allows (a written Arrangement clip is deleted, fenced to its content) and
+kept otherwise. Live runs the extension with Node's permission model: it can
+read and write only its own folders.
 
 ## Implemented mutation classes
 

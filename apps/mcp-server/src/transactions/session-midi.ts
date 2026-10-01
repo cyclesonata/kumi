@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveOperationContext, type LiveRef, type LiveSnapshot, type Note, type LiveStatus } from "../live.js";
+import { LiveViews, withoutPlaybackState, type AsyncLiveAdapter, type LiveAdapter, type LiveOperationContext, type LiveRef, type LiveSnapshot, type Note, type LiveStatus } from "../live.js";
 
 export const SESSION_MIDI_TRANSACTION_TTL_MS = 30_000;
-export const MAX_SESSION_MIDI_NOTES = 512;
+/** No count cap on a clip's notes: this only stops past what one wire array carries. */
+export const MAX_SESSION_MIDI_NOTES = 10_000_000;
 
 export interface SessionMidiRequest { trackRef: LiveRef; sceneIndex: number; name: string; length: number; notes: Note[]; }
 export interface SessionMidiPreview { transactionId: string; epoch: number; revision: string; target: { trackRef: LiveRef; trackIdentity: string; sceneIndex: number; slotRef: LiveRef; slotIdentity: string; sceneRef: LiveRef; sceneIdentity: string; }; prior: { occupied: boolean; clipRef?: LiveRef }; proposed: SessionMidiRequest; impact: "creates-session-midi-clip"; confirmation: "apply"; expiresAt: number; }
@@ -48,7 +49,7 @@ function validateRequest(value: unknown): asserts value is SessionMidiRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid MIDI clip request");
   const request = value as Partial<SessionMidiRequest>;
   const sceneIndex = request.sceneIndex;
-  if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 1023 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
+  if (typeof request.trackRef !== "string" || !Number.isInteger(sceneIndex) || (sceneIndex as number) < 0 || (sceneIndex as number) > 100_000 || typeof request.name !== "string" || request.name.length < 1 || request.name.length > 256 || typeof request.length !== "number" || !Number.isFinite(request.length) || request.length <= 0 || request.length > 1024 || !Array.isArray(request.notes) || request.notes.length > MAX_SESSION_MIDI_NOTES) throw new Error("invalid MIDI clip request");
   // Most producers never think about MIDI channels; default to channel 1.
   for (const note of request.notes) { note.channel ??= 1; validateNote(note, request.length as number); }
 }
@@ -57,7 +58,9 @@ export class SessionMidiTransactionManager {
   private static readonly MAX_RECORDS = 64;
   private readonly records = new Map<string, SessionMidiRecord>();
   private readonly idempotency = new Map<string, { transactionId: string; result: unknown }>();
-  constructor(private readonly adapter: LiveAdapter) {}
+  private readonly views: LiveViews;
+  /** `views` are the host's shared reads (see LiveViews); a manager of its own reads through its own. */
+  constructor(private readonly adapter: LiveAdapter, views?: LiveViews) { this.views = views ?? new LiveViews(() => this.asyncAdapter()); }
 
   private retain(record: SessionMidiRecord): void {
     const now = Date.now(); const protectedStates = new Set(["applying", "applied", "undoing", "uncertain"]);
@@ -81,7 +84,7 @@ export class SessionMidiTransactionManager {
     validateRequest(request);
     const adapter = this.asyncAdapter();
     const status = this.require(["session.read", "session.midi_clip.create", "session.midi_clip.delete", "session.midi_note.write"], ["clip.create", "clip.delete", "note.add-batch"]);
-    const snapshot = await adapter.snapshotAsync();
+    const snapshot = await this.views.viewFor(undefined, [(request as SessionMidiRequest).trackRef]);
     const track = snapshot.tracks.find((item) => item.ref === (request as SessionMidiRequest).trackRef);
     if (!track || (track.kind !== "midi" && (track as unknown as { mediaKind?: string }).mediaKind !== "midi")) throw new Error("MIDI track not found");
     const typed = request as SessionMidiRequest;
@@ -93,17 +96,18 @@ export class SessionMidiTransactionManager {
     return clone(result);
   }
 
-  private async getOrAbsent(adapter: AsyncLiveAdapter, reference: LiveRef, context?: LiveOperationContext): Promise<unknown> {
-    const snapshot = await adapter.snapshotAsync(context);
+  private async getOrAbsent(record: SessionMidiRecord, reference: LiveRef, context?: LiveOperationContext): Promise<unknown> {
+    // The clip was made in the transaction's target slot: its track is where to look.
+    const snapshot = await this.views.viewFor(context, [record.target.trackRef]);
     return snapshot.tracks.flatMap((track) => track.clips).find((clip) => clip.ref === reference);
   }
 
   private async compensateApplyAsync(record: SessionMidiRecord, adapter: AsyncLiveAdapter, context?: LiveOperationContext): Promise<void> {
     if (!record.clipRef && !record.compensationArgs) return; const clipRef = record.clipRef ?? record.compensationArgs?.ref as LiveRef;
-    if (!record.compensationArgs) { const observed = await adapter.getAsync(clipRef, context) as { objectIdentity?: unknown; notesRevision?: unknown } | undefined; if (record.clipIdentity && observed?.objectIdentity !== record.clipIdentity) throw new Error("transaction-owned MIDI clip identity changed before compensation"); const observedFingerprint = fingerprint(observed); const exactCreationState = observedFingerprint === record.clipFingerprint; const exactWrittenState = typeof record.appliedNotesRevision === "string" && observed?.notesRevision === record.appliedNotesRevision && typeof record.clipBaseFingerprint === "string" && clipBaseFingerprint(observed) === record.clipBaseFingerprint; if (!exactCreationState && !exactWrittenState) throw new Error("transaction-owned MIDI clip changed before compensation"); record.compensationFingerprint = observedFingerprint; record.compensationArgs = { ref: clipRef, ...clipDeleteAuthority(await adapter.snapshotAsync(context), clipRef) }; }
-    else { const observed = await this.getOrAbsent(adapter, clipRef, context); if (observed === undefined || observed === null) return; if (!record.compensationFingerprint || fingerprint(observed) !== record.compensationFingerprint) throw new Error("transaction-owned MIDI clip changed before compensation replay"); }
+    if (!record.compensationArgs) { const observed = await adapter.getAsync(clipRef, context) as { objectIdentity?: unknown; notesRevision?: unknown } | undefined; if (record.clipIdentity && observed?.objectIdentity !== record.clipIdentity) throw new Error("transaction-owned MIDI clip identity changed before compensation"); const observedFingerprint = fingerprint(observed); const exactCreationState = observedFingerprint === record.clipFingerprint; const exactWrittenState = typeof record.appliedNotesRevision === "string" && observed?.notesRevision === record.appliedNotesRevision && typeof record.clipBaseFingerprint === "string" && clipBaseFingerprint(observed) === record.clipBaseFingerprint; if (!exactCreationState && !exactWrittenState) throw new Error("transaction-owned MIDI clip changed before compensation"); record.compensationFingerprint = observedFingerprint; record.compensationArgs = { ref: clipRef, ...clipDeleteAuthority(await this.views.viewFor(context, [record.target.trackRef, clipRef]), clipRef) }; }
+    else { const observed = await this.getOrAbsent(record, clipRef, context); if (observed === undefined || observed === null) return; if (!record.compensationFingerprint || fingerprint(observed) !== record.compensationFingerprint) throw new Error("transaction-owned MIDI clip changed before compensation replay"); }
     await adapter.invokeAsync({ operation: "clip.delete", args: record.compensationArgs }, { signal: context?.signal, deadlineMs: context?.deadlineMs ?? Date.now() + 5_000, transactionId: record.transactionId, idempotencyKey: record.applyKey });
-    const remaining = await this.getOrAbsent(adapter, clipRef, context); if (remaining !== undefined && remaining !== null) throw new Error("MIDI compensation deletion was not confirmed");
+    const remaining = await this.getOrAbsent(record, clipRef, context); if (remaining !== undefined && remaining !== null) throw new Error("MIDI compensation deletion was not confirmed");
   }
 
   async applyAsync(transactionId: string, confirmation: unknown, idempotencyKey: string, context?: LiveOperationContext): Promise<unknown> {
@@ -115,14 +119,14 @@ export class SessionMidiTransactionManager {
     const reconciliation = record.state === "uncertain" && record.applyKey === idempotencyKey;
     if (record.state !== "previewed" && !reconciliation) throw new Error("MIDI transaction is no longer applicable");
     const adapter = this.asyncAdapter();
-    if (reconciliation) await adapter.snapshotAsync(context);
+    if (reconciliation) await this.views.view(context, [], ["set"]);
     const status = this.require(["session.read", "session.midi_clip.create", "session.midi_clip.delete", "session.midi_note.write"], ["clip.create", "clip.delete", "note.add-batch"]);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; preview again");
     if (reconciliation && record.recoveryMode === "compensate") { try { await this.compensateApplyAsync(record, adapter, context); record.state = "undone"; return { transactionId, state: "compensated", residuals: [], idempotent: false }; } catch (cause) { record.state = "uncertain"; throw cause; } }
     record.state = "applying"; record.recoveryMode = "apply"; record.applyKey = idempotencyKey;
     let clipRef: LiveRef | undefined;
     try {
-      const snapshot = await adapter.snapshotAsync(context);
+      const snapshot = await this.views.viewFor(context, [record.target.trackRef]);
       if (!reconciliation && revision(snapshot, targetAuthority(snapshot, record.target.trackRef, record.target.sceneIndex)) !== record.revision) throw new Error("Session target identity or slot state changed since preview");
       record.createArgs ??= { trackRef: record.target.trackRef, kind: "midi", name: record.proposed.name, sceneIndex: record.target.sceneIndex, length: record.proposed.length, expectedTrackIdentity: record.target.trackIdentity, expectedSlotRef: record.target.slotRef, expectedSlotIdentity: record.target.slotIdentity, expectedSceneRef: record.target.sceneRef, expectedSceneIdentity: record.target.sceneIdentity };
       const created = await adapter.invokeAsync({ operation: "clip.create", args: record.createArgs }, context) as { ref?: LiveRef; objectIdentity?: string; createdFingerprint?: string };
@@ -130,7 +134,7 @@ export class SessionMidiTransactionManager {
       clipRef = created.ref; record.clipRef = clipRef; record.clipIdentity = created.objectIdentity; record.clipFingerprint = created.createdFingerprint;
       if (!record.noteArgs) { const creation = await adapter.getAsync(clipRef, context) as { notesRevision?: unknown }; if (fingerprint(creation) !== record.clipFingerprint) throw new Error("Live did not confirm the exact created clip fingerprint"); record.clipBaseFingerprint = clipBaseFingerprint(creation); if (record.proposed.notes.length === 0) { if (typeof creation.notesRevision !== "string" || !/^[a-f0-9]{64}$/.test(creation.notesRevision)) throw new Error("Live did not return the empty MIDI note revision"); record.appliedNotesRevision = creation.notesRevision; } }
       if (record.proposed.notes.length > 0) {
-        if (!record.noteArgs) { const noteAuthority = noteMutationAuthority(await adapter.snapshotAsync(context), clipRef); record.noteArgs = { ref: clipRef, notes: record.proposed.notes, ...noteAuthority }; }
+        if (!record.noteArgs) { const noteAuthority = noteMutationAuthority(await this.views.viewFor(context, [record.target.trackRef, clipRef]), clipRef); record.noteArgs = { ref: clipRef, notes: record.proposed.notes, ...noteAuthority }; }
         const added = await adapter.invokeAsync({ operation: "note.add-batch", args: record.noteArgs }, context) as { added?: unknown; notesRevision?: unknown };
         if (typeof added.notesRevision !== "string" || !/^[a-f0-9]{64}$/.test(added.notesRevision)) throw new Error("Live did not return the fingerprinted MIDI note state");
         record.appliedNotesRevision = added.notesRevision;
@@ -138,7 +142,7 @@ export class SessionMidiTransactionManager {
       }
       const verified = await adapter.getAsync(clipRef, context) as { objectIdentity?: string; name?: string; length?: number; notes?: Note[]; notesRevision?: string } | undefined;
       if (!verified || verified.objectIdentity !== record.clipIdentity || verified.name !== record.proposed.name || verified.length !== record.proposed.length || verified.notesRevision !== record.appliedNotesRevision || !notesMatch(verified.notes ?? [], record.proposed.notes)) throw new Error("Live did not confirm exact MIDI clip contents");
-      record.clipDeleteAuthority = clipDeleteAuthority(await adapter.snapshotAsync(context), clipRef);
+      record.clipDeleteAuthority = clipDeleteAuthority(await this.views.viewFor(context, [record.target.trackRef, clipRef]), clipRef);
       record.state = "applied"; record.clipRef = clipRef; record.appliedNotes = clone(verified.notes ?? []); record.applyKey = idempotencyKey;
       const result = { transactionId, state: "applied", clipRef, notes: record.appliedNotes, epoch: record.epoch, idempotent: false };
       this.idempotency.set(idempotencyKey, { transactionId, result: clone(result) });
@@ -160,7 +164,7 @@ export class SessionMidiTransactionManager {
     if (!record || (!reconciliation && record.state !== "applied") || !record.clipRef) throw new Error("Only an applied or exact-key uncertain MIDI transaction can be undone");
     const adapter = this.asyncAdapter(); const status = this.require(["session.read", "session.midi_clip.delete"], ["clip.delete"]);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
-    record.state = "undoing"; record.undoKey = idempotencyKey;
+    record.state = "undoing"; record.undoKey = idempotencyKey; let sent = false;
     try {
       if (!reconciliation) {
         const clip = await adapter.getAsync(record.clipRef, context) as { objectIdentity?: string; name?: string; length?: number; notes?: Note[] } | undefined;
@@ -169,12 +173,17 @@ export class SessionMidiTransactionManager {
         record.undoArgs = { ref: record.clipRef, ...record.clipDeleteAuthority };
       }
       if (!record.undoArgs) throw new Error("MIDI clip deletion replay authority is unavailable");
-      await adapter.invokeAsync({ operation: "clip.delete", args: record.undoArgs }, context);
-      const remaining = await this.getOrAbsent(adapter, record.clipRef, context);
+      sent = true; await adapter.invokeAsync({ operation: "clip.delete", args: record.undoArgs }, context);
+      const remaining = await this.getOrAbsent(record, record.clipRef, context);
       if (remaining !== undefined && remaining !== null) throw new Error("MIDI clip deletion was not authoritatively confirmed");
       record.state = "undone";
       return { transactionId, state: "undone", deleted: record.clipRef, idempotent: false };
-    } catch (cause) { record.state = "uncertain"; throw cause; }
+    } catch (cause) {
+      // Stopped before the deletion was sent (a read or a check failed): nothing changed, the clip stays
+      // applied, and the next undo checks afresh. Once it was sent, or on a retry, it's uncertain.
+      if (!sent && !reconciliation) { record.state = "applied"; delete record.undoKey; delete record.undoArgs; throw cause; }
+      record.state = "uncertain"; throw cause;
+    }
   }
 
   preview(request: unknown): SessionMidiPreview {
@@ -235,15 +244,19 @@ export class SessionMidiTransactionManager {
     if (!record || record.state !== "applied" || !record.clipRef) throw new Error("Only an applied MIDI transaction can be undone");
     const status = this.require(["session.read", "session.midi_clip.delete"], ["clip.delete"]);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
-    record.state = "undoing"; record.undoKey = idempotencyKey;
+    record.state = "undoing"; record.undoKey = idempotencyKey; let sent = false;
     try {
       const clip = this.adapter.get(record.clipRef) as { objectIdentity?: string; name?: string; length?: number; notes?: Note[] } | undefined;
       if (!clip || clip.objectIdentity !== record.clipIdentity || clip.name !== record.proposed.name || clip.length !== record.proposed.length || JSON.stringify(clip.notes ?? []) !== JSON.stringify(record.appliedNotes ?? [])) throw new Error("MIDI clip identity or content changed after apply; undo refused");
       if (!record.clipDeleteAuthority) throw new Error("MIDI clip deletion authority is unavailable");
-      this.adapter.invoke({ operation: "clip.delete", args: { ref: record.clipRef, ...record.clipDeleteAuthority } });
+      sent = true; this.adapter.invoke({ operation: "clip.delete", args: { ref: record.clipRef, ...record.clipDeleteAuthority } });
       record.state = "undone";
       return { transactionId, state: "undone", deleted: record.clipRef, idempotent: false };
-    } catch (cause) { record.state = "uncertain"; throw cause; }
+    } catch (cause) {
+      // As the asynchronous undo: stopped before the deletion was sent, the clip stays applied.
+      if (!sent) { record.state = "applied"; delete record.undoKey; throw cause; }
+      record.state = "uncertain"; throw cause;
+    }
   }
 
   isFinalizable(transactionId: string): boolean { const record = this.records.get(transactionId); return !!record && ["uncertain", "applied", "undone"].includes(record.state); }
@@ -279,7 +292,8 @@ export function discoverSession(adapter: LiveAdapter, kind: "track" | "scene" | 
 export async function discoverSessionAsync(adapter: AsyncLiveAdapter, kind: "track" | "scene" | "clip" | "note", limit: number, cursor?: string): Promise<{ epoch: number; revision: string; items: unknown[]; nextCursor?: string; truncated: boolean }> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be from 1 to 100");
   const status = adapter.status(); if (!status.connected || status.epoch === null || !status.capabilities.includes("session.read")) throw new Error("live-capability-unavailable:session.read");
-  const snapshot = await adapter.snapshotAsync(); let items: unknown[];
+  // The whole Set through track windows, as the host reads it: never one request that builds every track.
+  const snapshot = await new LiveViews(() => adapter).wholeSet(undefined); let items: unknown[];
   if (kind === "track") items = [...snapshot.tracks];
   else if (kind === "scene") items = [...snapshot.scenes];
   else if (kind === "clip") items = snapshot.tracks.flatMap((track) => track.clips);

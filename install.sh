@@ -105,7 +105,7 @@ main() {
   fi
 
   # ── Kumi ───────────────────────────────────────────────────────────────
-  step "Downloading Kumi $kumi_version…"
+  step "Downloading Kumi ${kumi_version}…"
   fetch "$base/$bundle" "$work/kumi.tar.gz" || fail "couldn't download Kumi from GitHub."
   [ "$(sha "$work/kumi.tar.gz")" = "$bundle_sha" ] || fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."
   mkdir -p "$work/app" && tar -xzf "$work/kumi.tar.gz" -C "$work/app" || fail "couldn't unpack Kumi."

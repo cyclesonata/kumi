@@ -310,6 +310,7 @@ function releaseRole(name: string, legacy: boolean): string | null {
   if (name.startsWith("dist/src/") && (name.endsWith(".js") || name.endsWith(".d.ts"))) return "compiled-runtime";
   if (name === "README.md" || (name.startsWith("release-docs/") && name.endsWith(".md"))) return "documentation";
   if (name.startsWith("remote-script/")) return "ableton-remote-script";
+  if (name.startsWith("live-extension/")) return "ableton-live-extension";
   return null;
 }
 

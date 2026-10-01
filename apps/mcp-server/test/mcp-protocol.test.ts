@@ -170,7 +170,7 @@ test("modern stdio allows immediate ID reuse from the response data handler", { 
   }
 });
 
-test("stdio cancellation suppresses a completed response queued behind an earlier request", async () => {
+test("stdio answers a request as soon as its work is done, not behind an earlier one; a cancellation after the answer changes nothing", async () => {
   const input = new PassThrough(); const output = new PassThrough(); let text = "";
   output.on("data", (chunk) => { text += String(chunk); });
   let release!: () => void; let completed!: () => void;
@@ -184,8 +184,10 @@ test("stdio cancellation suppresses a completed response queued behind an earlie
   input.write(`${JSON.stringify(modern(1, "ping"))}\n${JSON.stringify(modern(2, "ping"))}\n`);
   await second; await tick();
   input.end(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2, reason: "no longer needed", _meta: {} } })}\n`);
+  // Request 2 was answered while request 1 still ran.
+  assert.deepEqual(text.trim().split("\n").map((line) => JSON.parse(line).id), [2]);
   await tick(); release(); await run;
-  assert.deepEqual(text.trim().split("\n").map((line) => JSON.parse(line).id), [1]);
+  assert.deepEqual(text.trim().split("\n").map((line) => JSON.parse(line).id), [2, 1]);
 });
 
 test("stdio ignores malformed cancellation and suppresses post-cancel rejection replies", async () => {

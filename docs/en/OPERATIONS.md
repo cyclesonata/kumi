@@ -52,9 +52,9 @@ the retained log may be removed with the rest of owner state.
 
 ## Limits and shutdown
 
-The host bounds JSON-RPC frames at 64 MiB, remote frames at 1 MiB, remote
-pending work at 64 requests, tracked request identifiers at 4096, and tool
-calls at 120 per rolling minute. Stdio allows bounded concurrent work (default
+The host bounds JSON-RPC frames at 500 MiB (the largest string Node holds),
+remote frames at 256 MiB, remote pending work at 4096 requests, and tracked
+request identifiers at 4096; tool calls have no rate limit. Stdio allows bounded concurrent work (default
 16, maximum 64), backpressures at four times the configured concurrency,
 preserves response order, and treats cancellation after dispatch as
 non-retracting. PCM analysis is limited to 10,000,000 samples / 600 seconds;

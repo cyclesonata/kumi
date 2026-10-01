@@ -97,3 +97,67 @@ test("active transport and recording are refused with actionable errors, includi
   await assert.rejects(call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "transport-resumed" }), /stopped transport/);
   assert.equal((adapter.get(clipRef) as any).followActionA, initial.followActionA);
 });
+
+
+test("follow-actions undo respects a policy changed after apply", async () => {
+  const { host, adapter, call, clipRef } = fixture();
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionA: 8 });
+  await call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "policy-apply" });
+  host.setToolPolicy({ profile: "full", deny: ["live_follow_actions_apply"] });
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "policy-undo" };
+  await assert.rejects(call("live_undo", undo), /deployment policy/);
+  host.setToolPolicy({ profile: "full" });
+  await call("live_undo", undo);
+  assert.equal((adapter.get(clipRef) as any).followActionA, 4);
+});
+
+
+test("follow-actions undo retries after a connection failure before the restore was recorded", async () => {
+  const { host, adapter, call, clipRef } = fixture();
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionA: 8 });
+  await call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "early-apply" });
+  let fail = true;
+  const original = (host as any).requireConnected.bind(host);
+    (host as any).requireConnected = (...args: unknown[]) => { if (fail) { fail = false; throw new Error("injected status failure"); } return original(...args); };
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "early-undo" };
+  await assert.rejects(call("live_undo", undo), /injected/);
+  await call("live_undo", undo);
+  assert.equal((adapter.get(clipRef) as any).followActionA, 4);
+});
+
+
+test("follow-actions undo retries after a read failure before the restore was recorded", async () => {
+  const { host, adapter, call, clipRef } = fixture();
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionA: 8 });
+  await call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "early-apply" });
+  let fail = true;
+  const original = adapter.snapshotAsync.bind(adapter);
+    adapter.snapshotAsync = async (...args) => { if (fail) { fail = false; throw new Error("injected read failure"); } return original(...args); };
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "early-undo" };
+  await assert.rejects(call("live_undo", undo), /injected/);
+  await call("live_undo", undo);
+  assert.equal((adapter.get(clipRef) as any).followActionA, 4);
+});
+
+
+test("Follow validation errors retain their useful reasons", async () => {
+  const { call, clipRef } = fixture();
+  await assert.rejects(call("live_follow_actions_preview", { clipRef, followActionChanceA: 20, followActionChanceB: 30 }), /probabilities must sum to 100/);
+});
+
+test("Follow timing accepts float32 readback while integral fields remain exact", async () => {
+  const { adapter, call, clipRef } = fixture();
+  const invoke = adapter.invokeAsync.bind(adapter);
+  adapter.invokeAsync = async (invocation) => {
+    const result = await invoke(invocation);
+    if (invocation.operation === "clip.follow-actions.set") {
+      const clip = (adapter as any).state.tracks[0].clips[0];
+      clip.followActionTime = Math.fround(clip.followActionTime);
+    }
+    return result;
+  };
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionTime: 1.333 });
+  await call("live_follow_actions_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "rounded-time-apply" });
+  await call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "rounded-time-undo" });
+  assert.equal((adapter.get(clipRef) as any).followActionTime, 4);
+});

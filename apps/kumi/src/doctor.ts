@@ -12,6 +12,7 @@ import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, load
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
+import { extensionAnswers, extensionDataDir, extensionSource, installedExtension, liveExtensionsDir, readExtension, runningExtension } from "./live-extension.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -95,6 +96,32 @@ export function readBridgeServer(configPath: string): BridgeServer {
   return { ...(command ? { command } : {}), ...(entry ? { entry } : {}), ...(version ? { version } : {}) };
 }
 
+/**
+ * Kumi's Live extension: in Live's Extensions folder, the same as the bridge's copy, running (in Live,
+ * or started by the bridge while Live's Developer Mode is on), and answering. Nothing where there's no
+ * Live, or when the installed bridge carries no extension (the bridge's own line says to update it).
+ */
+async function extensionCheck(env: Env, configPath: string, server: BridgeServer, live: LiveProbe): Promise<Check | undefined> {
+  const folder = liveExtensionsDir(env);
+  if (!folder) return undefined;
+  const [major = 0, minor = 0] = (live.liveVersion ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  if (live.liveVersion && (major < 12 || (major === 12 && minor < 4))) return { status: "note", text: `Live ${live.liveVersion} runs no extensions (12.4 and later do), so Kumi can't render tracks without playing them` };
+  const source = server.entry ? extensionSource(dirname(dirname(dirname(server.entry)))) : undefined;
+  const carried = source ? readExtension(source) : undefined;
+  const installed = installedExtension(folder);
+  const again = `Run: ${KUMI} bridge, then restart Live`;
+  if (!installed) return carried ? { status: "fix", text: "Kumi's extension isn't in Live (it renders tracks without playing them and writes MIDI clips in the Arrangement)", next: again } : undefined;
+  if (carried && carried.digest !== installed.digest) return { status: "fix", text: "Kumi's extension in Live is from another bridge", next: again };
+  const inLive = extensionDataDir(folder);
+  const running = runningExtension(inLive) ?? runningExtension(join(dirname(configPath), "live-extension"));
+  if (running) {
+    if (!(await extensionAnswers(running.port))) return { status: "fix", text: "Kumi's extension is running but doesn't answer", next: "Restart Live" };
+    return { status: "ok", text: running.folder === inLive ? "Kumi's extension is running in Live" : "Kumi's extension is running (Kumi started it: Live's Developer Mode is on)" };
+  }
+  if (live.connected) return { status: "note", text: "Live hasn't started Kumi's extension", next: "Restart Live: it starts extensions when it opens. With Developer Mode on (Settings → Extensions), Kumi starts it itself while Kumi runs" };
+  return { status: "ok", text: `Kumi's extension ${installed.version} is in Live; it starts with Live` };
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
@@ -129,7 +156,7 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
         }
       }
     }
-    const live = await (io.probeLive ?? (async () => ({ started: false })))(configPath).catch(() => ({ started: false } as LiveProbe));
+    const live: LiveProbe = await (io.probeLive ?? (async () => ({ started: false })))(configPath).catch(() => ({ started: false }));
     if (!live.started) {
       // Kumi's bridge stops at its handshake when Live's Remote Script doesn't answer: an older one
       // (said above), or Live not open, not using it, or held by a dialog.
@@ -143,6 +170,8 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
       const where = [live.liveVersion ? `Live ${live.liveVersion}` : "Live", "connected", live.set ? `· ${live.set}` : ""].filter(Boolean).join(" ");
       checks.push(live.realLive === false ? { status: "note", text: `${where} (a simulator, not real Live)` } : { status: "ok", text: where });
     }
+    const extension = live.realLive === false ? undefined : await extensionCheck(env, configPath, server, live);
+    if (extension) checks.push(extension);
   }
   try {
     const projects = loadProjectsDir(env);

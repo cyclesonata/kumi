@@ -60,7 +60,7 @@ function syntheticBridge() {
       state.tracks.push({ name: "Pad", kind: "audio", volume: 0.85, pan: 0 });
     },
     endpoint: {
-      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.53" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
+      pid: null, serverInfo: { name: "kumi-eval-bridge", version: "1.0.66" }, stderrStatus: () => ({ bytes: 0, truncated: false }),
       async list() { return { tools: schemas }; },
       async call(name, args) {
         requests.push({ name, args });
@@ -180,6 +180,9 @@ const CASES = [
   // Listening: a comparison with a reference, said in the producer's terms.
   { name: "compare to a reference", audio: true, prompts: ({ mix, reference }) => [`How does my mix at ${mix} compare with this reference, ${reference}? What's the biggest difference in tone?`],
     check: ({ heard, last }) => heard.some((event) => event.compared) && /bright|dark|high|top|treble|air|presence|brillian/i.test(last) },
+  // Matching the whole mix: an audition of the mix itself (Resampling, Main silent), not a track.
+  { name: "match the mix to a reference", audio: true, prompts: ({ reference }) => [`Match my whole mix to this reference, ${reference}: bars 1 to 8. How close is it, and what would you change first?`],
+    check: ({ tools, requests }) => tools.includes("audition") && requests.some((request) => request.name === "live_routing_preview" && request.args.inputType === "Resampling") },
   // Recipes: one the producer shows Kumi by hand.
   { name: "watch a tutorial", video: true, prompts: ({ video }) => [`Watch this tutorial and build the bass it makes on a new MIDI track: ${video}`],
     check: ({ tools, requests, last }) => tools.includes("watch_video") && /operator/i.test(last) && requests.some((request) => /Operator/.test(JSON.stringify(request.args ?? {}))) },

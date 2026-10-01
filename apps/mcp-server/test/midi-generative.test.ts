@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Note } from "../src/live.js";
-import { DRUM_ROLES, GENERATIVE_TRANSFORMS, UPDATE_ONLY_TRANSFORMS, applyMidiTransform, bjorklund, parseChordList, parseChordSymbol, parseRomanNumeral } from "../src/midi-transforms.js";
+import { DRUM_ROLES, GENERATIVE_TRANSFORMS, MIDI_TRANSFORM_MAX_GENERATED_NOTES, UPDATE_ONLY_TRANSFORMS, applyMidiTransform, bjorklund, parseChordList, parseChordSymbol, parseRomanNumeral } from "../src/midi-transforms.js";
 
 function note(pitch: number, start: number, duration: number, velocity = 100, id?: number): Note {
   return { pitch, start, duration, velocity, channel: 1, ...(id !== undefined ? { id } : {}) };
@@ -170,8 +170,9 @@ test("bassline templates follow chord roots deterministically", () => {
 });
 
 test("generators refuse oversized work before allocation and keep bass notes inside each chord", () => {
-  assert.throws(() => applyMidiTransform([], { type: "bassline", params: { pattern: "walking", chords: Array(32).fill("C"), chordDuration: 1024, stepBeats: 1 / 1024 } }), /bounded 2048-note limit/);
-  assert.throws(() => applyMidiTransform([], { type: "euclidean", params: { pulses: 64, steps: 64, bars: 64, pitch: 36 } }), /bounded 2048-note limit/);
+  assert.throws(() => applyMidiTransform([], { type: "bassline", params: { pattern: "walking", chords: Array(32).fill("C"), chordDuration: 1024, stepBeats: 1 / 1024 } }), new RegExp(`bounded ${MIDI_TRANSFORM_MAX_GENERATED_NOTES}-note limit`));
+  // The largest euclidean pattern (64 pulses over 64 bars) fits the bound whole.
+  assert.equal(applyMidiTransform([], { type: "euclidean", params: { pulses: 64, steps: 64, bars: 64, pitch: 36 } }).notes.length, 64 * 64);
   assert.throws(() => bjorklund(1, 1_000_000_000), /invalid/);
   const outcome = applyMidiTransform([], { type: "bassline", params: { pattern: "octave", chords: ["C", "F"], chordDuration: 1, stepBeats: 0.6 } });
   assert.deepEqual(outcome.notes.map((row) => [row.start, row.duration]), [[0, 0.6], [0.6, 0.4], [1, 0.6], [1.6, 0.4]]);

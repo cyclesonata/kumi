@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { expandPadChains, READ_ONLY_INVOKES, RemoteScriptLiveAdapter } from "../src/bridge/remote-adapter.js";
+import { expandPadChains, AUTHORITY_FREE_INVOKES, EXPLICIT_DELETIONS, READ_ONLY_INVOKES, RemoteScriptLiveAdapter, TRANSACTION_CREATIONS, TRANSACTION_DELETIONS } from "../src/bridge/remote-adapter.js";
 import { LIVE_REGISTRY_HASH, LiveMutationNotDispatchedError } from "../src/live.js";
 
 const secret = "0123456789abcdef0123456789abcdef";
@@ -145,7 +145,7 @@ test("remote adapter retries an operation that waits for Live's playhead, with a
   });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const result = await adapter.invokeAsync({ operation: "locator.add", args: { name: "Drop", position: 16, expectedCollectionRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 5000, idempotencyKey: "locator-drop-key", transactionId: "locator-transaction" }) as { name?: string };
     assert.equal(result.name, "Drop");
     assert.deepEqual(seen, ["status", "preflight", "prepare", "invoke", "preflight", "prepare", "invoke"]);
@@ -164,7 +164,7 @@ test("remote adapter obtains mutation preflight authority with stable transactio
   });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const context = { deadlineMs: Date.now() + 5000, idempotencyKey: "scene-capture-apply-key", transactionId: "host-scene-capture-transaction" };
     await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, context); await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, context);
     await adapter.invokeAsync({ operation: "scene.capture", args: { expectedStateRevision: "a".repeat(64) } }, { ...context, transactionId: "second-scene-capture-transaction" });
@@ -177,7 +177,7 @@ test("remote adapter hides cleanup tokens and binds destructive cleanup to the c
   const seen: Record<string, unknown>[] = []; const token = "o".repeat(48);
   const server = framedServer((request, socket) => { seen.push(request); if (request.method === "status") { socket.write(`${JSON.stringify(response(request.id as string, status({ operations: [...requiredOperations, "track.create", "track.delete"] })))}\n`); return; } if (request.method === "retire") { socket.write(`${JSON.stringify(response(request.id as string, { retired: 1 }))}\n`); return; } const argsDigest = createHash("sha256").update(canonical(request.args ?? {})).digest("hex"); if (request.method === "preflight") socket.write(`${JSON.stringify(response(request.id as string, { preflightToken: "p".repeat(32), confirmation: "c".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), impact: "mutates-live", expiresAt: Date.now() + 5000 }))}\n`); else if (request.method === "prepare") socket.write(`${JSON.stringify(response(request.id as string, { authorityToken: "t".repeat(32), operation: request.operation, argsDigest, stateDigest: "a".repeat(64), expiresAt: Date.now() + 5000 }))}\n`); else if (request.operation === "track.create") socket.write(`${JSON.stringify(response(request.id as string, { ref: "1:track:1", objectIdentity: "live:track:1", name: "Owned", kind: "midi", index: 1, createdFingerprint: "f".repeat(64), ownershipToken: token }))}\n`); else { assert.equal(request.ownershipToken, token); socket.write(`${JSON.stringify(response(request.id as string, { deleted: "1:track:1" }))}\n`); } });
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined; const transactionId = "creating-structure-transaction";
-  try { adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 }); const created = await adapter.invokeAsync({ operation: "track.create", args: { name: "Owned", kind: "midi", index: 1, expectedStructureRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 1000, idempotencyKey: "create-owned-track", transactionId }) as Record<string, unknown>; assert.equal(created.ownershipToken, undefined); await adapter.retireTransactionAsync(transactionId, { deadlineMs: Date.now() + 1000 }); const deleteInvocation = { operation: "track.delete" as const, args: { ref: "1:track:1", expectedStructureRevision: "b".repeat(64), expectedObjectIdentity: "live:track:1" } }; await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-delete", transactionId: "foreign-structure-transaction" }), /lacks transaction-owned authority/); const beforeDelete = seen.length; assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-delete", transactionId }), { deleted: "1:track:1" }); assert.equal(seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke"].includes(String(row.method))).every((row) => row.ownershipToken === token), true); }
+  try { adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 }); const created = await adapter.invokeAsync({ operation: "track.create", args: { name: "Owned", kind: "midi", index: 1, expectedStructureRevision: "a".repeat(64) } }, { deadlineMs: Date.now() + 1000, idempotencyKey: "create-owned-track", transactionId }) as Record<string, unknown>; assert.equal(created.ownershipToken, undefined); await adapter.retireTransactionAsync(transactionId, { deadlineMs: Date.now() + 1000 }); const deleteInvocation = { operation: "track.delete" as const, args: { ref: "1:track:1", expectedStructureRevision: "b".repeat(64), expectedObjectIdentity: "live:track:1" } }; await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-delete", transactionId: "foreign-structure-transaction" }), /lacks transaction-owned authority/); const beforeDelete = seen.length; assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-delete", transactionId }), { deleted: "1:track:1" }); const sent = seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke", "mutate"].includes(String(row.method))); assert.deepEqual(sent.map((row) => row.method), ["mutate"]); assert.equal(sent.every((row) => row.ownershipToken === token), true); }
   finally { await adapter?.close(); await close(server); }
 });
 
@@ -205,7 +205,9 @@ test("remote adapter retains and strips audio-clip creation tokens across create
     await assert.rejects(adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "foreign-clip-delete", transactionId: "foreign-audio-transaction" }), /lacks transaction-owned authority/);
     const beforeDelete = seen.length;
     assert.deepEqual(await adapter.invokeAsync(deleteInvocation, { deadlineMs: Date.now() + 1000, idempotencyKey: "owned-clip-delete", transactionId }), { deleted: "1:clip:0:1" });
-    assert.equal(seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke"].includes(String(row.method))).every((row) => row.ownershipToken === token), true);
+    const sent = seen.slice(beforeDelete).filter((row) => ["preflight", "prepare", "invoke", "mutate"].includes(String(row.method)));
+    assert.deepEqual(sent.map((row) => row.method), ["mutate"]);
+    assert.equal(sent.every((row) => row.ownershipToken === token), true);
   }
   finally { await adapter?.close(); await close(server); }
 });
@@ -379,6 +381,12 @@ test("read-only invoke classification is identical across the TS adapter and the
   assert.ok(match, "python read-only invoke set not found");
   const pythonSet = new Set([...match[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]));
   assert.deepEqual([...pythonSet].sort(), [...READ_ONLY_INVOKES].sort());
+  // And the sets that decide what a mutation carries: its creations' ownership, its deletions' fences.
+  for (const [name, mirror] of [["_AUTHORITY_FREE_INVOKES", AUTHORITY_FREE_INVOKES], ["_TRANSACTION_CREATIONS", TRANSACTION_CREATIONS], ["_TRANSACTION_DELETIONS", TRANSACTION_DELETIONS], ["_EXPLICIT_DELETIONS", EXPLICIT_DELETIONS]] as const) {
+    const set = python.match(new RegExp(`${name} = \\{([^}]*)\\}`));
+    assert.ok(set, `python ${name} not found`);
+    assert.deepEqual([...set[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]).sort(), [...mirror].sort(), `${name} is mirrored exactly`);
+  }
 });
 
 function authorityServer(operations: string[], seen: Record<string, unknown>[], answer: (request: Record<string, unknown>) => unknown) {
@@ -393,7 +401,7 @@ function authorityServer(operations: string[], seen: Record<string, unknown>[], 
 }
 const notDispatched = (pattern?: RegExp) => (error: unknown) => error instanceof LiveMutationNotDispatchedError && (!pattern || pattern.test(error.message));
 
-test("an explicit deletion of an existing device or return goes out with its identity fences and no ownership token; without it, the deletion is refused unsent", async () => {
+test("an explicit deletion of an existing device, return or track goes out with its identity fences and no ownership token; without it, the deletion is refused unsent", async () => {
   const seen: Record<string, unknown>[] = [];
   const server = authorityServer(["device.delete", "track.delete-return", "track.delete"], seen, (request) => ({ deleted: (request.args as { ref: string }).ref }));
   const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
@@ -401,7 +409,7 @@ test("an explicit deletion of an existing device or return goes out with its ide
   const device = { ref: "1:device:0:1", expectedObjectIdentity: "live:device:eq", expectedOwnerRef: "1:track:0", expectedOwnerIdentity: "live:track:0", expectedSiblings: [{ ref: "1:device:0:0", objectIdentity: "live:device:synth" }, { ref: "1:device:0:1", objectIdentity: "live:device:eq" }], expectedTrackRef: "1:track:0", expectedTrackIdentity: "live:track:0" };
   const ret = { ref: "1:track:2", expectedObjectIdentity: "live:return:a", expectedStructureRevision: "a".repeat(64) };
   try {
-    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500, mutationPath: "authority" });
     const before = seen.length;
     await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: device }, context("unowned-device-delete")), notDispatched(/lacks transaction-owned authority/));
     await assert.rejects(adapter.invokeAsync({ operation: "track.delete-return", args: ret }, context("unowned-return-delete")), notDispatched(/lacks transaction-owned authority/));
@@ -411,8 +419,12 @@ test("an explicit deletion of an existing device or return goes out with its ide
     const sent = seen.slice(before);
     assert.deepEqual(sent.map((row) => `${String(row.method)} ${String(row.operation)}`), ["preflight device.delete", "prepare device.delete", "invoke device.delete", "preflight track.delete-return", "prepare track.delete-return", "invoke track.delete-return"]);
     assert.equal(sent.every((row) => row.ownershipToken === undefined && (row.args as Record<string, unknown>).explicitDeletion === true), true);
+    // A track (like a clip, a scene or a locator) is deleted explicitly the same way: fences, no token.
+    const beforeTrack = seen.length;
+    assert.deepEqual(await adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0", explicitDeletion: true } }, context("explicit-track-delete")), { deleted: "1:track:0" });
+    assert.equal(seen.slice(beforeTrack).every((row) => row.ownershipToken === undefined), true);
     const beforeOthers = seen.length;
-    await assert.rejects(adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0", explicitDeletion: true } }, context("explicit-track-delete")), notDispatched(), "other deletions have no explicit form");
+    await assert.rejects(adapter.invokeAsync({ operation: "track.delete", args: { ref: "1:track:0", expectedStructureRevision: "a".repeat(64), expectedObjectIdentity: "live:track:0" } }, context("unowned-track-delete")), notDispatched(/lacks transaction-owned authority/));
     await assert.rejects(adapter.invokeAsync({ operation: "device.delete", args: { ...device, explicitDeletion: false } }, context("half-explicit-delete")), notDispatched(), "only explicitDeletion: true is the authority");
     assert.equal(seen.length, beforeOthers);
   } finally { await adapter?.close(); await close(server); }
@@ -433,5 +445,88 @@ test("song.read is one read-only invoke with no authority chain, and mutation ar
     await assert.rejects(adapter.invokeAsync({ operation: "transport.set", args: { ...fences, loopEnabled: true, metronome: undefined } }, context), notDispatched(), "an undefined field is not a wire value");
     await assert.rejects(adapter.invokeAsync({ operation: "transport.set", args: { ...fences, loopLength: -4 } }, context), notDispatched(), "a value outside the registry's bounds");
     assert.equal(seen.length, beforeInvalid, "nothing reached the bridge");
+  } finally { await adapter?.close(); await close(server); }
+});
+
+/** Rows and parts a snapshot answer holds, for fake Remote Scripts. */
+const trackRow = (index: number, light = false) => light ? { ref: `1:track:${index}`, objectIdentity: `live:track:${index}`, name: `Track ${index}`, kind: "regular", light: true, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } : { ref: `1:track:${index}`, objectIdentity: `live:track:${index}`, name: `Track ${index}`, kind: "regular", clips: [], clipSlots: [], devices: [], takeLanes: [] };
+const playbackPart = { ref: "1:session_playback:playback", epoch: 1, revision: "1:playback:1:0", transport: { playing: false, arrangementRecord: false, sessionRecord: false, position: 0, launchQuantization: { raw: null, normalized: null }, loop: { enabled: false, start: 0, length: 4 }, punchIn: null, punchOut: null, metronome: null, countIn: null }, firedTargets: [], playingTargets: [] };
+const wholeSetAnswer = (tracks = 4) => ({ set: { ref: "1:set:song", name: "Set" }, tracks: Array.from({ length: tracks }, (_, index) => trackRow(index)), scenes: [], arrangement: { locators: [], clips: [] }, playback: playbackPart, trackCount: tracks, sceneCount: 0, epoch: 1 });
+
+test("a snapshot's windows, focus and parts go as its wire args, checked against the registry before anything is sent", async () => {
+  const snapshots: Record<string, unknown>[] = [];
+  const server = framedServer((request, socket) => {
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method !== "snapshot") return;
+    snapshots.push(request); const args = request.args as { focus?: number[]; tracks?: { from: number; count: number }; parts?: string[] } | undefined;
+    const whole = wholeSetAnswer(4) as Record<string, unknown>;
+    if (!args) { socket.write(`${JSON.stringify(response(request.id as string, whole))}\n`); return; }
+    const answer: Record<string, unknown> = { trackCount: 4, sceneCount: 0, epoch: 1, window: args };
+    for (const part of args.parts ?? ["set", "tracks", "scenes", "arrangement", "playback"]) answer[part] = whole[part];
+    if (args.focus) answer.tracks = [0, 1, 2, 3].map((index) => trackRow(index, !args.focus!.includes(index)));
+    if (args.tracks) answer.tracks = [0, 1, 2, 3].slice(args.tracks.from, args.tracks.from + args.tracks.count).map((index) => trackRow(index));
+    socket.write(`${JSON.stringify(response(request.id as string, answer))}\n`);
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    const focused = await adapter.snapshotAsync(undefined, { focus: [3], parts: ["tracks"] });
+    assert.deepEqual(focused.window, { focus: [3], parts: ["tracks"] }); assert.equal("set" in focused, false);
+    assert.deepEqual(focused.tracks.map((track) => track.light === true), [true, true, true, false]);
+    assert.deepEqual((await adapter.snapshotAsync(undefined, { tracks: { from: 2, count: 16 }, parts: ["tracks", "arrangement"] })).tracks.map((track) => track.ref), ["1:track:2", "1:track:3"]);
+    await adapter.snapshotAsync(undefined, {});
+    await adapter.snapshotAsync();
+    assert.deepEqual(snapshots.map((request) => request.args), [{ focus: [3], parts: ["tracks"] }, { tracks: { from: 2, count: 16 }, parts: ["tracks", "arrangement"] }, undefined, undefined]);
+    assert.equal("args" in snapshots[3]!, false, "no request sends no args: the whole Set, as before");
+    for (const bad of [{ focus: [1, 1] }, { focus: [100_001] }, { parts: ["everything"] }, { tracks: { from: 0, count: 0 } }]) await assert.rejects(adapter.snapshotAsync(undefined, bad as never), /registry/);
+    assert.equal(snapshots.length, 4, "a request the registry refuses is never sent");
+  } finally { await adapter?.close(); await close(server); }
+});
+
+test("a snapshot answer is checked against what was asked: no window means the whole Set, a window holds exactly what it says", async () => {
+  const answers: unknown[] = [];
+  const server = framedServer((request, socket) => {
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method === "snapshot") socket.write(`${JSON.stringify(response(request.id as string, answers.shift()))}\n`);
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  const lightExcept = (...whole: number[]) => [0, 1, 2, 3].map((index) => trackRow(index, !whole.includes(index)));
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 500 });
+    // A Remote Script from before snapshot arguments answers a focused read with the whole Set: that's used as the whole Set.
+    answers.push(wholeSetAnswer(4));
+    const legacy = await adapter.snapshotAsync(undefined, { focus: [1], parts: ["tracks"] });
+    assert.equal(legacy.window, undefined); assert.equal(legacy.tracks.every((track) => track.light !== true), true); assert.ok(legacy.playback);
+    const refusals: Array<[unknown, Parameters<RemoteScriptLiveAdapter["snapshotAsync"]>[1], RegExp]> = [
+      [(({ playback: _playback, ...rest }) => rest)(wholeSetAnswer(4)), undefined, /without a window isn't the whole Set: it lacks playback/],
+      [{ ...wholeSetAnswer(4), tracks: lightExcept(0) }, { focus: [0] }, /without a window isn't the whole Set: its tracks aren't all whole/],
+      [{ tracks: lightExcept(1), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] }, set: {} }, { focus: [1], parts: ["tracks"] }, /holds set, which wasn't asked/],
+      [{ trackCount: 4, epoch: 1, window: { parts: ["tracks", "set"] }, set: {} }, { parts: ["tracks", "set"] }, /lacks its tracks/],
+      [{ tracks: lightExcept(1, 2), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /track 2 is whole, but was asked light/],
+      [{ tracks: lightExcept(), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /track 1 is light, but was asked whole/],
+      [{ tracks: lightExcept(1).slice(0, 3), trackCount: 4, epoch: 1, window: { focus: [1], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /doesn't hold the track rows asked/],
+      [{ tracks: [0, 1, 2].map((index) => trackRow(index)), trackCount: 4, epoch: 1, window: { tracks: { from: 0, count: 2 }, parts: ["tracks"] } }, { tracks: { from: 0, count: 2 }, parts: ["tracks"] }, /doesn't hold the track rows asked/],
+      [{ ...wholeSetAnswer(4), window: { focus: [0] } }, { parts: ["tracks"] }, /honoured focus, which wasn't asked/],
+      [{ tracks: lightExcept(3), trackCount: 4, epoch: 1, window: { focus: [3], parts: ["tracks"] } }, { focus: [1], parts: ["tracks"] }, /focus isn't the focus asked/],
+    ];
+    for (const [answer, request, reason] of refusals) { answers.push(answer); await assert.rejects(adapter.snapshotAsync(undefined, request), reason); }
+    // A window honouring the focus and parts asked holds exactly them.
+    answers.push({ tracks: lightExcept(2), trackCount: 4, sceneCount: 0, epoch: 1, window: { focus: [2], parts: ["tracks"] } });
+    assert.equal((await adapter.snapshotAsync(undefined, { focus: [2], parts: ["tracks"] })).tracks.filter((track) => track.light !== true)[0]!.ref, "1:track:2");
+  } finally { await adapter?.close(); await close(server); }
+});
+
+test("a snapshot or discovery page without a caller's deadline gets six times the configured timeout; a single object's read doesn't", async () => {
+  const server = framedServer((request, socket) => {
+    const answer = (result: unknown) => setTimeout(() => { if (!socket.destroyed) socket.write(`${JSON.stringify(response(request.id as string, result))}\n`); }, 150);
+    if (request.method === "status") socket.write(`${JSON.stringify(response(request.id as string, status()))}\n`);
+    if (request.method === "snapshot") answer(wholeSetAnswer(0));
+    if (request.method === "get") answer({ ref: "1:track:0" });
+  });
+  const port = await listen(server); let adapter: RemoteScriptLiveAdapter | undefined;
+  try {
+    adapter = await RemoteScriptLiveAdapter.connect({ host: "127.0.0.1", port, secret, timeoutMs: 50 });
+    assert.deepEqual((await adapter.snapshotAsync()).tracks, []);
+    await assert.rejects(adapter.getAsync("1:track:0"), /uncertain after dispatch timeout|disconnected/);
   } finally { await adapter?.close(); await close(server); }
 });

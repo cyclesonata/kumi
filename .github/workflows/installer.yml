@@ -60,8 +60,13 @@ jobs:
       - name: Serve the release locally
         shell: bash
         run: |
-          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &) && sleep 2
-          curl -fsS http://127.0.0.1:8765/kumi-release.json
+          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          # The server can take a few seconds to listen on a busy runner (Windows especially): wait for it.
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/kumi-release.json; then exit 0; fi
+            sleep 1
+          done
+          exit 1
 
       - name: Install, use, update and remove (macOS, Linux)
         if: runner.os != 'Windows'
@@ -72,8 +77,11 @@ jobs:
           SHELL: /bin/bash
         run: |
           set -eux
-          # As producers run it: piped into sh, with no Node of its own on PATH.
-          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
+          # A variable name running straight into a non-ASCII character ("$version…") is read as part of
+          # the name by macOS's /bin/sh (bash 3.2) in a UTF-8 locale: brace it ("${version}…").
+          if LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' install.sh; then exit 1; fi
+          # As producers run it: piped into sh from a Terminal (a UTF-8 locale), with no Node of its own on PATH.
+          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
           kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm KUMI_RELEASES="$KUMI_RELEASES" "$KUMI_HOME/bin/kumi" "$@"; }
           kumi --version | grep -q "Kumi $(node -p 'require("./package.json").version')"
           kumi --help | grep -q "kumi bridge"

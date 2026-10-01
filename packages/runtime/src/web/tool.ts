@@ -4,9 +4,10 @@
  * pages say is untrusted: each result says it's information, never instructions.
  */
 import type { KernelTool, SessionEvent, WebEvent } from "../core/contracts.js";
+import type { FreeServices } from "./free.js";
 import { createWebClient, WebError, type WebClient } from "./net.js";
 import { readPage, type Page } from "./read.js";
-import { searchWeb } from "./search.js";
+import { SearchCache, searchWeb } from "./search.js";
 
 export const SEARCH_WEB_TOOL = "search_web";
 export const READ_WEB_TOOL = "read_web";
@@ -51,13 +52,14 @@ function linesOf(text: string): string[] {
 
 /** A page's heading line for the model: what it is, its title and address, and how Kumi read it. */
 function heading(page: Page): string {
-  return `${page.kind[0]!.toUpperCase()}${page.kind.slice(1)}${page.title ? `, “${collapse(page.title).slice(0, 200)}”` : ""} (${page.url})${page.via ? `, read through Exa's reader: ${page.via}` : ""}.`;
+  return `${page.kind[0]!.toUpperCase()}${page.kind.slice(1)}${page.title ? `, “${collapse(page.title).slice(0, 200)}”` : ""} (${page.url})${page.via ? `, read through ${page.reader ?? "a free service"}'s reader: ${page.via}` : ""}.`;
 }
 
 export interface WebToolOptions {
   onEvent: (event: SessionEvent) => void;
-  /** For tests: how Kumi goes onto the web. */
+  /** For tests: how Kumi goes onto the web, and the free services it takes turns with. */
   client?: WebClient;
+  services?: FreeServices;
   now?: () => number;
 }
 
@@ -66,6 +68,7 @@ export function webTools(options: WebToolOptions): KernelTool[] {
   const now = options.now ?? Date.now;
   const tell = (event: SessionEvent) => { try { options.onEvent(event); } catch { /* the app's trouble isn't the page's */ } };
   const kept = new Map<string, { at: number; page: Page; lines: string[] }>();
+  const searches = new SearchCache(now);
   const keyOf = (address: string) => { try { const url = new URL(address.trim()); url.hash = ""; return url.href; } catch { return address.trim(); } };
 
   async function page(address: string, signal: AbortSignal): Promise<{ page: Page; lines: string[]; fresh: boolean }> {
@@ -75,7 +78,7 @@ export function webTools(options: WebToolOptions): KernelTool[] {
     let shown = key;
     try { const url = new URL(key); shown = `${url.hostname}${url.pathname.length > 1 ? url.pathname : ""}`; } catch { /* as given */ }
     tell({ type: "doing", text: `reading ${clip(shown, 70)}` });
-    const read = await readPage(client, key, signal);
+    const read = await readPage(client, key, signal, ...(options.services ? [options.services] : []));
     const entry = { at: now(), page: read, lines: linesOf(read.text) };
     kept.delete(key); kept.set(key, entry);
     for (const [old, value] of kept) if (kept.size > KEPT || now() - value.at >= KEEP_MS) kept.delete(old); else break;
@@ -97,7 +100,8 @@ export function webTools(options: WebToolOptions): KernelTool[] {
       const about = typeof input.about === "string" ? collapse(input.about) : "";
       tell({ type: "doing", text: `searching ${where === "github" ? "GitHub" : "the web"} for “${clip(query, 60)}”` });
       try {
-        const searched = await searchWeb(client, query, { where, count, signal, ...(about ? { about } : {}) });
+        const searched = await searches.search(JSON.stringify([where, count, about, query.toLowerCase()]),
+          () => searchWeb(client, query, { where, count, signal, ...(about ? { about } : {}), ...(options.services ? { services: options.services } : {}) }));
         const event: WebEvent = { type: "web", action: "searched", title: query, where, via: searched.via, results: searched.results.length };
         tell(event);
         if (!searched.results.length) return { text: `No results for “${query}”${where === "web" ? "; try other words, or where \"github\" for code" : " on GitHub; try other words, or the web"}.` };
@@ -127,7 +131,7 @@ export function webTools(options: WebToolOptions): KernelTool[] {
       try {
         const { page: held, lines, fresh } = await page(/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(address) ? `https://${address}` : address, signal);
         if (fresh) {
-          const event: WebEvent = { type: "web", action: "read", title: held.title ?? held.url, url: held.url, kind: held.kind, ...(held.via ? { via: "Exa" } : {}), ...(held.files !== undefined ? { files: held.files } : {}) };
+          const event: WebEvent = { type: "web", action: "read", title: held.title ?? held.url, url: held.url, kind: held.kind, ...(held.reader ? { via: held.reader } : {}), ...(held.files !== undefined ? { files: held.files } : {}) };
           tell(event);
         }
         const total = lines.length;

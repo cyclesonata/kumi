@@ -1,33 +1,67 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import {
-  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, liveCapabilitiesForOperations,
+  LIVE_CAPABILITIES, LIVE_REGISTRY_HASH, LIVE_REGISTRY_OPERATIONS, LiveMutationNotDispatchedError, REMOTE_SCRIPT_EVENT_TYPES, checkSnapshotAnswer, liveCapabilitiesForOperations,
   type AsyncLiveAdapter, type LiveDiscoveryKind, type LiveDiscoveryRequest, type LiveDiscoveryResult,
-  type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveStatus,
+  type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotRequest, type LiveStatus,
 } from "../live.js";
 import { LOOPBACK_PROTOCOL_VERSION, type RemoteBridgeRequest, type LoopbackResponse } from "../loopback.js";
 import { validateLiveOperationRequest, validateLiveOperationResult } from "../registry.js";
 
-const MAX_FRAME_BYTES = 4 * 1_048_576;
-const MAX_PENDING = 64;
+// As large as the Remote Script sends (its MAX_WIRE_BYTES): big Sets make big frames, and what keeps
+// Live responsive is paging on its side, not a cap here.
+const MAX_FRAME_BYTES = 256 * 1_048_576;
+const MAX_PENDING = 4096;
 const DEFAULT_TIMEOUT_MS = 5_000;
+// A snapshot or discovery page of a big Set legitimately takes longer than one change: without a caller's
+// deadline such reads get six times the configured timeout (30 s on the 5 s default), within the Remote
+// Script's 60 s deadline maximum.
+const LARGE_READ_TIMEOUT_FACTOR = 6;
+const MAX_DEADLINE_MS = 60_000;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const LIVE_PROTOCOL = "ableton-live/v1";
 const ADAPTERS = new Set(["remote-script", "simulator", "extension", "unavailable"]);
-const EVENT_TYPES = new Set(["transport", "object", "reset"]);
+// What the Remote Script pushes: its subscription's event types (the registry's subscribe types).
+const EVENT_TYPES: ReadonlySet<string> = new Set(REMOTE_SCRIPT_EVENT_TYPES);
 // Pure reads need no mutation authority (identical to the Remote Script's _READ_ONLY_INVOKES).
-export const READ_ONLY_INVOKES = new Set(["session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "willington.device.read", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read"]);
+export const READ_ONLY_INVOKES = new Set(["session.playback", "willington.device.read", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"]);
+/** Changes the Remote Script makes without mutation authority: its own undo steps, and a message in Live's status bar. */
+export const AUTHORITY_FREE_INVOKES = new Set(["undo.step.begin", "undo.step.end", "application.message"]);
 // Creation classification has one shared source: the mapper's
 // _TRANSACTION_CREATIONS in remote-script/ableton_mcp_remote_script.py. Keep
 // this set identical so ownership tokens are retained (never leaked into
 // results) and later cleanup deletes can present them.
-const TRANSACTION_CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"]);
-const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"]);
+export const TRANSACTION_CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "device.duplicate", "session.capture-midi", "scene.capture", "locator.add"]);
+export const TRANSACTION_DELETIONS = new Set(["track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"]);
 // Deletions of an existing object the producer previewed and confirmed (never an undo or a cleanup):
 // they carry explicitDeletion instead of a creating transaction's ownership token, and the Remote
 // Script checks the exact identity fences in their arguments. Mirrors _EXPLICIT_DELETIONS there.
-const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return"]);
-function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation); }
+export const EXPLICIT_DELETIONS = new Set(["device.delete", "track.delete-return", "clip.delete", "arrangement.clip.delete", "scene.delete", "track.delete", "locator.delete"]);
+// An undo step belongs to the connection that opened it; the Remote Script closes it when that connection goes.
+function mutationAuthorityRequired(operation: string): boolean { return !READ_ONLY_INVOKES.has(operation) && !AUTHORITY_FREE_INVOKES.has(operation); }
+// The Remote Script keeps every change's reply (its MAX_MUTATION_LEDGER, 65,536) so a lost one can be
+// replayed; a reply the host has seen is only memory there. With single-tick mutations the adapter frees
+// that memory itself, off the path of any change: past this many changed transactions it retires the
+// oldest in the background, down to half.
+const DEFAULT_RETIRE_AFTER = 4096;
+// A preview's state digest waits this long for its change; the preview itself expires sooner.
+const EXPECTED_DIGEST_TTL_MS = 10 * 60_000;
+const MAX_EXPECTED_DIGESTS = 4096;
+/** Where the Remote Script refused a change before running it (its arguments, its replay ledger, its fences:
+ * ownership, the preview's state; a queue that never ran it), it says nothing changed: nothing reached Live.
+ * A Remote Script from before that said so only of a stale preview. */
+const MUTATION_REFUSED_UNRUN = /; nothing changed\b|Live state changed since the preview$/;
+/**
+ * The references in a change's arguments, as the Remote Script's authority digest collects them (every
+ * `ref`, `*Ref` and `*Refs` value, nested too): with the operation, all a state digest depends on.
+ */
+export function digestReferences(value: unknown, key = "", into = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) for (const item of value) digestReferences(item, key, into);
+  else if (value && typeof value === "object") for (const [child, item] of Object.entries(value)) digestReferences(item, child, into);
+  else if (typeof value === "string" && (key === "ref" || key.endsWith("Ref") || key.endsWith("Refs"))) into.add(value);
+  return into;
+}
+const referencesKey = (args: Record<string, unknown>): string => JSON.stringify([...digestReferences(args)].sort());
 const KIND_TO_WIRE: Readonly<Record<LiveDiscoveryKind, string>> = {
   set: "set", track: "track", "return-track": "return_track", "main-track": "main_track", scene: "scene",
   "clip-slot": "clip_slot", "session-clip": "session_clip", "arrangement-clip": "arrangement_clip", note: "note",
@@ -36,7 +70,17 @@ const KIND_TO_WIRE: Readonly<Record<LiveDiscoveryKind, string>> = {
 };
 const WIRE_TO_KIND = new Map(Object.entries(KIND_TO_WIRE).map(([key, value]) => [value, key as LiveDiscoveryKind]));
 
-type Endpoint = { host: string; port: number; secret: string; timeoutMs?: number };
+type Endpoint = {
+  host: string; port: number; secret: string; timeoutMs?: number;
+  /**
+   * How a change reaches Live: `mutate` (the default) is one request that the Remote Script checks and
+   * applies in one Live tick, with the state digest from the preview when there is one; `authority` is
+   * the older preflight → prepare → invoke chain, kept for the tests that exercise it.
+   */
+  mutationPath?: "mutate" | "authority";
+  /** Past this many changed transactions the adapter retires the oldest in the background (tests set it low). */
+  retireAfter?: number;
+};
 type Pending = {
   operationId: string;
   resolve: (value: unknown) => void;
@@ -47,13 +91,13 @@ type Pending = {
 type Hello = LoopbackResponse & { id: "hello"; result: { protocol: string; registryHash: string; maxDeadlineMs: number } };
 
 function canonical(value: unknown, depth = 0): string {
-  // As deep as the Remote Script allows (racks nested in racks' chains): both ends sign the same text.
-  if (depth > 64) throw new Error("wire payload is too deeply nested");
+  // The Remote Script's own bounds (MAX_WIRE_DEPTH and the rest): both ends sign the same text.
+  if (depth > 256) throw new Error("wire payload is too deeply nested");
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
-  if (typeof value === "string") { if (value.length > 16_384) throw new Error("wire string is too large"); return JSON.stringify(value); }
+  if (typeof value === "string") { if (value.length > 1_048_576) throw new Error("wire string is too large"); return JSON.stringify(value); }
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("wire number is not finite"); return JSON.stringify(Object.is(value, -0) ? 0 : value); }
-  if (Array.isArray(value)) { if (value.length > 512) throw new Error("wire array is too large"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
-  if (typeof value === "object") { const object = value as Record<string, unknown>; const keys = Object.keys(object); if (keys.length > 256) throw new Error("wire object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key], depth + 1)}`).join(",")}}`; }
+  if (Array.isArray(value)) { if (value.length > 10_000_000) throw new Error("wire array is too large"); return `[${value.map((item) => canonical(item, depth + 1)).join(",")}]`; }
+  if (typeof value === "object") { const object = value as Record<string, unknown>; const keys = Object.keys(object); if (keys.length > 1_000_000) throw new Error("wire object is too large"); return `{${keys.sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key], depth + 1)}`).join(",")}}`; }
   throw new Error("unsupported wire value");
 }
 function mac(secret: string, value: unknown): string { const encoded = canonical(value); if (Buffer.byteLength(encoded) > MAX_FRAME_BYTES) throw new Error("wire payload is too large"); return createHmac("sha256", secret).update(encoded).digest("base64url"); }
@@ -88,9 +132,9 @@ function validStatus(value: unknown): value is LiveStatus {
   const operations = status.operations;
   if (typeof status.connected !== "boolean" || typeof status.adapter !== "string" || !ADAPTERS.has(status.adapter) ||
       !(status.epoch === null || (typeof status.epoch === "number" && Number.isSafeInteger(status.epoch) && status.epoch >= 1)) ||
-      status.protocol !== LIVE_PROTOCOL || !Array.isArray(capabilities) || capabilities.length > 256 ||
+      status.protocol !== LIVE_PROTOCOL || !Array.isArray(capabilities) || capabilities.length > 4096 ||
       !capabilities.every((capability) => typeof capability === "string" && capability.length > 0 && capability.length <= 128) ||
-      status.registryHash !== LIVE_REGISTRY_HASH || !Array.isArray(operations) || operations.length > 256) return false;
+      status.registryHash !== LIVE_REGISTRY_HASH || !Array.isArray(operations) || operations.length > 4096) return false;
   if (new Set(capabilities).size !== capabilities.length || !capabilities.every((capability) => (LIVE_CAPABILITIES as readonly string[]).includes(capability))) return false;
   if (!operations.every((operation) => typeof operation === "string" && operation.length > 0 && operation.length <= 128) ||
       new Set(operations).size !== operations.length ||
@@ -106,8 +150,19 @@ function verifySigned(secret: string, response: LoopbackResponse): void {
   const received = Buffer.from(response.mac);
   if (expected.length !== received.length || !timingSafeEqual(expected, received)) throw new Error("remote response authentication failed");
 }
+/** A snapshot request's wire args: only the fields given (the registry checks their bounds), none for the whole Set. */
+function snapshotArgs(request: LiveSnapshotRequest | undefined): Record<string, unknown> | undefined {
+  if (request === undefined) return undefined;
+  const args: Record<string, unknown> = {};
+  if (request.tracks !== undefined) args.tracks = { from: request.tracks.from, count: request.tracks.count };
+  if (request.scenes !== undefined) args.scenes = { from: request.scenes.from, count: request.scenes.count };
+  if (request.focus !== undefined) args.focus = [...request.focus];
+  if (request.parts !== undefined) args.parts = [...request.parts];
+  return Object.keys(args).length > 0 ? args : undefined;
+}
 function registryRequest(operationId: string, fields: Omit<RemoteBridgeRequest, "version" | "id" | "nonce" | "sequence" | "bridgeEpoch" | "connectionChallenge" | "deadlineMs" | "mac">): unknown {
-  if (operationId === "status" || operationId === "snapshot" || operationId === "reconnect" || operationId === "session.playback") return {};
+  if (operationId === "status" || operationId === "reconnect" || operationId === "session.playback") return {};
+  if (operationId === "snapshot") return fields.args ?? {};
   if (operationId === "discover") return fields.args ?? {};
   if (operationId === "get") return { ref: fields.ref };
   if (operationId === "authority.preflight") return { operation: fields.operation, argsDigest: createHash("sha256").update(canonical(fields.args ?? {})).digest("hex"), transactionId: fields.transactionId };
@@ -120,6 +175,8 @@ function registryRequest(operationId: string, fields: Omit<RemoteBridgeRequest, 
 export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   private socket?: Socket;
   private buffer = Buffer.alloc(0);
+  private pieces: Buffer[] = [];
+  private piecesLength = 0;
   private sequence = 0;
   private epoch: number | null = null;
   private bridgeEpoch?: string;
@@ -136,7 +193,20 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   private reconciliationPoisoned = false;
   private activeSubscriptionArgs?: Record<string, unknown>;
   private readonly cleanupOwnership = new Map<string, Map<string, string>>();
-  private constructor(private readonly endpoint: Endpoint) { validEndpoint(endpoint); }
+  private readonly mutationPath: "mutate" | "authority";
+  private readonly retireAfter: number;
+  /** State digests previews asked for, by transaction: the change they expect, and the digest on its way. */
+  private readonly expectedDigests = new Map<string, { operation: string; references: string; digest: Promise<string | undefined>; expiresAt: number }>();
+  /** Transactions whose changes the Remote Script still keeps for replay, oldest first. */
+  private readonly unretired = new Map<string, true>();
+  /** Transactions with a change on its way: never retired meanwhile. */
+  private readonly changing = new Map<string, number>();
+  private retiring?: Promise<void>;
+  private constructor(private readonly endpoint: Endpoint) {
+    validEndpoint(endpoint);
+    this.mutationPath = endpoint.mutationPath ?? "mutate";
+    this.retireAfter = Math.max(2, endpoint.retireAfter ?? DEFAULT_RETIRE_AFTER);
+  }
 
   static async connect(endpoint: Endpoint): Promise<RemoteScriptLiveAdapter> {
     const adapter = new RemoteScriptLiveAdapter(endpoint);
@@ -152,7 +222,13 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   invoke(): never { throw new Error("remote adapter is asynchronous; use invokeAsync"); }
   subscribe(listener: (event: LiveEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   reconnect(): LiveStatus { throw new Error("remote adapter is asynchronous; use reconnectAsync"); }
-  snapshotAsync(context?: LiveOperationContext): Promise<LiveSnapshot> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot" }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return snapshot; }) as Promise<LiveSnapshot>; }
+  /** A snapshot; `request` (windows, focus, parts) goes as the wire args, checked against the registry
+   * before anything is sent. No request sends none: the whole Set, as before. The answer is checked
+   * against what was asked (checkSnapshotAnswer): without a window it must be the whole Set. */
+  snapshotAsync(context?: LiveOperationContext, request?: LiveSnapshotRequest): Promise<LiveSnapshot> {
+    const args = snapshotArgs(request);
+    return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "snapshot", ...(args ? { args } : {}) }, "snapshot", context)).then((snapshot) => { expandPadChains(snapshot); return checkSnapshotAnswer(snapshot as LiveSnapshot, (args ?? {}) as LiveSnapshotRequest); });
+  }
   async discoverAsync(request: LiveDiscoveryRequest, context?: LiveOperationContext): Promise<LiveDiscoveryResult> {
     await this.ensureConnectedAsync(context);
     const wireKind = KIND_TO_WIRE[request.kind];
@@ -219,19 +295,10 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     }
     const ownershipFields = ownershipToken ? { ownershipToken } : {};
     const bridgeIdempotencyKey = createHash("sha256").update(`${transactionScope}\0${baseIdempotencyKey}\0${invocation.operation}\0${argsDigest}`).digest("base64url");
-    // Preflight and prepare only mint authority in the bridge: whatever goes wrong there, nothing
-    // was dispatched to Live, which callers (undo above all) may report as a plain refusal.
-    let prepared: { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
-    try {
-      const preflight = await this.requestAsync({ method: "preflight", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, ...ownershipFields }, "authority.preflight", context) as { preflightToken?: unknown; confirmation?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
-      if (typeof preflight.preflightToken !== "string" || typeof preflight.confirmation !== "string" || preflight.operation !== invocation.operation || typeof preflight.argsDigest !== "string" || typeof preflight.expiresAt !== "number" || preflight.expiresAt <= Date.now()) throw new Error("remote mutation authority preflight failed");
-      prepared = await this.requestAsync({ method: "prepare", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, preflightToken: preflight.preflightToken, confirmation: preflight.confirmation, idempotencyKey: bridgeIdempotencyKey, ...ownershipFields }, "authority.prepare", context) as { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
-      if (typeof prepared.authorityToken !== "string" || prepared.operation !== invocation.operation || prepared.argsDigest !== preflight.argsDigest || typeof prepared.expiresAt !== "number" || prepared.expiresAt <= Date.now()) throw new Error("remote mutation authority preparation failed");
-    } catch (error) { throw new LiveMutationNotDispatchedError(error instanceof Error ? error.message : "remote mutation authority failed"); }
     let wireResult: unknown;
-    try { wireResult = await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args, authorityToken: prepared.authorityToken, transactionId: transactionScope, ...ownershipFields }, invocation.operation, context); }
+    try { wireResult = this.mutationPath === "mutate" ? await this.mutateAsync(invocation, transactionScope, bridgeIdempotencyKey, ownershipFields, context) : await this.authorizedInvokeAsync(invocation, transactionScope, bridgeIdempotencyKey, ownershipFields, context); }
     catch (error) {
-      if (consumedMoveOwnership && reference && this.socket && !this.socket.destroyed) {
+      if (consumedMoveOwnership && reference && !(error instanceof LiveMutationNotDispatchedError) && this.socket && !this.socket.destroyed) {
         try {
           const observed = await this.requestAsync({ method: "get", ref: reference as LiveRef }, "get", context) as Record<string, unknown>; const expectedIdentity = invocation.args.expectedObjectIdentity;
           if (!observed || typeof observed !== "object" || typeof expectedIdentity !== "string" || observed.objectIdentity !== expectedIdentity) { const owned = this.cleanupOwnership.get(consumedMoveOwnership.transactionId); owned?.delete(consumedMoveOwnership.reference); if (owned?.size === 0) this.cleanupOwnership.delete(consumedMoveOwnership.transactionId); }
@@ -248,7 +315,86 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (TRANSACTION_DELETIONS.has(invocation.operation) && reference) { const owned = this.cleanupOwnership.get(transactionScope); owned?.delete(reference); if (owned?.size === 0) this.cleanupOwnership.delete(transactionScope); }
     return wireResult;
   }
-  async retireTransactionAsync(transactionId: string, context?: LiveOperationContext, terminal = false): Promise<{ retired: number }> { if (transactionId.length < 8 || transactionId.length > 128) throw new Error("remote retirement transaction id is invalid"); await this.ensureConnectedAsync(context); const result = await this.requestAsync({ method: "retire", transactionId, ...(terminal ? { terminal: true } : {}) }, "authority.retire", context) as { retired: number }; if (terminal) this.cleanupOwnership.delete(transactionId); return result; }
+  /** The older chain: preflight and prepare mint authority, then invoke spends it. */
+  private async authorizedInvokeAsync(invocation: LiveInvocation, transactionScope: string, idempotencyKey: string, ownershipFields: { ownershipToken?: string }, context?: LiveOperationContext): Promise<unknown> {
+    // Preflight and prepare only mint authority in the bridge: whatever goes wrong there, nothing
+    // was dispatched to Live, which callers (undo above all) may report as a plain refusal.
+    let prepared: { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+    try {
+      const preflight = await this.requestAsync({ method: "preflight", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, ...ownershipFields }, "authority.preflight", context) as { preflightToken?: unknown; confirmation?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+      if (typeof preflight.preflightToken !== "string" || typeof preflight.confirmation !== "string" || preflight.operation !== invocation.operation || typeof preflight.argsDigest !== "string" || typeof preflight.expiresAt !== "number" || preflight.expiresAt <= Date.now()) throw new Error("remote mutation authority preflight failed");
+      prepared = await this.requestAsync({ method: "prepare", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, preflightToken: preflight.preflightToken, confirmation: preflight.confirmation, idempotencyKey, ...ownershipFields }, "authority.prepare", context) as { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
+      if (typeof prepared.authorityToken !== "string" || prepared.operation !== invocation.operation || prepared.argsDigest !== preflight.argsDigest || typeof prepared.expiresAt !== "number" || prepared.expiresAt <= Date.now()) throw new Error("remote mutation authority preparation failed");
+    } catch (error) { throw new LiveMutationNotDispatchedError(error instanceof Error ? error.message : "remote mutation authority failed"); }
+    try { return await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args, authorityToken: prepared.authorityToken as string, transactionId: transactionScope, ...ownershipFields }, invocation.operation, context); }
+    catch (error) { if (error instanceof Error && MUTATION_REFUSED_UNRUN.test(error.message)) throw new LiveMutationNotDispatchedError(error.message); throw error; }
+  }
+
+  /**
+   * One request, one Live tick: the Remote Script checks the change's fences (its arguments' identities,
+   * and the state digest from the preview when this transaction's preview asked for one) and applies it,
+   * or refuses it unrun. It records the reply under the idempotency key, so a retry after a lost reply
+   * gets that reply instead of a second change.
+   */
+  private async mutateAsync(invocation: LiveInvocation, transactionScope: string, idempotencyKey: string, ownershipFields: { ownershipToken?: string }, context?: LiveOperationContext): Promise<unknown> {
+    const expectation = this.expectedDigests.get(transactionScope);
+    let stateDigest: string | undefined;
+    if (expectation && expectation.operation === invocation.operation && expectation.references === referencesKey(invocation.args)) {
+      this.expectedDigests.delete(transactionScope);
+      if (expectation.expiresAt > Date.now()) stateDigest = await expectation.digest;
+    }
+    this.changing.set(transactionScope, (this.changing.get(transactionScope) ?? 0) + 1);
+    try {
+      const result = await this.requestAsync({ method: "mutate", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, idempotencyKey, ...ownershipFields, ...(stateDigest ? { stateDigest } : {}) }, invocation.operation, context);
+      this.unretired.delete(transactionScope); this.unretired.set(transactionScope, true);
+      return result;
+    } catch (error) {
+      if (error instanceof Error && MUTATION_REFUSED_UNRUN.test(error.message)) throw new LiveMutationNotDispatchedError(error.message);
+      throw error;
+    } finally {
+      const left = (this.changing.get(transactionScope) ?? 1) - 1;
+      if (left > 0) this.changing.set(transactionScope, left); else this.changing.delete(transactionScope);
+      if (this.unretired.size > this.retireAfter) this.retireOldestSoon();
+    }
+  }
+
+  /** True when this adapter retires the Remote Script's replay records itself (single-tick mutations), so the host needn't after each change. */
+  get retiresOnItsOwn(): boolean { return this.mutationPath === "mutate"; }
+
+  /**
+   * A preview's word that its transaction will send `invocation`: asks the Remote Script now for the state
+   * digest that change is checked against, and the change carries it, so it's refused if anything it
+   * depends on (the rows it names, the Set's structure, the song's transport) changed since the preview.
+   * Only the transaction's first change of that operation on the same references carries it: a later
+   * step would see the first step's own effect.
+   */
+  expectStateDigest(transactionId: string, invocation: LiveInvocation): void {
+    if (this.mutationPath !== "mutate" || !this.cached.operations?.includes("authority.digest") || !mutationAuthorityRequired(invocation.operation)) return;
+    const now = Date.now();
+    for (const [key, row] of this.expectedDigests) if (row.expiresAt <= now) this.expectedDigests.delete(key);
+    while (this.expectedDigests.size >= MAX_EXPECTED_DIGESTS) this.expectedDigests.delete(this.expectedDigests.keys().next().value as string);
+    let digest: Promise<string | undefined>;
+    try {
+      digest = this.requestAsync({ method: "invoke", operation: "authority.digest", args: { operation: invocation.operation, args: invocation.args } }, "authority.digest")
+        .then((value) => { const stateDigest = (value as { stateDigest?: unknown }).stateDigest; return typeof stateDigest === "string" ? stateDigest : undefined; }, () => undefined);
+    } catch { return; }
+    this.expectedDigests.set(transactionId, { operation: invocation.operation, references: referencesKey(invocation.args), digest, expiresAt: now + EXPECTED_DIGEST_TTL_MS });
+  }
+
+  /** Retires the oldest changed transactions in the background, down to half the bound, skipping any with a change in flight. */
+  private retireOldestSoon(): void {
+    if (this.retiring) return;
+    this.retiring = (async () => {
+      for (const transactionId of [...this.unretired.keys()]) {
+        if (this.unretired.size <= Math.floor(this.retireAfter / 2)) break;
+        if (this.changing.has(transactionId)) continue;
+        this.unretired.delete(transactionId);
+        try { await this.retireTransactionAsync(transactionId, { deadlineMs: Date.now() + (this.endpoint.timeoutMs ?? DEFAULT_TIMEOUT_MS) }); } catch { /* the Remote Script clears its ledger on reconnect */ }
+      }
+    })().finally(() => { this.retiring = undefined; });
+  }
+
+  async retireTransactionAsync(transactionId: string, context?: LiveOperationContext, terminal = false): Promise<{ retired: number }> { if (transactionId.length < 8 || transactionId.length > 128) throw new Error("remote retirement transaction id is invalid"); this.unretired.delete(transactionId); await this.ensureConnectedAsync(context); const result = await this.requestAsync({ method: "retire", transactionId, ...(terminal ? { terminal: true } : {}) }, "authority.retire", context) as { retired: number }; if (terminal) this.cleanupOwnership.delete(transactionId); return result; }
   /** Internal adapter-status change channel (never the public LiveEvent stream:
    * those events carry remote wire sequence semantics that synthetic events
    * must not contaminate). Subscribers are notified after connect/disconnect,
@@ -259,7 +405,7 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   private shapeChanged(prior: LiveStatus, next: LiveStatus): boolean {
     return prior.connected !== next.connected || prior.epoch !== next.epoch || JSON.stringify(prior.operations ?? []) !== JSON.stringify(next.operations ?? []) || JSON.stringify([...prior.capabilities].sort()) !== JSON.stringify([...next.capabilities].sort());
   }
-  reconnectAsync(context?: LiveOperationContext): Promise<LiveStatus> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "reconnect" }, "reconnect", context)).then((value) => { const status = value as LiveStatus; if (!validStatus(status)) throw new Error("invalid reconnect status"); const changed = this.shapeChanged(this.cached, status); this.epoch = status.epoch; this.cached = status; this.lastEventEpoch = this.epoch; this.lastEventSequence = 0; this.cleanupOwnership.clear(); if (changed) this.emitStatusChange(); return status; }); }
+  reconnectAsync(context?: LiveOperationContext): Promise<LiveStatus> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "reconnect" }, "reconnect", context)).then((value) => { const status = value as LiveStatus; if (!validStatus(status)) throw new Error("invalid reconnect status"); const changed = this.shapeChanged(this.cached, status); this.epoch = status.epoch; this.cached = status; this.lastEventEpoch = this.epoch; this.lastEventSequence = 0; this.cleanupOwnership.clear(); this.unretired.clear(); this.expectedDigests.clear(); if (changed) this.emitStatusChange(); return status; }); }
   /** Re-request the mapper's current status without a reconnect; operations and
    * capabilities reflect the shape at call time (no epoch change). */
   refreshStatusAsync(context?: LiveOperationContext): Promise<LiveStatus> { return this.ensureConnectedAsync(context).then(() => this.requestAsync({ method: "status" }, "status", context)).then((value) => { const status = value as LiveStatus; if (!validStatus(status)) throw new Error("invalid refreshed status"); const changed = this.shapeChanged(this.cached, status); this.cached = status; if (changed) this.emitStatusChange(); return status; }); }
@@ -285,7 +431,7 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (this.reopening) return this.contextualReconnectWait(this.reopening, context);
     if (this.socket && !this.socket.destroyed && this.bridgeEpoch && this.connectionChallenge) return Promise.resolve();
     const priorBridgeEpoch = this.bridgeEpoch; const priorLiveEpoch = this.epoch;
-    this.bridgeEpoch = undefined; this.connectionChallenge = undefined; this.buffer = Buffer.alloc(0); this.sequence = 0;
+    this.bridgeEpoch = undefined; this.connectionChallenge = undefined; this.buffer = Buffer.alloc(0); this.pieces = []; this.piecesLength = 0; this.sequence = 0;
     this.reopening = (async () => {
       await this.open();
       const value = await this.requestAsync({ method: "status" }, "status") as LiveStatus;
@@ -329,7 +475,8 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
     if (this.pending.size >= MAX_PENDING) return Promise.reject(new Error("remote adapter queue is full"));
     if (this.sequence >= MAX_SEQUENCE) return Promise.reject(new Error("remote adapter sequence exhausted"));
     if (context?.signal?.aborted) return Promise.reject(new Error("remote adapter request cancelled before dispatch"));
-    const timeoutMs = this.endpoint.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const configured = this.endpoint.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = fields.method === "snapshot" || fields.method === "discover" ? Math.min(MAX_DEADLINE_MS, configured * LARGE_READ_TIMEOUT_FACTOR) : configured;
     const deadlineMs = context?.deadlineMs ?? Date.now() + timeoutMs;
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now() || deadlineMs > Date.now() + 60_000) return Promise.reject(new Error("remote adapter deadline is invalid or expired"));
     validateLiveOperationRequest(operationId, registryRequest(operationId, fields));
@@ -352,8 +499,13 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
   }
 
   private onData(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    if (this.buffer.length > MAX_FRAME_BYTES) { this.failPending(new Error("remote frame exceeds limit")); this.socket?.destroy(); return; }
+    // A frame arrives in many pieces: keep them until one holds a line end, then join once.
+    if (chunk.indexOf(10) < 0) {
+      this.pieces.push(chunk); this.piecesLength += chunk.length;
+      if (this.buffer.length + this.piecesLength > MAX_FRAME_BYTES) { this.failPending(new Error("remote frame exceeds limit")); this.socket?.destroy(); }
+      return;
+    }
+    this.buffer = Buffer.concat([this.buffer, ...this.pieces, chunk]); this.pieces = []; this.piecesLength = 0;
     while (true) {
       const index = this.buffer.indexOf(10); if (index < 0) return;
       const frame = this.buffer.subarray(0, index); this.buffer = this.buffer.subarray(index + 1); if (frame.length === 0) continue;

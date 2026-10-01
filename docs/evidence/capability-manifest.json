@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "1b62b8fee89110864a81f1992379fabe8f7d79bff2799d168a70770b7ee0d774",
-  "operationCount": 163,
+  "registryHash": "45395d1c98d022440c10b5678ff14b8704ee094d7e2148cc9bc3205c4f6271b7",
+  "operationCount": 194,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -393,6 +393,20 @@
           "access": [
             "read"
           ]
+        },
+        {
+          "id": "note.select",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "note.delete-range",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
         }
       ],
       "firstTested": "12.4.5b8 phase 5 (targeted APIs pending exact candidate)"
@@ -603,6 +617,20 @@
           "access": [
             "call"
           ]
+        },
+        {
+          "id": "fire-button.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "track.action",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
         }
       ],
       "firstTested": "12.4.5b8 phase 4 audition (properties pending exact candidate)"
@@ -627,6 +655,13 @@
         },
         {
           "id": "song.time-convert",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "clip.time-convert",
           "status": "executable-negotiated",
           "access": [
             "call"
@@ -745,6 +780,13 @@
         },
         {
           "id": "application.dialog",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "application.message",
           "status": "executable-negotiated",
           "access": [
             "call"
@@ -1024,6 +1066,62 @@
           "access": [
             "write"
           ]
+        },
+        {
+          "id": "device.property.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "device.action",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "sample.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "sample.slice",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "wavetable.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "wavetable.modulation.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "plugin.parameter-names",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "device.banks.read",
+          "status": "executable-negotiated",
+          "access": [
+            "read"
+          ]
         }
       ],
       "firstTested": "pending exact candidate (Live 12 device APIs)"
@@ -1072,6 +1170,20 @@
           "status": "executable-negotiated",
           "access": [
             "write"
+          ]
+        },
+        {
+          "id": "automation.step.insert",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "automation.value-at",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
           ]
         }
       ],
@@ -1184,8 +1296,15 @@
     },
     {
       "family": "authority",
-      "surface": "Transaction authority preflight/prepare/retire",
+      "surface": "Transaction authority preflight/prepare/retire, and the state digest a single-request mutation is checked against",
       "operations": [
+        {
+          "id": "authority.digest",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
         {
           "id": "authority.preflight",
           "status": "executable-negotiated",
@@ -1209,6 +1328,126 @@
         }
       ],
       "firstTested": "internal transaction machinery (not a user-facing Live surface)"
+    },
+    {
+      "family": "undo-history",
+      "surface": "Song undo history: begin/end_undo_step (one step for a plan), undo, redo",
+      "operations": [
+        {
+          "id": "undo.step.begin",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "undo.step.end",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "song.undo",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "song.redo",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "data.get",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "data.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        }
+      ],
+      "firstTested": "pending exact candidate"
+    },
+    {
+      "family": "extension",
+      "surface": "Live Extensions SDK 1.0 through Kumi's Live extension: offline render, Arrangement MIDI clips with notes, clearing a range, device copies, Browser-free pad samples, project import, one undo step for a group",
+      "operations": [
+        {
+          "id": "render.offline",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "arrangement.midi-clip.create",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        },
+        {
+          "id": "clip.clear-range",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "device.duplicate",
+          "status": "executable-negotiated",
+          "access": [
+            "write",
+            "call"
+          ]
+        },
+        {
+          "id": "drum-pad.sample-chain",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "project.import",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        },
+        {
+          "id": "transaction.group",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        }
+      ],
+      "firstTested": "pending exact candidate (Live 12.4.15b5, SDK 1.0.0-beta.1)"
+    },
+    {
+      "family": "developer",
+      "surface": "Live module introspection for the coverage audit (developers only)",
+      "operations": [
+        {
+          "id": "dev.lom-audit",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        }
+      ],
+      "firstTested": "pending exact candidate"
     },
     {
       "family": "realtime-subscriptions",

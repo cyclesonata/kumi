@@ -23,7 +23,7 @@ function fixture(adapter = new DeviceSimulator()) {
   host.handle({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:PROTOCOL_VERSION,capabilities:{},clientInfo:{name:'test',version:'1'}}});
   host.handle({jsonrpc:'2.0',method:'notifications/initialized'}); let id=2;
   const call = async(name:string,args:object) => { const reply = await host.handleAsync({jsonrpc:'2.0',id:id++,method:'tools/call',params:{name,arguments:args}}) as any; if(reply.error || reply.result?.isError) throw new Error(JSON.stringify(reply)); return JSON.parse(reply.result.content[0].text); };
-  return {adapter,call};
+  return {adapter,call,host};
 }
 for (const edit of [{kind:'macro-name',macroIndex:0,name:'New macro'},{kind:'variation-name',name:'New variation'},{kind:'macro-mapping',targetRef:'target',mappingIndex:0,minimum:0.75,maximum:0.25,mappingKind:'continuous'}]) {
   test(`Willington ${edit.kind} preview/apply/history undo`,async()=>{
@@ -70,4 +70,54 @@ test('Willington recovers apply and undo only with the exact key',async()=>{
   const undo={transactionId:preview.transactionId,confirmation:'undo',idempotencyKey:'lost-device-undo'};
   await assert.rejects(call('live_undo',undo));await call('live_undo',undo);
   assert.equal(adapter.names['macro-name'],'Macro 1');
+});
+
+
+test("willington-device undo respects a policy changed after apply", async () => {
+  const { host, adapter, call } = fixture();
+  const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
+  await call("live_willington_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "policy-apply" });
+  host.setToolPolicy({ profile: "full", deny: ["live_willington_device_apply"] });
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "policy-undo" };
+  await assert.rejects(call("live_undo", undo), /deployment policy/);
+  host.setToolPolicy({ profile: "full" });
+  await call("live_undo", undo);
+  assert.equal(adapter.names["macro-name"], "Macro 1");
+});
+
+
+test("willington-device undo retries after a connection failure before the restore was recorded", async () => {
+  const { host, adapter, call } = fixture();
+  const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
+  await call("live_willington_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "early-apply" });
+  let fail = true;
+  Object.assign(adapter, { refreshStatusAsync: async () => { if (fail) { fail = false; throw new Error("injected status failure"); } return adapter.status(); } });
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "early-undo" };
+  await assert.rejects(call("live_undo", undo), /injected/);
+  await call("live_undo", undo);
+  assert.equal(adapter.names["macro-name"], "Macro 1");
+});
+
+
+test("willington-device undo retries after a read failure before the restore was recorded", async () => {
+  const { host, adapter, call } = fixture();
+  const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
+  await call("live_willington_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "early-apply" });
+  let fail = true;
+  const original = adapter.invokeAsync.bind(adapter);
+    adapter.invokeAsync = async (invocation) => { if (fail && invocation.operation === "willington.device.read") { fail = false; throw new Error("injected read failure"); } return original(invocation); };
+  const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "early-undo" };
+  await assert.rejects(call("live_undo", undo), /injected/);
+  await call("live_undo", undo);
+  assert.equal(adapter.names["macro-name"], "Macro 1");
+});
+
+
+test("Willington preview reports playback and mapping validation errors without a full snapshot", async () => {
+  const { adapter, call } = fixture();
+  adapter.snapshotAsync = async () => { throw new Error("full snapshot forbidden"); };
+  (adapter as any).state.playback.transport.playing = true;
+  await assert.rejects(call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" }), /Willington edits require stopped playback/);
+  (adapter as any).state.playback.transport.playing = false;
+  await assert.rejects(call("live_willington_device_preview", { ref: "rack", kind: "macro-mapping", targetRef: "target", mappingIndex: 0, minimum: 3, maximum: 1, mappingKind: "continuous" }), /Mapping endpoints are outside parameter bounds/);
 });

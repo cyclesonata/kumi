@@ -9,8 +9,9 @@ every external environment.”
 ## What can the agent do?
 
 Plain-language answers for producers. Every mutation runs through a read-only
-preview, your explicit confirmation, an exact apply, and a verified read-back;
-most content edits can be undone with `live_undo`.
+preview, its confirmation (Kumi passes it; the model never sees it), an exact
+apply checked against the preview's state in the same tick, and a verified
+read-back; most content edits can be undone with `live_undo`.
 
 | I want to… | Tools | Worth knowing |
 |---|---|---|
@@ -71,9 +72,24 @@ most content edits can be undone with `live_undo`.
 | Switch views and control the Arrangement view | `live_view_preview/apply` | Session/Arranger switching, zoom/scroll, follow-song, track collapse; UI-only, no musical state touched |
 | Search the Browser and inspect items | `live_browser_search`, `live_browser_roots`, `live_browser_inspect` | Ranked multi-term host-side matching (order-independent tokens, word-boundary/prefix boosts, documented per-item scores and matched-token explanations) over a bounded, epoch-bound per-root candidate cache (60-second TTL, explicit `refresh`, cache provenance and truncation reported); exact-substring matching remains as a documented fallback mode; not tag/filter/similarity search — no public API for those (the library-database surface below covers tags when its schema is enumerated); shape-gated roots (sounds, samples, User Library, user folders, current project) with each binding's tier reported by `live_browser_roots`; single-item `live_browser_inspect` returns stable identity, type, provenance, and explicit loadability without raw filesystem paths. Internal bindings are never stable public LOM APIs |
 | Search Live's library database (tags, kinds, usage counts, plug-in inventory) | `live_library_search` | Opt-in, owner-allowlisted, read-only (no writes ever, uncheckpointed WAL refused). Fail-closed schema gating on versions shape-probed first-hand on Live 12.4.5 (files database 12300; plug-ins database 1 — anything else reports structured unavailability with the observed version). Name/wildcard + tag-conjunction + kind + source + sort filters with bounded revision-paged results; plug-in inventory with vendor/format filters; paths redacted, usage counts opaque; similarity/duplicates explicitly unavailable; discovery-only items are labeled, and loadability still requires `live_browser_inspect` |
-| Browser preview and hot-swap | — | Explicitly declined: `preview_item`/`stop_preview` is an unofficial binding with no authoritative observable preview state to verify postconditions against, and it is audible. Hot-swap/neighboring-preset loading is deferred for the same verifiability reason. The reserved `browser.preview.*` contracts stay fail-closed until an authoritative preview state exists |
+| Preview a Browser item | `live_browser_preview`, `live_browser_preview_stop` | Plays the item as Live's Browser does; only the latest preview's id stops it; nothing in the Set changes |
 | Read the Set: tracks, clips, devices, routing, playback | `live_snapshot`, `live_discover`, `live_status` | Read-only; stale references are rejected, never guessed |
 | Observe state changes | `live_observe_subscribe`, `live_observe_poll`, `live_observe_unsubscribe` | Bounded negotiated topics over documented observable state — transport, selection, track, clip, device, parameter, groove, tuning, scene, meters, and rack state. Quotas (8 subscriptions, 64 topics each), dedup-by-revision, changed-field lists, explicit overflow, negotiated minimum poll interval, and revision/identity on every event — none of it mutation authority |
+| Delete clips, scenes, tracks and locators | `live_clip_delete_*`, `live_scene_delete_*`, `live_track_delete_*`, `live_locator_delete_*` | Explicit deletion (`explicitDeletion: true`) fenced to the object, its track and its siblings; kept, since only Live's own undo brings it back |
+| Duplicate a device | `live_device_duplicate_preview/apply` | The copy goes right after the original, with its settings; undo deletes exactly the copy |
+| Make one change in one call | `live_change` | Runs a family's preview, then its apply, and answers with the apply's record (and the preview); refuses the families where someone decides between the two |
+| One undo step in Live for several changes | `live_undo_step_begin`, `live_undo_step_end` | Everything between is one Cmd-Z in Live; the Remote Script closes the step when its connection goes or its time is up; a producer's own edit meanwhile isn't drawn in |
+| Undo or redo in Live itself | `live_song_undo`, `live_song_redo` | A last resort, for what the producer did in Live; never Kumi's undo |
+| Follow Live as it changes | `live_subscribe` → `notifications/live_event` | Transport, selection, names and colours, mixer values, the selected parameter, structure; right-click "Ask Kumi about this" from Kumi's Live extension |
+| Render a track offline | `live_render_offline` (Kumi's Live extension) | An audio track's own clips, before its devices, at hundreds of times real time; routed inputs and Resampling render as silence |
+| MIDI clips with notes in the Arrangement | `live_arrangement_midi_clip_preview/apply` (Kumi's Live extension) | One clip or several; read back through the Remote Script; undo deletes exactly those clips while their content is as written |
+| Clear a stretch of the Arrangement | `live_clip_clear_range_preview/apply` (Kumi's Live extension) | Clips inside go, clips crossing the edges are cut; kept (Live's undo) |
+| Import a file into the project | `live_project_import` (Kumi's Live extension) | Into the Set's project folder, through Live |
+| Keep Kumi's notes in the Set | `live_data_read`, `live_data_preview/apply` | Text under `kumi.` keys, in the Set or on a track; other control surfaces' keys are read-only |
+| Edit a device beyond its parameters | `live_device_edit_preview/apply`, `live_device_read` | Simpler and Wavetable settings, Simpler slices, Wavetable modulation, parameter names and banks; fenced to the device's own state |
+| Read automation and convert clip time | `live_automation_read`, `live_clip_time_convert` | A parameter's automation value at a time; beats, samples and seconds in an audio clip |
+| Hold a launch button | `live_fire_button_preview/apply` | Pressed and released like a controller's button (legato launches); released when the connection goes |
+| Say something in Live's status bar | `live_message` | A short message, or a modal one |
 
 ## Evidence scope
 

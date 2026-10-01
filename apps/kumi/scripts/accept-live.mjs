@@ -74,6 +74,63 @@ async function state() {
   return { tempo: set.items[0]?.tempo, tracks: tracks.items.map((row) => row.name), scenes: scenes.items.length, locators: locators.items.map((row) => `${row.name}@${row.position}`), locatorPositions: locators.items.map((row) => row.position), reads: { tracks } };
 }
 
+/** Changes the run itself took away afterwards (a clip it cleared and deleted): their own undo finds nothing, as it should. */
+const expectedKept = new Set();
+/**
+ * Bridge 1.0.58 and Kumi's Live extension: MIDI with notes straight into the Arrangement, part of it
+ * cleared, the rest deleted (the pad track is empty again), a device copied, and the bounce rendered
+ * offline and heard back.
+ */
+async function acceptFullControl(change) {
+  const skip = (name) => process.stdout.write(`  skip           ${name} isn't offered by this bridge (or Kumi's Live extension isn't running)\n`);
+  observation = await integration.observe(signal());
+  const padOf = async () => (await all("track", { fields: ["name"] })).items.filter((row) => row.name === PAD).at(-1);
+  const pad = await padOf();
+  if (!pad) { say(false, undefined, "the pad track is gone"); return; }
+  if (tool("write_arrangement_clip")) {
+    // At the start of the pad track: the run copied the pad's clip to the Arrangement at SPOT already.
+    const written = await change("write_arrangement_clip", { trackRef: pad.ref, start: 0, length: 8, name: "Kumi Arrangement", notes: [60, 63, 67].map((pitch, index) => ({ pitch, start: index, duration: 2, velocity: 90 })) });
+    if (written?.ok && !stopping) {
+      if (tool("clear_range")) await change("clear_range", { trackRef: pad.ref, fromBeat: 6, toBeat: 8 }); else skip("clear_range");
+      if (tool("delete_clip")) {
+        observation = await integration.observe(signal());
+        const again = await padOf();
+        const clips = again ? (await all("arrangement-clip", { parent: again.ref, fields: ["name"] })).items.filter((clip) => clip.name === "Kumi Arrangement") : [];
+        for (const clip of clips) if (!stopping) await change("delete_clip", { clipRef: clip.ref });
+        if (written.body?.changed) expectedKept.add(written.body.changed);
+      } else skip("delete_clip");
+    }
+  } else skip("write_arrangement_clip");
+  if (tool("duplicate_device") && !stopping) {
+    observation = await integration.observe(signal());
+    const again = await padOf();
+    // A chain holds one instrument: copying the pad's is refused, plainly, and nothing changes. An effect is copied.
+    const instrument = again ? (await all("device", { parent: again.ref, fields: ["name", "deviceType"] })).items.find((row) => row.deviceType === "instrument") : undefined;
+    if (instrument) {
+      const refused = await run("duplicate_device", { deviceRef: instrument.ref });
+      say(!refused.ok && /one instrument/.test(refused.error ?? ""), refused.ms, `an instrument isn't copied beside itself${refused.ok ? ", but it was" : ""}`);
+    }
+    // Devices are discovered a track at a time: the first effect on the Set's first tracks.
+    let effect;
+    for (const track of (await all("track", { fields: ["name"] })).items.slice(0, 40)) {
+      effect = (await all("device", { parent: track.ref, fields: ["name", "deviceType"] })).items.find((row) => row.deviceType === "audio_effect" || row.deviceType === "midi_effect");
+      if (effect || stopping) break;
+    }
+    if (effect) await change("duplicate_device", { deviceRef: effect.ref }); else say(false, undefined, "no effect on the Set's first tracks to copy");
+  } else if (!tool("duplicate_device")) skip("duplicate_device");
+  if (tool("render") && !stopping) {
+    const bounce = (await all("track", { fields: ["name"] })).items.filter((row) => row.name === BOUNCE).at(-1);
+    if (!bounce) { say(false, undefined, "no bounce to render"); return; }
+    const rendered = await run("render", { track: bounce.ref, from_beat: SPOT, beats: 8 });
+    say(rendered.ok, rendered.ms, rendered.ok ? `rendered the bounce offline: ${Math.round((rendered.body?.seconds ?? 0) * 10) / 10} s of audio` : `render: ${rendered.error}`);
+    if (rendered.ok && rendered.body?.file) {
+      const t0 = performance.now();
+      try { const heard = await hear(rendered.body.file, { signal: signal() }); say(heard.loudness.integratedLufs !== null, performance.now() - t0, `heard the render: ${heard.loudness.integratedLufs === null ? "silent" : `${Math.round(heard.loudness.integratedLufs)} LUFS`}`); }
+      catch (error) { say(false, performance.now() - t0, `listening to the render: ${String(error?.message ?? error).slice(0, 200)}`); }
+    }
+  } else if (!tool("render")) skip("render");
+}
+
 /** Kumi 1.0: the song and scenes, clips and notes, a device off and on, a bounce heard back, playing and showing, watching. */
 async function acceptOneDotZero(change, target) {
   const skip = (name) => process.stdout.write(`  skip           ${name} isn't offered by this bridge\n`);
@@ -206,6 +263,7 @@ try {
             else say(false, undefined, "no Drift parameter to change");
           }
           if (!stopping) await acceptOneDotZero(change, target);
+          if (!stopping) { process.stdout.write("\nFull control\n"); await acceptFullControl(change); }
         }
       }
     } catch (error) { say(false, undefined, `stopped making changes: ${String(error?.message ?? error).slice(0, 200)}`); }
@@ -219,7 +277,7 @@ try {
         const after = await integration.undo(record.id, signal());
         // A bounce that recorded keeps its track, and the track it recorded from, as a producer would want.
         // Its input can't go back to Ext. In when Live has no audio input to offer.
-        const keeps = after.state === "kept" && ([`Added audio track “${BOUNCE}”`, `Added MIDI track “${PAD}”`].includes(record.title) || (record.title.startsWith(`${BOUNCE}: input from`) && /^Live doesn't offer/.test(after.note ?? "")));
+        const keeps = after.state === "kept" && ([`Added audio track “${BOUNCE}”`, `Added MIDI track “${PAD}”`].includes(record.title) || expectedKept.has(record.title) || (record.title.startsWith(`${BOUNCE}: input from`) && /^Live doesn't offer/.test(after.note ?? "")));
         say(after.state === "undone" || keeps, performance.now() - t1, `${after.state} · ${record.title}${after.note ? ` (${after.note})` : ""}`);
       } catch (error) { say(false, performance.now() - t1, `${record.title}: ${String(error?.message ?? error).slice(0, 200)}`); }
     }

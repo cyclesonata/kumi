@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { npmExecutable } from "../dist/src/platform.js";
+import { BRIDGE_DIAGNOSTICS_MAX_BYTES } from "../dist/src/delivery.js";
 import { validatePackagedDocumentation } from "./release-documentation.mjs";
 
 const packageDirectory = new URL("..", import.meta.url);
@@ -73,8 +74,8 @@ try {
   for (const required of ["dist/src/cli.js", "dist/src/setup.js", "dist/src/migrate.js", "dist/src/diagnostics.js", "dist/src/install-remote-script.js", "dist/src/lifecycle-cli.js", "remote-script/AbletonMcpBridge/__init__.py", "remote-script/AbletonMcpBridge/ableton_mcp_remote_script.py", "remote-script/AbletonMcpBridge/ableton-live-v1.operations.json", "remote-script/AbletonMcpBridge/manifest.json", "release-docs/USER_GUIDE.md", "release-docs/OPERATIONS.md", "release-docs/RECOVERY.md", "release-docs/DISTRIBUTION_POLICY.md", "release-docs/SUPPORT_MATRIX.md", "release-manifest.json", "LICENSE.md", "package.json"]) {
     if (!names.includes(required)) throw new Error(`package is missing ${required}`);
   }
-  const runtimeModules = ["als", "analysis-job-worker", "analysis-runner", "analysis", "key-estimation", "audio-diagnosis", "audio-file", "audio-standards", "bridge/remote-adapter", "cli", "delivery", "diagnostics", "drum-sampler-preset", "framing", "host", "index", "install-remote-script", "journeys", "lifecycle-cli", "lifecycle", "live", "loopback", "migrate", "platform", "project", "project-semantic", "project-semantic-diff", "reference-analysis", "registry", "setup", "stdio", "tool-catalog", "midi-transforms", "mcp-protocol", "transactions/session-midi", "transactions/batch", "transactions/device-state", "sqlite-reader", "library-search"];
-  const expectedNames = ["package.json", "LICENSE.md", "README.md", "release-manifest.json", ...runtimeModules.flatMap((module) => [`dist/src/${module}.js`, `dist/src/${module}.d.ts`]), ...["README.md", "USER_GUIDE.md", "USER_JOURNEYS.md", "OPERATIONS.md", "RECOVERY.md", "LIVE_SAFETY.md", "AUDIO_INTELLIGENCE.md", "REALTIME_CONTROL.md", "DELIVERY.md", "DEVELOPER_GUIDE.md", "TESTING.md", "IMPLEMENTATION_STATUS.md", "DISTRIBUTION_POLICY.md", "SUPPORT_MATRIX.md", "CAPABILITY_MATRIX.md"].map((name) => `release-docs/${name}`), "remote-script/README.md", "remote-script/AbletonMcpBridge/__init__.py", "remote-script/AbletonMcpBridge/ableton_mcp_remote_script.py", "remote-script/AbletonMcpBridge/ableton-live-v1.operations.json", "remote-script/AbletonMcpBridge/manifest.json"].sort();
+  const runtimeModules = ["als", "analysis-job-worker", "analysis-runner", "analysis", "key-estimation", "audio-diagnosis", "audio-file", "audio-standards", "bridge/remote-adapter", "bridge/extension-channel", "bridge/extension-launcher", "bridge/extension-setup", "bridge/live-extension-folders", "bridge/router", "cli", "delivery", "diagnostics", "drum-sampler-preset", "framing", "follow-actions", "host", "index", "install-remote-script", "journeys", "lifecycle-cli", "lifecycle", "live", "loopback", "migrate", "platform", "project", "project-semantic", "project-semantic-diff", "reference-analysis", "registry", "setup", "stdio", "tool-catalog", "midi-transforms", "mcp-protocol", "transactions/session-midi", "transactions/batch", "transactions/device-state", "sqlite-reader", "library-search"];
+  const expectedNames = ["package.json", "LICENSE.md", "README.md", "release-manifest.json", ...runtimeModules.flatMap((module) => [`dist/src/${module}.js`, `dist/src/${module}.d.ts`]), ...["README.md", "USER_GUIDE.md", "USER_JOURNEYS.md", "OPERATIONS.md", "RECOVERY.md", "LIVE_SAFETY.md", "AUDIO_INTELLIGENCE.md", "REALTIME_CONTROL.md", "DELIVERY.md", "DEVELOPER_GUIDE.md", "TESTING.md", "IMPLEMENTATION_STATUS.md", "DISTRIBUTION_POLICY.md", "SUPPORT_MATRIX.md", "CAPABILITY_MATRIX.md"].map((name) => `release-docs/${name}`), "remote-script/README.md", "remote-script/AbletonMcpBridge/__init__.py", "remote-script/AbletonMcpBridge/ableton_mcp_remote_script.py", "remote-script/AbletonMcpBridge/ableton-live-v1.operations.json", "remote-script/AbletonMcpBridge/manifest.json", "live-extension/manifest.json", "live-extension/package.json", "live-extension/dist/extension.js", "live-extension/dist/extension.js.sha256"].sort();
   if (JSON.stringify([...names].sort()) !== JSON.stringify(expectedNames)) throw new Error("package inventory differs from the independent explicit allowlist");
   const allowed = (name) => expectedNames.includes(name);
   const forbidden = names.filter((name) => !allowed(name) || name.startsWith("scripts/") || name.includes("/test/") || name.endsWith(".map") || name.includes("node_modules") || name.includes("evidence/") || /(?:^|\/)(?:bridge\.secret|bridge-config\.json|install-receipt\.json|lifecycle-journal\.json)$/.test(name));
@@ -99,7 +100,7 @@ try {
   const manifestNames = Object.keys(releaseManifest.files ?? {}).sort();
   const expectedManifestNames = names.filter((name) => name !== "release-manifest.json").sort();
   if (JSON.stringify(manifestNames) !== JSON.stringify(expectedManifestNames)) throw new Error("release manifest does not exactly cover the packaged payload allowlist");
-  const expectedRole = (name) => name === "LICENSE.md" ? "license" : name === "package.json" ? "package-metadata" : name.startsWith("dist/src/") ? "compiled-runtime" : (name === "README.md" || name.startsWith("release-docs/")) ? "documentation" : name.startsWith("remote-script/") ? "ableton-remote-script" : null;
+  const expectedRole = (name) => name === "LICENSE.md" ? "license" : name === "package.json" ? "package-metadata" : name.startsWith("dist/src/") ? "compiled-runtime" : (name === "README.md" || name.startsWith("release-docs/")) ? "documentation" : name.startsWith("remote-script/") ? "ableton-remote-script" : name.startsWith("live-extension/") ? "ableton-live-extension" : null;
   if (JSON.stringify(Object.keys(releaseManifest.roles ?? {}).sort()) !== JSON.stringify(manifestNames) || manifestNames.some((name) => releaseManifest.roles[name] !== expectedRole(name))) throw new Error("release manifest roles do not exactly classify the payload allowlist");
   for (const [name, expected] of Object.entries(releaseManifest.files)) {
     const actual = createHash("sha256").update(readFileSync(join(installedPackageDirectory, ...name.split("/")))).digest("hex");
@@ -123,7 +124,8 @@ try {
   const initialized = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
   const ping = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" });
   const output = execFileSync(process.execPath, [executable], { cwd: installDirectory, input: `${initialize}\n${initialized}\n${ping}\n`, encoding: "utf8" });
-  const responses = output.trim().split("\n").map((line) => JSON.parse(line));
+  // The bridge answers each request when its work is done; answers are matched to requests by id.
+  const responses = output.trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => (a?.id ?? 0) - (b?.id ?? 0));
   if (responses.length !== 2 || responses[0]?.id !== 1 || responses[0]?.result?.protocolVersion !== "2025-11-25" || responses[1]?.id !== 2 || !responses[1]?.result || responses.some((frame) => frame.error)) throw new Error("installed executable failed the legacy protocol smoke test");
   const modernMeta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} };
   const modernRequests = [
@@ -172,7 +174,7 @@ try {
     encoding: "utf8",
   });
   const loadedBridgeConfig = JSON.parse(loaderOutput);
-  if (loadedBridgeConfig.host !== "127.0.0.1" || loadedBridgeConfig.port !== controlPort || loadedBridgeConfig.realtimePort !== realtimePort || loadedBridgeConfig.secretLength < 32 || loadedBridgeConfig.diagnostics?.maxBytes !== 256 * 1024 || loadedBridgeConfig.diagnostics?.path !== join(lifecycleState, "bridge-diagnostics.log")) throw new Error("installed Live loader rejected or misread the lifecycle bridge configuration");
+  if (loadedBridgeConfig.host !== "127.0.0.1" || loadedBridgeConfig.port !== controlPort || loadedBridgeConfig.realtimePort !== realtimePort || loadedBridgeConfig.secretLength < 32 || loadedBridgeConfig.diagnostics?.maxBytes !== BRIDGE_DIAGNOSTICS_MAX_BYTES || loadedBridgeConfig.diagnostics?.path !== join(lifecycleState, "bridge-diagnostics.log")) throw new Error("installed Live loader rejected or misread the lifecycle bridge configuration");
   const migratedV2Path = join(temporaryDirectory, "migrated-v2.json");
   execFileSync(process.execPath, [join(installedPackageDirectory, "dist", "src", "migrate.js"), "--input", configPath, "--output", migratedV2Path, "--bridge-host", "127.0.0.1", "--bridge-port", String(controlPort), "--realtime-port", String(realtimePort), "--secret-file", join(lifecycleState, "bridge.secret")], { encoding: "utf8" });
   const migratedV2 = JSON.parse(readFileSync(migratedV2Path, "utf8"));
@@ -223,7 +225,7 @@ secret_path = os.environ.get("ABLETON_MCP_SMOKE_SECRET_FILE")
 diagnostics_path = os.environ.get("ABLETON_MCP_SMOKE_DIAGNOSTICS_FILE")
 if not secret_path or not diagnostics_path:
     raise RuntimeError("package smoke owner files were not provided through the environment")
-bridge = AbletonMcpBridge(Instance(), {"host":"127.0.0.1", "port":port, "secret":pathlib.Path(secret_path).read_text(encoding="utf-8").strip(), "diagnostics":{"path":diagnostics_path,"maxBytes":256 * 1024}}, diagnostics_validator=_diagnostics_path_safe)
+bridge = AbletonMcpBridge(Instance(), {"host":"127.0.0.1", "port":port, "secret":pathlib.Path(secret_path).read_text(encoding="utf-8").strip(), "diagnostics":{"path":diagnostics_path,"maxBytes":${BRIDGE_DIAGNOSTICS_MAX_BYTES}}}, diagnostics_validator=_diagnostics_path_safe)
 try:
     raise RuntimeError("diagnostics-secret-canary /Users/example/Project.als browser-query token mac pcm")
 except RuntimeError:
@@ -235,7 +237,7 @@ while time.time() < diagnostics_deadline:
     time.sleep(0.02)
 else:
     bridge.disconnect(); raise RuntimeError("configured diagnostics sink produced no record")
-if "diagnostics-secret-canary" in logged or "Project.als" in logged or pathlib.Path(diagnostics_path).stat().st_size > 256 * 1024:
+if "diagnostics-secret-canary" in logged or "Project.als" in logged or pathlib.Path(diagnostics_path).stat().st_size > ${BRIDGE_DIAGNOSTICS_MAX_BYTES}:
     bridge.disconnect(); raise RuntimeError("configured diagnostics sink leaked or exceeded its bound")
 deadline = time.time() + 5.0
 while time.time() < deadline:
@@ -279,8 +281,9 @@ finally: bridge.disconnect()
     const liveStatus = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "live_status", arguments: {} } });
     const liveScenes = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "live_discover", arguments: { kind: "scene", limit: 4 } } });
     const authenticatedOutput = execFileSync(process.execPath, [executable, "--config", bridgeConfigPath], { cwd: installDirectory, input: `${initializeBridge}\n${initializedBridge}\n${liveStatus}\n${liveScenes}\n`, encoding: "utf8", timeout: 10_000 });
-    const authenticatedResponses = authenticatedOutput.trim().split("\n").map((line) => JSON.parse(line));
-    if (authenticatedResponses.length !== 3 || authenticatedResponses[0]?.id !== 1 || authenticatedResponses[1]?.id !== 2 || authenticatedResponses[2]?.id !== 3) throw new Error("authenticated package discovery did not return ordered MCP responses");
+    // Answers come when each request's work is done; they're matched to their requests by id.
+    const authenticatedResponses = authenticatedOutput.trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => (a?.id ?? 0) - (b?.id ?? 0));
+    if (authenticatedResponses.length !== 3 || authenticatedResponses[0]?.id !== 1 || authenticatedResponses[1]?.id !== 2 || authenticatedResponses[2]?.id !== 3) throw new Error("authenticated package discovery did not answer each request once, by its id");
     const statusText = authenticatedResponses[1]?.result?.content?.[0]?.text ?? "";
     const sceneText = authenticatedResponses[2]?.result?.content?.[0]?.text ?? "";
     if (!statusText.includes("remote-script") || !statusText.includes("fake-live") || statusText.includes("real-live") || !sceneText.includes("Package Smoke Scene")) throw new Error("authenticated package smoke did not observe explicit fake bridge state");

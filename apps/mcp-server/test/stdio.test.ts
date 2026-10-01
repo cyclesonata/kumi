@@ -22,7 +22,7 @@ test("stdio preserves order across a backpressured writable", async () => {
   assert.deepEqual(received, ["1", "2", "3"]);
 });
 
-test("stdio runs bounded concurrent work but writes responses in request order", async () => {
+test("stdio runs bounded concurrent work and writes each response when its work is done: a slow one holds up no other", async () => {
   const input = new PassThrough();
   const received: string[] = [];
   const output = new Writable({ write(chunk, _encoding, callback) { received.push(String(chunk).trim()); callback(); } });
@@ -39,7 +39,8 @@ test("stdio runs bounded concurrent work but writes responses in request order",
   input.end('{"jsonrpc":"2.0","id":1}\n{"jsonrpc":"2.0","id":2}\n{"jsonrpc":"2.0","id":3}\n');
   await done;
   assert.equal(peak, 2);
-  assert.deepEqual(received, ["{\"jsonrpc\":\"2.0\",\"id\":1}", "{\"jsonrpc\":\"2.0\",\"id\":2}", "{\"jsonrpc\":\"2.0\",\"id\":3}"]);
+  // Request 1 takes 20 ms; 2 and 3 finish first and are answered first (JSON-RPC matches answers by id).
+  assert.deepEqual(received.map((value) => (JSON.parse(value) as { id: number }).id), [2, 3, 1]);
 });
 
 test("stdio saturation refuses excess work without stranding cancellation behind backpressure", async () => {
@@ -250,8 +251,9 @@ test("stdio contains delayed handler rejection and correlates it to its own requ
   input.write('{"jsonrpc":"2.0","id":1,"method":"slow"}\n{"jsonrpc":"2.0","id":2,"method":"fail"}\n');
   await new Promise((resolve) => setImmediate(resolve));
   releaseFirst?.(); input.end(); await done;
+  // The failure is answered first (it finished first), each answer under its own id.
   assert.deepEqual(received.map((line) => JSON.parse(line)), [
-    { jsonrpc: "2.0", id: 1, method: "slow" },
     { jsonrpc: "2.0", id: 2, error: { code: -32603, message: "Internal error" } },
+    { jsonrpc: "2.0", id: 1, method: "slow" },
   ]);
 });

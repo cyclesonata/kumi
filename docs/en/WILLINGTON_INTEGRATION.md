@@ -4,7 +4,7 @@ This is an experimental, separately installed native provider for the exact Live
 
 ## Development alignment
 
-Originally implemented against Kumi main `8bac909`, then merged with `e7f27ef` (Kumi 1.1.0) before publication. Reviewed DEVELOPMENT.md, DEVELOPER_GUIDE.md, LIVE_SAFETY.md, the API coverage issue #36, macro parameter issue #83 and partial-write recovery issue #90. Installer PR #104 is now merged. Open [PR #105](https://github.com/user1303836/kumi/pull/105) changes registry bounds, bridge code and the generated capability manifest; regenerate that manifest and rerun transaction tests when combining the branches. Its Live 12.4.15b5 evidence does not extend this provider's exact-build b4 support.
+Originally implemented against Kumi main `8bac909`, then merged with `e7f27ef` (Kumi 1.1.0) before publication. The branch now includes upstream `d4120a1` (Kumi 1.2.0), including [PR #105](https://github.com/user1303836/kumi/pull/105), bounded reads, the Live extension and undo identity/refusal checks. The protocol manifest and the extension's embedded registry/checksum are synchronized. Native support remains exact-build and requires the matching Willington profile and libraries.
 
 The canonical protocol registry defines the extension operations; regenerate the capability manifest with `node apps/mcp-server/scripts/generate-capability-manifest.mjs`. Package the bridge and host from the same revision because they negotiate the registry hash.
 
@@ -19,7 +19,7 @@ Rack transactions capture names or mapping/index/range, identities, macro values
 
 ## Local enablement
 
-Install WillingtonBindings and WillingtonDeviceTools separately. DeviceTools must provide `get_macro_mapping` and `get_selected_variation_name`. Native packages check executable SHA and running Mach-O UUID; this work was tested on macOS ARM64 Live 12.4.15b4 only.
+Install WillingtonBindings and WillingtonDeviceTools separately. DeviceTools must provide `get_macro_mapping` and `get_selected_variation_name`. Native packages check executable SHA and running Mach-O UUID; retained real-Live evidence covers macOS ARM64 Live 12.4.15b4 and a matching b5 profile (see [b5 runtime transaction evidence](../evidence/kumi-clip-follow-actions-b5.json)).
 
 Disable standalone Willington control surfaces and restart Live before letting Kumi own the provider. Place an owner-only regular `willington.json` beside the installed AbletonMcpBridge entrypoint:
 
@@ -27,11 +27,11 @@ Disable standalone Willington control surfaces and restart Live before letting K
 {"version":1,"followActions":true,"deviceTools":true,"enableWrites":false}
 ```
 
-Explicitly set `enableWrites` to true only for the supported installation. Follow Action writes also require a passing self-test receipt matching the installed library SHA. Unknown/malformed configuration, unsupported libraries, or another active owner leave the extension unavailable and ordinary bridge service active. Config changes require restarting Live. Remove the file to return to the standard bridge. Native libraries, local configuration and private fixtures are not bundled in Kumi's package.
+Explicitly set `enableWrites` to true only for the supported installation. Follow Action writes also require a passing self-test receipt matching the installed library SHA. Unknown/malformed configuration, unsupported libraries, or another active owner leave the extension unavailable and ordinary bridge service active. Disconnect disables Follow writes and uninstalls DeviceTools. Follow bindings have no uninstall API: their native code and Clip properties remain registered for the Live process, and Kumi reuses the disabled registration on reconnect. A fresh matching self-test receipt is still required when enabling writes. Config changes require restarting Live. Remove the file to return to the standard bridge. Native libraries, local configuration and private fixtures are not bundled in Kumi's package.
 
 ## Evidence and limits
 
-Automated tests cover negotiation absence, malformed fields, detached targets, stale apply, external changes before undo, partial-write compensation, provider ownership/teardown and lost Follow Action apply/undo acknowledgements. Simulator evidence is separate from real-Live evidence.
+Automated tests cover negotiation absence, malformed fields, detached targets, stale apply, external changes before undo, partial-write compensation, provider ownership/reconnect, deployment-policy changes before undo, failures before undo dispatch, float32 timing/mapping readback, canonical macro references, URI-fenced Browser lookup and lost apply/undo acknowledgements. Rack state reads are scoped to the rack; ordinary snapshots do not read Follow fields when the provider is absent, or for Arrangement/take-lane clips. Simulator evidence is separate from real-Live evidence.
 
 Real Live tests used a disposable saved fixture through the authenticated bridge and McpHost: Follow Action preview/apply/readback/history undo; macro rename; continuous inverted, enum inverted and boolean mappings; variation rename with Unicode text. Each edit was undone, and the owned Follow Action test clip was removed. These are stopped-playback tests, not evidence of save/reload persistence or musical Follow Action scheduling.
 

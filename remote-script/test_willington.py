@@ -206,3 +206,96 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(calls,[True,'uninstall'])
                 self.assertFalse(mapper.willington_device_writes)
                 self.assertIsNone(live._kumi_willington_owner)
+
+
+class ReviewRegressions(unittest.TestCase):
+    def test_follow_time_uses_float32_readback(self):
+        from test_remote_script import float32
+        class RoundedClip(FollowClip):
+            def __setattr__(self, name, value):
+                super().__setattr__(name, float32(value) if name == 'follow_action_time' else value)
+        test = WillingtonTests(); test.setUp()
+        test.clip.__class__ = RoundedClip
+        test.mapper._follow_action_set(test.args(followActionTime=1.333))
+        self.assertEqual(test.clip.follow_action_time, float32(1.333))
+
+    def test_follow_reads_only_for_enabled_session_clips(self):
+        from unittest.mock import patch
+        song = FakeSong(); clip = FollowClip()
+        song.tracks[0].clip_slots[0].clip = clip
+        song.tracks[0].arrangement_clips = [clip]
+        mapper = LiveObjectMapper(song)
+        with patch.object(mapper, '_follow_action_fields', side_effect=AssertionError('unexpected Follow reads')):
+            snapshot = mapper.snapshot()
+            self.assertNotIn('followActionA', snapshot['tracks'][0]['clips'][0])
+        mapper.willington_follow_writes = True
+        with patch.object(mapper, '_follow_action_fields', wraps=mapper._follow_action_fields) as read:
+            snapshot = mapper.snapshot()
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(snapshot['tracks'][0]['clips'][0]['followActionA'], 4)
+            self.assertNotIn('followActionA', snapshot['arrangement']['clips'][0])
+
+    def test_macro_refs_are_canonical_and_readable(self):
+        from test_remote_script import FakeRackDevice, FakeParameter
+        song = FakeSong(); rack = FakeRackDevice()
+        macros = [FakeParameter() for _ in range(16)]
+        rack.parameters = [FakeParameter()] + macros
+        del rack.macros
+        rack.macros_mapped = [False] * 16
+        song.tracks[0].devices = [rack]
+        mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()['tracks'][0]['devices'][0]
+        self.assertEqual([m['ref'] for m in row['macros']], [p['ref'] for p in row['parameters'][1:]])
+        for macro in row['macros']:
+            self.assertEqual(mapper.get(macro['ref'])['objectIdentity'], macro['objectIdentity'])
+        authority = mapper._realtime_parameter_authority(row['macros'][0]['ref'])
+        self.assertEqual(len({p['objectIdentity'] for p in authority['siblings']}), len(authority['siblings']))
+
+    def test_mapping_rounding_remap_and_rollback_without_full_set_reads(self):
+        from test_remote_script import float32
+        from unittest.mock import patch
+        import json
+        test = DeviceTests(); test.setUp()
+        parameter = test.target.parameters[0]; parameter.max = 20000
+        test.rack.set_macro_mapping_range = lambda target, low, high: test.mapping.update(minimum=float32(low), maximum=float32(high))
+        original_map = test.rack.map_macro
+        def map_once(index, target):
+            if test.mapping is not None: raise AssertionError('must unmap before remapping')
+            original_map(index, target)
+        test.rack.map_macro = map_once
+        with patch.object(test.mapper, 'snapshot', side_effect=AssertionError('full snapshot forbidden')):
+            test.apply('macro-mapping', {'mapping': {'index': 0, 'minimum': 2500.7, 'maximum': 12000.3, 'kind': 'continuous'}, 'parameterValue': 0.5})
+            old = dict(test.mapping)
+            test.apply('macro-mapping', {'mapping': {'index': 0, 'minimum': 2000.2, 'maximum': 10000.1, 'kind': 'continuous'}, 'parameterValue': 0.5})
+            prior = dict(test.mapping)
+            original_range = test.rack.set_macro_mapping_range
+            def fail_new(target, low, high):
+                if low == 3000.4: raise RuntimeError('injected range failure')
+                original_range(target, low, high)
+            test.rack.set_macro_mapping_range = fail_new
+            with self.assertRaisesRegex(RuntimeError, 'injected range failure'):
+                test.apply('macro-mapping', {'mapping': {'index': 0, 'minimum': 3000.4, 'maximum': 9000.1, 'kind': 'continuous'}, 'parameterValue': 0.5})
+            self.assertEqual(test.mapping, prior)
+            test.apply('macro-mapping', {'mapping': None, 'parameterValue': 2500.7})
+            self.assertIsNone(test.mapping)
+
+    def test_follow_provider_reconnect_reuses_disabled_native_registration(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        import AbletonMcpBridge as wrapper
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'willington.json'
+            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': False, 'enableWrites': False})); path.chmod(0o600)
+            calls = []; live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
+            native = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(value))
+            with patch.object(wrapper, '__file__', str(path.with_name('__init__.py'))), patch.dict('sys.modules', {'Live': live, 'WillingtonBindings': types.SimpleNamespace(install=lambda: (calls.append('install'), native)[1])}):
+                first = wrapper._WillingtonProvider(mapper, None)
+                first.close(); first.close()
+                second = wrapper._WillingtonProvider(mapper, None)
+                self.assertIs(second.follow, native)
+                second.close()
+            self.assertEqual(calls.count('install'), 1)
+            self.assertFalse(mapper.willington_follow_writes)
+            self.assertIsNone(live._kumi_willington_owner)
+            self.assertIs(live._kumi_willington_follow_library, native)

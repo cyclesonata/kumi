@@ -72,7 +72,7 @@ test("ranked search reports cache provenance, refresh semantics, and epoch inval
   assert.equal(first.fromCache, false);
   assert.equal(first.cacheTtlSeconds, 60);
   assert.equal(first.candidates, 4);
-  assert.equal(first.candidateBound, 100);
+  assert.equal(first.candidateBound, 10_000);
   assert.equal(first.candidateBoundReached, false);
   assert.deepEqual(first.searchedRoots, ["drums"]);
   assert.equal(traversals, 1);
@@ -105,10 +105,10 @@ test("ranked search cache stays bounded and truncation is reported honestly", as
   const complete = await parse(call("live_browser_search", { category: "drums", query: "kick" }));
   assert.equal(complete.truncated, false);
   // a full candidate bound is reported as reached when the adapter returns the maximum
-  const huge = Array.from({ length: 100 }, (_, index) => ({ id: `drums/Pad ${index}`, objectIdentity: `simulator:browser:drums/Pad ${index}`, name: `Pad ${index}`, category: "drums", path: `drums/Pad ${index}`, isDevice: false }));
+  const huge = Array.from({ length: 10_000 }, (_, index) => ({ id: `drums/Pad ${index}`, objectIdentity: `simulator:browser:drums/Pad ${index}`, name: `Pad ${index}`, category: "drums", path: `drums/Pad ${index}`, isDevice: false }));
   const bounded = connectedHost(huge);
   const reached = await bounded.parse(bounded.call("live_browser_search", { category: "drums", query: "pad" }));
-  assert.equal(reached.candidates, 100);
+  assert.equal(reached.candidates, 10_000);
   assert.equal(reached.candidateBoundReached, true);
 });
 

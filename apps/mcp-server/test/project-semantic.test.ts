@@ -12,6 +12,7 @@ import {
   SEMANTIC_PROJECT_MAX_BUNDLE_BYTES,
   SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES,
   SEMANTIC_PROJECT_MAX_PAGE_BYTES,
+  SEMANTIC_PROJECT_MAX_PAGES,
   assembleSemanticProjectPages,
   canonicalSemanticJson,
   compareSemanticStrings,
@@ -88,9 +89,10 @@ test("Live's 'none selected' -1 on racks without variations and plug-ins without
   assert.ok(diffSemanticProjectSnapshots(artifact, changed).items.some((item) => item.section === "devices" && item.type === "change"));
 });
 
-test("bundle and combined diff-input bounds reserve space below the transport frame", () => {
-  assert.equal(SEMANTIC_PROJECT_MAX_BUNDLE_BYTES, 24 * 1024 * 1024); assert.equal(SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, 50 * 1024 * 1024);
-  assert.ok(SEMANTIC_PROJECT_MAX_BUNDLE_BYTES * 2 < SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES); assert.ok(SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES < 64 * 1024 * 1024);
+test("bundle and diff-input bounds hold a big Set's snapshot, and a whole bundle fits the page count", () => {
+  assert.equal(SEMANTIC_PROJECT_MAX_BUNDLE_BYTES, 1024 * 1024 * 1024); assert.equal(SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, 1024 * 1024 * 1024);
+  assert.equal(SEMANTIC_PROJECT_MAX_PAGE_BYTES, 512 * 1024);
+  assert.ok(SEMANTIC_PROJECT_MAX_PAGES * SEMANTIC_PROJECT_MAX_PAGE_BYTES >= SEMANTIC_PROJECT_MAX_BUNDLE_BYTES);
 });
 
 test("pages losslessly within byte/record bounds and rejects cursor and page tampering", () => {
@@ -217,7 +219,8 @@ test("canonical serializer uses fixed Unicode ordering and enforces pre-allocati
   const first = createSemanticProjectSnapshot(snapshot, options()); device.parameters.reverse(); const second = createSemanticProjectSnapshot(snapshot, options()); assert.equal(first.artifact.id, second.artifact.id);
   assert.throws(() => canonicalSemanticJson({ value: Number.NaN }), /non-finite/);
   assert.throws(() => canonicalSemanticJson({ value: undefined }), /unsupported/);
-  assert.throws(() => canonicalSemanticJson(Array.from({ length: 24_001 }, () => null)), /array/);
+  // Past the array bound (sparse: the length is checked before any item is).
+  assert.throws(() => canonicalSemanticJson(new Array(10_000_001)), /array/);
   assert.throws(() => canonicalSemanticJson(Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`k${index}`, null]))), /field/);
   assert.throws(() => canonicalSemanticJson({ ["k".repeat(129)]: null }), /key/);
   let deep: any = {}; let cursor = deep; for (let index = 0; index < 30; index += 1) { cursor.next = {}; cursor = cursor.next; }
@@ -235,7 +238,7 @@ test("deep device truncation counts every skipped descendant and marks the secti
 
 test("pagination rejects an unassemblable small-limit plan and validates every repeated header", () => {
   const snapshot = new DeterministicLiveSimulator().snapshot(); const base = snapshot.tracks[0]!;
-  snapshot.tracks = Array.from({ length: 520 }, (_, index) => ({ ...structuredClone(base), ref: `track:page-${index}` as any, name: `Track ${index}`, clips: [], clipSlots: [], devices: [] }));
+  snapshot.tracks = Array.from({ length: SEMANTIC_PROJECT_MAX_PAGES + 8 }, (_, index) => ({ ...structuredClone(base), ref: `track:page-${index}` as any, name: `Track ${index}`, clips: [], clipSlots: [], devices: [] }));
   const artifact = createSemanticProjectSnapshot(snapshot, options()); assert.throws(() => pageSemanticProjectSnapshot(artifact, { limit: 1 }), /too small/);
   const first = pageSemanticProjectSnapshot(artifact, { limit: 2 }); const second = pageSemanticProjectSnapshot(artifact, { limit: 2, cursor: first.page.nextCursor }); const changed = structuredClone([first, second]); changed[1]!.safety = { ...changed[1]!.safety, readOnly: false as true };
   assert.throws(() => assembleSemanticProjectPages(changed), /inconsistent|tampered/);

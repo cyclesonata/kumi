@@ -6,7 +6,7 @@ const testDirectory = resolve("dist/test");
 const testFiles = readdirSync(testDirectory).filter((file) => file.endsWith(".test.js") && file !== "benchmark.test.js").sort().map((file) => resolve(testDirectory, file));
 if (testFiles.length === 0) throw new Error("no compiled tests are available for coverage");
 const args = [
-  "--test", "--test-concurrency=1", "--experimental-test-coverage", "--test-coverage-include=dist/src/**/*.js",
+  "--test", "--test-reporter=spec", "--test-concurrency=1", "--experimental-test-coverage", "--test-coverage-include=dist/src/**/*.js",
   "--test-coverage-exclude=dist/src/benchmark.js", "--test-coverage-exclude=dist/src/analysis-worker.js",
   "--test-coverage-lines=85", "--test-coverage-branches=65", "--test-coverage-functions=84", ...testFiles,
 ];

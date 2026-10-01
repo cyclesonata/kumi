@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { connectMcp, bridgeEntry, type McpEndpoint } from "../src/mcp/client.js";
+import { connectMcp, LinearReadBuffer, bridgeEntry, type McpEndpoint } from "../src/mcp/client.js";
 import { AllowedTools } from "../src/mcp/allowed-tools.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 const fixture = fileURLToPath(new URL("../../test/fixtures/mcp-server.mjs", import.meta.url));
@@ -24,7 +24,7 @@ test("real SDK stdio initialization, bounded pagination and exact four-tool sche
   const { client, tools } = await open(); const pid = client.pid;
   try {
     await tools.refresh(freshSignal());
-    assert.deepEqual(tools.list().map((tool) => tool.name).sort(), ["live_discover", "live_snapshot", "live_status", "server_status"]);
+    assert.deepEqual(tools.list().map((tool) => tool.name).sort(), ["live_discover", "live_note_read", "live_status", "server_status"]);
     assert.deepEqual(tools.list()[0]?.inputSchema, { type: "object", properties: { action: { type: "string" } }, additionalProperties: true });
     const result = await tools.call("live_status", {}, freshSignal());
     assert.equal(data(result).provenance, "synthetic-fixture");
@@ -42,10 +42,10 @@ test("unknown and mutation calls never reach the server; fresh call-time catalog
     for (const name of ["mutation_0", "live_tempo_apply", "tools/call", "new_unsafe_tool"]) await assert.rejects(tools.call(name, {}, freshSignal()), /allowed tool list|not currently available/);
     assert.deepEqual(data(await tools.call("server_status", {}, freshSignal())).calls, ["server_status"]);
     await client.call("server_status", { action: "notify" }, freshSignal());
-    await assert.rejects(tools.call("live_snapshot", {}, freshSignal()), /catalog/);
+    await assert.rejects(tools.call("live_note_read", {}, freshSignal()), /catalog/);
     await tools.refresh(freshSignal());
-    assert(!tools.list().some((tool) => tool.name === "live_snapshot"));
-    await assert.rejects(tools.call("live_snapshot", {}, freshSignal()), /allowed tool list|not currently available/);
+    assert(!tools.list().some((tool) => tool.name === "live_note_read"));
+    await assert.rejects(tools.call("live_note_read", {}, freshSignal()), /allowed tool list|not currently available/);
     await assert.rejects(tools.call("new_unsafe_tool", {}, freshSignal()), /allowed tool list|not currently available/);
     assert.deepEqual(data(await tools.call("server_status", {}, freshSignal())).calls, ["server_status", "server_status", "server_status"]);
   } finally { await tools.close(); }
@@ -247,4 +247,52 @@ test("reads sent together share one reading of the catalog, and a change announc
   await Promise.all([tools.refresh(freshSignal()), tools.refresh(freshSignal()), tools.refresh(freshSignal()), tools.refresh(freshSignal())]);
   assert.equal(tools.has("live_status"), true);
   assert.equal(lists, 2, "one reading for all four, read again once after the change");
+});
+
+test("a discovery page the Remote Script refuses as too big is asked again at 100 rows, and from then on", async () => {
+  // The Remote Script Live loaded may be older than its host and allow 100 rows a page.
+  const limits: unknown[] = [];
+  const endpoint: McpEndpoint = {
+    pid: null, serverInfo: undefined, stderrStatus: () => ({ bytes: 0, truncated: false }), close: async () => undefined,
+    onCatalogChanged: () => () => undefined, onDisconnect: () => () => undefined,
+    list: async () => ({ tools: [{ name: "live_discover", inputSchema: { type: "object" } }] }),
+    call: async (_name, args) => { limits.push(args.limit); return args.limit as number > 100 ? { isError: true, content: [{ type: "text", text: "discovery limit is invalid" }] } : { content: [{ type: "text", text: "{}" }] }; },
+  };
+  const tools = new AllowedTools(endpoint, new Set(["live_discover"]));
+  assert.equal((await tools.call("live_discover", { kind: "track", limit: 100_000 }, freshSignal(), { host: true })).isError, undefined);
+  assert.equal((await tools.call("live_discover", { kind: "device", limit: 100_000 }, freshSignal(), { host: true })).isError, undefined);
+  assert.deepEqual(limits, [100_000, 100, 100]);
+  await tools.close();
+});
+
+test("a bridge message of megabytes (a big Set's page) arrives whole, read in linear time", async () => {
+  const { tools } = await open();
+  try {
+    await tools.refresh(freshSignal());
+    const started = performance.now();
+    const large = await tools.call("server_status", { action: "large" }, freshSignal(), { host: true });
+    const text = large.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    assert.equal(text.length, 5 * 1024 * 1024);
+    assert.ok(performance.now() - started < 5_000, "no quadratic joining");
+    assert.ok((data(await tools.call("server_status", {}, freshSignal())) as { calls: unknown[] }).calls.length > 0, "the link is still up");
+  } finally { await tools.close(); }
+});
+
+test("the bridge's read buffer looks at each byte once, however the message is cut into chunks", () => {
+  const buffer = new LinearReadBuffer(128 * 1024 * 1024);
+  const chunk = Buffer.alloc(64 * 1024, 0x20);
+  const started = performance.now();
+  // As the SDK reads: a message asked for after every chunk the pipe delivers.
+  buffer.append(Buffer.from('{"jsonrpc":"2.0","id":1,"result":{"text":"'));
+  for (let index = 0; index < 1000; index++) { buffer.append(chunk); assert.equal(buffer.readMessage(), null); }
+  buffer.append(Buffer.from('"}}\n{"jsonrpc":"2.0","id":2,"result":{}}\n{"jsonrpc"'));
+  const first = buffer.readMessage() as unknown as { id: number; result: { text: string } };
+  assert.equal(first.id, 1); assert.equal(first.result.text.length, 1000 * 64 * 1024);
+  assert.equal((buffer.readMessage() as { id: number }).id, 2);
+  assert.equal(buffer.readMessage(), null, "the start of the next message waits for its end");
+  buffer.append(Buffer.from(':"2.0","id":3,"result":{}}\r\n'));
+  assert.equal((buffer.readMessage() as { id: number }).id, 3);
+  // Searching every chunk again on each one took over a second here; once each, a few tens of ms.
+  assert.ok(performance.now() - started < 600, `${Math.round(performance.now() - started)} ms`);
+  assert.throws(() => { const small = new LinearReadBuffer(10); small.append(Buffer.alloc(11)); }, /exceeded maximum size of 10 bytes/);
 });

@@ -77,7 +77,7 @@ export interface ChangeKind {
   /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
   explain?(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
-  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "clip" } | undefined;
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "session-clip" } | undefined;
   /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
   permanent?(input: JsonObject): string | undefined;
   /**
@@ -285,7 +285,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "write_midi_clip", preview: "live_midi_clip_preview", apply: "live_midi_clip_apply", family: "clip",
-    produces(applied) { return typeof applied.clipRef === "string" ? { ref: applied.clipRef, kind: "clip" } : undefined; },
+    produces(applied) { return typeof applied.clipRef === "string" ? { ref: applied.clipRef, kind: "session-clip" } : undefined; },
     description: "Write a new MIDI clip into an empty Session slot. trackRef is a MIDI track from discovery in this turn; sceneIndex 0 is the first scene; length and every note's start and duration are in beats from the clip start (a 4/4 bar is 4 beats); pitch 60 is middle C (C3 in Live); velocity is 1–127.",
     summarize(preview, input, track) {
       const proposed = record(preview.proposed);
@@ -495,7 +495,9 @@ export const UNDO_DESCRIPTION = "Undo one of your changes from this session: pas
 /** Bridge tools only Kumi calls, behind its change tools: previews, applies and undo. */
 /** Stops clips, the transport and recording at once, whatever Live is doing: Kumi's stop when the ordinary one can't. */
 export const EMERGENCY_STOP = "live_session_emergency_stop";
-export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), ...ACTIONS.flatMap((kind) => [kind.preview, kind.apply]), "live_undo", "live_transaction_release", EMERGENCY_STOP]);
+export const HOST_TOOLS: ReadonlySet<string> = new Set([...CHANGES.flatMap((kind) => [kind.preview, kind.apply]), ...ACTIONS.flatMap((kind) => [kind.preview, kind.apply]), "live_undo", "live_transaction_release", EMERGENCY_STOP,
+  // A plan as one Live undo step, a change in one call, Live's events, and the extension's offline render.
+  "live_undo_step_begin", "live_undo_step_end", "live_change", "live_subscribe", "live_render_offline", "live_song_undo", "live_song_redo"]);
 
 /** The fields of a change tool's input that name Live objects; they must come from discovery in this turn. */
 export const REFERENCE_FIELDS = ["trackRef", "ref", "clipRef", "deviceRef", "parameterRef", "chainRef", "rackRef", ...MORE_REFERENCE_FIELDS] as const;

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import { doctorChecks, runDoctor, type DoctorIo } from "../src/doctor.js";
@@ -15,8 +16,8 @@ function setup() {
   const config = join(root, "bridge-config.json");
   writeFileSync(config, JSON.stringify({ version: 2, server: { command: node, args: [join(packageRoot, "dist", "src", "cli.js"), "--config", config] } }));
   writeFileSync(join(scripts, "AbletonMcpBridge", "bridge-reference.json"), JSON.stringify({ config }));
-  const env = { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_MODEL: "openai/gpt-fixture", OPENAI_API_KEY: "sk-fixture-never-printed", KUMI_AUTH_FILE: join(root, "auth.json"), KUMI_SETTINGS_FILE: join(root, "settings.json"), KUMI_PROJECTS_DIR: join(root, "projects") };
-  return { root, env, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  const env = { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_MODEL: "openai/gpt-fixture", OPENAI_API_KEY: "sk-fixture-never-printed", KUMI_AUTH_FILE: join(root, "auth.json"), KUMI_SETTINGS_FILE: join(root, "settings.json"), KUMI_PROJECTS_DIR: join(root, "projects"), KUMI_LIVE_EXTENSIONS_DIR: join(root, "Ableton", "Extensions") };
+  return { root, env, packageRoot, config, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 const io = (env: DoctorIo["env"], extra: Partial<DoctorIo> = {}): DoctorIo => ({ out: new Writable({ write(_c, _e, done) { done(); } }), env, nodeVersion: "v24.21.0",
   terminal: { isTTY: true, columns: 120, rows: 36 }, probeLive: async () => ({ started: true, connected: true, set: "Night Drive", realLive: true }), nodeVersionOf: async () => "v24.1.0",
@@ -71,4 +72,38 @@ test("the doctor says what watching videos needs: ffmpeg for frames, whisper.cpp
     assert.match(noFfmpeg.find((check) => /can't see its frames/.test(check.text))?.next ?? "", /ffmpeg/);
     assert.ok(noFfmpeg.every((check) => check.status !== "fix" || !/video/.test(check.text)), "videos are never something to fix");
   } finally { s.cleanup(); }
+});
+
+/** An extension folder (manifest and code), as the bridge carries it and Live keeps it. */
+function extensionFolder(folder: string, code = "module.exports = {};\n"): void {
+  mkdirSync(join(folder, "dist"), { recursive: true });
+  writeFileSync(join(folder, "manifest.json"), JSON.stringify({ name: "kumi", author: "Kumi", version: "1.0.0", entry: "dist/extension.js", minimumApiVersion: "1.0.0" }));
+  writeFileSync(join(folder, "dist", "extension.js"), code);
+}
+
+test("the doctor says whether Kumi's extension is in Live, the bridge's own, running and answering", async () => {
+  const s = setup();
+  const extensions = s.env.KUMI_LIVE_EXTENSIONS_DIR; const data = join(dirname(extensions), "Extensions Data", "kumi.kumi");
+  // A stand-in for the running extension: it greets each connection the way the extension does.
+  const server = createServer((socket) => socket.end(`${JSON.stringify({ version: "ableton-loopback/v1", id: "hello", ok: true })}\n`));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const line = async (probe: Partial<Awaited<ReturnType<NonNullable<DoctorIo["probeLive"]>>>> = {}) => (await doctorChecks(io(s.env, { probeLive: async () => ({ started: true, connected: true, realLive: true, ...probe }) }))).find((check) => /extension/.test(check.text));
+  try {
+    assert.equal(await line(), undefined, "a bridge without an extension says nothing more");
+    extensionFolder(join(s.packageRoot, "live-extension"));
+    assert.deepEqual(await line(), { status: "fix", text: "Kumi's extension isn't in Live (it renders tracks without playing them and writes MIDI clips in the Arrangement)", next: "Run: npm run kumi -- bridge, then restart Live" });
+    cpSync(join(s.packageRoot, "live-extension"), join(extensions, "kumi.kumi"), { recursive: true });
+    assert.match((await line())!.text, /Live hasn't started Kumi's extension/);
+    assert.match((await line({ connected: false }))!.text, /Kumi's extension 1\.0\.0 is in Live; it starts with Live/);
+    mkdirSync(data, { recursive: true }); writeFileSync(join(data, "endpoint.json"), JSON.stringify({ host: "127.0.0.1", port, pid: process.pid }));
+    assert.deepEqual(await line(), { status: "ok", text: "Kumi's extension is running in Live" });
+    // With Developer Mode on, Live starts no extensions: the bridge started this one in its own folder.
+    rmSync(data, { recursive: true }); mkdirSync(join(dirname(s.config), "live-extension"), { recursive: true });
+    writeFileSync(join(dirname(s.config), "live-extension", "endpoint.json"), JSON.stringify({ host: "127.0.0.1", port, pid: process.pid }));
+    assert.match((await line())!.text, /running \(Kumi started it: Live's Developer Mode is on\)/);
+    extensionFolder(join(s.packageRoot, "live-extension"), "module.exports = { newer: true };\n");
+    assert.deepEqual(await line(), { status: "fix", text: "Kumi's extension in Live is from another bridge", next: "Run: npm run kumi -- bridge, then restart Live" });
+    assert.match((await line({ liveVersion: "12.3.2" }))!.text, /Live 12\.3\.2 runs no extensions \(12\.4 and later do\)/);
+  } finally { server.close(); s.cleanup(); }
 });
