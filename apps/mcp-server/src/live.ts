@@ -226,6 +226,17 @@ export function checkSnapshotAnswer(answer: LiveSnapshot, request: LiveSnapshotR
 }
 
 /** A track as a focused read lists it outside its focus: who it is, none of what it holds. */
+/**
+ * Whether a track plays audio or MIDI. The Remote Script's rows say what a track is (`kind`: regular, group,
+ * return, main) apart from what it plays (`mediaKind`: audio, midi); older simulated rows said the second as
+ * `kind`. Undefined for a track that plays neither (a group).
+ */
+export function trackMedia(track: Pick<Track, "kind"> & { mediaKind?: unknown }): "audio" | "midi" | undefined {
+  if (track.kind === "group") return undefined;
+  if (track.mediaKind === "audio" || track.mediaKind === "midi") return track.mediaKind;
+  return track.kind === "audio" || track.kind === "midi" ? track.kind : undefined;
+}
+
 export function lightTrackRow(track: Track, setRef?: LiveRef): Track {
   return { ref: track.ref, parentRef: track.parentRef ?? setRef, objectIdentity: track.objectIdentity, name: track.name, kind: track.kind, mediaKind: track.mediaKind ?? (track.kind === "midi" ? "midi" : "audio"), light: true, armed: track.armed ?? null, colorIndex: track.colorIndex ?? null, groupTrackRef: track.groupTrackRef ?? null, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } as unknown as Track;
 }
@@ -345,6 +356,10 @@ export type LiveViewScope = readonly number[] | "all";
  * UI thread; the page is what keeps Live responsive, not a bound on the Set. */
 export const WHOLE_SET_PAGE_TRACKS = 16;
 const MAX_REMEMBERED_OWNERS = 250_000;
+/** How many pages one discovery may take to its end (a page holds one item at least). */
+const MAX_DISCOVERY_PAGES = 1_000_000;
+/** A read put together from pages: its rows, and the Arrangement's clips of the whole ones. */
+interface Assembly { tracks: Track[]; clips: Map<unknown, Record<string, unknown>>; held: Map<unknown, { clip: Clip; trackRef: LiveRef }> }
 
 /**
  * Reads of Live shaped to what an operation touches. A mutation's preview, apply, verification and undo
@@ -361,15 +376,25 @@ export class LiveViews {
 
   public constructor(private readonly adapter: () => AsyncLiveAdapter) {}
 
-  /** A view whole for `scope`'s tracks and light for the rest (`[]`: every track light); "all" reads the whole Set. */
+  /** A view whole for `scope`'s tracks and light for the rest (`[]`: every track light); "all" reads the whole Set.
+   * A focused track the Remote Script's read budget left light (its `window.focus` lists those that came whole)
+   * comes whole through a track window of its own, so a view holds what it was asked for. */
   public async view(context: LiveOperationContext | undefined, scope: LiveViewScope, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
     if (scope === "all") return this.wholeSet(context, parts);
     const focus = [...new Set(scope)].filter((index) => Number.isInteger(index) && index >= 0 && index <= MAX_SNAPSHOT_INDEX).sort((left, right) => left - right);
-    const wanted = parts ? [...new Set(parts)] : undefined;
+    const wanted = parts ? [...new Set(parts)] : undefined; const read = this.reader(context);
     // The focus also limits the Arrangement's clips to the focus tracks' (none, for a read of locators).
-    const snapshot = await this.adapter().snapshotAsync(context, wanted && !wanted.includes("tracks") && !wanted.includes("arrangement") ? { parts: wanted } : { focus, ...(wanted ? { parts: wanted } : {}) });
-    this.note(snapshot);
-    return snapshot;
+    if (wanted && !wanted.includes("tracks") && !wanted.includes("arrangement")) return read({ parts: wanted });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await read({ focus, ...(wanted ? { parts: wanted } : {}) });
+      const honoured = snapshot.window?.focus; const tracks = snapshot.tracks;
+      if (!honoured || !Array.isArray(tracks) || focus.every((index) => honoured.includes(index) || index >= tracks.length)) return snapshot;
+      const assembly = LiveViews.assembly(snapshot);
+      const filled = await this.fill(snapshot, assembly, focus, LiveViews.pageParts(wanted), read);
+      if (filled === undefined) continue;
+      return filled === true ? LiveViews.assembled(snapshot, assembly, wanted, focus) : filled;
+    }
+    throw new Error("the Set's tracks kept changing while they were read; read them again");
   }
 
   /** A view whole for the tracks holding `refs` (and the tracks at `indices`), light for the rest. References
@@ -395,43 +420,107 @@ export class LiveViews {
   }
 
   /** The whole Set, paged by tracks and assembled: the first page lists every track (whole for its own) with
-   * the rest of the Set, later pages add whole rows, and a Set whose tracks moved meanwhile is read again.
-   * Paging is used only as far as the Remote Script says (its `window`) it honoured it. */
+   * the rest of the Set, then track windows make the other rows whole, each starting where the last one's
+   * whole rows ended (a window holds as many as the Remote Script's read budget allows, one at least). A Set
+   * whose tracks moved meanwhile is read again. Paging is used only as far as the Remote Script says (its
+   * `window`) it honoured it. */
   public async wholeSet(context: LiveOperationContext | undefined, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
-    const adapter = this.adapter(); const wanted = parts ? [...new Set(parts)] : undefined;
-    const read = async (request?: LiveSnapshotRequest): Promise<LiveSnapshot> => { const snapshot = await adapter.snapshotAsync(context, request); this.note(snapshot); return snapshot; };
+    const wanted = parts ? [...new Set(parts)] : undefined; const read = this.reader(context);
     if (wanted && !wanted.includes("tracks")) return read({ parts: wanted });
-    const pageParts = (wanted ?? LIVE_SNAPSHOT_PARTS).filter((part) => part === "tracks" || part === "arrangement");
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const first = await read({ focus: Array.from({ length: WHOLE_SET_PAGE_TRACKS }, (_, index) => index), ...(wanted ? { parts: wanted } : {}) });
-      // Without a window the answer is the whole Set (a Remote Script from before focus); a small Set fits one page.
+      // Without a window the answer is the whole Set (a Remote Script from before focus).
       if (!first.window?.focus || !Array.isArray(first.tracks)) return first;
-      if (first.tracks.every((track) => track.light !== true)) { const whole: LiveSnapshot = { ...first }; delete whole.window; return whole; }
-      const count = first.tracks.length;
-      const tracks = [...first.tracks]; const clips = new Map<unknown, Record<string, unknown>>(); const heldClips = new Map<unknown, { clip: Clip; trackRef: LiveRef }>();
-      const keep = (snapshot: LiveSnapshot): void => {
-        for (const clip of snapshot.arrangement?.clips ?? []) if (!clips.has(clip.ref)) clips.set(clip.ref, clip);
-        for (const item of snapshot.arrangementClips ?? []) if (!heldClips.has(item.clip.ref)) heldClips.set(item.clip.ref, item);
-      };
-      keep(first);
-      let consistent = first.trackCount === undefined || first.trackCount === count;
-      for (let from = WHOLE_SET_PAGE_TRACKS; consistent && from < count; from += WHOLE_SET_PAGE_TRACKS) {
-        const size = Math.min(WHOLE_SET_PAGE_TRACKS, count - from);
-        const page = await read({ tracks: { from, count: size }, parts: pageParts });
-        // A page answered without its window is the whole Set: nothing left to assemble.
-        if (!page.window) return page;
-        if (!page.window.tracks || !Array.isArray(page.tracks) || page.tracks.length !== size || (page.trackCount !== undefined && page.trackCount !== count) || page.sceneCount !== first.sceneCount || page.epoch !== first.epoch) { consistent = false; break; }
-        page.tracks.forEach((row, offset) => { const listed = tracks[from + offset]; if (!listed || row.light === true || listed.ref !== row.ref || listed.objectIdentity !== row.objectIdentity) consistent = false; else tracks[from + offset] = row; });
-        keep(page);
-      }
-      if (!consistent) continue;
-      const whole: LiveSnapshot = { ...first, tracks };
-      if (first.arrangement && typeof first.arrangement === "object" && (wanted === undefined || wanted.includes("arrangement"))) whole.arrangement = { ...first.arrangement, clips: [...clips.values()] };
-      if (first.arrangementClips) whole.arrangementClips = [...heldClips.values()];
-      delete whole.window;
-      return whole;
+      if (first.trackCount !== undefined && first.trackCount !== first.tracks.length) continue;
+      const assembly = LiveViews.assembly(first);
+      const filled = await this.fill(first, assembly, first.tracks.map((_, index) => index), LiveViews.pageParts(wanted), read);
+      if (filled === undefined) continue;
+      return filled === true ? LiveViews.assembled(first, assembly, wanted) : filled;
     }
     throw new Error("the Set's tracks kept changing while it was read; read it again");
+  }
+
+  /**
+   * Every item a discovery lists, page after page: a page ends at its limit or where the Remote Script's read
+   * budget ran out, with `nextCursor` to go on. `most` stops once that many came (what the caller asked for).
+   * A list that changes between pages is refused (its cursors are bound to it), and so is a cursor that
+   * doesn't move on.
+   */
+  public async discoverAll(request: LiveDiscoveryRequest, context?: LiveOperationContext, most = Number.POSITIVE_INFINITY): Promise<Array<Record<string, unknown>>> {
+    const adapter = this.adapter(); const items: Array<Record<string, unknown>> = []; let cursor = request.cursor; let revision: string | undefined;
+    for (let pages = 0; pages < MAX_DISCOVERY_PAGES; pages += 1) {
+      const page = await adapter.discoverAsync({ ...request, ...(cursor !== undefined ? { cursor } : {}) }, context);
+      if (revision !== undefined && page.revision !== revision) throw new Error(`the ${request.kind} list changed while it was read; read it again`);
+      revision = page.revision;
+      items.push(...(Array.isArray(page.items) ? page.items : []));
+      if (items.length >= most) return items.slice(0, most);
+      if (!page.nextCursor) return items;
+      if (page.nextCursor === cursor) throw new Error(`the ${request.kind} list's cursor didn't move on`);
+      cursor = page.nextCursor;
+    }
+    throw new Error(`the ${request.kind} list didn't end`);
+  }
+
+  /** Reads that remember what they saw (the track count, where references sit). */
+  private reader(context: LiveOperationContext | undefined): (request: LiveSnapshotRequest) => Promise<LiveSnapshot> {
+    const adapter = this.adapter();
+    return async (request) => { const snapshot = await adapter.snapshotAsync(context, request); this.note(snapshot); return snapshot; };
+  }
+
+  /** The parts a track window reads: the rows, and the Arrangement's clips on them. */
+  private static pageParts(wanted: readonly LiveSnapshotPart[] | undefined): LiveSnapshotPart[] {
+    return (wanted ?? LIVE_SNAPSHOT_PARTS).filter((part) => part === "tracks" || part === "arrangement");
+  }
+
+  private static assembly(first: LiveSnapshot): Assembly {
+    const assembly: Assembly = { tracks: [...(first.tracks ?? [])], clips: new Map(), held: new Map() };
+    LiveViews.keep(assembly, first);
+    return assembly;
+  }
+
+  private static keep(assembly: Assembly, snapshot: LiveSnapshot): void {
+    for (const clip of snapshot.arrangement?.clips ?? []) if (!assembly.clips.has(clip.ref)) assembly.clips.set(clip.ref, clip);
+    for (const item of snapshot.arrangementClips ?? []) if (!assembly.held.has(item.clip.ref)) assembly.held.set(item.clip.ref, item);
+  }
+
+  /** The assembled read: its rows, the Arrangement's clips of every whole row (in track order), and the window
+   * of a focused view (all its focus whole now) or none for the whole Set. */
+  private static assembled(first: LiveSnapshot, assembly: Assembly, wanted: readonly LiveSnapshotPart[] | undefined, focus?: readonly number[]): LiveSnapshot {
+    const whole: LiveSnapshot = { ...first, tracks: assembly.tracks };
+    const order = new Map(assembly.tracks.map((track, index) => [track.ref as unknown, index]));
+    const placed = <T>(rows: T[], trackOf: (row: T) => unknown): T[] => rows.map((row, index) => ({ row, index, track: order.get(trackOf(row)) ?? Number.MAX_SAFE_INTEGER })).sort((left, right) => left.track - right.track || left.index - right.index).map((entry) => entry.row);
+    if (first.arrangement && typeof first.arrangement === "object" && (wanted === undefined || wanted.includes("arrangement"))) whole.arrangement = { ...first.arrangement, clips: placed([...assembly.clips.values()], (clip) => clip.trackRef) };
+    if (first.arrangementClips) whole.arrangementClips = placed([...assembly.held.values()], (item) => item.trackRef);
+    if (focus && first.window) whole.window = { ...first.window, focus: [...focus] }; else delete whole.window;
+    return whole;
+  }
+
+  /**
+   * Makes whole, through track windows, the rows at `indices` that the assembly holds light. A window holds whole
+   * rows while the Remote Script's read budget lasts (its `window.tracks.count` says how many came, one at
+   * least), and the next starts where it ended. Undefined when a row came back as another track or the Set's
+   * counts moved (it changed meanwhile: read again); the answer itself when a window was answered with the
+   * whole Set.
+   */
+  private async fill(first: LiveSnapshot, assembly: Assembly, indices: readonly number[], parts: readonly LiveSnapshotPart[], read: (request: LiveSnapshotRequest) => Promise<LiveSnapshot>): Promise<true | undefined | LiveSnapshot> {
+    const pending = [...new Set(indices)].filter((index) => assembly.tracks[index]?.light === true).sort((left, right) => left - right);
+    for (let at = 0; at < pending.length;) {
+      const from = pending[at]!; let count = 1;
+      while (count < WHOLE_SET_PAGE_TRACKS && pending[at + count] === from + count) count += 1;
+      const page = await read({ tracks: { from, count }, parts: [...parts] });
+      // A window answered without its window is the whole Set: nothing left to assemble.
+      if (!page.window) return page;
+      const delivered = page.window.tracks?.count ?? 0;
+      if (page.window.tracks?.from !== from || !Array.isArray(page.tracks) || delivered < 1 || delivered > count || page.tracks.length !== delivered || page.epoch !== first.epoch || (first.trackCount !== undefined && page.trackCount !== first.trackCount) || page.sceneCount !== first.sceneCount) return undefined;
+      for (const [offset, row] of page.tracks.entries()) {
+        const listed = assembly.tracks[from + offset];
+        if (!listed || !row || row.light === true || listed.ref !== row.ref || listed.objectIdentity !== row.objectIdentity) return undefined;
+        assembly.tracks[from + offset] = row;
+      }
+      LiveViews.keep(assembly, page);
+      at += delivered;
+    }
+    return true;
   }
 
   /** Session playback alone (transport, fired and playing slots): what playback polls read. */
@@ -485,7 +574,7 @@ const clipRevision = (row: unknown): string => simulatorRevision(withoutPlayback
 function createSimulatorState(): LiveSnapshot {
   const initialNotes: Note[] = [{ pitch: 36, start: 0, duration: 0.25, velocity: 110, channel: 1, id: 1, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 }];
   const kick: Clip = { ref: ref("clip", "clip-1"), objectIdentity: "simulator:clip:clip-1", name: "Kick Pattern", kind: "midi", start: 0, length: 4, notes: initialNotes, notesRevision: simulatorRevision(initialNotes), warp: false, takes: ["take-1"], automation: [], muted: false, colorIndex: 0, looping: true, loopStart: 0, loopEnd: 4, launchMode: 0, launchQuantization: 4, legato: false, velocityAmount: 0, clipView: { gridQuantization: 1, gridIsTriplet: false } };
-  const track: Track = { ref: ref("track", "track-1"), objectIdentity: "simulator:track:track-1", name: "Drums", kind: "midi", volume: 0.85, pan: 0, mute: false, solo: false, armed: false, monitoringState: "off", playingSlotIndex: null, firedSlotIndex: null, clips: [kick], clipSlots: [{ ref: ref("clip-slot", "track-1:0"), parentRef: ref("track", "track-1"), objectIdentity: "simulator:clip-slot:track-1:0", sceneIndex: 0, clipRef: kick.ref, empty: false, colorIndex: 2, controlsOtherClips: false, hasStopButton: true, isGroupSlot: false, playingStatus: 0, willRecordOnStart: false, fireButtonState: false }], mixer: { volume: 0.85, pan: 0, cueVolume: 1, mute: false, solo: false, sends: [0.5, 0.25], volumeRef: ref("parameter", "mixer:0:volume"), volumeIdentity: "simulator:parameter:mixer:0:volume", panRef: ref("parameter", "mixer:0:panning"), panIdentity: "simulator:parameter:mixer:0:panning", cueRef: ref("parameter", "mixer:0:cue_volume"), cueIdentity: "simulator:parameter:mixer:0:cue_volume", sendRefs: [ref("parameter", "mixer:0:sends:0"), ref("parameter", "mixer:0:sends:1")], sendIdentities: ["simulator:parameter:mixer:0:sends:0", "simulator:parameter:mixer:0:sends:1"], mixerIdentity: "simulator:mixer:track-1", trackActivatorRef: ref("parameter", "mixer:0:activator"), crossfaderRef: ref("parameter", "mixer:0:crossfader"), crossfadeAssign: 1, panningMode: 0, panningLeftRef: ref("parameter", "mixer:0:panning_left"), panningRightRef: ref("parameter", "mixer:0:panning_right"), trackActivator: true, crossfader: 0, panningLeft: 0, panningRight: 0 }, routing: { inputType: "Ext. In", inputSubRouting: "1", outputType: "Main", outputSubRouting: "1/2", availableInputTypes: 2, availableInputChannels: 16, availableOutputTypes: 3, availableOutputChannels: 4 }, devices: [], sends: [0, 0], groupTrackRef: null, isVisible: true, isSelected: true, isFrozen: false, foldState: null, implicitArm: false, backToArranger: false, mutedViaSolo: false, colorIndex: 4, color: 0xFF0000, inputMeterLeft: 0.5, inputMeterRight: 0.4, inputMeterLevel: 0.45, outputMeterLeft: 0.6, outputMeterRight: 0.55, outputMeterLevel: 0.58, performanceImpact: 1, view: { selectedDeviceRef: ref("device", "utility-1"), deviceInsertMode: 1, isCollapsed: false }, takeLanes: [{ ref: ref("take-lane", "track-1:0"), objectIdentity: "simulator:take-lane:track-1:0", parentRef: ref("track", "track-1"), trackRef: ref("track", "track-1"), name: "Take 1", index: 0, clips: [] }] };
+  const track: Track = { ref: ref("track", "track-1"), objectIdentity: "simulator:track:track-1", name: "Drums", kind: "regular", mediaKind: "midi", volume: 0.85, pan: 0, mute: false, solo: false, armed: false, monitoringState: "off", playingSlotIndex: null, firedSlotIndex: null, clips: [kick], clipSlots: [{ ref: ref("clip-slot", "track-1:0"), parentRef: ref("track", "track-1"), objectIdentity: "simulator:clip-slot:track-1:0", sceneIndex: 0, clipRef: kick.ref, empty: false, colorIndex: 2, controlsOtherClips: false, hasStopButton: true, isGroupSlot: false, playingStatus: 0, willRecordOnStart: false, fireButtonState: false }], mixer: { volume: 0.85, pan: 0, cueVolume: 1, mute: false, solo: false, sends: [0.5, 0.25], volumeRef: ref("parameter", "mixer:0:volume"), volumeIdentity: "simulator:parameter:mixer:0:volume", panRef: ref("parameter", "mixer:0:panning"), panIdentity: "simulator:parameter:mixer:0:panning", cueRef: ref("parameter", "mixer:0:cue_volume"), cueIdentity: "simulator:parameter:mixer:0:cue_volume", sendRefs: [ref("parameter", "mixer:0:sends:0"), ref("parameter", "mixer:0:sends:1")], sendIdentities: ["simulator:parameter:mixer:0:sends:0", "simulator:parameter:mixer:0:sends:1"], mixerIdentity: "simulator:mixer:track-1", trackActivatorRef: ref("parameter", "mixer:0:activator"), crossfaderRef: ref("parameter", "mixer:0:crossfader"), crossfadeAssign: 1, panningMode: 0, panningLeftRef: ref("parameter", "mixer:0:panning_left"), panningRightRef: ref("parameter", "mixer:0:panning_right"), trackActivator: true, crossfader: 0, panningLeft: 0, panningRight: 0 }, routing: { inputType: "Ext. In", inputSubRouting: "1", outputType: "Main", outputSubRouting: "1/2", availableInputTypes: 2, availableInputChannels: 16, availableOutputTypes: 3, availableOutputChannels: 4 }, devices: [], sends: [0, 0], groupTrackRef: null, isVisible: true, isSelected: true, isFrozen: false, foldState: null, implicitArm: false, backToArranger: false, mutedViaSolo: false, colorIndex: 4, color: 0xFF0000, inputMeterLeft: 0.5, inputMeterRight: 0.4, inputMeterLevel: 0.45, outputMeterLeft: 0.6, outputMeterRight: 0.55, outputMeterLevel: 0.58, performanceImpact: 1, view: { selectedDeviceRef: ref("device", "utility-1"), deviceInsertMode: 1, isCollapsed: false }, takeLanes: [{ ref: ref("take-lane", "track-1:0"), objectIdentity: "simulator:take-lane:track-1:0", parentRef: ref("track", "track-1"), trackRef: ref("track", "track-1"), name: "Take 1", index: 0, clips: [] }] };
   const gain: Parameter = { ref: ref("parameter", "gain-1"), objectIdentity: "simulator:parameter:gain-1", name: "Gain", value: 0.5, min: 0, max: 1, automatable: true, quantization: 0, enabled: true, displayValue: "0.5", revision: 1, defaultValue: 0.75, originalName: "Gain (dB)", state: 1, valueItems: ["Off", "On"] };
   const device: Device = { ref: ref("device", "utility-1"), parentRef: track.ref, name: "Utility", kind: "audio-effect", parameters: [gain], objectIdentity: "simulator:device:utility-1", enabled: true, view: { isCollapsed: false }, latencySamples: 256, latencyMs: 5.8, parameterBank: 1, comparison: { capability: true, activeSide: 0 } };
   track.devices.push(device);
@@ -605,7 +694,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
   }
 
   status(): LiveStatus { return { connected: true, adapter: "simulator", epoch: this.epoch, protocol: LIVE_PROTOCOL_VERSION, capabilities: liveCapabilitiesForOperations(SIMULATOR_OPERATIONS), operations: [...SIMULATOR_OPERATIONS] }; }
-  snapshot(): LiveSnapshot { const value = structuredClone(this.state) as LiveSnapshot; value.arrangement.clips = (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, muted: item.clip.muted ?? null, colorIndex: item.clip.colorIndex ?? null, looping: item.clip.looping ?? null, loopStart: item.clip.loopStart ?? null, loopEnd: item.clip.loopEnd ?? null, filePath: item.clip.filePath ?? null, isAudio: item.clip.isAudio ?? (item.clip.kind === "audio") })); return value; }
+  snapshot(): LiveSnapshot { const value = structuredClone(this.state) as LiveSnapshot; value.arrangement.clips = (this.state.arrangementClips ?? []).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, muted: item.clip.muted ?? null, colorIndex: item.clip.colorIndex ?? null, looping: item.clip.looping ?? null, loopStart: item.clip.loopStart ?? null, loopEnd: item.clip.loopEnd ?? null, filePath: item.clip.filePath ?? null, isAudio: item.clip.isAudio ?? (item.clip.kind === "audio"), endTime: (item.clip as Clip & { endTime?: number }).endTime ?? item.clip.start + item.clip.length, noteCount: item.clip.notes.length })); return value; }
   get(objectRef: LiveRef): unknown {
     if (objectRef === this.state.set.ref) return structuredClone(this.state.set);
     const scene = this.state.scenes.find((item) => item.ref === objectRef);
@@ -883,17 +972,22 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const index = args.index === undefined ? this.state.tracks.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.tracks.length) throw new RangeError("track index is invalid");
         if (this.state.tracks.some((track) => track.name === name)) throw new Error("track name already exists");
-        const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
+        const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind: "regular", mediaKind: kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
         this.state.tracks.splice(index as number, 0, track);
         this.emit({ type: "object", ref: track.ref, payload: { operation, track } });
-        return { ...structuredClone(track), createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
+        // As the Remote Script answers a creation: the track's media as its kind (its row says regular).
+        return { ...structuredClone(track), kind, index, createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
       }
       case "track.delete": {
         requireStructureRevision(); const trackRef = objectRef("ref");
         const index = this.state.tracks.findIndex((track) => track.ref === trackRef);
         if (index < 0) throw new Error(`unknown track reference: ${trackRef}`);
         if (args.expectedObjectIdentity !== this.state.tracks[index]!.objectIdentity) throw new Error("track object identity changed; deletion refused");
+        // As Live: a group track goes with every track inside it, nested groups' too.
+        const inside = (group: LiveRef): LiveRef[] => this.state.tracks.filter((track) => track.groupTrackRef === group).flatMap((track) => [track.ref, ...inside(track.ref)]);
+        const members = new Set(this.state.tracks[index]!.kind === "group" ? inside(trackRef) : []);
         const [deleted] = this.state.tracks.splice(index, 1);
+        if (members.size) this.state.tracks = this.state.tracks.filter((track) => !members.has(track.ref));
         this.emit({ type: "object", ref: trackRef, payload: { operation, track: deleted } });
         return { deleted: trackRef };
       }
@@ -2353,6 +2447,19 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       value.tracks = value.tracks.map((track, position) => focus.has(offset + position) ? track : lightTrackRow(track, full.set.ref));
       whole = value.tracks.filter((track) => track.light !== true); window.focus = [...request.focus];
     }
+    // As the Remote Script's read budget: a read with arguments builds whole rows while it lasts (one at
+    // least); a window then ends at the last whole row, a focus goes on with light rows.
+    if (this.readBudgetRows !== undefined && Object.keys(request).length > 0 && (!request.parts || request.parts.includes("tracks"))) {
+      const offset = request.tracks?.from ?? 0; const rows: Track[] = []; let built = 0; let cut = false;
+      for (const track of value.tracks) {
+        if (track.light === true) { rows.push(track); continue; }
+        if (built >= Math.max(1, this.readBudgetRows)) { cut = true; if (!request.focus) break; rows.push(lightTrackRow(track, full.set.ref)); continue; }
+        built += 1; rows.push(track);
+      }
+      if (cut && !request.focus && request.tracks) window.tracks = { from: offset, count: rows.length };
+      if (cut && request.focus) window.focus = request.focus.filter((index) => rows[index - offset] !== undefined && rows[index - offset]!.light !== true);
+      value.tracks = rows; whole = rows.filter((track) => track.light !== true);
+    }
     if (request.tracks || request.focus) {
       const read = new Set(whole.map((track) => track.ref));
       value.arrangement = { ...value.arrangement, clips: (full.arrangement.clips ?? []).filter((clip) => read.has(clip.trackRef as LiveRef)) };
@@ -2370,9 +2477,35 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     if (Object.keys(request).length > 0) value.window = window;
     return checkSnapshotAnswer(value, request);
   }
+  /** How many whole track rows a read with arguments builds before its budget runs out, as the Remote Script's
+   * read budget cuts it (a window ends there, a focus goes on light); undefined: no budget. A snapshot without
+   * arguments is always whole. */
+  readBudgetRows: number | undefined;
+  /** How many items a discovery page holds before its budget runs out (then truncated, with nextCursor); undefined: its limit. */
+  discoveryBudgetItems: number | undefined;
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
-    const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
-    return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
+    const rows = this.discoveryRows(request);
+    // Pages as the Remote Script's: a cursor names where to go on in this list as it is, and nowhere else.
+    const revision = `${this.epoch}:${request.kind}:${request.parent ?? ""}:${rows.length}`;
+    let offset = 0;
+    if (request.cursor !== undefined) {
+      let position: { revision?: unknown; offset?: unknown };
+      try { position = JSON.parse(Buffer.from(request.cursor, "base64url").toString("utf8")) as typeof position; } catch { throw new Error("invalid discovery cursor"); }
+      if (position.revision !== revision || !Number.isInteger(position.offset) || (position.offset as number) < 0 || (position.offset as number) > rows.length) throw new Error("stale discovery cursor");
+      offset = position.offset as number;
+    }
+    const page = rows.slice(offset, offset + Math.max(1, Math.min(request.limit ?? 50, this.discoveryBudgetItems ?? Number.POSITIVE_INFINITY)));
+    const next = offset + page.length < rows.length ? Buffer.from(JSON.stringify({ revision, offset: offset + page.length })).toString("base64url") : undefined;
+    return { epoch: this.epoch, items: structuredClone(page), truncated: next !== undefined, revision, kind: request.kind, ...(next ? { nextCursor: next } : {}) };
+  }
+  /** What a discovery lists, before paging: a clip's notes (Session or Arrangement) by their parent clip. */
+  private discoveryRows(request: LiveDiscoveryRequest): Record<string, unknown>[] {
+    if (request.kind === "note") {
+      const clip = this.state.tracks.flatMap((track) => track.clips).find((item) => item.ref === request.parent) ?? (this.state.arrangementClips ?? []).find((item) => item.clip.ref === request.parent)?.clip;
+      if (request.parent === undefined) throw new Error("a kind-specific parent reference is required");
+      return (clip?.notes ?? []).map((note, index) => ({ ...note, ref: `${request.parent}:note:${index}`, parentRef: request.parent }));
+    }
+    return (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
   }
   async getAsync(objectRef: LiveRef): Promise<unknown> { return this.get(objectRef); }
   async invokeAsync(invocation: LiveInvocation): Promise<unknown> { return this.invoke(invocation); }
@@ -2776,7 +2909,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     switch (operation) {
       case "render.offline": {
         const target = track();
-        if (target.kind !== "audio") throw new Error(`track "${target.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
+        if (trackMedia(target) !== "audio") throw new Error(`track "${target.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
         const from = number("fromBeat"); const to = number("toBeat");
         if (!(to > from)) throw new Error("the range to render is empty");
         const seconds = ((to - from) * 60) / (this.state.set.tempo ?? 120);
@@ -2785,7 +2918,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
       case "arrangement.midi-clip.create": {
         const target = track();
-        if (target.kind !== "midi") throw new Error(`track "${target.name}" isn't a MIDI track`);
+        if (trackMedia(target) !== "midi") throw new Error(`track "${target.name}" isn't a MIDI track`);
         if (args.takeLaneRef !== undefined) throw new Error("the simulator makes Arrangement clips on a track's own lane");
         const start = number("start"); const length = number("length");
         if (!Array.isArray(args.notes)) throw new TypeError("notes must be a list");
@@ -2801,11 +2934,13 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const from = number("fromBeat"); const to = number("toBeat");
         if (!(to > from)) throw new Error("the range to clear is empty");
         const all = this.state.arrangementClips ?? []; const mine = all.filter((item) => item.trackRef === target.ref);
-        const removed = mine.filter((item) => item.clip.start >= from && item.clip.start + item.clip.length <= to);
+        // A clip's extent on the timeline is its end time (a looped clip plays past its loop length).
+        const endOf = (clip: Clip): number => (clip as Clip & { endTime?: number }).endTime ?? clip.start + clip.length;
+        const removed = mine.filter((item) => item.clip.start >= from && endOf(item.clip) <= to);
         for (const item of mine) {
           if (removed.includes(item)) continue;
-          const end = item.clip.start + item.clip.length;
-          if (item.clip.start < to && end > from) { if (item.clip.start < from) item.clip.length = from - item.clip.start; else { item.clip.length = end - to; item.clip.start = to; } }
+          const end = endOf(item.clip); const clip = item.clip as Clip & { endTime?: number };
+          if (clip.start < to && end > from) { if (clip.start < from) { clip.length = Math.min(clip.length, from - clip.start); clip.endTime = from; } else { clip.length = Math.min(clip.length, end - to); clip.start = to; clip.endTime = end; } }
         }
         this.state.arrangementClips = all.filter((item) => !removed.includes(item));
         this.emit({ type: "object", ref: target.ref, payload: { operation } });

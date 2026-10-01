@@ -615,11 +615,27 @@ def _same_number(observed: Any, expected: Any) -> bool:
     return math.isclose(float(observed), float(expected), rel_tol=1e-6, abs_tol=1e-6)
 
 
+# How a refusal says nothing ran (the change was refused before it reached Live): the host reports it
+# as not dispatched, a plain refusal, instead of uncertain.
+UNRUN_SUFFIX = "; nothing changed"
+
+
+def _unrun(error: BaseException) -> BaseException:
+    """The same refusal, saying nothing ran (once). Another exception is named by its type, as
+    _failure_summary names it."""
+    message = str(error) if isinstance(error, (ValueError, TimeoutError)) and str(error) else type(error).__name__
+    if message.endswith(UNRUN_SUFFIX): return error
+    return (TimeoutError if isinstance(error, TimeoutError) else ValueError)(message + UNRUN_SUFFIX)
+
+
 def _failure_summary(error: BaseException) -> str:
     """Say why a request failed without echoing Live's own exception text: the bridge's validation
-    messages (ValueError/TimeoutError) are actionable and carry no payloads; anything else is named by type."""
+    messages (ValueError/TimeoutError) are actionable and carry no payloads; anything else is named by type.
+    A refusal that says nothing ran keeps saying so, however long it is."""
     if isinstance(error, (ValueError, TimeoutError)) and str(error):
-        return "request failed: " + re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(error))[:200]
+        text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(error))
+        if text.endswith(UNRUN_SUFFIX) and len(text) > 200: return "request failed: " + text[:200 - len(UNRUN_SUFFIX)] + UNRUN_SUFFIX
+        return "request failed: " + text[:200]
     return f"request failed: {type(error).__name__}"
 
 
@@ -4513,13 +4529,26 @@ class LiveObjectMapper:
         if not hmac.compare_digest(expected_identity, self._capture_object_identity(obj)): raise ValueError("Session object identity changed; deletion refused")
         deleter = getattr(self.song, "delete_track" if operation == "track.delete" else "delete_scene", None)
         if not callable(deleter): raise ValueError("object deletion is unavailable")
-        before_identity_order = [self._capture_object_identity(item) for item in collection]; expected_identity_order = list(before_identity_order); expected_identity_order.pop(index); deletion_error: BaseException | None = None
+        # Live deletes a group track with every track inside it (nested groups' too), as its UI does.
+        gone = {index} | (self._grouped_under(collection, obj) if kind == "track" and self._track_kind(obj) == "group" else set())
+        before_identity_order = [self._capture_object_identity(item) for item in collection]; expected_identity_order = [identity for position, identity in enumerate(before_identity_order) if position not in gone]; deletion_error: BaseException | None = None
         try: deleter(index)
         except BaseException as error: deletion_error = error
         after = self._items(getattr(self.song, "tracks" if kind == "track" else "scenes", [])); after_identity_order = [self._capture_object_identity(item) for item in after]
         if after_identity_order != expected_identity_order: raise ValueError("Session object deletion did not preserve exact remaining sibling order") from deletion_error
         self.refs.delete(reference)
         return {"deleted": reference}
+
+    def _grouped_under(self, tracks: list[Any], group: Any) -> set[int]:
+        """The positions of the tracks inside a group track, nested groups' too (each track's
+        group_track, up to the top)."""
+        identity = self._capture_object_identity(group); inside: set[int] = set()
+        for position, track in enumerate(tracks):
+            parent, depth = self._read_attr(track, "group_track"), 0
+            while parent is not None and depth < 64:
+                if self._capture_object_identity(parent) == identity: inside.add(position); break
+                parent, depth = self._read_attr(parent, "group_track"), depth + 1
+        return inside
 
     def _locator_mutate(self, args: dict[str, Any], delete: bool) -> dict[str, Any]:
         if not self._locator_supported():
@@ -12182,17 +12211,20 @@ class AbletonMcpBridge:
 
     def _replay_or_apply(self, idempotency_key: str, transaction_id: str, operation: str, digest: str, apply: Callable[[], Any], check: Callable[[], None] | None = None) -> Any:
         """Apply a mutation once per idempotency key: a retry gets the recorded result, never a second
-        application. `check` (the fences) runs only when nothing was recorded yet."""
+        application. `check` (the fences) runs only when nothing was recorded yet. Whatever refuses the
+        change before `apply` runs (the ledger, the fences) says nothing changed."""
         with self._executed_lock:
-            retired = getattr(self, "_retired_mutation_keys", {}); finalized = getattr(self, "_finalized_transactions", set())
-            if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
-            if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
-            prior = self._executed_mutations.get(idempotency_key)
-            if prior is not None:
-                if prior["operation"] != operation or prior["argsDigest"] != digest or prior.get("transactionId") != transaction_id: raise ValueError("idempotency key conflicts with an executed mutation")
-                return prior["result"]
-            if len(self._executed_mutations) >= MAX_MUTATION_LEDGER: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
-            if check is not None: check()
+            try:
+                retired = getattr(self, "_retired_mutation_keys", {}); finalized = getattr(self, "_finalized_transactions", set())
+                if transaction_id in finalized: raise ValueError("transaction recovery authority has been terminally finalized")
+                if idempotency_key in retired: raise ValueError("mutation replay authority has been retired")
+                prior = self._executed_mutations.get(idempotency_key)
+                if prior is not None:
+                    if prior["operation"] != operation or prior["argsDigest"] != digest or prior.get("transactionId") != transaction_id: raise ValueError("idempotency key conflicts with an executed mutation")
+                    return prior["result"]
+                if len(self._executed_mutations) >= MAX_MUTATION_LEDGER: raise ValueError("executed mutation ledger is full; reconnect after authoritative recovery")
+                if check is not None: check()
+            except Exception as error: raise _unrun(error) from error
             result = apply(); self._executed_mutations[idempotency_key] = {"operation": operation, "argsDigest": digest, "transactionId": transaction_id, "result": result}; return result
 
     def _apply_mutation(self, operation: str, args: dict[str, Any], transaction_id: str | None, ownership_token: str | None, holder: dict[str, Any] | None) -> Any:
@@ -12209,27 +12241,35 @@ class AbletonMcpBridge:
         """One request, one Live-thread callback: the cleanup ownership an owned deletion needs, the
         state digest from the preview (when given; a mismatch refuses), then the mutation through the
         same idempotency ledger invoke uses, so a retried request returns what was recorded instead
-        of applying twice. Reads are invoked, not mutated."""
+        of applying twice. Reads are invoked, not mutated. A refusal before the change runs (its
+        arguments, the ledger, the fences, a queue that never ran it) says nothing changed."""
         operation = str(request.get("operation")); args = dict(request.get("args", {})); transaction_id = request.get("transactionId"); idempotency_key = request.get("idempotencyKey"); ownership_token = request.get("ownershipToken"); expected = request.get("stateDigest")
-        entry = _registry_operation(operation)
-        if operation in _READ_ONLY_INVOKES or operation == "realtime.stats": raise ValueError("read-only operations are invoked, not mutated")
-        if entry is None or entry.get("method") != "invoke": raise ValueError("only Live operations are mutated")
-        if not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128: raise ValueError("mutation transaction identity is required")
-        if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128: raise ValueError("mutation idempotency key is required")
-        if expected is not None and (not isinstance(expected, str) or re.fullmatch(r"[a-f0-9]{64}", expected) is None): raise ValueError("mutation state digest is invalid")
-        digest = hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(args).encode("utf-8")).hexdigest()
-        release_pending = self._claim_mutation(idempotency_key, transaction_id, operation, digest)
+        try:
+            entry = _registry_operation(operation)
+            if operation in _READ_ONLY_INVOKES or operation == "realtime.stats": raise ValueError("read-only operations are invoked, not mutated")
+            if entry is None or entry.get("method") != "invoke": raise ValueError("only Live operations are mutated")
+            if not isinstance(transaction_id, str) or not 8 <= len(transaction_id) <= 128: raise ValueError("mutation transaction identity is required")
+            if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128: raise ValueError("mutation idempotency key is required")
+            if expected is not None and (not isinstance(expected, str) or re.fullmatch(r"[a-f0-9]{64}", expected) is None): raise ValueError("mutation state digest is invalid")
+            digest = hashlib.sha256(AuthenticatedRemoteScript._bounded_canonical(args).encode("utf-8")).hexdigest()
+            release_pending = self._claim_mutation(idempotency_key, transaction_id, operation, digest)
+        except Exception as error: raise _unrun(error) from error
+        started = False
         def fences() -> None:
             # Removing what a transaction made takes that transaction's ownership, as preflight asks.
             if operation in _TRANSACTION_DELETIONS and not _explicit_deletion(operation, args): self.mapper._require_cleanup_ownership(operation, args, transaction_id, ownership_token)
             if expected is not None and not hmac.compare_digest(_authority_state_digest(self.mapper, args, operation), expected): raise ValueError("Live state changed since the preview")
         def mutate_on_live() -> Any:
+            nonlocal started; started = True
             try: return self._replay_or_apply(idempotency_key, transaction_id, operation, digest, lambda: self._apply_mutation(operation, args, transaction_id, ownership_token, holder), fences)
             finally: release_pending()
         try:
             return self.queue.submit(mutate_on_live, deadline_ms=request.get("deadlineMs"), on_cancel=release_pending)
         except BaseException as error:
-            if not isinstance(error, _DispatchUncertainError): release_pending()
+            if isinstance(error, _DispatchUncertainError): raise
+            release_pending()
+            # The queue refused it, or cancelled it before Live's thread ran it: nothing changed.
+            if not started and isinstance(error, Exception): raise _unrun(error) from error
             raise
 
     def _dispatch_with_holder(self, method: str, request: dict[str, Any], holder: dict[str, Any]) -> Any:

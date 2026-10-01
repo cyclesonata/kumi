@@ -47,8 +47,10 @@ const DEFAULT_RETIRE_AFTER = 4096;
 // A preview's state digest waits this long for its change; the preview itself expires sooner.
 const EXPECTED_DIGEST_TTL_MS = 10 * 60_000;
 const MAX_EXPECTED_DIGESTS = 4096;
-/** Where the Remote Script refuses a single-tick change before running it: nothing reached Live. */
-const MUTATION_REFUSED_UNRUN = /Live state changed since the preview$/;
+/** Where the Remote Script refused a change before running it (its arguments, its replay ledger, its fences:
+ * ownership, the preview's state; a queue that never ran it), it says nothing changed: nothing reached Live.
+ * A Remote Script from before that said so only of a stale preview. */
+const MUTATION_REFUSED_UNRUN = /; nothing changed\b|Live state changed since the preview$/;
 /**
  * The references in a change's arguments, as the Remote Script's authority digest collects them (every
  * `ref`, `*Ref` and `*Refs` value, nested too): with the operation, all a state digest depends on.
@@ -324,7 +326,8 @@ export class RemoteScriptLiveAdapter implements AsyncLiveAdapter {
       prepared = await this.requestAsync({ method: "prepare", operation: invocation.operation, args: invocation.args, transactionId: transactionScope, preflightToken: preflight.preflightToken, confirmation: preflight.confirmation, idempotencyKey, ...ownershipFields }, "authority.prepare", context) as { authorityToken?: unknown; operation?: unknown; argsDigest?: unknown; expiresAt?: unknown };
       if (typeof prepared.authorityToken !== "string" || prepared.operation !== invocation.operation || prepared.argsDigest !== preflight.argsDigest || typeof prepared.expiresAt !== "number" || prepared.expiresAt <= Date.now()) throw new Error("remote mutation authority preparation failed");
     } catch (error) { throw new LiveMutationNotDispatchedError(error instanceof Error ? error.message : "remote mutation authority failed"); }
-    return await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args, authorityToken: prepared.authorityToken as string, transactionId: transactionScope, ...ownershipFields }, invocation.operation, context);
+    try { return await this.requestAsync({ method: "invoke", operation: invocation.operation, args: invocation.args, authorityToken: prepared.authorityToken as string, transactionId: transactionScope, ...ownershipFields }, invocation.operation, context); }
+    catch (error) { if (error instanceof Error && MUTATION_REFUSED_UNRUN.test(error.message)) throw new LiveMutationNotDispatchedError(error.message); throw error; }
   }
 
   /**

@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, trackMedia, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -277,6 +277,8 @@ const MAX_PARAMETER_VALUES = 10_000;
 const MAX_QUEUED_EVENTS = 65_536;
 /** What deleting an existing object leaves: the deletion is kept, as device deletion is. */
 const KEPT_DELETION = "Kumi can't bring this back; Live's undo can.";
+/** How many notes one page of a clip's notes asks for. */
+const NOTE_PAGE = 2_000;
 /** What each live_device_edit action takes, besides deviceRef. */
 const DEVICE_EDIT_TAKES: Readonly<Record<string, readonly string[]>> = { set: ["setting", "value"], modulate: ["source", "value", "targetIndex", "parameterRef"], "slice-insert": ["time"], "slice-move": ["time", "toTime"], "slice-remove": ["time"], "slice-clear": [], "slice-reset": [], "warp-as": ["beats"], "warp-double": [], "warp-half": [], resend: [] };
 /** The device edits Kumi's undo doesn't take back, and why. */
@@ -543,6 +545,12 @@ function sceneFieldRestored(restored: Record<string, unknown>, field: string, va
   const off = (field === "tempo" && (typeof value !== "number" || value < 20)) || ((field === "signatureNumerator" || field === "signatureDenominator") && (typeof value !== "number" || value < 1));
   if (off) return restored[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] === false && prior[field === "tempo" ? "tempoEnabled" : "timeSignatureEnabled"] !== true;
   return sameLiveValue(restored[field], value);
+}
+
+/** Where an Arrangement clip ends on the timeline: its row's endTime (a looped clip's end isn't its start
+ * plus its loop length), or start + length on rows without one. */
+function arrangementClipEnd(clip: JsonObject): number {
+  return typeof clip.endTime === "number" && Number.isFinite(clip.endTime) ? clip.endTime : (clip.start as number) + (clip.length as number);
 }
 
 function sameLiveValue(observed: unknown, expected: unknown): boolean {
@@ -5652,8 +5660,9 @@ export class McpHost {
     if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
     if (track.kind === "return") throw new Error("a return track is deleted with live_track_structure (action delete-return)");
     if (track.kind === "main") throw new Error("the Main track can't be deleted");
-    // Deleting a group deletes the tracks in it too: say which.
-    const grouped = snapshot.tracks.filter((candidate) => (candidate as unknown as { groupTrackRef?: unknown }).groupTrackRef === reference).map((candidate) => candidate.name);
+    // Live deletes a group track with every track inside it, nested groups' too: say which.
+    const inside = (group: string, depth: number): string[] => depth > 64 ? [] : snapshot.tracks.filter((candidate) => (candidate as unknown as { groupTrackRef?: unknown }).groupTrackRef === group).flatMap((candidate) => [candidate.name, ...inside(candidate.ref, depth + 1)]);
+    const grouped = inside(reference, 0);
     return { operation: "track.delete", payload: { ref: reference, expectedStructureRevision: this.structureRevision(snapshot), expectedObjectIdentity: track.objectIdentity, explicitDeletion: true }, target: { ref: reference, name: track.name, kind: track.kind, ...(grouped.length ? { alsoDeletes: grouped } : {}) } };
   }
 
@@ -5714,7 +5723,8 @@ export class McpHost {
     const track = snapshot.tracks.find((candidate) => candidate.ref === trackRef);
     if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
     if (track.kind === "group") throw new Error(`track "${track.name}" is a group: ${what} its tracks instead`);
-    if (track.kind !== kind) throw new Error(`track "${track.name}" isn't ${kind === "audio" ? "an audio" : "a MIDI"} track`);
+    // The Remote Script's rows say regular, return or main as `kind`, and audio or MIDI as `mediaKind`.
+    if (track.kind === "return" || track.kind === "main" || trackMedia(track) !== kind) throw new Error(`track "${track.name}" isn't ${kind === "audio" ? "an audio" : "a MIDI"} track`);
     return track;
   }
 
@@ -5734,16 +5744,27 @@ export class McpHost {
   }
 
   /** A file copied into the project folder, which Live then manages as Collect All and Save would. */
+  /**
+   * An audio file copied into the Set's project folder. Checked as an audio import is: under the allowed root,
+   * a real file (not a link), of an audio type its content agrees with; Live copies a verified copy of it, so
+   * what lands in the project is what was checked. No network paths.
+   */
   private async liveProjectImportAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["filePath"]) || !isNonEmptyString(params.filePath, 4096) || !isAbsolute(params.filePath) || params.filePath.includes("\0")) return error(id, -32602, "filePath, an absolute path to a file, is required");
+    if (!isObject(params) || !hasOnly(params, ["filePath", "allowedRoot"]) || !isNonEmptyString(params.filePath, 1024) || !isNonEmptyString(params.allowedRoot, 1024) || params.filePath.includes("\0") || params.allowedRoot.includes("\0")) return error(id, -32602, "filePath and allowedRoot (the folder it must be in) are required");
+    if ([params.filePath, params.allowedRoot].some((path) => /^(?:\\\\|\/\/)/.test(path))) return error(id, -32602, "files on a network share aren't imported: copy the file onto this computer first");
+    let staged: string | undefined;
     try {
-      let file: ReturnType<typeof statSync>;
-      try { file = statSync(params.filePath); } catch { throw new Error("there's no file at that path"); }
-      if (!file.isFile()) throw new Error("that path isn't a file");
+      let file: ReturnType<typeof lstatSync>;
+      try { file = lstatSync(params.filePath); } catch { throw new Error("there's no file at that path"); }
+      if (file.isSymbolicLink()) throw new Error("that path is a link: import the file itself, from where it is");
+      const authority = await this.audioImportFileAuthority(params.filePath, params.allowedRoot);
       await this.requireOperation("project.import");
-      const imported = await this.asyncAdapter().invokeAsync({ operation: "project.import", args: { filePath: params.filePath } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
-      return this.successText(id, { filePath: params.filePath, path: imported.path });
+      staged = await this.stageVerifiedImportFile(authority.canonicalPath, authority);
+      const imported = await this.asyncAdapter().invokeAsync({ operation: "project.import", args: { filePath: staged } }, { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }) as JsonObject;
+      return this.successText(id, { filePath: authority.canonicalPath, path: imported.path, bytes: authority.size, sha256: authority.sha256 });
     } catch (cause) { return this.adapterToolError(id, cause, "Nothing was copied into the project."); }
+    // The project has its own copy now (or none was made): the verified copy goes.
+    finally { if (staged !== undefined) this.releaseStagedImportFile(staged); }
   }
 
   /** The clips an Arrangement MIDI clip change asks for: one (its fields), or several (clips). */
@@ -5786,7 +5807,7 @@ export class McpHost {
       // A new clip goes where the Arrangement is empty: it never replaces or cuts what's there, or another new one.
       for (const [index, clip] of clips.entries()) {
         const end = clip.start + clip.length; const name = tracks.get(clip.trackRef)!.name;
-        const there = this.arrangementClipsOf(snapshot, clip.trackRef).find((other) => (other.start as number) < end && (other.start as number) + (other.length as number) > clip.start);
+        const there = this.arrangementClipsOf(snapshot, clip.trackRef).find((other) => (other.start as number) < end && arrangementClipEnd(other) > clip.start);
         if (there) throw new Error(`track "${name}" already has "${String(there.name ?? "a clip")}" in the Arrangement between beat ${clip.start} and ${end}; clear the range first (live_clip_clear_range) or choose another place`);
         if (clips.some((other, otherIndex) => otherIndex !== index && other.trackRef === clip.trackRef && other.start < end && other.start + other.length > clip.start)) throw new Error(`two of the new clips overlap on "${name}"`);
       }
@@ -5805,7 +5826,7 @@ export class McpHost {
     const before = new Set((transaction.prior as { clipIdentities?: unknown[] } | undefined)?.clipIdentities ?? []);
     const found: Array<JsonObject | undefined> = [];
     for (const clip of clips) {
-      const rows = (await this.asyncAdapter().discoverAsync({ kind: "arrangement-clip", parent: clip.trackRef }, context)).items;
+      const rows = await this.views.discoverAll({ kind: "arrangement-clip", parent: clip.trackRef }, context);
       found.push(rows.find((row) => !before.has(row.objectIdentity) && isNonEmptyString(row.objectIdentity, 256) && Math.abs((row.start as number) - clip.start) < 1e-6 && Math.abs((row.length as number) - clip.length) < 1e-6 && (clip.name === undefined || row.name === clip.name)));
     }
     return found;
@@ -5829,7 +5850,8 @@ export class McpHost {
       let made = reconciliation ? await this.createdArrangementMidiClips(transaction, context) : [];
       if (reconciliation && made.some(Boolean) && !made.every(Boolean)) throw new Error("only some of the clips are there; look at the Arrangement before making them again");
       if (!made.every(Boolean) || made.length === 0) {
-        if (!reconciliation) {
+        // About to make them, a retry too: only while the tracks and their Arrangement clips are as previewed.
+        {
           const snapshot = await this.viewForAsync(context, trackRefs);
           const current = JSON.stringify({ tracks: trackRefs.map((trackRef) => { const track = snapshot.tracks.find((candidate) => candidate.ref === trackRef); return [trackRef, track?.objectIdentity, track?.name]; }), clips: this.arrangementFence(snapshot, trackRefs) });
           if (current !== transaction.fence) return this.transactionError(id, "the tracks or their Arrangement clips changed since the preview; preview again");
@@ -5841,7 +5863,10 @@ export class McpHost {
         made = await this.createdArrangementMidiClips(transaction, context);
         if (!made.every(Boolean)) throw new Error("Live made the clips, but the Arrangement doesn't show every one where it was asked");
       }
-      transaction.created = { clips: made.map((row, index) => ({ ref: row!.ref, objectIdentity: row!.objectIdentity, trackRef: clips[index]!.trackRef, name: row!.name ?? null, start: row!.start, length: row!.length, notes: (clips[index]!.notes as unknown[]).length })) };
+      // What undo checks is as it was made: each clip's name, extent and notes (the producer's later edits are theirs).
+      const fences: JsonObject[] = [];
+      for (const row of made) fences.push({ objectIdentity: row!.objectIdentity, name: row!.name ?? null, start: row!.start, end: arrangementClipEnd(row!), notesRevision: McpHost.notesRevision(await this.clipNotesAsync(row!.ref as LiveRef, context)) });
+      transaction.created = { clips: made.map((row, index) => ({ ref: row!.ref, objectIdentity: row!.objectIdentity, trackRef: clips[index]!.trackRef, name: row!.name ?? null, start: row!.start, length: row!.length, notes: (clips[index]!.notes as unknown[]).length })), fences };
       transaction.applyKey = params.idempotencyKey as string; transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", clips: transaction.created.clips, ...(reconciliation ? { reconciled: true } : {}), idempotent: false });
     } catch (cause) { if (transaction.state === "applying" || reconciliation) transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Whether the clips are there is uncertain: retry with the same key, which looks for them before making any."); }
@@ -5857,12 +5882,12 @@ export class McpHost {
       const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.trackRef]);
       const track = snapshot.tracks.find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
-      if (track.kind !== "audio" && track.kind !== "midi") throw new Error(`track "${track.name}" has no Arrangement clips of its own`);
-      const row = (clip: JsonObject) => ({ ref: clip.ref, name: clip.name ?? null, start: clip.start, end: (clip.start as number) + (clip.length as number) });
-      const overlapping = this.arrangementClipsOf(snapshot, params.trackRef as LiveRef).filter((clip) => (clip.start as number) < to && (clip.start as number) + (clip.length as number) > from);
+      if (track.kind === "return" || track.kind === "main" || trackMedia(track) === undefined) throw new Error(`track "${track.name}" has no Arrangement clips of its own`);
+      const row = (clip: JsonObject) => ({ ref: clip.ref, name: clip.name ?? null, start: clip.start, end: arrangementClipEnd(clip) });
+      const overlapping = this.arrangementClipsOf(snapshot, params.trackRef as LiveRef).filter((clip) => (clip.start as number) < to && arrangementClipEnd(clip) > from);
       if (!overlapping.length) throw new Error(`track "${track.name}" has no Arrangement clips between beat ${from} and ${to}`);
-      const removes = overlapping.filter((clip) => (clip.start as number) >= from && (clip.start as number) + (clip.length as number) <= to).map(row);
-      const cuts = overlapping.filter((clip) => !((clip.start as number) >= from && (clip.start as number) + (clip.length as number) <= to)).map(row);
+      const removes = overlapping.filter((clip) => (clip.start as number) >= from && arrangementClipEnd(clip) <= to).map(row);
+      const cuts = overlapping.filter((clip) => !((clip.start as number) >= from && arrangementClipEnd(clip) <= to)).map(row);
       const fence = JSON.stringify({ track: [track.ref, track.objectIdentity, track.name], clips: this.arrangementFence(snapshot, [params.trackRef]) });
       const transaction: ClipLifecycleTransaction = { id: `clearrange_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "clip-clear-range", fence, clipRef: params.trackRef as LiveRef, payload: { trackRef: params.trackRef, fromBeat: from, toBeat: to, expectedName: track.name }, prior: { removes, cuts }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "clear range");
@@ -5887,7 +5912,7 @@ export class McpHost {
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await this.asyncAdapter().invokeAsync({ operation: "clip.clear-range", args: transaction.payload }, context) as JsonObject;
       const after = this.arrangementClipsOf(await this.viewForAsync(context, [trackRef]), trackRef);
-      if (after.some((clip) => (clip.start as number) < toBeat - 1e-6 && (clip.start as number) + (clip.length as number) > fromBeat + 1e-6)) throw new Error("the range still holds a clip after clearing");
+      if (after.some((clip) => (clip.start as number) < toBeat - 1e-6 && arrangementClipEnd(clip) > fromBeat + 1e-6)) throw new Error("the range still holds a clip after clearing");
       transaction.created = { removed: result.removed ?? [] }; transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", removed: result.removed ?? [], clipsBefore: result.clipsBefore ?? null, clipsAfter: result.clipsAfter ?? null, kept: KEPT_DELETION, idempotent: false });
     } catch (cause) { if (transaction.state === "applying") transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Whether the range is clear is uncertain: look at the Arrangement before trying again."); }
@@ -6211,7 +6236,8 @@ export class McpHost {
       if (operation === "device.action" ? result.done !== true : operation === "sample.slice" ? !Array.isArray(result.slices) : result.changed !== true) throw new Error("the device edit wasn't confirmed");
       // What undo puts back, and what it checks is still so.
       if (edit === "set") transaction.created = { value: result.value ?? args.value };
-      else if (edit === "modulate") transaction.created = { targetIndex: result.targetIndex, value: result.value, prior: result.prior };
+      // Live's API reads no modulation amount back: undo is fenced on the target the edit set, at its place in the matrix.
+      else if (edit === "modulate") { const targets = this.deviceEditState(edit, this.deviceRow(await this.viewForAsync(context, [args.ref]), args.ref as LiveRef).device as unknown as Record<string, unknown>).targets as unknown[]; transaction.created = { targetIndex: result.targetIndex, value: result.value, prior: result.prior, target: targets[result.targetIndex as number] ?? null }; }
       else if (edit.startsWith("slice-")) transaction.created = { slices: result.slices };
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", result, ...(DEVICE_EDIT_KEPT[edit] ? { undo: DEVICE_EDIT_KEPT[edit] } : {}), idempotent: false });
@@ -6450,8 +6476,10 @@ export class McpHost {
       const snapshot = await this.viewForAsync(undefined, [params.clipRef]);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.clip.isAudio === true || row.clip.kind === "audio") return this.transactionError(id, "key estimation requires a MIDI clip");
-      const notes = ((row.clip.notes as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>) ?? []).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
-      const notesRevision = typeof row.clip.notesRevision === "string" ? row.clip.notesRevision : createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex");
+      // An Arrangement clip's row says how many notes it holds, not which: they come page by page.
+      const listed = Array.isArray(row.clip.notes) ? row.clip.notes as unknown as Array<Record<string, unknown>> : await this.clipNotesAsync(params.clipRef as LiveRef);
+      const notes = (listed as unknown as Array<{ pitch: number; start: number; duration: number; velocity?: number }>).filter((note) => Number.isInteger(note.pitch) && typeof note.duration === "number" && note.duration > 0);
+      const notesRevision = typeof row.clip.notesRevision === "string" ? row.clip.notesRevision : createHash("sha256").update(canonicalMutationIdentity(Array.isArray(row.clip.notes) ? notes : listed)).digest("hex");
       if (params.expectedNotesRevision !== undefined && params.expectedNotesRevision !== notesRevision) return this.transactionError(id, "clip notes changed since the fenced revision");
       const estimate = estimateKey(notes);
       return this.successText(id, { ...estimate, evidence: { ...estimate.evidence, clipRef: params.clipRef, notesRevision } } as unknown as JsonObject);
@@ -7527,7 +7555,8 @@ export class McpHost {
       if (result.changed !== true) throw new Error("specialized device change was not confirmed");
       const verifiedDevice = this.deviceRow(await this.viewForAsync(context, [transaction.payload.ref]), transaction.payload.ref as LiveRef).device as unknown as Record<string, unknown>;
       const verified = ((verifiedDevice[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>);
-      for (const field of fields) if (transaction.payload[field] !== undefined && JSON.stringify(verified[field]) !== JSON.stringify(transaction.payload[field])) throw new Error("specialized device postcondition was not confirmed");
+      // Live reads decimal settings back as float32: close is the same value.
+      for (const field of fields) if (transaction.payload[field] !== undefined && !sameLiveValue(verified[field], transaction.payload[field])) throw new Error("specialized device postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
@@ -8340,6 +8369,18 @@ export class McpHost {
   private captureObjectFingerprint(value: unknown): string { return createHash("sha256").update(canonicalMutationIdentity(withoutPlaybackState(value))).digest("hex"); }
 
   /** What a MIDI or scene capture is fenced on; the Remote Script's _capture_authority_revision computes the same. */
+  /** Every note of a clip, as its rows are (an Arrangement clip's row carries only its noteCount): through
+   * `discover note`, page after page. */
+  /** A clip's notes' revision, over their rows as the Remote Script computes a clip's notesRevision. */
+  private static notesRevision(notes: ReadonlyArray<Record<string, unknown>>): string { return createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex"); }
+
+  private async clipNotesAsync(clipRef: LiveRef, context?: LiveOperationContext): Promise<Array<Record<string, unknown>>> {
+    // A page of NOTE_PAGE notes: the Remote Script's budget bounds building them, not sending them, and
+    // sending ten thousand held Live's thread for 300 ms on the measured Set.
+    const items = await this.views.discoverAll({ kind: "note", parent: clipRef, limit: NOTE_PAGE }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+    return items.map(({ ref: _ref, parentRef: _parentRef, ...note }) => note);
+  }
+
   private captureAuthorityRevision(snapshot: LiveSnapshot): string {
     const authority = { tracks: snapshot.tracks.map((track) => ({ ref: track.ref, objectIdentity: track.objectIdentity, clips: track.clips.map((clip) => ({ ref: clip.ref, objectIdentity: clip.objectIdentity, notesRevision: clip.notesRevision })) })), scenes: snapshot.scenes.map((scene) => ({ ref: scene.ref, objectIdentity: scene.objectIdentity, index: scene.index })), playbackRevision: snapshot.playback.revision };
     return createHash("sha256").update(canonicalMutationIdentity(authority)).digest("hex");
@@ -9320,12 +9361,20 @@ export class McpHost {
       const reconciliation = made.state === "uncertain" && made.undoKey === params.idempotencyKey;
       if ((made.state !== "applied" && !reconciliation) || !made.created) return this.transactionError(id, "Only an applied or exact-key uncertain Arrangement MIDI clip transaction can be undone");
       try {
-        this.beginUndoRecovery(made, params.idempotencyKey as string); const status = this.requireConnected(); if (status.epoch !== made.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
+        const status = this.requireConnected(); if (status.epoch !== made.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; made.undoKey = params.idempotencyKey as string;
         const clips = made.created.clips as Array<{ objectIdentity: string; trackRef: LiveRef }>;
         const trackRefs = [...new Set(clips.map((clip) => clip.trackRef))];
         // All of them still there, or none deleted: an undo doesn't leave half a change.
         if (!reconciliation) { const snapshot = await this.viewForAsync(context, trackRefs); if (clips.some((clip) => !this.arrangementClipsOf(snapshot, clip.trackRef).some((row) => row.objectIdentity === clip.objectIdentity))) return this.transactionError(id, "a clip this change made isn't in the Arrangement any more; undo refused"); }
+        // Edited since Kumi made it (its notes, name or extent): it stays, with the producer's edits.
+        if (!reconciliation) for (const fence of (made.created.fences as JsonObject[] | undefined) ?? []) {
+          const clip = clips.find((item) => item.objectIdentity === fence.objectIdentity); if (!clip) continue;
+          const row = this.arrangementClipsOf(await this.viewForAsync(context, [clip.trackRef]), clip.trackRef).find((candidate) => candidate.objectIdentity === fence.objectIdentity); if (!row) continue;
+          if (row.name !== fence.name || !sameLiveValue(row.start, fence.start) || !sameLiveValue(arrangementClipEnd(row), fence.end) || McpHost.notesRevision(await this.clipNotesAsync(row.ref as LiveRef, context)) !== fence.notesRevision) return this.reasonError(id, `the clip "${String(fence.name ?? "")}" Kumi made has been edited since (its notes, name or length): it stays, with those edits`, "If it should go anyway, delete it with live_clip_delete_preview, then live_clip_delete_apply.");
+        }
+        // Checked first: a refused undo leaves no recovery behind it, and a later one starts afresh.
+        this.beginUndoRecovery(made, params.idempotencyKey as string);
         made.state = "undoing";
         // Each is found again by its identity: an Arrangement clip's reference moves when an earlier one goes.
         for (const clip of [...clips].reverse()) {
@@ -9488,7 +9537,7 @@ export class McpHost {
       const edited = this.clipLifecycleTransactions.get(params.transactionId as string);
       if (!edited || edited.kind !== "device-edit") return this.transactionError(id, "Unknown or expired device-edit transaction");
       const { edit, args } = edited.payload as { edit: string; args: Record<string, unknown> };
-      const kept = DEVICE_EDIT_KEPT[edit]; if (kept) return this.reasonError(id, kept, "live_song_undo steps back through Live's own history.");
+      const kept = DEVICE_EDIT_KEPT[edit]; if (kept) return this.reasonError(id, kept, "If the producer wants it back, Live's own undo can take it back (Cmd-Z in Live).");
       if (edited.state === "undone" && edited.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: edited.id, state: "undone", idempotent: true });
       const reconciliation = edited.state === "uncertain" && edited.undoKey === params.idempotencyKey;
       if ((edited.state !== "applied" && !reconciliation) || !edited.created) return this.transactionError(id, "Only an applied device edit can be undone");
@@ -9500,9 +9549,10 @@ export class McpHost {
         const fences = { expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") };
         let inverse: LiveInvocation;
         if (edit === "set") {
-          if (!reconciliation && JSON.stringify(state.value) !== JSON.stringify(edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
+          if (!reconciliation && !sameLiveValue(state.value, edited.created.value)) return this.transactionError(id, "the setting changed after the edit; undo refused");
           inverse = { operation: "device.property.set", args: { ref: args.ref, property: args.property, value: (edited.prior as { value: unknown }).value, ...fences } };
         } else if (edit === "modulate") {
+          if (!reconciliation && ((state.targets as unknown[])[edited.created.targetIndex as number] ?? null) !== edited.created.target) return this.transactionError(id, "Wavetable's modulation matrix changed after the edit (that target isn't where it was); undo refused");
           // The amount goes back; a parameter the edit added to the matrix stays there (Live can't take one out).
           inverse = { operation: "wavetable.modulation.set", args: { ref: args.ref, targetIndex: edited.created.targetIndex, source: args.source, value: edited.created.prior, ...fences } };
         } else {
@@ -9530,7 +9580,7 @@ export class McpHost {
         const fields = McpHost.SPECIALIZED_FAMILY_FIELDS[family]!;
         const snapshot = await this.viewForAsync(context, [devspec.payload.ref]); const row = this.deviceRow(snapshot, devspec.payload.ref as LiveRef);
         const undoFamilyRow = ((row.device as unknown as Record<string, unknown>)[McpHost.specializedRowKey(family)] ?? {}) as Record<string, unknown>;
-        if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && JSON.stringify(undoFamilyRow[field]) !== JSON.stringify(devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
+        if (!reconciliation) { for (const field of fields) if (devspec.payload[field] !== undefined && !sameLiveValue(undoFamilyRow[field], devspec.payload[field])) return this.transactionError(id, "device state changed after apply; undo refused"); }
         const state = Object.fromEntries(fields.map((field) => [field, undoFamilyRow[field] ?? null]));
         devspec.state = "undoing";
         const result = await this.invokeUndoRecovery(devspec, adapter, `${family}.set` as "drift.set" | "drum-cell.set" | "eq8.set" | "hybrid-reverb.set" | "meld.set" | "plugin.set" | "sample.set" | "wavetable.set", { ref: devspec.payload.ref, ...(devspec.prior as Record<string, unknown>), expectedObjectIdentity: row.device.objectIdentity, expectedStateRevision: createHash("sha256").update(canonicalMutationIdentity(state)).digest("hex") }, context) as { changed?: unknown };
@@ -9912,7 +9962,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     if (!transaction) {
       // A deletion is kept: nothing of the deleted object is left for Kumi to restore it from.
       const deletion = this.clipLifecycleTransactions.get(params.transactionId as string);
-      if (deletion && DELETION_KINDS.has(deletion.kind)) return this.reasonError(id, KEPT_DELETION, "If the producer wants it back, Live's own undo can bring it (Cmd-Z in Live, or live_song_undo when they ask for that).");
+      if (deletion && DELETION_KINDS.has(deletion.kind)) return this.reasonError(id, KEPT_DELETION, "If the producer wants it back, Live's own undo can bring it (Cmd-Z in Live).");
       return this.transactionError(id, "Unknown or expired transaction");
     }
     if (transaction.state === "undone" && transaction.undoKey === params.idempotencyKey) return this.successText(id, { transactionId: transaction.id, state: "undone", tempo: transaction.priorTempo, idempotent: true });

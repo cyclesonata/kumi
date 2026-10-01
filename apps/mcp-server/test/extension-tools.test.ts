@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -106,12 +106,28 @@ test("a sample goes onto an empty pad without the Browser, through a new chain, 
   assert.equal(pad().chains.length, 0);
 });
 
-test("a file is copied into the project, and a missing one is refused before Live hears of it", async () => {
-  const { call } = hosted(new DeterministicLiveSimulator());
-  const dir = mkdtempSync(join(tmpdir(), "import-sources-")); const file = join(dir, "Loop.wav"); writeFileSync(file, "RIFF");
-  const imported = await call("live_project_import", { filePath: file });
+test("an audio file from the allowed folder is copied into the project; anything else is refused before Live hears of it", async () => {
+  const managed = mkdtempSync(join(tmpdir(), "import-staging-"));
+  const { call, raw } = hosted(new DeterministicLiveSimulator(), { importStagingDir: managed });
+  const dir = mkdtempSync(join(tmpdir(), "import-sources-")); const file = join(dir, "Loop.wav");
+  const wav = Buffer.concat([Buffer.from("RIFF"), Buffer.from([16, 0, 0, 0]), Buffer.from("WAVE"), Buffer.from("fake-audio-bytes")]); writeFileSync(file, wav);
+  const imported = await call("live_project_import", { filePath: file, allowedRoot: dir });
   assert.equal(imported.isError, false, JSON.stringify(imported.body)); assert.match(imported.body.path, /Samples[\\/]Imported[\\/]Loop\.wav$/);
-  assert.match((await call("live_project_import", { filePath: join(dir, "Gone.wav") })).body.reason, /no file at that path/);
+  assert.equal(imported.body.bytes, wav.length);
+  // The verified copy Live copied from goes once the project has its own.
+  assert.deepEqual(readdirSync(managed), []);
+  assert.match((await call("live_project_import", { filePath: join(dir, "Gone.wav"), allowedRoot: dir })).body.reason, /no file at that path/);
+  // Outside the allowed folder, a link, a file that isn't audio, a network share: none reaches Live.
+  const elsewhere = mkdtempSync(join(tmpdir(), "import-elsewhere-")); const secret = join(elsewhere, "auth.json"); writeFileSync(secret, "{\"token\":\"x\"}");
+  assert.match((await call("live_project_import", { filePath: secret, allowedRoot: dir })).body.reason, /escapes the allowed root/);
+  const linked = join(dir, "Linked.wav"); symlinkSync(secret, linked);
+  assert.match((await call("live_project_import", { filePath: linked, allowedRoot: dir })).body.reason, /is a link/);
+  const json = join(dir, "auth.json"); writeFileSync(json, "{}");
+  assert.match((await call("live_project_import", { filePath: json, allowedRoot: dir })).body.reason, /not an importable audio file/);
+  const disguised = join(dir, "Disguised.wav"); writeFileSync(disguised, "not audio at all, just text");
+  assert.match((await call("live_project_import", { filePath: disguised, allowedRoot: dir })).body.reason, /does not match the declared audio format/);
+  assert.equal((await raw("live_project_import", { filePath: "\\\\server\\share\\Loop.wav", allowedRoot: "\\\\server\\share" })).error?.code, -32602);
+  assert.equal((await raw("live_project_import", { filePath: file })).error?.code, -32602, "the allowed folder is required");
 });
 
 // Kumi's Live extension as committed, in this process, against the extension's own fake Live, and a
@@ -133,7 +149,7 @@ test("the extension's tools appear while it's connected, and a render goes to it
   // The LOM side: the fake extension's Set (Keys, Drums, Vox), with positional references.
   const simulator = new DeterministicLiveSimulator();
   const state = stateOf(simulator); const base = state.tracks[0]!;
-  state.tracks = [["Keys", "midi"], ["Drums", "midi"], ["Vox", "audio"]].map(([name, kind], index) => ({ ...structuredClone(base), ref: `3:track:${index}`, objectIdentity: `live:track:${index}`, name, kind, clips: [], clipSlots: [], devices: [] }));
+  state.tracks = [["Keys", "midi"], ["Drums", "midi"], ["Vox", "audio"]].map(([name, kind], index) => ({ ...structuredClone(base), ref: `3:track:${index}`, objectIdentity: `live:track:${index}`, name, kind: "regular", mediaKind: kind, clips: [], clipSlots: [], devices: [] }));
   const lom = Object.create(simulator) as DeterministicLiveSimulator;
   lom.status = () => { const status = simulator.status(); return { ...status, operations: (status.operations ?? []).filter((operation) => !(EXTENSION_OPERATIONS as readonly string[]).includes(operation)) }; };
   const channel = new ExtensionChannel({ storageDirectory: storage });

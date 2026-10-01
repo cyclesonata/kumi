@@ -853,7 +853,7 @@ const toolDescriptors = [
   },
   {
     name: "live_track_delete_preview",
-    description: "Preview deleting one audio, MIDI or group track (trackRef from discovery) with its clips and devices; a group takes the tracks in it (alsoDeletes names them). Fenced to the track and the Set's tracks and scenes as they are now. Return tracks go with live_track_structure; Main stays. The deletion is kept: Kumi can't bring it back; Live's undo can.",
+    description: "Preview deleting one audio, MIDI or group track (trackRef from discovery) with its clips and devices; a group goes with every track inside it, nested groups' too, as Live deletes a group (alsoDeletes names them). Fenced to the track and the Set's tracks and scenes as they are now. Return tracks go with live_track_structure; Main stays. The deletion is kept: Kumi can't bring it back; Live's undo can.",
     inputSchema: { type: "object", properties: { trackRef: { type: "string", minLength: 1, maxLength: 256 } }, required: ["trackRef"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: true, openWorldHint: true },
   },
@@ -883,8 +883,8 @@ const toolDescriptors = [
   },
   {
     name: "live_project_import",
-    description: "Copy a file (an absolute path) into the Set's project folder, which Live then manages as Collect All and Save would; answers where the copy is. Nothing in the Set changes. Needs Kumi's Live extension.",
-    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["filePath"], additionalProperties: false },
+    description: "Copy an audio file into the Set's project folder, which Live then manages as Collect All and Save would; answers where the copy is. The file must be in allowedRoot (a folder the producer named), a real file (not a link, not on a network share) of an audio type (WAV, AIFF, FLAC, MP3, OGG...). Nothing in the Set changes. Needs Kumi's Live extension.",
+    inputSchema: { type: "object", properties: { filePath: { type: "string", minLength: 1, maxLength: 1024 }, allowedRoot: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["filePath", "allowedRoot"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
