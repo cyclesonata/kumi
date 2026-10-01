@@ -283,7 +283,8 @@ export function discoverSession(adapter: LiveAdapter, kind: "track" | "scene" | 
 export async function discoverSessionAsync(adapter: AsyncLiveAdapter, kind: "track" | "scene" | "clip" | "note", limit: number, cursor?: string): Promise<{ epoch: number; revision: string; items: unknown[]; nextCursor?: string; truncated: boolean }> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be from 1 to 100");
   const status = adapter.status(); if (!status.connected || status.epoch === null || !status.capabilities.includes("session.read")) throw new Error("live-capability-unavailable:session.read");
-  const snapshot = await adapter.snapshotAsync(); let items: unknown[];
+  // The whole Set through track windows, as the host reads it: never one request that builds every track.
+  const snapshot = await new LiveViews(() => adapter).wholeSet(undefined); let items: unknown[];
   if (kind === "track") items = [...snapshot.tracks];
   else if (kind === "scene") items = [...snapshot.scenes];
   else if (kind === "clip") items = snapshot.tracks.flatMap((track) => track.clips);
