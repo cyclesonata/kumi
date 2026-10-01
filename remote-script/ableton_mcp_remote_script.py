@@ -11924,15 +11924,17 @@ class _ReadBudget:
 
     __slots__ = ("deadline", "slowest", "mark", "units")
 
+    # perf_counter, not monotonic: Live 12's Python on Windows has a monotonic clock in steps of about
+    # 15.6 ms, so a unit that spans a step would look that slow and end every page early.
     def __init__(self, seconds: float) -> None:
-        self.deadline = time.monotonic() + seconds; self.slowest = 0.0; self.mark = time.monotonic(); self.units = 0
+        self.deadline = time.perf_counter() + seconds; self.slowest = 0.0; self.mark = time.perf_counter(); self.units = 0
 
     def room(self) -> bool:
-        now = time.monotonic()
+        now = time.perf_counter()
         if self.units: self.slowest = max(self.slowest, now - self.mark)
         self.mark = now
-        # Reaching the deadline spends it: on Windows the clock moves in steps of about 15.6 ms, so no
-        # time may seem to pass, and a budget of nothing still stops after the first unit.
+        # Reaching the deadline spends it: a budget of nothing stops after the first unit even when no
+        # time seems to pass between two quick units.
         if self.units and now + self.slowest >= self.deadline: return False
         self.units += 1
         return True
