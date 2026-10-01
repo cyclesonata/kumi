@@ -116,7 +116,8 @@ The Remote Script's device, note and parameter discovery is being made to read o
 to page by work so no request holds Live's UI for long.
 
 Duplicating the template track through the bridge's three-step change path took 0.92 s at 20 tracks,
-1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: a change still costs more the bigger the Set is.
+1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: a change still costs more the bigger the Set is. (Bridge
+1.0.62 changed that; see "Full control and scale on real Live" in `docs/evidence/kumi-poc.md`.)
 
 ## Right-click "Ask Kumi about this"
 

@@ -124,7 +124,8 @@ try {
   const initialized = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
   const ping = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" });
   const output = execFileSync(process.execPath, [executable], { cwd: installDirectory, input: `${initialize}\n${initialized}\n${ping}\n`, encoding: "utf8" });
-  const responses = output.trim().split("\n").map((line) => JSON.parse(line));
+  // The bridge answers each request when its work is done; answers are matched to requests by id.
+  const responses = output.trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => (a?.id ?? 0) - (b?.id ?? 0));
   if (responses.length !== 2 || responses[0]?.id !== 1 || responses[0]?.result?.protocolVersion !== "2025-11-25" || responses[1]?.id !== 2 || !responses[1]?.result || responses.some((frame) => frame.error)) throw new Error("installed executable failed the legacy protocol smoke test");
   const modernMeta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} };
   const modernRequests = [
@@ -280,8 +281,9 @@ finally: bridge.disconnect()
     const liveStatus = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "live_status", arguments: {} } });
     const liveScenes = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "live_discover", arguments: { kind: "scene", limit: 4 } } });
     const authenticatedOutput = execFileSync(process.execPath, [executable, "--config", bridgeConfigPath], { cwd: installDirectory, input: `${initializeBridge}\n${initializedBridge}\n${liveStatus}\n${liveScenes}\n`, encoding: "utf8", timeout: 10_000 });
-    const authenticatedResponses = authenticatedOutput.trim().split("\n").map((line) => JSON.parse(line));
-    if (authenticatedResponses.length !== 3 || authenticatedResponses[0]?.id !== 1 || authenticatedResponses[1]?.id !== 2 || authenticatedResponses[2]?.id !== 3) throw new Error("authenticated package discovery did not return ordered MCP responses");
+    // Answers come when each request's work is done; they're matched to their requests by id.
+    const authenticatedResponses = authenticatedOutput.trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => (a?.id ?? 0) - (b?.id ?? 0));
+    if (authenticatedResponses.length !== 3 || authenticatedResponses[0]?.id !== 1 || authenticatedResponses[1]?.id !== 2 || authenticatedResponses[2]?.id !== 3) throw new Error("authenticated package discovery did not answer each request once, by its id");
     const statusText = authenticatedResponses[1]?.result?.content?.[0]?.text ?? "";
     const sceneText = authenticatedResponses[2]?.result?.content?.[0]?.text ?? "";
     if (!statusText.includes("remote-script") || !statusText.includes("fake-live") || statusText.includes("real-live") || !sceneText.includes("Package Smoke Scene")) throw new Error("authenticated package smoke did not observe explicit fake bridge state");

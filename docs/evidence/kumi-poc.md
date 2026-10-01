@@ -1129,3 +1129,117 @@ Live won't take failed the whole batch after its 15 s deadline and left the host
 Snippet screening only pays for parts of six seconds or more; it's covered by the goal tests
 (a quiet-then-loud reference, the window found later in it), not measured on Live here, where the
 part was one bar.
+
+## Full control and scale on real Live (bridges 1.0.58 to 1.0.62, 2026-09-30)
+
+Live 12.4.15b5 on macOS arm64. Two Sets:
+
+- **Kumi Acceptance:** 19 tracks.
+- **Kumi Big Set:** 200 tracks, each a copy of one template (Operator, EQ Eight, Compressor, Reverb, and
+  an Audio Effect Rack with chains). It has 1773 devices, 591 chains, and a 20,000-note Arrangement MIDI clip.
+
+How it was measured:
+
+- **Acceptance:** `npm run accept:live` makes every kind of change through Kumi and undoes each with
+  Kumi's own undo.
+- **Live's main thread:** a second client asked the Remote Script for a one-row read every 50 ms. Its time
+  to answer is how long Live's main thread was held, plus up to a display tick (about 100 ms; idle,
+  its median is 50 ms).
+
+**Install.** `kumi bridge` installs the bridge, the Remote Script and Kumi's Live extension. Live runs
+the extension in its own host, and `kumi doctor` says "Kumi's extension is running in Live". Before
+1.0.60 `kumi bridge` never saw Live connect: the lifecycle answers "completed", and Kumi looked for
+"activated". It now says "Live is connected through the new bridge" once Live opens.
+
+**Acceptance results:**
+
+| Bridge | 19 tracks | 200 tracks | What the failures were |
+| --- | --- | --- | --- |
+| 1.0.58 | 58 of 61 | | Live refuses to copy an instrument beside itself (a chain holds one), and the bridge called that uncertain; the run's own clip spot was taken |
+| 1.0.59 | 63 of 64 | 47 of 54 | The catch-up export and the answers queued behind it (below) |
+| 1.0.60 | | 61 of 62 | Watching a change by hand timed out once |
+| 1.0.62 | 65 of 65 | 65 of 65 | |
+
+**Also checked on real Live:**
+
+- **A plan is one Cmd-Z.** A two-change plan (tempo, a track's name) through Kumi was taken back whole
+  by a single Cmd-Z in Live.
+- **Right-click pins.** Right-clicking a track in Live (Extensions › "kumi: Ask Kumi about this")
+  pinned it in Kumi, and the next look told the model the producer pointed at it.
+- **Offline render.** A bounce rendered offline (3.9 s of audio in 0.2–1 s) and was heard back.
+- **Deletions.** Deleting a clip and clearing a range worked, kept in HISTORY for Live's own undo.
+
+**One change through Kumi.** Each change is Kumi's status check, the bridge's preview and apply, and the
+HISTORY record. Times are seconds, from the acceptance runs:
+
+| Change | 1.0.59, 19 tracks | 1.0.59, 200 tracks | 1.0.62, 19 tracks | 1.0.62, 200 tracks |
+| --- | --- | --- | --- | --- |
+| Tempo | 0.50 | 0.52 | 0.025 | 0.30 |
+| Mixer | 0.62 | 0.65 | 0.10 | 0.37 |
+| Rename a track | 0.59 | 2.5 | 0.086 | 0.22 |
+| Colour | 0.62 | 0.61 | 0.091 | 1.9 |
+| A device parameter | 0.52 | 0.67 | 0.096 | 0.10 |
+| New MIDI track | 0.84 | 6.9 | 0.22 | 4.6 |
+| Load Drift from the Browser | 0.73 | 3.7 | 0.16 | 2.2 |
+| New MIDI clip | 0.91 | 0.89 | 0.10 | 0.50 |
+
+On the big Set, the same changes were measured again after Kumi's catch-up export had finished: two
+runs of five on its first track, one of the heavy template tracks.
+
+| Change | Times (ms) | Median |
+| --- | --- | --- |
+| Tempo | 30, 63, 786, 61, 33, 87, 475, 87, 74, 73 | 74 |
+| Mixer | 316, 225, 213, 216, 213, 269, 661, 240, 150, 156 | 220 |
+| Rename | 321, 195, 913, 912, 194, 1346, 406, 264, 213, 211 | 292 |
+| One of Operator's parameters | 435, 1114, 932, 1004, 999 | 999 |
+
+The slow ones weren't traced. Setting Operator's parameter on that heavy track reads more than the
+parameter, and that read is being cut next.
+
+**Reads on the 200-track Set:**
+
+| Read | 1.0.59 | 1.0.62 |
+| --- | --- | --- |
+| Kumi's first look at the Set | 0.42 s | 0.24 s |
+| Every track, through Kumi | 35.7 s | 0.41 s |
+| Catch-up snapshot | not done within 60 s | 12.4 s (10 pages, 2.3 MB) |
+
+**Live's main thread during the 200-track acceptance (ping, ms):**
+
+| Bridge | Median | p95 | p99 | Longest |
+| --- | --- | --- | --- | --- |
+| 1.0.59 | 125 | 162 | 265 | 4609 |
+| 1.0.60 | 53 | 154 | 898 | 7027 |
+| 1.0.62 | 50 | 135 | 1324 | 4350 |
+
+The long holds come from changes to the Set's structure, and Live costs the same doing them itself.
+Timed with a trace in the Remote Script, Kumi's requests on this Set held Live's thread for:
+
+- making a MIDI track: 1.8 s;
+- making an audio track: 2.7 s;
+- loading Drift: 1.4 s;
+- copying EQ Eight: 1.7 s;
+- deleting a device: 1.3–1.6 s;
+- each read: 120–190 ms or less.
+
+Live's own Cmd-Shift-T on the same Set froze it 3.5 s (its undo 6.8 s), and Live's own Cmd-D on EQ Eight
+froze it 2.8 s (its undo 2.9 s).
+
+**What the 200-track Set found, and what changed:**
+
+- **The catch-up export read the whole Set again for every page** (10 pages). The bridge now keeps the
+  first page's read for the rest.
+- **The bridge wrote answers in request order.** So one slow request held every answer after it: the
+  model's 0.2 s track read waited 35.7 s behind the export, and changes timed out. Each answer now
+  goes out when its work is done.
+- **Each step of a change waited for Live's next display tick.** A change is read, change, confirm, so
+  that was about 100 ms a step and half a second a change, whatever the Set's size. A tick that
+  answered a client now waits up to 12 ms for its next request and serves it at once, and reads that
+  start then end with the tick's 50 ms budget. A tempo change through the bridge alone went from
+  400 ms to 16–67 ms.
+- **The Remote Script writes its canonical answers about four times faster**, byte for byte the same
+  text (fuzzed against the old writer).
+- **A change drops the Remote Script's kept structure revision.** Live can tell a rename's listener only
+  after the next request in the same tick, and a colour change right after a rename was refused.
+- **Instruments.** Copying an instrument is refused up front, and a copy Live refuses says nothing changed.
+- **The read budget runs on `perf_counter`.** On Windows the monotonic clock moves in 15.6 ms steps; found by CI.

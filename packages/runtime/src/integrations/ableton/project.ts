@@ -336,7 +336,13 @@ export function describeWatch(diff: JsonObject, before: readonly JsonObject[], a
     const kind = String(item.kind);
     if (!["set", "track", "scene", "clip", "device", "locator"].includes(kind)) continue;
     if (item.type === "ambiguity") {
-      const names = (ids: unknown, from: Map<string, Row>) => (Array.isArray(ids) ? ids : []).map((id) => from.get(String(id))?.name).filter((name): name is string => typeof name === "string");
+      // Each name once, with how many share it: a big Set's lookalikes (200 tracks named "Template") stay one entry.
+      const names = (ids: unknown, from: Map<string, Row>) => {
+        const counted = new Map<string, number>();
+        for (const id of Array.isArray(ids) ? ids : []) { const name = from.get(String(id))?.name; if (typeof name === "string") counted.set(name, (counted.get(name) ?? 0) + 1); }
+        const listed = [...counted].slice(0, 20).map(([name, count]) => (count > 1 ? `${name} ×${count}` : name));
+        return counted.size > 20 ? [...listed, `+${counted.size - 20} more names`] : listed;
+      };
       changes.push({ unclear: kind, before: names(item.beforeSnapshotIds, was), after: names(item.afterSnapshotIds, now) });
       continue;
     }
