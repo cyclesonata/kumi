@@ -1130,7 +1130,7 @@ Snippet screening only pays for parts of six seconds or more; it's covered by th
 (a quiet-then-loud reference, the window found later in it), not measured on Live here, where the
 part was one bar.
 
-## Full control and scale on real Live (bridges 1.0.58 to 1.0.62, 2026-09-30)
+## Full control and scale on real Live (bridges 1.0.58 to 1.0.63, 2026-09-30)
 
 Live 12.4.15b5 on macOS arm64. Two Sets:
 
@@ -1159,6 +1159,7 @@ the extension in its own host, and `kumi doctor` says "Kumi's extension is runni
 | 1.0.59 | 63 of 64 | 47 of 54 | The catch-up export and the answers queued behind it (below) |
 | 1.0.60 | | 61 of 62 | Watching a change by hand timed out once |
 | 1.0.62 | 65 of 65 | 65 of 65 | |
+| 1.0.63 | 65 of 65 | 65 of 65 | |
 
 **Also checked on real Live:**
 
@@ -1172,29 +1173,50 @@ the extension in its own host, and `kumi doctor` says "Kumi's extension is runni
 **One change through Kumi.** Each change is Kumi's status check, the bridge's preview and apply, and the
 HISTORY record. Times are seconds, from the acceptance runs:
 
-| Change | 1.0.59, 19 tracks | 1.0.59, 200 tracks | 1.0.62, 19 tracks | 1.0.62, 200 tracks |
+| Change | 1.0.59, 19 tracks | 1.0.59, 200 tracks | 1.0.63, 19 tracks | 1.0.63, 200 tracks |
 | --- | --- | --- | --- | --- |
-| Tempo | 0.50 | 0.52 | 0.025 | 0.30 |
-| Mixer | 0.62 | 0.65 | 0.10 | 0.37 |
-| Rename a track | 0.59 | 2.5 | 0.086 | 0.22 |
-| Colour | 0.62 | 0.61 | 0.091 | 1.9 |
-| A device parameter | 0.52 | 0.67 | 0.096 | 0.10 |
-| New MIDI track | 0.84 | 6.9 | 0.22 | 4.6 |
-| Load Drift from the Browser | 0.73 | 3.7 | 0.16 | 2.2 |
-| New MIDI clip | 0.91 | 0.89 | 0.10 | 0.50 |
+| Tempo | 0.50 | 0.52 | 0.021 | 0.042 |
+| Mixer | 0.62 | 0.65 | 0.024 | 0.12 |
+| Rename a track | 0.59 | 2.5 | 0.072 | 1.7 (Live busy, below) |
+| Colour | 0.62 | 0.61 | 0.086 | 0.23 |
+| A device parameter | 0.52 | 0.67 | 0.034 | 0.033 |
+| New MIDI track | 0.84 | 6.9 | 0.17 | 5.8 (Live-bound) |
+| Load Drift from the Browser | 0.73 | 3.7 | 0.18 | 2.3 (Live-bound) |
+| New MIDI clip | 0.91 | 0.89 | 0.11 | 0.19 |
+| New Arrangement clip (extension) | | | 0.17 | 0.21 |
+| Offline render (extension) | | | 0.11 | 0.68 |
 
-On the big Set, the same changes were measured again after Kumi's catch-up export had finished: two
-runs of five on its first track, one of the heavy template tracks.
+On the big Set, the same changes were measured on their own, after Kumi's catch-up export had
+finished: two runs of five on its first track (one of the heavy template tracks: Operator, EQ Eight,
+Compressor, Reverb, racks). Each rename was followed by a 2 s pause.
 
-| Change | Times (ms) | Median |
-| --- | --- | --- |
-| Tempo | 30, 63, 786, 61, 33, 87, 475, 87, 74, 73 | 74 |
-| Mixer | 316, 225, 213, 216, 213, 269, 661, 240, 150, 156 | 220 |
-| Rename | 321, 195, 913, 912, 194, 1346, 406, 264, 213, 211 | 292 |
-| One of Operator's parameters | 435, 1114, 932, 1004, 999 | 999 |
+| Change | 1.0.62 (ms) | 1.0.63 (ms) | 1.0.63 median |
+| --- | --- | --- | --- |
+| Tempo | 30, 63, 786, 61, 33, 87, 475, 87, 74, 73 | 69, 76, 19, 74, 77, 67, 65, 123, 39, 86 | 72 |
+| Mixer | 316, 225, 213, 216, 213, 269, 661, 240, 150, 156 | 26, 28, 74, 28, 92, 26, 26, 87, 78, 26 | 28 |
+| An Operator parameter | 435, 1114, 932, 1004, 999 (Algorithm, each right after a rename) | 85, 82, 52, 71, 91, 36, 100, 340, 305, 124 (Volume) | 88 |
+| Rename | 321, 195, 913, 912, 194, 1346, 406, 264, 213, 211 | 910, 69, 28, 86, 37, 79, 794, 33, 797, 793 | 83 |
 
-The slow ones weren't traced. Setting Operator's parameter on that heavy track reads more than the
-parameter, and that read is being cut next.
+**What changed in 1.0.63.** A parameter, mixer or rename change reads only its own objects:
+
+- a parameter: its row, its device's light row and its track's identity;
+- a mixer change: the track's mixer row;
+- a rename: the target's identity and name.
+
+Before, each such change read the whole heavy track and a light row of every track, three times over.
+On the 200-track fake with the real Remote Script, a parameter change went from about 61,000 attribute
+reads (869 KB of answers) to 332 (4.4 KB), the same count on 19 tracks as on 200.
+
+**Renames and Live's own work.** The renames that took about 0.8 s, and changes made just after a
+rename, waited for Live's own work after a rename. With the ping running, each rename through the
+bridge alone answered in 21–30 ms, then held Live's thread 0.8–1.1 s. A rename with Live's own Cmd-R
+held it 1.2–1.9 s. The Remote Script's requests in those moments took 0–3 ms each (traced); the next
+display tick just came 750–850 ms later.
+
+**Extensions on a big Set.** On the 200-track Set, Live started its extension host when it opened, but
+Kumi's extension only answered about two minutes later, once the Set had loaded. Kumi offered the
+extension's tools within 10 s of that, on the bridge's next look. A Kumi session started earlier gets
+them then; until then its tools for the extension aren't offered.
 
 **Reads on the 200-track Set:**
 
