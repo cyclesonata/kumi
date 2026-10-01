@@ -164,7 +164,7 @@ export class SessionMidiTransactionManager {
     if (!record || (!reconciliation && record.state !== "applied") || !record.clipRef) throw new Error("Only an applied or exact-key uncertain MIDI transaction can be undone");
     const adapter = this.asyncAdapter(); const status = this.require(["session.read", "session.midi_clip.delete"], ["clip.delete"]);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
-    record.state = "undoing"; record.undoKey = idempotencyKey;
+    record.state = "undoing"; record.undoKey = idempotencyKey; let sent = false;
     try {
       if (!reconciliation) {
         const clip = await adapter.getAsync(record.clipRef, context) as { objectIdentity?: string; name?: string; length?: number; notes?: Note[] } | undefined;
@@ -173,12 +173,17 @@ export class SessionMidiTransactionManager {
         record.undoArgs = { ref: record.clipRef, ...record.clipDeleteAuthority };
       }
       if (!record.undoArgs) throw new Error("MIDI clip deletion replay authority is unavailable");
-      await adapter.invokeAsync({ operation: "clip.delete", args: record.undoArgs }, context);
+      sent = true; await adapter.invokeAsync({ operation: "clip.delete", args: record.undoArgs }, context);
       const remaining = await this.getOrAbsent(record, record.clipRef, context);
       if (remaining !== undefined && remaining !== null) throw new Error("MIDI clip deletion was not authoritatively confirmed");
       record.state = "undone";
       return { transactionId, state: "undone", deleted: record.clipRef, idempotent: false };
-    } catch (cause) { record.state = "uncertain"; throw cause; }
+    } catch (cause) {
+      // Stopped before the deletion was sent (a read or a check failed): nothing changed, the clip stays
+      // applied, and the next undo checks afresh. Once it was sent, or on a retry, it's uncertain.
+      if (!sent && !reconciliation) { record.state = "applied"; delete record.undoKey; delete record.undoArgs; throw cause; }
+      record.state = "uncertain"; throw cause;
+    }
   }
 
   preview(request: unknown): SessionMidiPreview {
@@ -239,15 +244,19 @@ export class SessionMidiTransactionManager {
     if (!record || record.state !== "applied" || !record.clipRef) throw new Error("Only an applied MIDI transaction can be undone");
     const status = this.require(["session.read", "session.midi_clip.delete"], ["clip.delete"]);
     if (status.epoch !== record.epoch) throw new Error("Live connection epoch changed; undo refused");
-    record.state = "undoing"; record.undoKey = idempotencyKey;
+    record.state = "undoing"; record.undoKey = idempotencyKey; let sent = false;
     try {
       const clip = this.adapter.get(record.clipRef) as { objectIdentity?: string; name?: string; length?: number; notes?: Note[] } | undefined;
       if (!clip || clip.objectIdentity !== record.clipIdentity || clip.name !== record.proposed.name || clip.length !== record.proposed.length || JSON.stringify(clip.notes ?? []) !== JSON.stringify(record.appliedNotes ?? [])) throw new Error("MIDI clip identity or content changed after apply; undo refused");
       if (!record.clipDeleteAuthority) throw new Error("MIDI clip deletion authority is unavailable");
-      this.adapter.invoke({ operation: "clip.delete", args: { ref: record.clipRef, ...record.clipDeleteAuthority } });
+      sent = true; this.adapter.invoke({ operation: "clip.delete", args: { ref: record.clipRef, ...record.clipDeleteAuthority } });
       record.state = "undone";
       return { transactionId, state: "undone", deleted: record.clipRef, idempotent: false };
-    } catch (cause) { record.state = "uncertain"; throw cause; }
+    } catch (cause) {
+      // As the asynchronous undo: stopped before the deletion was sent, the clip stays applied.
+      if (!sent) { record.state = "applied"; delete record.undoKey; throw cause; }
+      record.state = "uncertain"; throw cause;
+    }
   }
 
   isFinalizable(transactionId: string): boolean { const record = this.records.get(transactionId); return !!record && ["uncertain", "applied", "undone"].includes(record.state); }
