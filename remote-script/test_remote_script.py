@@ -1115,7 +1115,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(bridge._pending_mutations["delayed-apply"]["count"], 1)
         self.assertEqual(bridge._dispatch_with_holder("retire", {"transactionId": "transaction-race", "deadlineMs": int(time.time() * 1000) + 5000}, {}), {"retired": 0})
         bridge.queue.release.set(); worker.join(1)
-        self.assertFalse(worker.is_alive()); self.assertEqual(failures, ["mutation replay authority has been retired"]); self.assertEqual(bridge.mapper._resolve_parameter(parameter["ref"]).value, 0.5); self.assertEqual(bridge._executed_mutations, {})
+        self.assertFalse(worker.is_alive()); self.assertEqual(failures, ["mutation replay authority has been retired; nothing changed"]); self.assertEqual(bridge.mapper._resolve_parameter(parameter["ref"]).value, 0.5); self.assertEqual(bridge._executed_mutations, {})
 
     def test_mutation_preflight_is_unpredictable_one_use_and_fences_external_state(self):
         bridge = object.__new__(AbletonMcpBridge); bridge.mapper = LiveObjectMapper(FakeSong())
@@ -6611,11 +6611,43 @@ class SingleRequestMutationTests(unittest.TestCase):
     def test_a_stale_preview_refuses_and_nothing_changes(self):
         bridge = immediate_bridge(); request = self.parameter_request(bridge)
         parameter = bridge.mapper.song.tracks[0].devices[0].parameters[0]; parameter.value = 0.25
-        with self.assertRaisesRegex(ValueError, "^Live state changed since the preview$"): bridge._dispatch_with_holder("mutate", request, {})
+        with self.assertRaisesRegex(ValueError, "^Live state changed since the preview; nothing changed$"): bridge._dispatch_with_holder("mutate", request, {})
         self.assertEqual(parameter.value, 0.25); self.assertEqual((bridge._pending_mutations, bridge._executed_mutations), ({}, {}))
         # Without a digest, the operation's own fences decide (its revision and identities still match).
         parameter.value = 0.5
         self.assertEqual(bridge._dispatch_with_holder("mutate", {key: value for key, value in self.parameter_request(bridge, key="mutate-key-0002").items() if key != "stateDigest"}, {})["value"], 0.75)
+
+    def test_every_refusal_before_a_change_runs_says_nothing_changed(self):
+        """The host reports these as refused, not uncertain: its arguments, the ledger, the fences
+        (ownership, the preview's state), and a queue that never ran it."""
+        unrun = "; nothing changed$"
+        bridge = immediate_bridge(provenance="real-live"); mapper = bridge.mapper
+        def refused(pattern, request, holder=None):
+            with self.assertRaisesRegex(ValueError, pattern + ".*" + unrun): bridge._dispatch_with_holder("mutate", request, holder or {})
+        refused("read-only operations are invoked, not mutated", {"operation": "song.read", "transactionId": "transaction-read", "idempotencyKey": "read-key-0001", "args": {"setRef": "x"}})
+        refused("mutation transaction identity is required", {"operation": "track.rename", "idempotencyKey": "rename-key-0001", "args": {}})
+        # The ledger: a key spent on another change, a retired key.
+        request = self.parameter_request(bridge); parameter = mapper.song.tracks[0].devices[0].parameters[0]
+        self.assertEqual(bridge._dispatch_with_holder("mutate", request, {})["value"], 0.75)
+        refused("idempotency key conflicts with an executed mutation", {**request, "args": {**request["args"], "value": 0.25}})
+        bridge._dispatch_with_holder("retire", {"transactionId": "transaction-mutate", "deadlineMs": int(time.time() * 1000) + 5000}, {})
+        refused("mutation replay authority has been retired", request); self.assertEqual(parameter.value, 0.75)
+        # Ownership: another transaction's, a changed creation, a lower one before a higher one.
+        transaction = "transaction-owner"; made = [mapper.invoke("track.create", {"name": name, "kind": "midi", "index": index, "expectedStructureRevision": mapper._structure_revision()}, transaction) for index, name in ((1, "Owned A"), (2, "Owned B"))]
+        delete = lambda row, key, owner=transaction: {"operation": "track.delete", "transactionId": owner, "idempotencyKey": key, "ownershipToken": row["ownershipToken"], "args": {"ref": row["ref"], "expectedStructureRevision": mapper._structure_revision(), "expectedObjectIdentity": row["objectIdentity"]}}
+        refused("destructive cleanup lacks exact transaction-owned authority", delete(made[1], "delete-key-0001", "transaction-other"))
+        refused("transaction-owned structure cleanup must proceed from the highest positional authority", delete(made[0], "delete-key-0002"))
+        mapper.song.tracks[2].arrangement_clips = [FakeClip(4.0)]
+        refused("transaction-owned object changed after creation; cleanup refused", delete(made[1], "delete-key-0003"))
+        self.assertEqual([track.name for track in mapper.song.tracks], ["Drums", "Owned A", "Owned B"]); self.assertEqual(bridge._pending_mutations, {})
+        # A queue that refused it before Live's thread ran it (its deadline had passed).
+        queued = immediate_bridge(); queued.queue = remote_module._MainThreadQueue()
+        late = {**self.parameter_request(queued, key="late-key-0001"), "deadlineMs": int(time.time() * 1000) - 1}
+        with self.assertRaisesRegex(TimeoutError, "deadline expired" + unrun): queued._dispatch_with_holder("mutate", late, {})
+        self.assertEqual((queued.mapper.song.tracks[0].devices[0].parameters[0].value, queued._pending_mutations), (0.5, {}))
+        # And it says so on the wire, however long the reason.
+        self.assertTrue(remote_module._failure_summary(ValueError("x" * 300 + remote_module.UNRUN_SUFFIX)).endswith("; nothing changed"))
+        self.assertEqual(remote_module._failure_summary(ValueError("short" + remote_module.UNRUN_SUFFIX)), "request failed: short; nothing changed")
 
     def test_reads_and_owned_deletions_keep_their_rules(self):
         bridge = immediate_bridge(provenance="real-live")

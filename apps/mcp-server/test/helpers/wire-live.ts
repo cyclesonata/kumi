@@ -14,6 +14,8 @@ const CHALLENGE = "wire-connection-challenge-0123456789";
 const REGISTRY_PATHS = ["../../../../protocol/ableton-live-v1.operations.json", "../../../../../protocol/ableton-live-v1.operations.json"];
 const registry = JSON.parse(readFileSync(REGISTRY_PATHS.map((path) => fileURLToPath(new URL(path, import.meta.url))).find((path) => { try { readFileSync(path); return true; } catch { return false; } })!, "utf8")) as { operations: Array<{ id: string; method: string; result: { properties?: Record<string, unknown> } }> };
 const SNAPSHOT_KEYS = new Set(Object.keys(registry.operations.find((operation) => operation.id === "snapshot")!.result.properties ?? {}));
+/** What each operation's result may hold, where the registry closes it: the simulator's results carry more (whole rows). */
+const RESULT_KEYS = new Map(registry.operations.filter((operation) => (operation.result as { additionalProperties?: unknown }).additionalProperties === false && operation.result.properties).map((operation) => [operation.id, new Set(Object.keys(operation.result.properties!))]));
 const CREATIONS = new Set(["track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "session.capture-midi", "scene.capture", "locator.add"]);
 const WIRE_KINDS: Record<string, LiveDiscoveryKind> = { set: "set", track: "track", return_track: "return-track", main_track: "main-track", scene: "scene", clip_slot: "clip-slot", session_clip: "session-clip", arrangement_clip: "arrangement-clip", note: "note", locator: "locator", device: "device", parameter: "parameter", selection: "selection", routing_choice: "routing-choice" };
 
@@ -40,6 +42,8 @@ export interface WireLive {
   requests: WireRequest[];
   /** Pushes an event on every connection, as the Remote Script does for a subscription. */
   push(event: Omit<LiveEvent, "epoch" | "sequence">): void;
+  /** The next mutate of `operation` fails with `error`, as the Remote Script's refusal (nothing runs). */
+  refuseNext(operation: string, error: string): void;
   close(): Promise<void>;
 }
 
@@ -55,13 +59,16 @@ function stateDigest(simulator: DeterministicLiveSimulator, operation: string, a
 export async function serveSimulator(simulator = new DeterministicLiveSimulator(), extraOperations: readonly string[] = ["authority.digest", "subscribe"]): Promise<WireLive> {
   const requests: WireRequest[] = [];
   const executed = new Map<string, unknown>();
+  const refusals = new Map<string, string>();
   const sockets = new Set<Socket>();
   const sequences = new Map<Socket, number>();
   const operations = [...new Set([...(simulator.status().operations ?? []), ...extraOperations])];
   const status = () => ({ connected: true, adapter: "remote-script", epoch: 1, protocol: "ableton-live/v1", capabilities: liveCapabilitiesForOperations(operations), registryHash: LIVE_REGISTRY_HASH, operations, provenance: "fake-live" });
   const invoke = async (operation: string, args: Record<string, unknown>) => {
     if (operation === "authority.digest") return { stateDigest: stateDigest(simulator, String(args.operation), args.args as Record<string, unknown>), epoch: 1 };
-    const result = await simulator.invokeAsync({ operation, args } as LiveInvocation) as unknown;
+    let result = await simulator.invokeAsync({ operation, args } as LiveInvocation) as unknown;
+    const keys = RESULT_KEYS.get(operation);
+    if (keys && result && typeof result === "object" && !Array.isArray(result)) result = Object.fromEntries(Object.entries(result).filter(([key]) => keys.has(key)));
     if (!CREATIONS.has(operation) || !result || typeof result !== "object") return result;
     return operation === "session.capture-midi" ? result : { ...(result as Record<string, unknown>), ownershipToken: "o".repeat(48) };
   };
@@ -84,10 +91,11 @@ export async function serveSimulator(simulator = new DeterministicLiveSimulator(
     if (method === "mutate") {
       const key = `${String(request.transactionId)}\0${String(request.idempotencyKey)}`;
       if (executed.has(key)) return executed.get(key);
-      if (typeof request.stateDigest === "string" && request.stateDigest !== stateDigest(simulator, operation!, args)) throw new Error("request failed: Live state changed since the preview");
+      const refusal = refusals.get(operation!); if (refusal !== undefined) { refusals.delete(operation!); throw new Error(refusal); }
+      if (typeof request.stateDigest === "string" && request.stateDigest !== stateDigest(simulator, operation!, args)) throw new Error("request failed: Live state changed since the preview; nothing changed");
       const result = await invoke(operation!, args); executed.set(key, result); return result;
     }
-    if (method === "invoke") return await invoke(operation!, args);
+    if (method === "invoke") { const refusal = refusals.get(operation!); if (refusal !== undefined) { refusals.delete(operation!); throw new Error(refusal); } return await invoke(operation!, args); }
     throw new Error(`the wire fake doesn't answer ${method}`);
   };
   const server: Server = createServer((socket) => {
@@ -109,6 +117,7 @@ export async function serveSimulator(simulator = new DeterministicLiveSimulator(
   const address = server.address(); if (!address || typeof address === "string") throw new Error("the wire fake has no port");
   return {
     port: address.port, requests,
+    refuseNext: (operation, error) => { refusals.set(operation, error); },
     push: (event) => { for (const socket of sockets) { const sequence = (sequences.get(socket) ?? 0) + 1; sequences.set(socket, sequence); socket.write(answer("event", { event: { ...event, epoch: 1, sequence } })); } },
     close: () => new Promise<void>((resolve) => { for (const socket of sockets) socket.destroy(); server.close(() => resolve()); }),
   };

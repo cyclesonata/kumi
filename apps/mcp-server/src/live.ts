@@ -964,7 +964,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
         this.state.tracks.splice(index as number, 0, track);
         this.emit({ type: "object", ref: track.ref, payload: { operation, track } });
-        return { ...structuredClone(track), createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
+        return { ...structuredClone(track), index, createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
       }
       case "track.delete": {
         requireStructureRevision(); const trackRef = objectRef("ref");
