@@ -345,6 +345,8 @@ export type LiveViewScope = readonly number[] | "all";
  * UI thread; the page is what keeps Live responsive, not a bound on the Set. */
 export const WHOLE_SET_PAGE_TRACKS = 16;
 const MAX_REMEMBERED_OWNERS = 250_000;
+/** A read put together from pages: its rows, and the Arrangement's clips of the whole ones. */
+interface Assembly { tracks: Track[]; clips: Map<unknown, Record<string, unknown>>; held: Map<unknown, { clip: Clip; trackRef: LiveRef }> }
 
 /**
  * Reads of Live shaped to what an operation touches. A mutation's preview, apply, verification and undo
@@ -361,15 +363,25 @@ export class LiveViews {
 
   public constructor(private readonly adapter: () => AsyncLiveAdapter) {}
 
-  /** A view whole for `scope`'s tracks and light for the rest (`[]`: every track light); "all" reads the whole Set. */
+  /** A view whole for `scope`'s tracks and light for the rest (`[]`: every track light); "all" reads the whole Set.
+   * A focused track the Remote Script's read budget left light (its `window.focus` lists those that came whole)
+   * comes whole through a track window of its own, so a view holds what it was asked for. */
   public async view(context: LiveOperationContext | undefined, scope: LiveViewScope, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
     if (scope === "all") return this.wholeSet(context, parts);
     const focus = [...new Set(scope)].filter((index) => Number.isInteger(index) && index >= 0 && index <= MAX_SNAPSHOT_INDEX).sort((left, right) => left - right);
-    const wanted = parts ? [...new Set(parts)] : undefined;
+    const wanted = parts ? [...new Set(parts)] : undefined; const read = this.reader(context);
     // The focus also limits the Arrangement's clips to the focus tracks' (none, for a read of locators).
-    const snapshot = await this.adapter().snapshotAsync(context, wanted && !wanted.includes("tracks") && !wanted.includes("arrangement") ? { parts: wanted } : { focus, ...(wanted ? { parts: wanted } : {}) });
-    this.note(snapshot);
-    return snapshot;
+    if (wanted && !wanted.includes("tracks") && !wanted.includes("arrangement")) return read({ parts: wanted });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await read({ focus, ...(wanted ? { parts: wanted } : {}) });
+      const honoured = snapshot.window?.focus; const tracks = snapshot.tracks;
+      if (!honoured || !Array.isArray(tracks) || focus.every((index) => honoured.includes(index) || index >= tracks.length)) return snapshot;
+      const assembly = LiveViews.assembly(snapshot);
+      const filled = await this.fill(snapshot, assembly, focus, LiveViews.pageParts(wanted), read);
+      if (filled === undefined) continue;
+      return filled === true ? LiveViews.assembled(snapshot, assembly, wanted, focus) : filled;
+    }
+    throw new Error("the Set's tracks kept changing while they were read; read them again");
   }
 
   /** A view whole for the tracks holding `refs` (and the tracks at `indices`), light for the rest. References
@@ -395,43 +407,86 @@ export class LiveViews {
   }
 
   /** The whole Set, paged by tracks and assembled: the first page lists every track (whole for its own) with
-   * the rest of the Set, later pages add whole rows, and a Set whose tracks moved meanwhile is read again.
-   * Paging is used only as far as the Remote Script says (its `window`) it honoured it. */
+   * the rest of the Set, then track windows make the other rows whole, each starting where the last one's
+   * whole rows ended (a window holds as many as the Remote Script's read budget allows, one at least). A Set
+   * whose tracks moved meanwhile is read again. Paging is used only as far as the Remote Script says (its
+   * `window`) it honoured it. */
   public async wholeSet(context: LiveOperationContext | undefined, parts?: readonly LiveSnapshotPart[]): Promise<LiveSnapshot> {
-    const adapter = this.adapter(); const wanted = parts ? [...new Set(parts)] : undefined;
-    const read = async (request?: LiveSnapshotRequest): Promise<LiveSnapshot> => { const snapshot = await adapter.snapshotAsync(context, request); this.note(snapshot); return snapshot; };
+    const wanted = parts ? [...new Set(parts)] : undefined; const read = this.reader(context);
     if (wanted && !wanted.includes("tracks")) return read({ parts: wanted });
-    const pageParts = (wanted ?? LIVE_SNAPSHOT_PARTS).filter((part) => part === "tracks" || part === "arrangement");
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const first = await read({ focus: Array.from({ length: WHOLE_SET_PAGE_TRACKS }, (_, index) => index), ...(wanted ? { parts: wanted } : {}) });
-      // Without a window the answer is the whole Set (a Remote Script from before focus); a small Set fits one page.
+      // Without a window the answer is the whole Set (a Remote Script from before focus).
       if (!first.window?.focus || !Array.isArray(first.tracks)) return first;
-      if (first.tracks.every((track) => track.light !== true)) { const whole: LiveSnapshot = { ...first }; delete whole.window; return whole; }
-      const count = first.tracks.length;
-      const tracks = [...first.tracks]; const clips = new Map<unknown, Record<string, unknown>>(); const heldClips = new Map<unknown, { clip: Clip; trackRef: LiveRef }>();
-      const keep = (snapshot: LiveSnapshot): void => {
-        for (const clip of snapshot.arrangement?.clips ?? []) if (!clips.has(clip.ref)) clips.set(clip.ref, clip);
-        for (const item of snapshot.arrangementClips ?? []) if (!heldClips.has(item.clip.ref)) heldClips.set(item.clip.ref, item);
-      };
-      keep(first);
-      let consistent = first.trackCount === undefined || first.trackCount === count;
-      for (let from = WHOLE_SET_PAGE_TRACKS; consistent && from < count; from += WHOLE_SET_PAGE_TRACKS) {
-        const size = Math.min(WHOLE_SET_PAGE_TRACKS, count - from);
-        const page = await read({ tracks: { from, count: size }, parts: pageParts });
-        // A page answered without its window is the whole Set: nothing left to assemble.
-        if (!page.window) return page;
-        if (!page.window.tracks || !Array.isArray(page.tracks) || page.tracks.length !== size || (page.trackCount !== undefined && page.trackCount !== count) || page.sceneCount !== first.sceneCount || page.epoch !== first.epoch) { consistent = false; break; }
-        page.tracks.forEach((row, offset) => { const listed = tracks[from + offset]; if (!listed || row.light === true || listed.ref !== row.ref || listed.objectIdentity !== row.objectIdentity) consistent = false; else tracks[from + offset] = row; });
-        keep(page);
-      }
-      if (!consistent) continue;
-      const whole: LiveSnapshot = { ...first, tracks };
-      if (first.arrangement && typeof first.arrangement === "object" && (wanted === undefined || wanted.includes("arrangement"))) whole.arrangement = { ...first.arrangement, clips: [...clips.values()] };
-      if (first.arrangementClips) whole.arrangementClips = [...heldClips.values()];
-      delete whole.window;
-      return whole;
+      if (first.trackCount !== undefined && first.trackCount !== first.tracks.length) continue;
+      const assembly = LiveViews.assembly(first);
+      const filled = await this.fill(first, assembly, first.tracks.map((_, index) => index), LiveViews.pageParts(wanted), read);
+      if (filled === undefined) continue;
+      return filled === true ? LiveViews.assembled(first, assembly, wanted) : filled;
     }
     throw new Error("the Set's tracks kept changing while it was read; read it again");
+  }
+
+  /** Reads that remember what they saw (the track count, where references sit). */
+  private reader(context: LiveOperationContext | undefined): (request: LiveSnapshotRequest) => Promise<LiveSnapshot> {
+    const adapter = this.adapter();
+    return async (request) => { const snapshot = await adapter.snapshotAsync(context, request); this.note(snapshot); return snapshot; };
+  }
+
+  /** The parts a track window reads: the rows, and the Arrangement's clips on them. */
+  private static pageParts(wanted: readonly LiveSnapshotPart[] | undefined): LiveSnapshotPart[] {
+    return (wanted ?? LIVE_SNAPSHOT_PARTS).filter((part) => part === "tracks" || part === "arrangement");
+  }
+
+  private static assembly(first: LiveSnapshot): Assembly {
+    const assembly: Assembly = { tracks: [...(first.tracks ?? [])], clips: new Map(), held: new Map() };
+    LiveViews.keep(assembly, first);
+    return assembly;
+  }
+
+  private static keep(assembly: Assembly, snapshot: LiveSnapshot): void {
+    for (const clip of snapshot.arrangement?.clips ?? []) if (!assembly.clips.has(clip.ref)) assembly.clips.set(clip.ref, clip);
+    for (const item of snapshot.arrangementClips ?? []) if (!assembly.held.has(item.clip.ref)) assembly.held.set(item.clip.ref, item);
+  }
+
+  /** The assembled read: its rows, the Arrangement's clips of every whole row (in track order), and the window
+   * of a focused view (all its focus whole now) or none for the whole Set. */
+  private static assembled(first: LiveSnapshot, assembly: Assembly, wanted: readonly LiveSnapshotPart[] | undefined, focus?: readonly number[]): LiveSnapshot {
+    const whole: LiveSnapshot = { ...first, tracks: assembly.tracks };
+    const order = new Map(assembly.tracks.map((track, index) => [track.ref as unknown, index]));
+    const placed = <T>(rows: T[], trackOf: (row: T) => unknown): T[] => rows.map((row, index) => ({ row, index, track: order.get(trackOf(row)) ?? Number.MAX_SAFE_INTEGER })).sort((left, right) => left.track - right.track || left.index - right.index).map((entry) => entry.row);
+    if (first.arrangement && typeof first.arrangement === "object" && (wanted === undefined || wanted.includes("arrangement"))) whole.arrangement = { ...first.arrangement, clips: placed([...assembly.clips.values()], (clip) => clip.trackRef) };
+    if (first.arrangementClips) whole.arrangementClips = placed([...assembly.held.values()], (item) => item.trackRef);
+    if (focus && first.window) whole.window = { ...first.window, focus: [...focus] }; else delete whole.window;
+    return whole;
+  }
+
+  /**
+   * Makes whole, through track windows, the rows at `indices` that the assembly holds light. A window holds whole
+   * rows while the Remote Script's read budget lasts (its `window.tracks.count` says how many came, one at
+   * least), and the next starts where it ended. Undefined when a row came back as another track or the Set's
+   * counts moved (it changed meanwhile: read again); the answer itself when a window was answered with the
+   * whole Set.
+   */
+  private async fill(first: LiveSnapshot, assembly: Assembly, indices: readonly number[], parts: readonly LiveSnapshotPart[], read: (request: LiveSnapshotRequest) => Promise<LiveSnapshot>): Promise<true | undefined | LiveSnapshot> {
+    const pending = [...new Set(indices)].filter((index) => assembly.tracks[index]?.light === true).sort((left, right) => left - right);
+    for (let at = 0; at < pending.length;) {
+      const from = pending[at]!; let count = 1;
+      while (count < WHOLE_SET_PAGE_TRACKS && pending[at + count] === from + count) count += 1;
+      const page = await read({ tracks: { from, count }, parts: [...parts] });
+      // A window answered without its window is the whole Set: nothing left to assemble.
+      if (!page.window) return page;
+      const delivered = page.window.tracks?.count ?? 0;
+      if (page.window.tracks?.from !== from || !Array.isArray(page.tracks) || delivered < 1 || delivered > count || page.tracks.length !== delivered || page.epoch !== first.epoch || (first.trackCount !== undefined && page.trackCount !== first.trackCount) || page.sceneCount !== first.sceneCount) return undefined;
+      for (const [offset, row] of page.tracks.entries()) {
+        const listed = assembly.tracks[from + offset];
+        if (!listed || !row || row.light === true || listed.ref !== row.ref || listed.objectIdentity !== row.objectIdentity) return undefined;
+        assembly.tracks[from + offset] = row;
+      }
+      LiveViews.keep(assembly, page);
+      at += delivered;
+    }
+    return true;
   }
 
   /** Session playback alone (transport, fired and playing slots): what playback polls read. */
@@ -2353,6 +2408,19 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       value.tracks = value.tracks.map((track, position) => focus.has(offset + position) ? track : lightTrackRow(track, full.set.ref));
       whole = value.tracks.filter((track) => track.light !== true); window.focus = [...request.focus];
     }
+    // As the Remote Script's read budget: a read with arguments builds whole rows while it lasts (one at
+    // least); a window then ends at the last whole row, a focus goes on with light rows.
+    if (this.readBudgetRows !== undefined && Object.keys(request).length > 0 && (!request.parts || request.parts.includes("tracks"))) {
+      const offset = request.tracks?.from ?? 0; const rows: Track[] = []; let built = 0; let cut = false;
+      for (const track of value.tracks) {
+        if (track.light === true) { rows.push(track); continue; }
+        if (built >= Math.max(1, this.readBudgetRows)) { cut = true; if (!request.focus) break; rows.push(lightTrackRow(track, full.set.ref)); continue; }
+        built += 1; rows.push(track);
+      }
+      if (cut && !request.focus && request.tracks) window.tracks = { from: offset, count: rows.length };
+      if (cut && request.focus) window.focus = request.focus.filter((index) => rows[index - offset] !== undefined && rows[index - offset]!.light !== true);
+      value.tracks = rows; whole = rows.filter((track) => track.light !== true);
+    }
     if (request.tracks || request.focus) {
       const read = new Set(whole.map((track) => track.ref));
       value.arrangement = { ...value.arrangement, clips: (full.arrangement.clips ?? []).filter((clip) => read.has(clip.trackRef as LiveRef)) };
@@ -2370,6 +2438,10 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     if (Object.keys(request).length > 0) value.window = window;
     return checkSnapshotAnswer(value, request);
   }
+  /** How many whole track rows a read with arguments builds before its budget runs out, as the Remote Script's
+   * read budget cuts it (a window ends there, a focus goes on light); undefined: no budget. A snapshot without
+   * arguments is always whole. */
+  readBudgetRows: number | undefined;
   async discoverAsync(request: LiveDiscoveryRequest): Promise<LiveDiscoveryResult> {
     const rows = (request.kind === "set" ? [this.state.set] : request.kind === "track" ? this.state.tracks : request.kind === "scene" ? this.state.scenes : request.kind === "session-clip" ? this.state.tracks.flatMap((track) => track.clips) : request.kind === "arrangement-clip" ? (this.state.arrangementClips ?? []).filter((item) => request.parent === undefined || item.trackRef === request.parent).map((item) => ({ ref: item.clip.ref, objectIdentity: item.clip.objectIdentity, parentRef: item.trackRef, trackRef: item.trackRef, name: item.clip.name, kind: item.clip.kind, start: item.clip.start, length: item.clip.length, notes: item.clip.notes.length })) : request.kind === "locator" ? this.state.arrangement.locators : request.kind === "device" ? this.allDevices().map((device) => (device.chains?.length ? { ...device, chainList: device.chains.map((chain) => ({ ref: chain.ref, name: chain.name })) } : device)) : request.kind === "parameter" ? this.state.tracks.flatMap((track) => track.devices.flatMap((device) => device.parameters)) : request.kind === "session-playback" ? [this.state.playback] : []) as unknown as Record<string, unknown>[];
     return { epoch: this.epoch, items: structuredClone(rows.slice(0, request.limit ?? 50)), truncated: false, revision: `${this.epoch}:${request.kind}:${rows.length}`, kind: request.kind };
