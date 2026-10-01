@@ -2934,7 +2934,7 @@ class LiveObjectMapper:
         index = self._cursor_offset(cursor, bound) if cursor is not None else 0
         if not 0 <= index <= total: raise ValueError("invalid discovery cursor")
         # The budget is the page's items': building the owner's list (a clip's whole note vector, each page) isn't one.
-        if deadline is not None: deadline = _ReadBudget(self.read_budget_seconds)
+        if deadline is not None: deadline = self._read_budget()
         end = min(total, traversal_budget); page: list[dict[str, Any]] = []
         while index < end and len(page) < limit:
             if deadline is not None and not deadline.room(): break
