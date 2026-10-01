@@ -51,6 +51,9 @@ test("what changed while Kumi watched reads exactly, in the order a recipe would
   const rows = (ids: string[]) => ids.map((id) => ({ snapshotId: id, kind: "track", name: "Template", data: {} }));
   const crowd = describeWatch({ items: [{ kind: "track", type: "ambiguity", beforeSnapshotIds: many, afterSnapshotIds: many.slice(1) }] }, [{ records: rows(many) }], [{ records: rows(many.slice(1)) }]).changes;
   assert.deepEqual(crowd, [{ unclear: "track", before: ["Template ×200"], after: ["Template ×199"] }]);
+  const named = (ids: string[]) => ids.map((id) => ({ snapshotId: id, kind: "track", name: `Track ${id}`, data: {} }));
+  const varied = describeWatch({ items: [{ kind: "track", type: "ambiguity", beforeSnapshotIds: many.slice(0, 25), afterSnapshotIds: [] }] }, [{ records: named(many) }], [{ records: [] }]).changes;
+  assert.deepEqual((varied[0] as { before: string[] }).before.slice(-2), ["Track t19", "+5 more names"]);
 });
 
 test("look-alike tracks the bridge can't tell apart still read as a rename and an addition", () => {
