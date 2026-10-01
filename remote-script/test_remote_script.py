@@ -6141,6 +6141,37 @@ class RegistryLoadTests(unittest.TestCase):
             remote_module._REGISTRY_CACHE = saved
 
 
+class LingeringTickTests(_BridgeSocketFixture, unittest.TestCase):
+    """A change's steps (read, change, confirm) each wait for the answer before them. A tick that answered
+    someone waits a few milliseconds for the next step, so the steps don't each cost a display tick."""
+
+    def test_requests_sent_right_after_their_answers_are_served_in_the_same_tick(self):
+        client, channel = self.connect(); answered = []
+        def ask():
+            buffer = bytearray()
+            for sequence in (1, 2, 3):
+                client.sendall(self.frame(channel, sequence))
+                while b"\n" not in buffer:
+                    chunk = client.recv(1 << 20)
+                    if not chunk: return
+                    buffer.extend(chunk)
+                index = buffer.find(b"\n"); answered.append(json.loads(bytes(buffer[:index]))); del buffer[:index + 1]
+        asker = threading.Thread(target=ask); asker.start()
+        deadline = time.time() + 2
+        while not answered and time.time() < deadline: self.bridge.update_display(); time.sleep(0.001)
+        ticks_after_first = 0
+        while len(answered) < 3 and time.time() < deadline: self.bridge.update_display(); ticks_after_first += 1
+        asker.join(timeout=2)
+        self.assertEqual([item["id"] for item in answered], ["status-1", "status-2", "status-3"])
+        self.assertEqual(ticks_after_first, 0, "the two later steps were served in the tick that answered the first")
+
+    def test_a_tick_that_answered_no_one_doesnt_wait(self):
+        self.connect()
+        started = time.perf_counter()
+        for _ in range(20): self.bridge.update_display()
+        self.assertLess((time.perf_counter() - started) / 20, remote_module.PUMP_LINGER_SECONDS / 2)
+
+
 class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
     def test_a_big_frame_arriving_in_pieces_is_scanned_once_and_answered(self):
         client, channel = self.connect()

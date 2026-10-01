@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import select
 import base64
 import re
 import math
@@ -11978,6 +11979,10 @@ class _ReadBudget:
 MAX_BRIDGE_CONNECTIONS = 64
 MAX_FRAMES_PER_PUMP = 1024
 PUMP_BUDGET_SECONDS = 0.05
+# How long a tick waits for a client it just answered to ask again (the next step of a change: read,
+# change, confirm), within the tick's budget: on loopback it asks within a few milliseconds, and serving
+# it now saves a whole display tick (about 100 ms) a step.
+PUMP_LINGER_SECONDS = 0.012
 MAX_OUTBOUND_BYTES = 4 * MAX_WIRE_BYTES
 # How much one socket read takes, and one send hands the socket.
 RECEIVE_CHUNK_BYTES = 1 << 20
@@ -12112,8 +12117,13 @@ class AbletonMcpBridge:
             # so a client with slow reads queued can't hold the others past their deadlines.
             connections = list(self._connections); self._pump_turn += 1
             start = self._pump_turn % len(connections) if connections else 0
-            for connection in connections[start:] + connections[:start]:
-                self._service(connection, deadline)
+            served = sum(self._service(connection, deadline) for connection in connections[start:] + connections[:start])
+            while served and time.monotonic() < deadline:
+                waiting = [connection for connection in self._connections if not connection.closing]
+                if not waiting: break
+                try: readable = set(select.select([connection.socket for connection in waiting], [], [], min(PUMP_LINGER_SECONDS, max(0.0, deadline - time.monotonic())))[0])
+                except (OSError, ValueError): break
+                served = sum(self._service(connection, deadline) for connection in waiting if connection.socket in readable)
         finally:
             self.queue.inline_thread = None
 
@@ -12138,7 +12148,9 @@ class AbletonMcpBridge:
                 client.close(); continue
             self._connections.append(connection); self._clients.add(client)
 
-    def _service(self, connection: "_Connection", deadline: float) -> None:
+    def _service(self, connection: "_Connection", deadline: float) -> int:
+        """Read, answer and send what a connection has: how many requests it answered."""
+        frames = 0
         try:
             subscription = connection.holder.get("subscription")
             if subscription is not None:
@@ -12153,7 +12165,7 @@ class AbletonMcpBridge:
                 except (BlockingIOError, InterruptedError): break
                 if not chunk: connection.closing = True; break
                 inbound += chunk
-                if len(inbound) > MAX_WIRE_BYTES: self._close(connection); return
+                if len(inbound) > MAX_WIRE_BYTES: self._close(connection); return frames
                 # What's left waits in the socket for the next tick.
                 if time.monotonic() >= deadline: break
             # Frames are taken by offset, searching only bytes not searched before, and the buffer is
@@ -12181,10 +12193,11 @@ class AbletonMcpBridge:
             if connection.sent >= len(outbound): outbound.clear(); connection.sent = 0
             elif connection.sent > len(outbound) // 2: del outbound[:connection.sent]; connection.sent = 0
         except OSError:
-            self._close(connection); return
+            self._close(connection); return frames
         finished = connection.auth.invalid or not connection.has_complete_frame()
         if (connection.closing and finished and not connection.pending_outbound()) or connection.pending_outbound() > MAX_OUTBOUND_BYTES:
             self._close(connection)
+        return frames
 
     def _close(self, connection: "_Connection") -> None:
         if connection in self._connections: self._connections.remove(connection)
