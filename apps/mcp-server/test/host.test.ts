@@ -833,6 +833,10 @@ test("a paged semantic export reads the Set once: its later pages come from the 
   assert.equal(reads, 1, "one read of the Set for the whole export");
   assert.ok(pages.every((page) => page.artifact.id === pages[0].artifact.id));
   await exported(); assert.equal(reads, 2, "a new export reads the Set again");
+  // A continuation asked for under another profile isn't served from the kept export.
+  const first = await exported();
+  const other = await liveHost.handleAsync({ jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "live_project_snapshot_export", arguments: { profile: "local", limit: 3, cursor: first.page.nextCursor } } }) as any;
+  assert.equal(other.result.isError, true, "a strict export's cursor doesn't page a local one");
 });
 
 test("exports paged semantic snapshots and diffs complete bundles offline without authority", async () => {

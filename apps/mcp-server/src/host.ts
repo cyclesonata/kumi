@@ -2616,7 +2616,7 @@ export class McpHost {
       // Later pages come from the artifact the first page built: one read of the Set for the whole export
       // (a big Set's read takes many requests, each its own moment of Live's thread), and pages that agree.
       const kept = typeof params.cursor === "string" ? this.semanticExports.get(semanticCursorArtifactId(params.cursor) ?? "") : undefined;
-      if (kept && kept.epoch === status.epoch && Date.now() - kept.at < SEMANTIC_EXPORT_KEEP_MS) {
+      if (kept && kept.epoch === status.epoch && kept.artifact.policy.profile === (params.profile ?? "collaboration") && Date.now() - kept.at < SEMANTIC_EXPORT_KEEP_MS) {
         return this.successText(id, pageSemanticProjectSnapshot(kept.artifact, { ...(params.limit !== undefined ? { limit: params.limit as number } : {}), cursor: params.cursor as string }));
       }
       const snapshot = await this.wholeSetAsync(undefined);
