@@ -6,7 +6,7 @@ each Kumi release names the bridge it ships with.
 ## Unreleased
 
 Kumi does what you ask and finds a way when no tool fits; the bridge refuses only what Live can't
-do or what would act on the wrong thing. Ships with bridge 1.0.67.
+do or what would act on the wrong thing. Ships with bridge 1.0.68.
 
 ### Doing what's asked
 
@@ -24,8 +24,12 @@ do or what would act on the wrong thing. Ships with bridge 1.0.67.
   something to match.
 - Kumi runs on Node 25 and newer, not only 22 and 24. Notes past the 24 kept forget the oldest.
 
-### Bridge 1.0.67
+### Bridge 1.0.68
 
+- `run_python` runs Python inside Live for APIs the typed tools do not cover: eval returns an
+  expression; exec returns `result`. It captures stdout and error details, returns usable Live
+  object refs, and checks a timeout. Each run uses one Live undo step and clears cached Set reads;
+  scripts have no HISTORY entry. MCP clients can call `live_run_python`.
 - Refusals say why, with Live's own reason, instead of "requires fresh authoritative state".
 - Undo takes back the change on the same object however it changed since: a renamed track, a
   device with clips added, a knob or fader moved again.

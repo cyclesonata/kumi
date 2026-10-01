@@ -26,6 +26,7 @@ type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters,
   /** A big Set: this many more tracks, every fourth a group holding the three after it, each with four devices that discovery lists without a parent. */ bigSet?: number;
   /** Discovery ends every page after this many rows, with a cursor, whatever the limit (as the Remote Script ends a page when its time is up). */ pageSize?: number;
   /** The tools of bridge 1.0.58: explicit deletions, Live's undo steps, and Kumi's Live extension (offline render, Arrangement MIDI clips). */ fullControl?: boolean;
+  /** The JSON reply to Python execution inside Live (bridge 1.0.68). */ python?: (args: JsonObject) => JsonObject;
   /** What's selected in Live, as the focus feed reports it. */ onFocus?: (focus: LiveFocus | null) => void;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
   /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
@@ -72,7 +73,8 @@ export function bridge(options: Options = {}) {
     ...(options.transport ? ["live_transport_action_preview", "live_transport_action_apply", "live_recording_preview", "live_recording_apply", "live_session_emergency_stop", "live_routing_preview", "live_routing_apply"] : []),
     ...(options.fullControl ? ["live_clip_delete_preview", "live_clip_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_undo_step_begin", "live_undo_step_end", "live_render_offline",
       "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_subscribe",
-      "live_device_edit_preview", "live_device_edit_apply", "live_song_undo", "live_song_redo", "live_device_read"] : [])];
+      "live_device_edit_preview", "live_device_edit_apply", "live_song_undo", "live_song_redo", "live_device_read"] : []),
+    ...(options.python ? ["live_run_python"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
   const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
@@ -156,6 +158,7 @@ export function bridge(options: Options = {}) {
       }
       if (name === "live_subscribe") return wrap({ subscribed: true, types: args.types ?? [] });
       if (name === "live_song_undo" || name === "live_song_redo") return wrap({ done: true, canUndo: name === "live_song_redo", canRedo: name === "live_song_undo" });
+      if (name === "live_run_python" && options.python) return wrap(options.python(args));
       if (name === "live_device_read") return wrap({ names: ["Cutoff", "Resonance", "Drive"], total: 3 });
       if (name === "live_undo_step_begin") return wrap({ open: true, stepId: `undo-step-${transactions}`, expiresAt: now() + 600_000, closedPrevious: false });
       if (name === "live_undo_step_end") return wrap({ closed: true, stepId: args.stepId ?? null, reason: "ended" });

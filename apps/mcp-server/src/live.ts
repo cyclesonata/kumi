@@ -271,7 +271,7 @@ export const LIVE_OPERATIONS = [
   "track.set", "track.view.set", "transport.action", "transport.set", "groove.edit", "groove.read", "groove.set", "take-lane.create", "take-lane.rename", "take-lane.clip.create",
   "take-lane.audio-clip.create", "tuning.read", "tuning.set", "view.control", "view.set", "subscribe", "application.message", "automation.step.insert", "automation.value-at",
   "clip.time-convert", "data.get", "data.set", "device.action", "device.banks.read", "device.property.set", "fire-button.set", "note.delete-range", "note.select",
-  "plugin.parameter-names", "sample.set", "sample.slice", "track.action", "wavetable.modulation.set", "wavetable.set",
+  "plugin.parameter-names", "sample.set", "sample.slice", "track.action", "wavetable.modulation.set", "wavetable.set", "python.run",
 ] as const;
 export type LiveOperation = typeof LIVE_OPERATIONS[number];
 

@@ -12,9 +12,9 @@ const DEVICE_SETTINGS = Object.keys(DEVICE_PROPERTIES);
  * can never advertise a tool that dispatch would refuse, or vice versa.
  */
 
-export type ToolPolicyClass = "local" | "read" | "edit" | "performance" | "audio" | "filesystem" | "recording" | "realtime" | "capture";
+export type ToolPolicyClass = "local" | "read" | "edit" | "performance" | "audio" | "filesystem" | "recording" | "realtime" | "capture" | "python";
 
-export const TOOL_POLICY_CLASSES: readonly ToolPolicyClass[] = ["local", "read", "edit", "performance", "audio", "filesystem", "recording", "realtime", "capture"];
+export const TOOL_POLICY_CLASSES: readonly ToolPolicyClass[] = ["local", "read", "edit", "performance", "audio", "filesystem", "recording", "realtime", "capture", "python"];
 
 export type ToolPolicyProfile = "read-only" | "edit-no-audio" | "performance" | "full";
 
@@ -175,6 +175,7 @@ export const TOOL_AVAILABILITY_RULES: readonly AvailabilityRule[] = [
   { name: "live_device_read", prereq: { operationsAny: ["plugin.parameter-names", "device.banks.read"] } },
   { name: "live_clip_time_convert", prereq: { operationsAll: ["clip.time-convert"] } },
   { name: "live_message", prereq: { operationsAll: ["application.message"] } },
+  { name: "live_run_python", prereq: { operationsAll: ["python.run"] } },
   { name: "live_browser_preview", prereq: { operationsAll: ["browser.inspect", "browser.preview.start"] } },
   { name: "live_browser_preview_stop", prereq: { operationsAll: ["browser.preview.stop"] } },
   { prefix: "live_fire_button_", prereq: {operationsAll: ["snapshot", "fire-button.set"] } },
@@ -228,6 +229,7 @@ export const TOOL_POLICY_RULES: readonly PolicyRule[] = [
   { name: "live_device_read", policyClass: "read" },
   { name: "live_clip_time_convert", policyClass: "read" },
   { name: "live_message", policyClass: "performance" },
+  { name: "live_run_python", policyClass: "python" },
   { prefix: "live_browser_preview", policyClass: "performance" },
   { prefix: "live_fire_button_", policyClass: "performance" },
   { name: "live_session_emergency_stop", policyClass: "performance" },
@@ -968,6 +970,15 @@ const toolDescriptors = [
     description: "Show the producer a short message in Live: in passing in its status bar, or with modal: true in a dialog they close. Nothing in the Set changes.",
     inputSchema: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 1024 }, modal: { type: "boolean" } }, required: ["text"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "live_run_python",
+    description: "Run Python on Live's main thread. Use typed tools first, then this for APIs they don't cover; explore with dir(). mode eval returns an expression's value; exec (default) returns whatever the statements assign to result. Names: Live, song, app, obj (the optional ref's Live object), bridge. Returns JSON {ok, result, stdout, error}; error holds type, message and traceback. Live objects become {ref, type, name}, tuples and sets become lists. One step in Live's undo unless one is already open; scripts have no transaction undo. timeoutMs defaults to 5000 (1–30000); the deadline interrupts Python bytecode, and checks native calls when they return.",
+    inputSchema: { type: "object", properties: {
+      code: { type: "string", minLength: 1, maxLength: 65536 }, mode: { type: "string", enum: ["eval", "exec"] },
+      ref: { type: "string", minLength: 1, maxLength: 256 }, timeoutMs: { type: "integer", minimum: 1, maximum: 30000 },
+    }, required: ["code"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
   {
     name: "live_browser_preview",

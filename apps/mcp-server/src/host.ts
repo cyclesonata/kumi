@@ -302,7 +302,7 @@ const DEVICE_EDIT_KEPT: Readonly<Record<string, string>> = {
 type DeletionKind = "clip" | "scene" | "track" | "locator";
 const DELETION_KINDS: ReadonlySet<string> = new Set(["device-delete", "clip-delete", "scene-delete", "track-delete", "locator-delete", "clip-clear-range"]);
 /** Tools only the asynchronous request path runs (the synchronous one refuses them): the newer ones. */
-const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo", "live_clip_delete_preview", "live_clip_delete_apply", "live_scene_delete_preview", "live_scene_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_locator_delete_preview", "live_locator_delete_apply", "live_render_offline", "live_project_import", "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_device_duplicate_preview", "live_device_duplicate_apply", "live_data_read", "live_data_preview", "live_data_apply", "live_automation_read", "live_device_read", "live_clip_time_convert", "live_message", "live_browser_preview", "live_browser_preview_stop", "live_fire_button_preview", "live_fire_button_apply", "live_device_edit_preview", "live_device_edit_apply"]);
+const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo", "live_clip_delete_preview", "live_clip_delete_apply", "live_scene_delete_preview", "live_scene_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_locator_delete_preview", "live_locator_delete_apply", "live_render_offline", "live_project_import", "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_device_duplicate_preview", "live_device_duplicate_apply", "live_data_read", "live_data_preview", "live_data_apply", "live_automation_read", "live_device_read", "live_clip_time_convert", "live_message", "live_run_python", "live_browser_preview", "live_browser_preview_stop", "live_fire_button_preview", "live_fire_button_apply", "live_device_edit_preview", "live_device_edit_apply"]);
 /** live_change's fused changes, by idempotency key, so a retried call reconciles its change instead of making another. */
 const MAX_FUSED_CHANGES = 4096;
 /**
@@ -959,6 +959,7 @@ export class McpHost {
       if (name === "live_device_read") return await this.liveDeviceReadAsync(id, toolArguments);
       if (name === "live_clip_time_convert") return await this.liveClipTimeConvertAsync(id, toolArguments);
       if (name === "live_message") return await this.liveMessageAsync(id, toolArguments);
+      if (name === "live_run_python") return await this.liveRunPythonAsync(id, toolArguments, signal);
       if (name === "live_browser_preview") return await this.liveBrowserPreviewAsync(id, toolArguments);
       if (name === "live_browser_preview_stop") return await this.liveBrowserPreviewStopAsync(id, toolArguments);
       if (name === "live_fire_button_preview") return await this.liveFireButtonPreviewAsync(id, toolArguments);
@@ -6132,6 +6133,22 @@ export class McpHost {
       const time = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
       return this.successText(id, { clipRef: params.clipRef, beats: time(result.beats), samples: time(result.samples), seconds: time(result.seconds) });
     } catch (cause) { return this.adapterToolError(id, cause, "Discover the clip again and convert from a fresh reference."); }
+  }
+
+  private async liveRunPythonAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["code", "mode", "ref", "timeoutMs"]) || !isNonEmptyString(params.code, 65536)
+      || (params.mode !== undefined && params.mode !== "eval" && params.mode !== "exec")
+      || (params.ref !== undefined && !isNonEmptyString(params.ref, 256))
+      || (params.timeoutMs !== undefined && !isIntegerInRange(params.timeoutMs, 1, 30000))) return error(id, -32602, "code is required; mode is eval or exec, ref is optional, timeoutMs is 1–30000");
+    try {
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+      if (!(status.operations ?? []).includes("python.run")) throw new Error("Python execution is unavailable on this Live shape");
+      const timeoutMs = params.timeoutMs ?? 5000;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "python.run", args: {
+        code: params.code, mode: params.mode ?? "exec", timeoutMs, ...(params.ref !== undefined ? { ref: params.ref } : {}),
+      } }, { signal, deadlineMs: this.deadline(Math.max(AUDITION_DEADLINE_MS, Number(timeoutMs) + 5000)) });
+      return this.successText(id, result);
+    } catch (cause) { return this.adapterToolError(id, cause, "Read the Set again before continuing; a dispatched script may have changed it."); }
   }
 
   /** A message from Kumi in Live: in passing in its status bar, or modal, in a dialog the producer closes. */

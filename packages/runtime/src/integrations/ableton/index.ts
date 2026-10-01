@@ -18,7 +18,7 @@ import { deviceTool } from "../../devices/tool.js";
 import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { bars, setMeter } from "./more-changes.js";
-import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
 import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, RENDER_DESCRIPTION, RENDER_SCHEMA, RENDER_TOOL, renderSpan, restoreStore, silentRender } from "./audition.js";
 import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
 import { summary as heardSummary } from "../../audio/tools.js";
@@ -32,8 +32,9 @@ import { KUMI } from "../../command.js";
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
 /** A verified copy of the Set as last saved, kept before big plans. */
 const BACKUP_TOOLS = ["live_project_backup_preview", "live_project_backup_apply"];
+const PYTHON_TOOLS = ["live_run_python"];
 /** Every bridge tool Kumi may call: the model's reads, and those behind Kumi's own tools. */
-export const BRIDGE_TOOLS: readonly string[] = [...new Set([...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS])];
+export const BRIDGE_TOOLS: readonly string[] = [...new Set([...MODEL_TOOLS, ...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS, ...PYTHON_TOOLS])];
 /** Keys whose values are Live references: ref, parent, trackRef, parentRef, selectedTrackRef… */
 const REF_KEY = /^(?:ref|parent)$|Refs?$/;
 /** Live's references: an epoch, a kind and a path ("1232800184424618:track:4"). */
@@ -248,7 +249,7 @@ export function createAbletonIntegration(options: Options): Integration {
   /** Use this bridge connection from now on: its tools, its disconnect signal and the focus feed. */
   function attach(connected: McpEndpoint) {
     endpoint = connected;
-    tools = new AllowedTools(connected, new Set([...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS]));
+    tools = new AllowedTools(connected, new Set([...HOST_TOOLS, ...PROJECT_TOOLS, ...BACKUP_TOOLS, ...PYTHON_TOOLS]));
     // A changed catalog is read again on next use (AllowedTools listens for it); only losing the bridge ends access.
     unlisten.push(connected.onDisconnect(loseAccess));
     focusFeed?.stop();
@@ -2274,7 +2275,40 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         try { options.onAction?.({ title: done.done === true ? (redo ? "Redid in Live" : "Undid in Live") : redo ? "Nothing to redo in Live" : "Nothing to undo in Live" }); } catch { /* a listener failure must not affect Live */ }
         return { text: JSON.stringify(done), isError: false };
       } }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo];
+    const python: KernelTool[] = supported({ since: PYTHON_BRIDGE }) && tools!.has("live_run_python") ? [{ name: "run_python",
+      description: "Run Python inside Live for anything your typed tools don't cover; use those first. Explore Live's API with dir(). mode eval returns an expression; exec (default) returns whatever you assign to result. Names: Live, song, app, obj (optional ref), bridge. Returns JSON {ok, result, stdout, error}, with Live objects as usable {ref, type, name} and errors as type, message and traceback. Each run is one step in Live's undo; undo_in_live takes it back. No HISTORY entry or undo_change. Set reads and old references are discarded after every run, including failures. timeoutMs defaults to 5000 (1–30000), checked by Python tracing; native calls finish before the deadline can be checked.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        code: { type: "string", minLength: 1, maxLength: 65536 }, mode: { type: "string", enum: ["eval", "exec"] },
+        ref: { type: "string", minLength: 1, maxLength: 256 }, timeoutMs: { type: "integer", minimum: 1, maximum: 30000 },
+      }, required: ["code"] },
+      execute: async (input, signal) => {
+        const args = lengthen(input) as JsonObject;
+        try { requireFreshReferences(args); } catch (error) { return { text: error instanceof Error ? error.message : "Use a current Live reference", isError: true }; }
+        let result: CallToolResult;
+        try {
+          result = await tools!.call("live_run_python", args, AbortSignal.any([signal, lifetime.signal]), { host: true });
+        } finally {
+          // A script can move or change anything, even before failing. Retire reads and short names.
+          refs.clear(); known.clear(); cursors.clear(); shortRefs.clear(); longRefs.clear(); observationGeneration++;
+        }
+        if (result.isError) return { text: resultText(result), isError: true };
+        const done = payload(result);
+        const register = (value: unknown): void => {
+          if (Array.isArray(value)) { for (const item of value) register(item); }
+          else if (value && typeof value === "object") {
+            const row = value as JsonObject;
+            if (typeof row.ref === "string" && LIVE_REF.test(row.ref) && row.ref.length <= 256 && typeof row.type === "string") {
+              const kind = /^\d+:([a-z_]+):/.exec(row.ref)![1]!;
+              refs.set(row.ref, kind === "clip" ? "session-clip" : kind.replace(/_/g, "-"));
+              if (kind === "track" && typeof row.name === "string") known.set(row.ref, { name: row.name.slice(0, 256) });
+            }
+            for (const child of Object.values(row)) register(child);
+          }
+        };
+        register(done.result);
+        return { text: JSON.stringify(shorten(done)), isError: done.ok !== true };
+      } }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python];
   }
   return {
     async start(signal) {

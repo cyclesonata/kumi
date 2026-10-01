@@ -639,7 +639,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "ac87e255f7396663f66d11965f42df57ddde755c6872e7370ed14f9eded87909")
+        self.assertEqual(digest, "265d7d77208a58a88ffbebc0054c16e53c3d9ee6c29cf616027402b64c40593d")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -6741,6 +6741,141 @@ class FakeUndoSong(FakeSong):
     def end_undo_step(self): self.calls.append("end")
     def undo(self): self.calls.append("undo"); self.can_redo = True
     def redo(self): self.calls.append("redo"); self.can_redo = False
+
+
+class PythonRunTests(unittest.TestCase):
+    def setUp(self):
+        self.song = FakeUndoSong()
+        self.song.tempo = 120
+        self.song.tracks[0].clip_slots[0].create_clip(4)
+        self.mapper = LiveObjectMapper(self.song)
+        self.application = types.SimpleNamespace(marker="app")
+        self.live = types.SimpleNamespace(
+            marker="Live", Application=types.SimpleNamespace(get_application=lambda: self.application),
+            Track=types.SimpleNamespace(Track=FakeTrack), Scene=types.SimpleNamespace(Scene=FakeScene),
+            ClipSlot=types.SimpleNamespace(ClipSlot=FakeSlot), Clip=types.SimpleNamespace(Clip=FakeClip),
+            Device=types.SimpleNamespace(Device=FakeDevice), DeviceParameter=types.SimpleNamespace(DeviceParameter=FakeParameter),
+        )
+        self.live_patch = patch.dict(sys.modules, {"Live": self.live})
+        self.live_patch.start()
+        self.addCleanup(self.live_patch.stop)
+
+    def run_python(self, code, **args):
+        request = {"code": code, **args}
+        validate_operation_payload("python.run", "request", request)
+        result = self.mapper.invoke("python.run", request)
+        validate_operation_payload("python.run", "result", result)
+        json.dumps(result, allow_nan=False)
+        return result
+
+    def test_eval_has_the_live_namespace_and_json_values(self):
+        result = self.run_python("(Live.marker, song.tempo, app.marker, obj is None, bridge.song is song)", mode="eval")
+        self.assertEqual(result, {"ok": True, "result": ["Live", 120, "app", True, True], "stdout": "", "error": None})
+        self.assertEqual(self.song.calls, ["begin", "end"])
+        self.assertTrue(self.mapper._operation_supported("python.run"))
+        self.assertFalse(LiveObjectMapper(FakeSong())._operation_supported("python.run"))
+        with patch.dict(sys.modules, {"Live": None}): self.assertFalse(self.mapper._operation_supported("python.run"))
+
+    def test_exec_captures_stdout_returns_result_and_mutates_without_rollback(self):
+        result = self.run_python("print('renaming')\nsong.tracks[0].name = 'Python Bass'\nresult = {'name': song.tracks[0].name, 'tuple': (1, 2), 'set': {3}, 'frozen': frozenset([4])}")
+        self.assertEqual(result, {"ok": True, "result": {"name": "Python Bass", "tuple": [1, 2], "set": [3], "frozen": [4]}, "stdout": "renaming\n", "error": None})
+        self.assertEqual(self.song.tracks[0].name, "Python Bass")
+        self.assertIsNone(self.run_python("print('no result')")["result"])
+        # Exec globals and locals are shared, including functions defined by the script.
+        self.assertEqual(self.run_python("x = 3\ndef answer(): return x + song.tempo\nresult = answer()")["result"], 123)
+
+    def test_live_objects_return_refs_consumed_by_the_typed_mapper(self):
+        result = self.run_python("(song, song.tracks[0], song.scenes[0], song.tracks[0].devices[0], song.tracks[0].devices[0].parameters[0], song.tracks[0].clip_slots[0], song.tracks[0].clip_slots[0].clip)", mode="eval")
+        self.assertTrue(result["ok"], result)
+        objects = [self.song, self.song.tracks[0], self.song.scenes[0], self.song.tracks[0].devices[0], self.song.tracks[0].devices[0].parameters[0], self.song.tracks[0].clip_slots[0], self.song.tracks[0].clip_slots[0].clip]
+        for row, obj, kind in zip(result["result"], objects, ["set", "track", "scene", "device", "parameter", "clip_slot", "clip"]):
+            self.assertEqual(set(row), {"ref", "type", "name"})
+            self.assertIn(f":{kind}:", row["ref"])
+            self.assertIs(self.mapper.refs.get(row["ref"]), obj)
+            if kind != "clip_slot": self.assertEqual(self.mapper.get(row["ref"])["ref"], row["ref"])
+        reference = result["result"][1]["ref"]
+        self.assertEqual(self.run_python("obj.name", mode="eval", ref=reference)["result"], "Drums")
+        # A script can shift the positions registered by earlier discovery.
+        shifted = self.run_python("song.create_midi_track(0)\nresult = song.tracks")
+        self.assertTrue(shifted["ok"], shifted)
+        self.assertEqual([row["ref"] for row in shifted["result"]], [f"{self.mapper.refs.epoch}:track:0", f"{self.mapper.refs.epoch}:track:1"])
+        self.assertEqual(self.mapper.get(shifted["result"][1]["ref"])["name"], "Drums")
+
+    def test_exceptions_and_exit_are_data_and_restore_stdout_trace_and_undo(self):
+        previous_stdout, previous_trace = sys.stdout, sys.gettrace()
+        for expression, name, message in [("raise ValueError('broken')", "ValueError", "broken"), ("raise SystemExit(9)", "SystemExit", "9"), ("raise KeyboardInterrupt('stop')", "KeyboardInterrupt", "stop"), ("raise GeneratorExit('exit')", "GeneratorExit", "exit")]:
+            with self.subTest(name=name):
+                result = self.run_python("song.tempo = 126\nprint('before failure')\n" + expression)
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["result"])
+                self.assertEqual(result["stdout"], "before failure\n")
+                self.assertEqual((result["error"]["type"], result["error"]["message"]), (name, message))
+                self.assertIn("<python.run>", result["error"]["traceback"])
+                self.assertEqual(self.song.tempo, 126, "failed scripts keep the changes they made")
+                self.assertEqual(self.song.calls[-2:], ["begin", "end"])
+                self.assertIs(sys.stdout, previous_stdout)
+                self.assertIs(sys.gettrace(), previous_trace)
+                self.assertIsNone(self.mapper._undo_step)
+        syntax = self.run_python("result =")
+        self.assertEqual(syntax["error"]["type"], "SyntaxError")
+
+    def test_timeout_interrupts_a_loop_and_cleans_up(self):
+        started = time.perf_counter()
+        result = self.run_python("print('started')\nwhile True: pass", timeoutMs=10)
+        self.assertLess(time.perf_counter() - started, 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "TimeoutError")
+        self.assertIn("10 ms", result["error"]["message"])
+        self.assertEqual(result["stdout"], "started\n")
+        self.assertEqual(self.song.calls, ["begin", "end"])
+        self.assertIsNone(self.mapper._undo_step)
+        self.assertEqual(self.run_python("2 + 2", mode="eval")["result"], 4)
+
+    def test_an_open_undo_step_is_kept_and_a_previous_trace_restored(self):
+        step = self.mapper.invoke("undo.step.begin", {"label": "Plan"})
+        previous = sys.gettrace()
+        def prior_trace(frame, event, arg): return prior_trace
+        try:
+            sys.settrace(prior_trace)
+            self.assertTrue(self.run_python("result = 1")["ok"])
+            self.assertIs(sys.gettrace(), prior_trace)
+            self.assertFalse(self.run_python("raise SystemExit()", timeoutMs=10)["ok"])
+            self.assertIs(sys.gettrace(), prior_trace)
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(self.song.calls, ["begin"])
+        self.assertEqual(self.mapper._undo_step["stepId"], step["stepId"])
+        self.mapper.invoke("undo.step.end", {"stepId": step["stepId"]})
+        self.assertEqual(self.song.calls, ["begin", "end"])
+
+    def test_non_json_results_and_unprintable_exceptions_are_data(self):
+        for code in ["float('nan')", "float('inf')", "2 ** 100", "object()"]:
+            with self.subTest(code=code): self.assertFalse(self.run_python(code, mode="eval")["ok"])
+        self.assertFalse(self.run_python("result = []; result.append(result)")["ok"])
+        bad_error = self.run_python("class BadError(BaseException):\n def __str__(self): raise SystemExit()\nraise BadError()")
+        self.assertEqual(bad_error["error"]["type"], "BadError")
+        self.assertEqual(bad_error["error"]["message"], "Error message unavailable")
+
+    def test_authenticated_invoke_needs_no_authority_and_runs_on_the_live_queue(self):
+        self.assertIn("python.run", remote_module._AUTHORITY_FREE_INVOKES)
+        self.assertNotIn("python.run", remote_module._READ_ONLY_INVOKES)
+        bridge = immediate_bridge(self.song)
+        bridge.queue = _MainThreadQueue()
+        remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
+        unsigned = remote.bound({"version": PROTOCOL, "id": "python", "method": "invoke", "operation": "python.run", "args": {"code": "import threading\nprint(threading.get_ident())\nraise SystemExit('exit')"}, "nonce": "python-nonce-0001", "sequence": 1})
+        replies = []
+        worker = threading.Thread(target=lambda: replies.append(remote.dispatch({**unsigned, "mac": remote.sign(unsigned)})))
+        worker.start()
+        deadline = time.perf_counter() + 1
+        while bridge.queue.items.empty() and time.perf_counter() < deadline: time.sleep(0.001)
+        self.assertEqual(bridge.queue.drain(), 1)
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(replies[0]["ok"], replies)
+        result = replies[0]["result"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "SystemExit")
+        self.assertEqual(result["stdout"], str(threading.get_ident()) + "\n")
 
 
 class LiveUndoTests(unittest.TestCase):
