@@ -226,6 +226,17 @@ export function checkSnapshotAnswer(answer: LiveSnapshot, request: LiveSnapshotR
 }
 
 /** A track as a focused read lists it outside its focus: who it is, none of what it holds. */
+/**
+ * Whether a track plays audio or MIDI. The Remote Script's rows say what a track is (`kind`: regular, group,
+ * return, main) apart from what it plays (`mediaKind`: audio, midi); older simulated rows said the second as
+ * `kind`. Undefined for a track that plays neither (a group).
+ */
+export function trackMedia(track: Pick<Track, "kind"> & { mediaKind?: unknown }): "audio" | "midi" | undefined {
+  if (track.kind === "group") return undefined;
+  if (track.mediaKind === "audio" || track.mediaKind === "midi") return track.mediaKind;
+  return track.kind === "audio" || track.kind === "midi" ? track.kind : undefined;
+}
+
 export function lightTrackRow(track: Track, setRef?: LiveRef): Track {
   return { ref: track.ref, parentRef: track.parentRef ?? setRef, objectIdentity: track.objectIdentity, name: track.name, kind: track.kind, mediaKind: track.mediaKind ?? (track.kind === "midi" ? "midi" : "audio"), light: true, armed: track.armed ?? null, colorIndex: track.colorIndex ?? null, groupTrackRef: track.groupTrackRef ?? null, clips: [], clipSlots: [], devices: [], takeLanes: [], mixer: null, routing: null } as unknown as Track;
 }
@@ -563,7 +574,7 @@ const clipRevision = (row: unknown): string => simulatorRevision(withoutPlayback
 function createSimulatorState(): LiveSnapshot {
   const initialNotes: Note[] = [{ pitch: 36, start: 0, duration: 0.25, velocity: 110, channel: 1, id: 1, mute: false, probability: 1, velocityDeviation: 0, releaseVelocity: 64 }];
   const kick: Clip = { ref: ref("clip", "clip-1"), objectIdentity: "simulator:clip:clip-1", name: "Kick Pattern", kind: "midi", start: 0, length: 4, notes: initialNotes, notesRevision: simulatorRevision(initialNotes), warp: false, takes: ["take-1"], automation: [], muted: false, colorIndex: 0, looping: true, loopStart: 0, loopEnd: 4, launchMode: 0, launchQuantization: 4, legato: false, velocityAmount: 0, clipView: { gridQuantization: 1, gridIsTriplet: false } };
-  const track: Track = { ref: ref("track", "track-1"), objectIdentity: "simulator:track:track-1", name: "Drums", kind: "midi", volume: 0.85, pan: 0, mute: false, solo: false, armed: false, monitoringState: "off", playingSlotIndex: null, firedSlotIndex: null, clips: [kick], clipSlots: [{ ref: ref("clip-slot", "track-1:0"), parentRef: ref("track", "track-1"), objectIdentity: "simulator:clip-slot:track-1:0", sceneIndex: 0, clipRef: kick.ref, empty: false, colorIndex: 2, controlsOtherClips: false, hasStopButton: true, isGroupSlot: false, playingStatus: 0, willRecordOnStart: false, fireButtonState: false }], mixer: { volume: 0.85, pan: 0, cueVolume: 1, mute: false, solo: false, sends: [0.5, 0.25], volumeRef: ref("parameter", "mixer:0:volume"), volumeIdentity: "simulator:parameter:mixer:0:volume", panRef: ref("parameter", "mixer:0:panning"), panIdentity: "simulator:parameter:mixer:0:panning", cueRef: ref("parameter", "mixer:0:cue_volume"), cueIdentity: "simulator:parameter:mixer:0:cue_volume", sendRefs: [ref("parameter", "mixer:0:sends:0"), ref("parameter", "mixer:0:sends:1")], sendIdentities: ["simulator:parameter:mixer:0:sends:0", "simulator:parameter:mixer:0:sends:1"], mixerIdentity: "simulator:mixer:track-1", trackActivatorRef: ref("parameter", "mixer:0:activator"), crossfaderRef: ref("parameter", "mixer:0:crossfader"), crossfadeAssign: 1, panningMode: 0, panningLeftRef: ref("parameter", "mixer:0:panning_left"), panningRightRef: ref("parameter", "mixer:0:panning_right"), trackActivator: true, crossfader: 0, panningLeft: 0, panningRight: 0 }, routing: { inputType: "Ext. In", inputSubRouting: "1", outputType: "Main", outputSubRouting: "1/2", availableInputTypes: 2, availableInputChannels: 16, availableOutputTypes: 3, availableOutputChannels: 4 }, devices: [], sends: [0, 0], groupTrackRef: null, isVisible: true, isSelected: true, isFrozen: false, foldState: null, implicitArm: false, backToArranger: false, mutedViaSolo: false, colorIndex: 4, color: 0xFF0000, inputMeterLeft: 0.5, inputMeterRight: 0.4, inputMeterLevel: 0.45, outputMeterLeft: 0.6, outputMeterRight: 0.55, outputMeterLevel: 0.58, performanceImpact: 1, view: { selectedDeviceRef: ref("device", "utility-1"), deviceInsertMode: 1, isCollapsed: false }, takeLanes: [{ ref: ref("take-lane", "track-1:0"), objectIdentity: "simulator:take-lane:track-1:0", parentRef: ref("track", "track-1"), trackRef: ref("track", "track-1"), name: "Take 1", index: 0, clips: [] }] };
+  const track: Track = { ref: ref("track", "track-1"), objectIdentity: "simulator:track:track-1", name: "Drums", kind: "regular", mediaKind: "midi", volume: 0.85, pan: 0, mute: false, solo: false, armed: false, monitoringState: "off", playingSlotIndex: null, firedSlotIndex: null, clips: [kick], clipSlots: [{ ref: ref("clip-slot", "track-1:0"), parentRef: ref("track", "track-1"), objectIdentity: "simulator:clip-slot:track-1:0", sceneIndex: 0, clipRef: kick.ref, empty: false, colorIndex: 2, controlsOtherClips: false, hasStopButton: true, isGroupSlot: false, playingStatus: 0, willRecordOnStart: false, fireButtonState: false }], mixer: { volume: 0.85, pan: 0, cueVolume: 1, mute: false, solo: false, sends: [0.5, 0.25], volumeRef: ref("parameter", "mixer:0:volume"), volumeIdentity: "simulator:parameter:mixer:0:volume", panRef: ref("parameter", "mixer:0:panning"), panIdentity: "simulator:parameter:mixer:0:panning", cueRef: ref("parameter", "mixer:0:cue_volume"), cueIdentity: "simulator:parameter:mixer:0:cue_volume", sendRefs: [ref("parameter", "mixer:0:sends:0"), ref("parameter", "mixer:0:sends:1")], sendIdentities: ["simulator:parameter:mixer:0:sends:0", "simulator:parameter:mixer:0:sends:1"], mixerIdentity: "simulator:mixer:track-1", trackActivatorRef: ref("parameter", "mixer:0:activator"), crossfaderRef: ref("parameter", "mixer:0:crossfader"), crossfadeAssign: 1, panningMode: 0, panningLeftRef: ref("parameter", "mixer:0:panning_left"), panningRightRef: ref("parameter", "mixer:0:panning_right"), trackActivator: true, crossfader: 0, panningLeft: 0, panningRight: 0 }, routing: { inputType: "Ext. In", inputSubRouting: "1", outputType: "Main", outputSubRouting: "1/2", availableInputTypes: 2, availableInputChannels: 16, availableOutputTypes: 3, availableOutputChannels: 4 }, devices: [], sends: [0, 0], groupTrackRef: null, isVisible: true, isSelected: true, isFrozen: false, foldState: null, implicitArm: false, backToArranger: false, mutedViaSolo: false, colorIndex: 4, color: 0xFF0000, inputMeterLeft: 0.5, inputMeterRight: 0.4, inputMeterLevel: 0.45, outputMeterLeft: 0.6, outputMeterRight: 0.55, outputMeterLevel: 0.58, performanceImpact: 1, view: { selectedDeviceRef: ref("device", "utility-1"), deviceInsertMode: 1, isCollapsed: false }, takeLanes: [{ ref: ref("take-lane", "track-1:0"), objectIdentity: "simulator:take-lane:track-1:0", parentRef: ref("track", "track-1"), trackRef: ref("track", "track-1"), name: "Take 1", index: 0, clips: [] }] };
   const gain: Parameter = { ref: ref("parameter", "gain-1"), objectIdentity: "simulator:parameter:gain-1", name: "Gain", value: 0.5, min: 0, max: 1, automatable: true, quantization: 0, enabled: true, displayValue: "0.5", revision: 1, defaultValue: 0.75, originalName: "Gain (dB)", state: 1, valueItems: ["Off", "On"] };
   const device: Device = { ref: ref("device", "utility-1"), parentRef: track.ref, name: "Utility", kind: "audio-effect", parameters: [gain], objectIdentity: "simulator:device:utility-1", enabled: true, view: { isCollapsed: false }, latencySamples: 256, latencyMs: 5.8, parameterBank: 1, comparison: { capability: true, activeSide: 0 } };
   track.devices.push(device);
@@ -961,10 +972,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         const index = args.index === undefined ? this.state.tracks.length : args.index;
         if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > this.state.tracks.length) throw new RangeError("track index is invalid");
         if (this.state.tracks.some((track) => track.name === name)) throw new Error("track name already exists");
-        const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
+        const track: Track = { ref: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:track:${this.state.tracks.length + this.sequence + 1}`, name, kind: "regular", mediaKind: kind, volume: 0.85, pan: 0, mute: false, solo: false, armed: false, clips: [], clipSlots: this.state.scenes.map((scene) => ({ ref: ref("clip-slot", `${this.state.tracks.length + this.sequence + 1}:${scene.index}`), parentRef: ref("track", `track-${this.state.tracks.length + this.sequence + 1}`), objectIdentity: `simulator:clip-slot:${this.state.tracks.length + this.sequence + 1}:${scene.index}`, sceneIndex: scene.index, clipRef: null, empty: true })), devices: [], sends: [0, 0] };
         this.state.tracks.splice(index as number, 0, track);
         this.emit({ type: "object", ref: track.ref, payload: { operation, track } });
-        return { ...structuredClone(track), index, createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
+        // As the Remote Script answers a creation: the track's media as its kind (its row says regular).
+        return { ...structuredClone(track), kind, index, createdFingerprint: this.structureCreatedFingerprint("track", track.ref) };
       }
       case "track.delete": {
         requireStructureRevision(); const trackRef = objectRef("ref");
@@ -2893,7 +2905,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
     switch (operation) {
       case "render.offline": {
         const target = track();
-        if (target.kind !== "audio") throw new Error(`track "${target.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
+        if (trackMedia(target) !== "audio") throw new Error(`track "${target.name}" isn't an audio track: offline renders are of an audio track's own clips, before its devices`);
         const from = number("fromBeat"); const to = number("toBeat");
         if (!(to > from)) throw new Error("the range to render is empty");
         const seconds = ((to - from) * 60) / (this.state.set.tempo ?? 120);
@@ -2902,7 +2914,7 @@ export class DeterministicLiveSimulator implements LiveAdapter {
       }
       case "arrangement.midi-clip.create": {
         const target = track();
-        if (target.kind !== "midi") throw new Error(`track "${target.name}" isn't a MIDI track`);
+        if (trackMedia(target) !== "midi") throw new Error(`track "${target.name}" isn't a MIDI track`);
         if (args.takeLaneRef !== undefined) throw new Error("the simulator makes Arrangement clips on a track's own lane");
         const start = number("start"); const length = number("length");
         if (!Array.isArray(args.notes)) throw new TypeError("notes must be a list");

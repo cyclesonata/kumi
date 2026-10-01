@@ -9,7 +9,7 @@ import type { PcmAnalysis } from "./analysis.js";
 import type { ConventionalChannelLabel } from "./audio-standards.js";
 import { captureMediaIsAbsent, decodeOwnedWaveFile, unlinkLateCaptureCompanions, unlinkOwnedCaptureFile, type DecodedCaptureFile } from "./audio-file.js";
 import { diagnoseAudioWithLiveContext, type AudioDiagnosis } from "./audio-diagnosis.js";
-import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
+import { DEVICE_PROPERTIES, LIVE_CAPABILITIES, LIVE_PROTOCOL_VERSION, trackMedia, LIVE_REGISTRY_OPERATIONS, LIVE_UNAVAILABLE_CAPABILITIES, LiveMutationNotDispatchedError, LiveViews, REMOTE_SCRIPT_EVENT_TYPES, SAMPLE_FIELDS, WAVETABLE_FIELDS, UnavailableLiveAdapter, withoutPlaybackState, type LiveAdapter, type LiveCapability, type LiveEvent, type LiveInvocation, type LiveOperationContext, type LiveRef, type LiveSnapshot, type LiveSnapshotPart, type LiveStatus, type LiveViewScope, type SessionPlaybackState, type Track, type TakeLane, ownedDeviceFingerprintRow, ownedTrackFingerprintRow } from "./live.js";
 import { serveStdio, type RecordContext } from "./stdio.js";
 import { projectBackup, projectInfo, projectLimitation } from "./project.js";
 import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMANTIC_PROJECT_MAX_RECORDS, assembleSemanticProjectPages, createSemanticProjectSnapshot, pageSemanticProjectSnapshot, type SemanticPrivacyProfile, type SemanticProjectArtifact, type SemanticProjectPage } from "./project-semantic.js";
@@ -5714,7 +5714,8 @@ export class McpHost {
     const track = snapshot.tracks.find((candidate) => candidate.ref === trackRef);
     if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
     if (track.kind === "group") throw new Error(`track "${track.name}" is a group: ${what} its tracks instead`);
-    if (track.kind !== kind) throw new Error(`track "${track.name}" isn't ${kind === "audio" ? "an audio" : "a MIDI"} track`);
+    // The Remote Script's rows say regular, return or main as `kind`, and audio or MIDI as `mediaKind`.
+    if (track.kind === "return" || track.kind === "main" || trackMedia(track) !== kind) throw new Error(`track "${track.name}" isn't ${kind === "audio" ? "an audio" : "a MIDI"} track`);
     return track;
   }
 
@@ -5857,7 +5858,7 @@ export class McpHost {
       const snapshot = await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.trackRef]);
       const track = snapshot.tracks.find((candidate) => candidate.ref === params.trackRef);
       if (!track || !isNonEmptyString(track.objectIdentity, 256)) throw new Error("track reference is not authoritative");
-      if (track.kind !== "audio" && track.kind !== "midi") throw new Error(`track "${track.name}" has no Arrangement clips of its own`);
+      if (track.kind === "return" || track.kind === "main" || trackMedia(track) === undefined) throw new Error(`track "${track.name}" has no Arrangement clips of its own`);
       const row = (clip: JsonObject) => ({ ref: clip.ref, name: clip.name ?? null, start: clip.start, end: (clip.start as number) + (clip.length as number) });
       const overlapping = this.arrangementClipsOf(snapshot, params.trackRef as LiveRef).filter((clip) => (clip.start as number) < to && (clip.start as number) + (clip.length as number) > from);
       if (!overlapping.length) throw new Error(`track "${track.name}" has no Arrangement clips between beat ${from} and ${to}`);

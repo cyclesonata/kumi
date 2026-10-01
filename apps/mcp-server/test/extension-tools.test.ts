@@ -133,7 +133,7 @@ test("the extension's tools appear while it's connected, and a render goes to it
   // The LOM side: the fake extension's Set (Keys, Drums, Vox), with positional references.
   const simulator = new DeterministicLiveSimulator();
   const state = stateOf(simulator); const base = state.tracks[0]!;
-  state.tracks = [["Keys", "midi"], ["Drums", "midi"], ["Vox", "audio"]].map(([name, kind], index) => ({ ...structuredClone(base), ref: `3:track:${index}`, objectIdentity: `live:track:${index}`, name, kind, clips: [], clipSlots: [], devices: [] }));
+  state.tracks = [["Keys", "midi"], ["Drums", "midi"], ["Vox", "audio"]].map(([name, kind], index) => ({ ...structuredClone(base), ref: `3:track:${index}`, objectIdentity: `live:track:${index}`, name, kind: "regular", mediaKind: kind, clips: [], clipSlots: [], devices: [] }));
   const lom = Object.create(simulator) as DeterministicLiveSimulator;
   lom.status = () => { const status = simulator.status(); return { ...status, operations: (status.operations ?? []).filter((operation) => !(EXTENSION_OPERATIONS as readonly string[]).includes(operation)) }; };
   const channel = new ExtensionChannel({ storageDirectory: storage });
