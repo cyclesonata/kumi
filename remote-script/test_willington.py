@@ -99,6 +99,73 @@ class WillingtonTests(unittest.TestCase):
             self.mapper._follow_action_set(self.args(followActionA=7, followActionLoopCount=2))
         self.assertEqual(self.mapper._follow_action_fields(self.clip), prior)
 
+class ZoneTests(unittest.TestCase):
+    def setUp(self):
+        DeviceTests.setUp(self)
+        import json
+        self.rack.class_name = 'InstrumentGroupDevice'
+        self.chain = self.rack.chains[0]
+        self.zone = {'minimum':12, 'maximum':104, 'fadeMinimum':24, 'fadeMaximum':88,
+                     'lowerBound':0, 'upperBound':127}
+        self.chain.get_zone = lambda kind: json.dumps(self.zone)
+        def write(kind, minimum, maximum, fade_minimum, fade_maximum):
+            self.zone.update(minimum=minimum, maximum=maximum,
+                             fadeMinimum=fade_minimum, fadeMaximum=fade_maximum)
+        self.chain.set_zone = write
+        self.mapper.willington_zone_writes = True
+        self.row = self.mapper.snapshot()['tracks'][0]['devices'][0]
+        self.selector = {'ref':self.row['ref'], 'kind':'selector-zone',
+                         'targetRef':self.row['chains'][0]['ref']}
+
+    def test_zone_complete_state_and_restore(self):
+        before = self.mapper.invoke('willington.device.read', self.selector)
+        next_state = {'minimum':16, 'maximum':40, 'fadeMinimum':20, 'fadeMaximum':36}
+        args = {**self.selector, 'next':next_state, 'expectedStateRevision':before['stateRevision']}
+        validate_operation_payload('willington.device.set', 'request', args)
+        after = self.mapper.invoke('willington.device.set', args)
+        validate_operation_payload('willington.device.set', 'result', after)
+        self.assertEqual({key:after['state'][key] for key in next_state}, next_state)
+        restored = self.mapper.invoke('willington.device.set', {**self.selector,
+            'next':{key:before['state'][key] for key in next_state},
+            'expectedStateRevision':after['stateRevision']})
+        self.assertEqual(restored['stateRevision'], before['stateRevision'])
+
+    def test_zone_refuses_stale_detached_disabled_and_bad_endpoints(self):
+        before = self.mapper.invoke('willington.device.read', self.selector)
+        args = {**self.selector, 'next':{'minimum':16,'maximum':40,'fadeMinimum':20,'fadeMaximum':36},
+                'expectedStateRevision':before['stateRevision']}
+        self.zone['fadeMaximum'] = 86
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            self.mapper.invoke('willington.device.set', args)
+        self.mapper.willington_zone_writes = False
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            self.mapper.invoke('willington.device.read', self.selector)
+        self.mapper.willington_zone_writes = True
+        current = self.mapper.invoke('willington.device.read', self.selector)
+        for value in (True, 20.5, -1, 50):
+            bad = {**args, 'expectedStateRevision':current['stateRevision'],
+                   'next':{**args['next'],'fadeMinimum':value}}
+            with self.assertRaises(ValueError): self.mapper.invoke('willington.device.set', bad)
+        self.rack.chains = []
+        with self.assertRaisesRegex(ValueError, 'no longer'):
+            self.mapper.invoke('willington.device.read', self.selector)
+
+    def test_zone_partial_failure_restores_four_endpoints(self):
+        before = dict(self.zone); write = self.chain.set_zone; fail = [True]
+        def partial(kind, *values):
+            if fail[0]:
+                fail[0] = False
+                self.zone['minimum'] = values[0]
+                raise RuntimeError('injected zone failure')
+            write(kind, *values)
+        self.chain.set_zone = partial
+        current = self.mapper.invoke('willington.device.read', self.selector)
+        with self.assertRaisesRegex(RuntimeError, 'injected'):
+            self.mapper.invoke('willington.device.set', {**self.selector,
+                'next':{'minimum':16,'maximum':40,'fadeMinimum':20,'fadeMaximum':36},
+                'expectedStateRevision':current['stateRevision']})
+        self.assertEqual(self.zone, before)
+
 class DeviceTests(unittest.TestCase):
     def setUp(self):
         import json

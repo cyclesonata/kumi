@@ -1,5 +1,20 @@
 # AbletonMcpBridge Remote Script
 
+The optional Willington rack-zone adapter adds `selector-zone`, `key-zone`, and
+`velocity-zone` to `live_willington_device_preview`. Use `ref` for the rack and
+`targetRef` for a regular chain. Preview captures all four integer endpoints;
+apply and history undo fence rack/chain identity and the complete zone state.
+Audio Effect Racks support selector zones; Instrument and MIDI Effect Racks
+also support key and velocity zones. Drum/return chains are rejected. Playback
+must be stopped. Moving boundaries may require specifying both fade endpoints
+to maintain `minimum <= fadeMinimum <= fadeMaximum <= maximum`.
+
+Install the exact-build `WillingtonRackZones` Remote Script package alongside
+the existing adapters, then add the optional `"rackZones": true` field to the
+owner-only `willington.json`. The existing `enableWrites` flag controls writes.
+The adapter is experimental on Live 12.4.15b5 ARM64; other builds are refused.
+See `docs/evidence/rack-zones-b5.json` for the tested scope and remaining limits.
+
 This directory contains a dependency-light Control Surface package and its
 transport implementation. Live loads `AbletonMcpBridge/__init__.py` and calls
 `create_instance(c_instance)`. The entrypoint reads an explicit owner-only

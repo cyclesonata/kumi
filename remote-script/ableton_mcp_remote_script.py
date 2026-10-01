@@ -1366,7 +1366,7 @@ class LiveObjectMapper:
         if operation == "ownership.settle":
             return self._operation_supported("browser.load")
         if operation in {"willington.device.read", "willington.device.set"}:
-            return getattr(self, "willington_device_writes", False) is True
+            return getattr(self, "willington_device_writes", False) is True or getattr(self, "willington_zone_writes", False) is True
         if operation == "rack.set":
             if self._probe_classes("rack"): return self._offers("rack", "visible_macro_count", method=False)
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for device in self._shape_probe()["rack"])
@@ -8250,7 +8250,34 @@ class LiveObjectMapper:
                 raise ValueError(f"drum pad {index + 1} of {len(pads)}: {str(error)[:200]}") from error
         return {"pads": loaded}
 
+    def _willington_zone_state(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not getattr(self, "willington_zone_writes", False): raise ValueError("Willington rack zones are unavailable")
+        if set(args) != {"ref", "kind", "targetRef"}: raise ValueError("invalid zone selector fields")
+        reference, target_ref = args["ref"], args["targetRef"]
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:") or not isinstance(target_ref, str) or not target_ref.startswith(f"{self.refs.epoch}:chain:"):
+            raise ValueError("invalid rack or chain reference")
+        registered = self.refs.get(reference); identity = self._capture_object_identity(registered)
+        found = self._device_on_path(reference)
+        if found is None or not self._capture_same_object(found[0], registered, identity): raise ValueError("zone rack identity changed")
+        rack = found[0]; rack_class = self._read_attr(rack, "class_name")
+        if rack_class not in {"AudioEffectGroupDevice", "InstrumentGroupDevice", "MidiEffectGroupDevice"}: raise ValueError("unsupported zone rack")
+        chain = self.refs.get(target_ref); chain_identity = self._capture_object_identity(chain)
+        if not any(self._capture_same_object(item, chain, chain_identity) for item in self._items(self._read_attr(rack, "chains") or [])):
+            raise ValueError("zone chain is no longer in this rack")
+        if not callable(getattr(chain, "get_zone", None)) or not callable(getattr(chain, "set_zone", None)): raise ValueError("zone bindings are unavailable")
+        kind = args["kind"].removesuffix("-zone")
+        zone = json.loads(chain.get_zone(kind))
+        fields = {"minimum", "maximum", "fadeMinimum", "fadeMaximum", "lowerBound", "upperBound"}
+        if not isinstance(zone, dict) or set(zone) != fields or any(type(value) is not int for value in zone.values()): raise ValueError("invalid native zone readback")
+        lower = 1 if kind == "velocity" else 0
+        if zone["lowerBound"] != lower or zone["upperBound"] != 127 or not lower <= zone["minimum"] <= zone["fadeMinimum"] <= zone["fadeMaximum"] <= zone["maximum"] <= 127:
+            raise ValueError("invalid native zone bounds")
+        state = {**zone, "deviceIdentity": identity, "targetIdentity": chain_identity, "rackClass": rack_class}
+        revision = hashlib.sha256(self._bounded_canonical(state).encode()).hexdigest()
+        return {"state": state, "stateRevision": revision}
+
     def _willington_device_state(self, args: dict[str, Any]) -> dict[str, Any]:
+        if args.get("kind") in {"selector-zone", "key-zone", "velocity-zone"}: return self._willington_zone_state(args)
         if not getattr(self, "willington_device_writes", False): raise ValueError("Willington device extensions are unavailable")
         kind = args.get("kind"); reference = args.get("ref")
         if kind not in {"macro-name", "macro-mapping", "variation-name"} or not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:"):
@@ -8311,7 +8338,16 @@ class LiveObjectMapper:
         state = before["state"]; desired = args["next"]
         if not isinstance(desired, dict): raise ValueError("invalid desired state")
         device = self.refs.get(args["ref"]); kind = args["kind"]
-        if kind in {"macro-name", "variation-name"}:
+        if kind in {"selector-zone", "key-zone", "velocity-zone"}:
+            fields = ("minimum", "maximum", "fadeMinimum", "fadeMaximum")
+            if set(desired) != set(fields) or any(type(value) is not int for value in desired.values()): raise ValueError("zone endpoints must be integers")
+            if not state["lowerBound"] <= desired["minimum"] <= desired["fadeMinimum"] <= desired["fadeMaximum"] <= desired["maximum"] <= state["upperBound"]:
+                raise ValueError("zone endpoints must be ordered and in bounds")
+            chain = self.refs.get(args["targetRef"])
+            def write(value): chain.set_zone(kind.removesuffix("-zone"), *[value[key] for key in fields])
+            restore = {key: state[key] for key in fields}
+            def confirmed(after): return all(after[key] == desired[key] for key in fields)
+        elif kind in {"macro-name", "variation-name"}:
             if set(desired) != {"name"} or not isinstance(desired["name"], str) or not 1 <= len(desired["name"]) <= 256 or "\0" in desired["name"]: raise ValueError("invalid name")
             def write(value):
                 if kind == "macro-name": device.rename_macro(args["macroIndex"], value["name"])

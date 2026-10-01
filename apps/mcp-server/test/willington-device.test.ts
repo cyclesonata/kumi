@@ -25,6 +25,44 @@ function fixture(adapter = new DeviceSimulator()) {
   const call = async(name:string,args:object) => { const reply = await host.handleAsync({jsonrpc:'2.0',id:id++,method:'tools/call',params:{name,arguments:args}}) as any; if(reply.error || reply.result?.isError) throw new Error(JSON.stringify(reply)); return JSON.parse(reply.result.content[0].text); };
   return {adapter,call,host};
 }
+class ZoneSimulator extends DeviceSimulator {
+  zone = {minimum:12, maximum:104, fadeMinimum:24, fadeMaximum:88};
+  override invoke(invocation: LiveInvocation): unknown {
+    const args = invocation.args as any;
+    if (!String(args.kind).endsWith('-zone')) return super.invoke(invocation);
+    const read = () => { const state = {...this.zone, lowerBound:args.kind==='velocity-zone'?1:0,
+      upperBound:127, deviceIdentity:'rack', targetIdentity:'chain', rackClass:'InstrumentGroupDevice'};
+      return {state,stateRevision:createHash('sha256').update(JSON.stringify(state)).digest('hex')}; };
+    if (invocation.operation==='willington.device.read') return read();
+    assert.equal(args.expectedStateRevision,read().stateRevision);
+    this.zone={...args.next};
+    return {changed:true,revision:1,...read()};
+  }
+}
+for (const kind of ['selector-zone','key-zone','velocity-zone']) {
+  test(`Willington ${kind} captures coupled fades and restores history`,async()=>{
+    const adapter=new ZoneSimulator();const {call}=fixture(adapter);const prior={...adapter.zone};
+    const preview=await call('live_willington_device_preview',{ref:'rack',targetRef:'chain',kind,
+      minimum:16,maximum:40,fadeMinimum:20,fadeMaximum:36});
+    assert.equal(preview.prior.fadeMaximum,88);
+    const apply={transactionId:preview.transactionId,confirmation:'apply',idempotencyKey:'zone-apply-1'};
+    await call('live_willington_device_apply',apply);
+    assert.deepEqual(adapter.zone,{minimum:16,maximum:40,fadeMinimum:20,fadeMaximum:36});
+    assert.equal((await call('live_willington_device_apply',apply)).idempotent,true);
+    await call('live_undo',{transactionId:preview.transactionId,confirmation:'undo',idempotencyKey:'zone-undo-1'});
+    assert.deepEqual(adapter.zone,prior);
+  });
+}
+test('zone preview rejects no-op, crossing fades and noninteger values; apply fences all fades',async()=>{
+  const adapter=new ZoneSimulator();const {call}=fixture(adapter);
+  const selector={ref:'rack',targetRef:'chain',kind:'key-zone'};
+  await assert.rejects(call('live_willington_device_preview',{...selector,minimum:12}),/not change/);
+  await assert.rejects(call('live_willington_device_preview',{...selector,minimum:50}),/ordered/);
+  await assert.rejects(call('live_willington_device_preview',{...selector,fadeMinimum:25.5}),/integers/);
+  const preview=await call('live_willington_device_preview',{...selector,fadeMinimum:25});
+  adapter.zone.fadeMaximum=86;
+  await assert.rejects(call('live_willington_device_apply',{transactionId:preview.transactionId,confirmation:'apply',idempotencyKey:'zone-stale-apply'}),/changed/);
+});
 for (const edit of [{kind:'macro-name',macroIndex:0,name:'New macro'},{kind:'variation-name',name:'New variation'},{kind:'macro-mapping',targetRef:'target',mappingIndex:0,minimum:0.75,maximum:0.25,mappingKind:'continuous'}]) {
   test(`Willington ${edit.kind} preview/apply/history undo`,async()=>{
     const {adapter,call}=fixture(); const original=JSON.stringify([adapter.names,adapter.mapping]);

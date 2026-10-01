@@ -17132,7 +17132,10 @@ var ableton_live_v1_operations_default = {
             enum: [
               "macro-name",
               "macro-mapping",
-              "variation-name"
+              "variation-name",
+              "selector-zone",
+              "key-zone",
+              "velocity-zone"
             ]
           },
           macroIndex: {
@@ -17198,7 +17201,10 @@ var ableton_live_v1_operations_default = {
             enum: [
               "macro-name",
               "macro-mapping",
-              "variation-name"
+              "variation-name",
+              "selector-zone",
+              "key-zone",
+              "velocity-zone"
             ]
           },
           macroIndex: {
@@ -17260,6 +17266,26 @@ var ableton_live_v1_operations_default = {
               },
               parameterValue: {
                 type: "number"
+              },
+              minimum: {
+                type: "integer",
+                minimum: 0,
+                maximum: 127
+              },
+              maximum: {
+                type: "integer",
+                minimum: 0,
+                maximum: 127
+              },
+              fadeMinimum: {
+                type: "integer",
+                minimum: 0,
+                maximum: 127
+              },
+              fadeMaximum: {
+                type: "integer",
+                minimum: 0,
+                maximum: 127
               }
             },
             additionalProperties: false

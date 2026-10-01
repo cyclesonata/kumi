@@ -292,16 +292,19 @@ class _WillingtonProvider:
         self.mapper = mapper
         self.follow = None
         self.devices = None
+        self.zones = None
         self.live = None
         self.mapper.willington_follow_writes = False
         self.mapper.willington_device_writes = False
+        self.mapper.willington_zone_writes = False
         path = Path(__file__).with_name("willington.json")
         if not path.exists(): return
         try:
             if path.is_symlink() or not path.is_file() or not _owner_controlled(path) or not _mode_owner_only(path) or path.stat().st_size > 4096:
                 raise ValueError("unsafe extension configuration")
             config = json.loads(path.read_text())
-            if not isinstance(config, dict) or set(config) != {"version", "followActions", "deviceTools", "enableWrites"} or type(config["version"]) is not int or config["version"] != 1 or any(type(config[key]) is not bool for key in ("followActions", "deviceTools", "enableWrites")):
+            required = {"version", "followActions", "deviceTools", "enableWrites"}
+            if not isinstance(config, dict) or not required <= set(config) <= required | {"rackZones"} or type(config["version"]) is not int or config["version"] != 1 or any(type(config[key]) is not bool for key in ("followActions", "deviceTools", "enableWrites")) or type(config.get("rackZones", False)) is not bool:
                 raise ValueError("invalid extension configuration")
             import Live
             if getattr(Live, "_kumi_willington_owner", None) is not None:
@@ -310,6 +313,9 @@ class _WillingtonProvider:
                 raise ValueError("standalone Follow Action surface already installed; restart required")
             if any(any(getattr(cls, name, None) is method for cls, name, method in getattr(item, "patches", ())) for item in getattr(Live, "_willington_device_libraries", ())):
                 raise ValueError("standalone device surface already installed")
+            chain_class = getattr(getattr(Live, "Chain", None), "Chain", None)
+            if callable(getattr(chain_class, "get_zone", None)) or callable(getattr(chain_class, "set_zone", None)):
+                raise ValueError("rack zone bindings already installed")
             self.live = Live
             Live._kumi_willington_owner = self
             if config["followActions"]:
@@ -326,6 +332,9 @@ class _WillingtonProvider:
             if config["deviceTools"]:
                 from WillingtonDeviceTools.api import install
                 self.devices = install()
+            if config.get("rackZones", False):
+                from WillingtonRackZones.api import install
+                self.zones = install()
             if config["enableWrites"]:
                 # Follow bindings require evidence for this exact compiled library,
                 # matching the standalone adapter's operator enablement contract.
@@ -342,6 +351,9 @@ class _WillingtonProvider:
                 if self.devices is not None:
                     self.devices.enable(True)
                     self.mapper.willington_device_writes = True
+                if self.zones is not None:
+                    self.zones.enable(True)
+                    self.mapper.willington_zone_writes = True
             if callable(log): log("Willington extensions initialized; writes " + ("enabled" if config["enableWrites"] else "disabled"))
         except Exception:
             try: self.close()
@@ -351,15 +363,19 @@ class _WillingtonProvider:
     def close(self):
         self.mapper.willington_follow_writes = False
         self.mapper.willington_device_writes = False
+        self.mapper.willington_zone_writes = False
         try:
             if self.follow is not None: self.follow.willington_enable_writes(False)
         finally:
             try:
                 if self.devices is not None: self.devices.uninstall()
             finally:
-                if self.live is not None and getattr(self.live, "_kumi_willington_owner", None) is self:
-                    self.live._kumi_willington_owner = None
-                self.follow = self.devices = None
+                try:
+                    if self.zones is not None: self.zones.uninstall()
+                finally:
+                    if self.live is not None and getattr(self.live, "_kumi_willington_owner", None) is self:
+                        self.live._kumi_willington_owner = None
+                    self.follow = self.devices = self.zones = None
 
 
 class AbletonMcpBridge(_ControlSurface):

@@ -4213,17 +4213,27 @@ export class McpHost {
   }
 
   private async liveWillingtonPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
-    if (!isObject(params) || !hasOnly(params, ["ref", "kind", "macroIndex", "targetRef", "name", "mappingIndex", "minimum", "maximum", "mappingKind"]) || !isNonEmptyString(params.ref, 256) || !["macro-name", "macro-mapping", "variation-name"].includes(String(params.kind))) return error(id, -32602, "an exact Willington target and kind are required");
+    if (!isObject(params) || !hasOnly(params, ["ref", "kind", "macroIndex", "targetRef", "name", "mappingIndex", "minimum", "maximum", "mappingKind", "fadeMinimum", "fadeMaximum"]) || !isNonEmptyString(params.ref, 256) || !["macro-name", "macro-mapping", "variation-name", "selector-zone", "key-zone", "velocity-zone"].includes(String(params.kind))) return error(id, -32602, "an exact Willington target and kind are required");
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !status.operations?.includes("willington.device.read") || !status.operations?.includes("willington.device.set")) throw new Error("Willington device editing is unavailable");
-      const allowed = params.kind === "macro-name" ? ["ref", "kind", "macroIndex", "name"] : params.kind === "variation-name" ? ["ref", "kind", "name"] : ["ref", "kind", "targetRef", "mappingIndex", "minimum", "maximum", "mappingKind"];
+      const zoneEdit = ["selector-zone", "key-zone", "velocity-zone"].includes(String(params.kind));
+      const allowed = zoneEdit ? ["ref", "kind", "targetRef", "minimum", "maximum", "fadeMinimum", "fadeMaximum"] : params.kind === "macro-name" ? ["ref", "kind", "macroIndex", "name"] : params.kind === "variation-name" ? ["ref", "kind", "name"] : ["ref", "kind", "targetRef", "mappingIndex", "minimum", "maximum", "mappingKind"];
       if (!hasOnly(params, allowed)) throw new Error("Fields do not match the requested edit kind");
       if ((await this.playbackAsync()).transport.playing !== false) throw new Error("Willington edits require stopped playback");
       const selector = Object.fromEntries(["ref", "kind", "macroIndex", "targetRef"].filter(key => params[key] !== undefined).map(key => [key, params[key]]));
       const read = await this.asyncAdapter().invokeAsync({ operation: "willington.device.read", args: selector }) as { state: Record<string, unknown>; stateRevision: string };
       let next: Record<string, unknown>;
-      if (params.kind !== "macro-mapping") {
+      if (zoneEdit) {
+        if (!isNonEmptyString(params.targetRef, 256)) throw new Error("a chain targetRef is required");
+        const fields = ["minimum", "maximum", "fadeMinimum", "fadeMaximum"];
+        next = Object.fromEntries(fields.map(key => [key, params[key] !== undefined ? params[key] : read.state[key]]));
+        if (!fields.some(key => params[key] !== undefined)) throw new Error("at least one zone endpoint is required");
+        if (!fields.every(key => typeof next[key] === "number" && Number.isInteger(next[key]))) throw new Error("zone endpoints must be integers");
+        const low = read.state.lowerBound as number, high = read.state.upperBound as number;
+        if (!(low <= (next.minimum as number) && (next.minimum as number) <= (next.fadeMinimum as number) && (next.fadeMinimum as number) <= (next.fadeMaximum as number) && (next.fadeMaximum as number) <= (next.maximum as number) && (next.maximum as number) <= high)) throw new Error("zone endpoints must be ordered and in bounds; specify coupled fade endpoints when moving a range");
+        if (fields.every(key => next[key] === read.state[key])) throw new Error("zone preview would not change any endpoint");
+      } else if (params.kind !== "macro-mapping") {
         if (!isNonEmptyString(params.name, 256) || params.name.includes("\0")) throw new Error("name is required");
         next = { name: params.name };
       } else {
@@ -10086,7 +10096,8 @@ export class McpHost {
         else {
           const current = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
           if (current.stateRevision !== tx.created?.stateRevision) return this.transactionError(id, "Willington target changed after apply; undo refused");
-          const next = tx.payload.kind === "macro-mapping" ? { mapping: JSON.parse(tx.prior.mapping as string), parameterValue: tx.prior.parameterValue } : { name: tx.prior.name };
+          const prior = tx.prior;
+          const next = ["selector-zone", "key-zone", "velocity-zone"].includes(String(tx.payload.kind)) ? Object.fromEntries(["minimum", "maximum", "fadeMinimum", "fadeMaximum"].map(key => [key, prior[key]])) : tx.payload.kind === "macro-mapping" ? { mapping: JSON.parse(prior.mapping as string), parameterValue: prior.parameterValue } : { name: prior.name };
           tx.state = "undoing";
           await this.invokeUndoRecovery(tx, adapter, "willington.device.set", { ...selector, next, expectedStateRevision: current.stateRevision }, context);
         }

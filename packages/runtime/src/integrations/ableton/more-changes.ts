@@ -97,8 +97,13 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "edit_rack_mapping", preview: "live_willington_device_preview", apply: "live_willington_device_apply", family: "device",
-    description: "Experimental Willington rack edits: kind macro-name renames macroIndex 0–15; variation-name renames the selected variation; macro-mapping assigns targetRef to mappingIndex 0–15 with minimum, maximum and mappingKind continuous, enum or boolean. Null mappingIndex unmaps. Boolean endpoints are macro thresholds 0–127; others use target parameter units. Requires stopped playback.",
-    summarize(_preview, input, track) {
+    description: "Experimental Willington rack edits: kind macro-name renames macroIndex 0–15; variation-name renames the selected variation; macro-mapping assigns targetRef to mappingIndex 0–15 with minimum, maximum and mappingKind continuous, enum or boolean. Null mappingIndex unmaps. Boolean endpoints are macro thresholds 0–127; others use target parameter units. Kinds key-zone, velocity-zone and selector-zone edit one regular chain: ref is its parent rack, targetRef the chain; minimum, maximum, fadeMinimum and fadeMaximum are integer endpoints. Omitted endpoints retain their current values; supply an ordered complete range, with velocity 1–127 and key/selector 0–127. Audio Effect Racks support selector zones only; Instrument and MIDI Effect Racks support all three. Requires stopped playback.",
+    summarize(preview, input, track) {
+      if (["key-zone", "velocity-zone", "selector-zone"].includes(String(input.kind))) {
+        const proposed = record(preview.proposed);
+        const zone = String(input.kind).replace("-zone", "");
+        return withTrack({ title: `Changed ${zone} zone to ${proposed.minimum ?? input.minimum}–${proposed.maximum ?? input.maximum}, fades ${proposed.fadeMinimum ?? input.fadeMinimum}–${proposed.fadeMaximum ?? input.fadeMaximum}` }, ownerTrack(input.ref, track));
+      }
       const macro = typeof input.macroIndex === "number" ? `Macro ${input.macroIndex + 1}` : "macro";
       const title = input.kind === "macro-name" ? `Renamed ${macro} to “${String(input.name ?? "")}”`
         : input.kind === "variation-name" ? `Renamed variation to “${String(input.name ?? "")}”`
