@@ -115,7 +115,7 @@ export function maxPatchSummary(root: unknown): string | undefined {
 }
 
 async function throughReader(client: WebClient, address: string, why: string, kind: string, signal: AbortSignal | undefined, services: FreeServices): Promise<Page> {
-  const read = await services.first((service) => service.read(client, address, signal), signal ? { signal } : {});
+  const read = await services.first("read", (service) => service.read(client, address, signal), signal ? { signal } : {});
   return { url: address, ...(read.value.title ? { title: read.value.title } : {}), kind, text: read.value.text, via: why, reader: read.service.name };
 }
 

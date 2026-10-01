@@ -648,9 +648,9 @@ Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only b
 you; terminal scrollback and the provider's retention policies are separate.
 When Kumi looks something up, its searches go to Exa, Parallel, Keenable or
 Firecrawl (or DuckDuckGo), and it reads pages itself; a PDF, a page built by
-scripts, or a site that turns Kumi away is read through one of those services'
-readers, which then sees that address. Kumi doesn't read an address that carries a
-key or token. The
+scripts, or a site that turns Kumi away is read through those services' readers in
+turn, and each one asked sees that address. Kumi doesn't read an address that
+carries a key or token. The
 credential store intentionally persists.
 
 Tested locally with macOS arm64 on Node 22.23.3 and 24.21.0 (and 25.9.0 before Node 25

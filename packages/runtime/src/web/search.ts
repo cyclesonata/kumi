@@ -83,7 +83,7 @@ export async function searchWeb(client: WebClient, query: string, options: { abo
   const signal = options.signal ? { signal: options.signal } : {};
   let none: NoFreeService;
   try {
-    const found = await services.first((service) => service.search(client, query, { ...(options.about ? { about: options.about } : {}), count: options.count, ...signal }),
+    const found = await services.first("search", (service) => service.search(client, query, { ...(options.about ? { about: options.about } : {}), count: options.count, ...signal }),
       { ...signal, empty: (results) => results.length === 0 });
     const said = found.failures.map((failure) => failure.error.message.replace(/ for now\.$|\.$/, "")).join("; ");
     return { via: found.service.name, results: found.value, ...(said ? { fellBack: said } : {}) };
@@ -97,7 +97,7 @@ export async function searchWeb(client: WebClient, query: string, options: { abo
   } catch (error) {
     options.signal?.throwIfAborted();
     const names = [...services.services.map((service) => service.name), "DuckDuckGo"];
-    if (offline([...none.failures.map((failure) => failure.error), error])) {
+    if (offline(none, error)) {
       throw new WebError(`Kumi couldn't reach any search service (${names.slice(0, -1).join(", ")} or DuckDuckGo): is this computer online?`, undefined, { unreachable: true });
     }
     const said = [freeTrouble(none), error instanceof Error ? error.message.replace(/\.$/, "") : "DuckDuckGo failed"].filter(Boolean).join("; ");

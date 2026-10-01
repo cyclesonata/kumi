@@ -135,11 +135,16 @@ export interface WebClientOptions {
   allow?: (address: string) => boolean;
 }
 
-/** Keys and tokens as services issue them (after Hermes Agent's list), each with a digit in it as real ones have. */
-const KEY_SHAPES = new RegExp(`(?:^|[^A-Za-z0-9])(?=[A-Za-z0-9._-]*\\d)(?:${[
-  "sk-[A-Za-z0-9_-]{20,}", "(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}", "gh[pousr]_[A-Za-z0-9]{20,}", "github_pat_[A-Za-z0-9_]{20,}", "glpat-[A-Za-z0-9_-]{20,}",
+/** A key's random part: 16 or more letters and digits in a row, with both in it (a slug's words aren't). */
+const RANDOM = "(?=[A-Za-z_]*[0-9])(?=[0-9_]*[A-Za-z])[A-Za-z0-9_]{16,}";
+/**
+ * Keys and tokens as services issue them (after Hermes Agent's list), each with a digit in it as real
+ * ones have. A key starts the address's part it's in: "casio-sk-1-sampler" or "boss-fc-300" is a page.
+ */
+const KEY_SHAPES = new RegExp(`(?:^|[^A-Za-z0-9_.-])(?=[A-Za-z0-9._-]*\\d)(?:${[
+  `sk-(?:[A-Za-z0-9]+-){0,3}${RANDOM}`, "(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}", "gh[pousr]_[A-Za-z0-9]{20,}", "github_pat_[A-Za-z0-9_]{20,}", "glpat-[A-Za-z0-9_-]{20,}",
   "xox[abprs]-[A-Za-z0-9-]{10,}", "xapp-\\d+-[A-Za-z0-9-]{10,}", "AIza[A-Za-z0-9_-]{30,}", "AKIA[A-Z0-9]{16}", "ya29\\.[A-Za-z0-9_-]{20,}",
-  "(?:hf|r8|npm|gsk|exa|fal)_[A-Za-z0-9]{20,}", "(?:tvly|pplx|pypi|fc)-[A-Za-z0-9_-]{20,}", "SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}",
+  "(?:hf|r8|npm|gsk|exa|fal)_[A-Za-z0-9]{20,}", `(?:tvly|pplx|pypi|fc)-(?:[A-Za-z0-9]+-){0,2}${RANDOM}`, "SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}",
   "eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
 ].join("|")})`);
 /** A key passed by name in a query: ?api_key=…, &access_token=…. */

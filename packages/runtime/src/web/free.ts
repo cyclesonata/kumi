@@ -72,9 +72,9 @@ export const PARALLEL: FreeService = {
     const result = record(Array.isArray(data.results) ? data.results[0] : undefined);
     const body = words(result.full_content) || words(result.content) || strings(result.excerpts).join("\n\n").trim();
     if (!body) {
-      const error = record(Array.isArray(data.errors) ? data.errors[0] : undefined);
-      const why = words(error.content) || words(error.error_type);
-      throw new WebError(`Parallel couldn't read it${why ? `: ${why.slice(0, 160)}` : ""}.`);
+      // Its error's kind only: the error's content is the site's own text, which isn't for the model unfenced.
+      const kind = words(record(Array.isArray(data.errors) ? data.errors[0] : undefined).error_type).replace(/[^\w .-]/g, "").slice(0, 60);
+      throw new WebError(`Parallel couldn't read it${kind ? ` (${kind})` : ""}.`);
     }
     return page("Parallel", result.title, body);
   },
@@ -89,7 +89,9 @@ export const KEENABLE: FreeService = {
     return results(answer(response, "Keenable").results, options.count, (item) => words(item.snippet) || words(item.description));
   },
   async read(client, url, signal) {
-    const response = await client.fetch(`${KEENABLE_URL}/v1/fetch/public?${new URLSearchParams({ url })}`, { headers: KEENABLE_TITLE, timeoutMs: READ_MS, maxBytes: 8 * 1024 * 1024, ...signalled(signal) });
+    // live: the page as it is now, not only one Keenable has indexed (the pages read this way rarely are).
+    const response = await client.fetch(`${KEENABLE_URL}/v1/fetch/public?${new URLSearchParams({ url, live: "true", max_chars: "400000" })}`,
+      { headers: KEENABLE_TITLE, timeoutMs: READ_MS, maxBytes: 8 * 1024 * 1024, ...signalled(signal) });
     const data = answer(response, "Keenable");
     return page("Keenable", data.title, words(data.content));
   },
@@ -127,6 +129,7 @@ const MAX_REST_MS = 24 * 60 * 60_000;
 
 export class FreeServices {
   private cursor: number;
+  /** Services resting, by what they rest from ("search Exa"): a service busy searching may still read. */
   private readonly rests = new Map<string, { until: number; busy: boolean }>();
 
   constructor(readonly services: readonly FreeService[] = [EXA, PARALLEL, KEENABLE, FIRECRAWL], private readonly now: () => number = Date.now, start = randomInt(services.length)) {
@@ -137,12 +140,13 @@ export class FreeServices {
    * The first answer `run` gets, starting with the next service in turn. An answer `empty` calls empty
    * (no results) goes on to the next service too, and is the answer when no service has more.
    */
-  async first<T>(run: (service: FreeService) => Promise<T>, options: { signal?: AbortSignal; empty?: (value: T) => boolean } = {}): Promise<{ value: T; service: FreeService; failures: Failure[] }> {
+  async first<T>(kind: "search" | "read", run: (service: FreeService) => Promise<T>, options: { signal?: AbortSignal; empty?: (value: T) => boolean } = {}): Promise<{ value: T; service: FreeService; failures: Failure[] }> {
     const start = this.cursor;
     this.cursor = (this.cursor + 1) % this.services.length;
     const now = this.now();
     const order = [...this.services.slice(start), ...this.services.slice(0, start)];
-    const resting = order.filter((service) => (this.rests.get(service.name)?.until ?? 0) > now);
+    const rest = (service: FreeService) => this.rests.get(`${kind} ${service.name}`);
+    const resting = order.filter((service) => (rest(service)?.until ?? 0) > now);
     const failures: Failure[] = [];
     let empty: { value: T; service: FreeService } | undefined;
     for (const service of order.filter((item) => !resting.includes(item))) {
@@ -154,14 +158,14 @@ export class FreeServices {
         options.signal?.throwIfAborted();
         const trouble = error instanceof WebError ? error : new WebError(`${service.name} failed: ${error instanceof Error ? error.message.slice(0, 160) : "it failed"}.`);
         failures.push({ service: service.name, error: trouble });
-        const rest = trouble.trouble.busy ? Math.min(MAX_REST_MS, trouble.trouble.retryAfterMs ?? BUSY_REST_MS) : trouble.trouble.unreachable ? DOWN_REST_MS : 0;
-        if (rest > 0) this.rests.set(service.name, { until: this.now() + rest, busy: trouble.trouble.busy === true });
+        const wait = trouble.trouble.busy ? Math.min(MAX_REST_MS, trouble.trouble.retryAfterMs ?? BUSY_REST_MS) : trouble.trouble.unreachable ? DOWN_REST_MS : 0;
+        if (wait > 0) this.rests.set(`${kind} ${service.name}`, { until: this.now() + wait, busy: trouble.trouble.busy === true });
       }
     }
     if (empty) return { ...empty, failures };
     const later = this.now();
-    const back = [...this.rests.values()].map((rest) => rest.until - later).filter((wait) => wait > 0);
-    throw new NoFreeService(failures, resting.map((service) => ({ service: service.name, busy: this.rests.get(service.name)?.busy ?? false })), back.length ? Math.min(...back) : undefined);
+    const back = order.map((service) => (rest(service)?.until ?? 0) - later).filter((wait) => wait > 0);
+    throw new NoFreeService(failures, resting.map((service) => ({ service: service.name, busy: rest(service)?.busy ?? false })), back.length ? Math.min(...back) : undefined);
   }
 }
 
@@ -187,5 +191,11 @@ export function freeTrouble(none: NoFreeService): string {
   ].join("; ");
 }
 
-/** Whether every failure was a connection that never happened: this computer is likely offline. */
-export const offline = (errors: readonly unknown[]) => errors.length > 0 && errors.every((error) => error instanceof WebError && error.trouble.unreachable === true && error.status === undefined);
+/**
+ * Whether this computer is likely offline: services were tried, none was resting from being busy (busy
+ * means it answered), and every failure was a connection that never happened.
+ */
+export function offline(none: NoFreeService, last: unknown): boolean {
+  const errors = [...none.failures.map((failure) => failure.error), last];
+  return none.failures.length > 0 && none.resting.every((rest) => !rest.busy) && errors.every((error) => error instanceof WebError && error.trouble.unreachable === true && error.status === undefined);
+}
