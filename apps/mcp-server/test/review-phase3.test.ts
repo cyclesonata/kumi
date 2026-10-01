@@ -159,3 +159,13 @@ test("a page of a clip's notes holds at most 2,000, whatever limit the model ask
   const rest = await call("live_discover", { kind: "note", parent: "clip:clip-1", limit: 100_000, cursor: page.nextCursor });
   assert.equal(rest.items.length, 500); assert.equal(rest.nextCursor, undefined);
 });
+
+test("an undo left for the producer's edits says what to do without naming the bridge's tools, which Kumi's model hasn't", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { change, undo } = hosted(simulator);
+  const made = await change("live_arrangement_midi_clip_preview", { trackRef: "track:track-1", start: 0, length: 4, name: "Hook", notes: [{ pitch: 60, start: 0, duration: 1 }] });
+  state(simulator).arrangementClips[0]!.clip.name = "Hook (producer's)";
+  const refused = await undo(made.previewed.transactionId);
+  assert.match(refused.reason, /has been edited since/);
+  assert.doesNotMatch(refused.remediation, /live_\w+/); assert.match(refused.remediation, /delete that clip/);
+});

@@ -9424,7 +9424,7 @@ export class McpHost {
         if (!reconciliation) for (const fence of (made.created.fences as JsonObject[] | undefined) ?? []) {
           const clip = clips.find((item) => item.objectIdentity === fence.objectIdentity); if (!clip) continue;
           const row = this.arrangementClipsOf(await this.viewForAsync(context, [clip.trackRef]), clip.trackRef).find((candidate) => candidate.objectIdentity === fence.objectIdentity); if (!row) continue;
-          if (row.name !== fence.name || !sameLiveValue(row.start, fence.start) || !sameLiveValue(arrangementClipEnd(row), fence.end) || McpHost.notesRevision(await this.clipNotesAsync(row.ref as LiveRef, context)) !== fence.notesRevision) return this.reasonError(id, `the clip "${String(fence.name ?? "")}" Kumi made has been edited since (its notes, name or length): it stays, with those edits`, "If it should go anyway, delete it with live_clip_delete_preview, then live_clip_delete_apply.");
+          if (row.name !== fence.name || !sameLiveValue(row.start, fence.start) || !sameLiveValue(arrangementClipEnd(row), fence.end) || McpHost.notesRevision(await this.clipNotesAsync(row.ref as LiveRef, context)) !== fence.notesRevision) return this.reasonError(id, `the clip "${String(fence.name ?? "")}" Kumi made has been edited since (its notes, name or length): it stays, with those edits`, "If it should go anyway, delete that clip.");
         }
         // Checked first: a refused undo leaves no recovery behind it, and a later one starts afresh.
         this.beginUndoRecovery(made, params.idempotencyKey as string);
