@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { McpHost, PROTOCOL_VERSION } from "../src/host.js";
-import { DeterministicLiveSimulator, type AsyncLiveAdapter, type LiveDiscoveryRequest, type LiveInvocation, type LiveOperationContext, type LiveSnapshotRequest } from "../src/live.js";
+import { DeterministicLiveSimulator, LiveMutationNotDispatchedError, type AsyncLiveAdapter, type LiveDiscoveryRequest, type LiveInvocation, type LiveOperationContext, type LiveSnapshotRequest } from "../src/live.js";
 
 // Review of the merged phase 3: undo's checks, fences and pages, on rows as the Remote Script has them.
 
@@ -21,13 +21,17 @@ function hosted(adapter: ConstructorParameters<typeof McpHost>[0]) {
 }
 const state = (simulator: DeterministicLiveSimulator) => (simulator as unknown as { state: { tracks: Array<Record<string, any>>; arrangementClips: Array<{ clip: Record<string, any>; trackRef: string }> } }).state;
 
-/** The simulator, with reads and changes that fail when a test says so. */
+/** The simulator, with reads and changes that fail when a test says so: `invoke` loses a change's
+ * answer after Live made it, `refuse` refuses one before it runs, as the Remote Script says it. */
 function faulty(simulator: DeterministicLiveSimulator) {
-  const faults: { read?: (request: LiveDiscoveryRequest | LiveSnapshotRequest | undefined) => boolean; invoke?: (invocation: LiveInvocation) => boolean } = {};
+  const faults: { read?: (request: LiveDiscoveryRequest | LiveSnapshotRequest | undefined) => boolean; invoke?: (invocation: LiveInvocation) => boolean; refuse?: (invocation: LiveInvocation) => boolean } = {};
   const adapter = Object.assign(Object.create(simulator), {
     discoverAsync: async (request: LiveDiscoveryRequest) => { if (faults.read?.(request)) { faults.read = undefined; throw new Error("request failed: invalid discovery cursor"); } return simulator.discoverAsync(request); },
     snapshotAsync: async (context?: LiveOperationContext, request?: LiveSnapshotRequest) => { if (faults.read?.(request)) { faults.read = undefined; throw new Error("remote adapter request timed out"); } return simulator.snapshotAsync(context, request); },
-    invokeAsync: async (invocation: LiveInvocation) => { const result = await simulator.invokeAsync(invocation); if (faults.invoke?.(invocation)) { faults.invoke = undefined; throw new Error("remote adapter request timed out"); } return result; },
+    invokeAsync: async (invocation: LiveInvocation) => {
+      if (faults.refuse?.(invocation)) { faults.refuse = undefined; throw new LiveMutationNotDispatchedError("request failed: Live state changed since the preview; nothing changed"); }
+      const result = await simulator.invokeAsync(invocation); if (faults.invoke?.(invocation)) { faults.invoke = undefined; throw new Error("remote adapter request timed out"); } return result;
+    },
   }) as AsyncLiveAdapter;
   return { adapter, faults };
 }
@@ -96,4 +100,34 @@ test("clearing a range is refused when a looped clip was extended into it after 
   const refused = await apply("live_clip_clear_range_apply", previewed.transactionId);
   assert.equal(refused.isError, true); assert.match(refused.reason, /changed since the preview/);
   assert.equal(loop.endTime, 7); assert.equal(state(simulator).arrangementClips.length, 2);
+});
+
+test("a retry's refusal doesn't prove its first attempt never ran: the change stays uncertain", async () => {
+  const simulator = new DeterministicLiveSimulator();
+  const { adapter, faults } = faulty(simulator);
+  const { call, apply, change, undo } = hosted(adapter);
+  // A transport change whose undo ran with its answer lost; the change's retry, under its own key, is refused.
+  const transport = await call("live_transport_preview", { metronome: true });
+  assert.equal((await apply("live_transport_apply", transport.transactionId, "transport-key")).state, "applied");
+  faults.invoke = (invocation) => invocation.operation === "transport.set";
+  assert.equal((await undo(transport.transactionId)).isError, true);
+  faults.refuse = (invocation) => invocation.operation === "transport.set";
+  const retried = await apply("live_transport_apply", transport.transactionId, "transport-key");
+  assert.equal(retried.isError, true); assert.match(retried.remediation, /uncertain/);
+  // A section whose first locator Live added, its answer lost; the retry's resend is refused.
+  const section = await call("live_arrangement_section_preview", { start: 4, end: 8, startName: "Verse", endName: "Chorus" });
+  faults.invoke = (invocation) => invocation.operation === "locator.add";
+  assert.equal((await apply("live_arrangement_section_apply", section.transactionId, "section-key")).isError, true);
+  faults.refuse = (invocation) => invocation.operation === "locator.add";
+  const resent = await apply("live_arrangement_section_apply", section.transactionId, "section-key");
+  assert.equal(resent.isError, true); assert.match(resent.remediation, /uncertain/);
+  // An undo of two clips: the first deletion ran, its answer lost; the retry's next deletion is refused.
+  const made = await change("live_arrangement_midi_clip_preview", { clips: [{ trackRef: "track:track-1", start: 0, length: 4, name: "A", notes: [] }, { trackRef: "track:track-1", start: 8, length: 4, name: "B", notes: [] }] });
+  faults.invoke = (invocation) => invocation.operation === "arrangement.clip.delete";
+  assert.equal((await undo(made.previewed.transactionId, "undo-key")).isError, true);
+  assert.deepEqual(state(simulator).arrangementClips.map((item) => item.clip.name), ["A"]);
+  faults.refuse = (invocation) => invocation.operation === "arrangement.clip.delete";
+  const again = await undo(made.previewed.transactionId, "undo-key");
+  assert.equal(again.isError, true); assert.doesNotMatch(again.reason, /before anything changed/);
+  assert.match((await undo(made.previewed.transactionId)).reason, /exact-key uncertain/);
 });

@@ -610,7 +610,7 @@ export class McpHost {
     if (value.kind === "drum-pad") this.releaseDrumSamplerPresets(value);
   });
   private readonly browserSearchCache = new Map<string, { items: Array<{ id: string; objectIdentity: string; name: string; category: string; path: string; isDevice: boolean }>; fetchedAt: number; epoch: number }>();
-  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; priorState?: string; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
+  private readonly undoRecoveryPlans = new WeakMap<object, { idempotencyKey: string; priorState?: string; retried?: boolean; steps: Array<{ operation: LiveInvocation["operation"]; args: Record<string, unknown>; completed: boolean; result?: unknown }> }>();
   /** Undos the bridge refused before dispatching anything to Live, by transaction: live_undo reports
    * them as refusals and the change stays applied, instead of leaving it uncertain. */
   private readonly undoRefusals = new Map<string, { record: object; message: string }>();
@@ -2132,7 +2132,8 @@ export class McpHost {
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
     } catch (cause) {
-      if (nothingChanged(cause)) { transaction.state = "undone"; return this.adapterToolError(id, cause, "Nothing changed in Live."); }
+      // A retry's refusal proves only that the retry didn't run: the first attempt may have.
+      if (nothingChanged(cause) && !reconciliation) { transaction.state = "undone"; return this.adapterToolError(id, cause, "Nothing changed in Live."); }
       transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Transport state is uncertain; perform fresh discovery before retrying.");
     }
   }
@@ -8723,7 +8724,8 @@ export class McpHost {
           step.result = result; if (!created.some((item) => item.ref === result!.ref)) created.push({ ...result, fingerprint: result.createdFingerprint }); transaction.created = created; currentSnapshot = await this.viewAsync(context, [], ["arrangement"]); const owned = created.find((item) => item.ref === result!.ref)!; const row = currentSnapshot.arrangement.locators.find((item) => item.ref === owned.ref); if (!row || row.objectIdentity !== owned.objectIdentity || this.captureObjectFingerprint(row) !== owned.fingerprint) throw new Error("created locator changed after atomic creation"); if (result.name !== proposed.name || result.position !== proposed.position) throw new Error("Live did not confirm exact created locator state");
         }
       } catch (cause) {
-        if (dispatchAmbiguous && !nothingChanged(cause)) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
+        // A retry's refusal doesn't prove the first attempt's lost step never ran.
+        if (dispatchAmbiguous && (reconciliation || !nothingChanged(cause))) { transaction.created = created; transaction.recoveryMode = "apply"; transaction.state = "uncertain"; throw cause; }
         transaction.created = created;
         try { await this.compensateArrangementAsync(transaction, adapter, context); transaction.state = "undone"; }
         catch { transaction.state = "uncertain"; transaction.recoveryMode = "compensate"; throw new Error("Arrangement apply compensation failed; retry the exact key to reconcile cleanup"); }
@@ -8783,6 +8785,7 @@ export class McpHost {
     let plan = this.undoRecoveryPlans.get(record);
     if (plan && plan.idempotencyKey !== idempotencyKey) throw new Error("uncertain undo requires the exact original idempotency key");
     if (!plan) { plan = { idempotencyKey, priorState: state, steps: [] }; this.undoRecoveryPlans.set(record, plan); }
+    if (reconciliation) plan.retried = true;
     return { reconciliation, steps: plan.steps };
   }
 
@@ -8790,7 +8793,8 @@ export class McpHost {
    * lacking ownership of an object later changes moved): noted for live_undo to report as a refusal. */
   private noteUndoRefusal(record: object, cause: unknown, context: LiveOperationContext): void {
     const plan = this.undoRecoveryPlans.get(record);
-    if ((cause instanceof LiveMutationNotDispatchedError || nothingChanged(cause)) && plan?.priorState === "applied" && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: (cause as Error).message });
+    // Not on a retry: an earlier attempt's step whose answer was lost may have run.
+    if ((cause instanceof LiveMutationNotDispatchedError || nothingChanged(cause)) && plan?.priorState === "applied" && plan.retried !== true && plan.steps.every((step) => !step.completed) && typeof context.transactionId === "string") this.undoRefusals.set(context.transactionId, { record, message: (cause as Error).message });
   }
 
   private async replayUndoRecovery(record: object, adapter: AsyncLiveAdapter, context: LiveOperationContext): Promise<void> {
