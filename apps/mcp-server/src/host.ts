@@ -277,6 +277,8 @@ const MAX_PARAMETER_VALUES = 10_000;
 const MAX_QUEUED_EVENTS = 65_536;
 /** What deleting an existing object leaves: the deletion is kept, as device deletion is. */
 const KEPT_DELETION = "Kumi can't bring this back; Live's undo can.";
+/** How many notes one page of a clip's notes asks for. */
+const NOTE_PAGE = 2_000;
 /** What each live_device_edit action takes, besides deviceRef. */
 const DEVICE_EDIT_TAKES: Readonly<Record<string, readonly string[]>> = { set: ["setting", "value"], modulate: ["source", "value", "targetIndex", "parameterRef"], "slice-insert": ["time"], "slice-move": ["time", "toTime"], "slice-remove": ["time"], "slice-clear": [], "slice-reset": [], "warp-as": ["beats"], "warp-double": [], "warp-half": [], resend: [] };
 /** The device edits Kumi's undo doesn't take back, and why. */
@@ -8373,7 +8375,9 @@ export class McpHost {
   private static notesRevision(notes: ReadonlyArray<Record<string, unknown>>): string { return createHash("sha256").update(canonicalMutationIdentity(notes)).digest("hex"); }
 
   private async clipNotesAsync(clipRef: LiveRef, context?: LiveOperationContext): Promise<Array<Record<string, unknown>>> {
-    const items = await this.views.discoverAll({ kind: "note", parent: clipRef, limit: 100_000 }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+    // A page of NOTE_PAGE notes: the Remote Script's budget bounds building them, not sending them, and
+    // sending ten thousand held Live's thread for 300 ms on the measured Set.
+    const items = await this.views.discoverAll({ kind: "note", parent: clipRef, limit: NOTE_PAGE }, context ?? { deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
     return items.map(({ ref: _ref, parentRef: _parentRef, ...note }) => note);
   }
 
