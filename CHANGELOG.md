@@ -3,9 +3,14 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## Unreleased
+## 1.6.1 — 2026-10-02
 
-On Windows, `kumi update` unpacks the new Kumi whatever tar comes first on your PATH.
+Kumi on Windows, from installing it to its first answer: `kumi update` works from any PowerShell,
+`kumi bridge` notices Live within moments and handles a User Library on another drive, Kumi's Live
+extension goes where Live on Windows looks for it, and Windows terminals show Kumi's colours and
+icons. Ships with bridge 1.0.72.
+
+### Windows
 
 - `kumi update` stopped at "Unpacking it failed: tar: Error is not recoverable: exiting now" in a
   PowerShell started from Git Bash: Git's GNU tar came first on PATH, and it reads "C:\…" as a
@@ -15,6 +20,30 @@ On Windows, `kumi update` unpacks the new Kumi whatever tar comes first on your 
 - From 1.6.0 or earlier in such a window, run the installer line once, or put Windows' own folder
   first in that window and update:
   `$env:Path = "$env:SystemRoot\System32;$env:Path"; kumi update`
+- Kumi's Live extension goes in `%LOCALAPPDATA%\Ableton\Extensions`, where Live on Windows keeps
+  it (and its database). 1.6.0 put it in `%APPDATA%\Ableton`, where Live never started it;
+  `kumi bridge` moves it, and the update runs that for you.
+- The Windows console and Windows Terminal get Kumi in 24-bit colour (it took them for 16
+  colours), and WezTerm and Git Bash's own window get its icons rather than two-letter badges.
+
+### Setting up the bridge
+
+- While `kumi bridge` waits for Live, it looks every 2 seconds whether Live's Remote Script
+  answers, and checks the connection in full only then. It notices Live within a few seconds;
+  each full check took several seconds on Windows.
+- Enter or Ctrl-C stops the waiting. It's read as a key, so a step under way finishes, and on
+  Windows cmd doesn't ask "Terminate batch job (Y/N)?" afterwards.
+
+### Bridge 1.0.72
+
+- A User Library on another drive than Kumi's folder (D:, an external drive) upgrades, rolls back,
+  repairs and uninstalls. Those moved the Remote Script's folder with a rename, which can't cross
+  drives; now it's copied, and its reference file is made owner-only again.
+- A lifecycle lock left by a process that has gone (a `kumi bridge` stopped mid-step) no longer
+  refuses every later install, upgrade and uninstall.
+- On Windows each owner-only file is set and checked in one PowerShell instead of two, which takes
+  about a quarter off each install, upgrade and uninstall step. The Remote Script runs PowerShell
+  by its full path, and looking for Live's Extension Host no longer holds up the bridge.
 
 ## 1.6.0 — 2026-10-02
 
