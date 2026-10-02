@@ -41,6 +41,8 @@ test("names say what a sound is: its class (the name before its folders), loop o
   assert.equal(nameHints("Vocals/Vox Chop C#m 120bpm.wav").key, "C# minor");
   assert.equal(nameHints("Loops/Drum Loop Kick Snare 90.wav").class, "drums", "a loop of several drums is drums");
   assert.equal(nameHints("FX/FX Guitar Chop C.aif").class, "guitar", "\"chop\" isn't vocal on its own");
+  assert.equal(nameHints("Splice/SO_DT_120_drum_loop_kick_heavy.wav").class, "drums", "a drum loop of one drum is drums");
+  assert.deepEqual([nameHints("Loops/Hat Loop 128.wav").class, nameHints("Loops/Top Loop 03 124bpm.wav").class], ["hat", "drums"]);
   assert.equal(parseKey("Am"), "A minor"); assert.equal(parseKey("I am here"), undefined, "a small letter isn't a key");
   assert.equal(parseKey("Bbmaj7 stab"), "A# major"); assert.equal(parseKey("Pad F# minor"), "F# minor"); assert.equal(parseKey("Strings Dmin6"), "D minor");
   assert.deepEqual(parseNote("Harpsichord Pluck C2"), { name: "C2", midi: 36 }); assert.equal(parseNote("E-Perc Low"), undefined);

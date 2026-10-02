@@ -20,7 +20,7 @@ const WORDS: Record<SoundClass, readonly string[]> = {
   tom: ["tom", "toms", "floortom"],
   perc: ["perc", "percs", "percussion", "conga", "congas", "bongo", "bongos", "tabla", "cowbell", "clave", "claves", "shaker", "shakers", "tamb", "tambourine",
     "woodblock", "wood", "rim", "block", "triangle", "guiro", "cabasa", "djembe", "timbale", "timbales", "agogo", "click", "eperc"],
-  drums: ["drums", "drum", "break", "breaks", "breakbeat", "beat", "beats", "kit", "tops", "top", "groove", "fill", "fills"],
+  drums: ["drums", "drum", "break", "breaks", "breakbeat", "beat", "beats", "kit", "tops", "top", "toploop", "fullkit", "groove", "fill", "fills"],
   bass: ["bass", "basses", "bassline", "sub", "subs", "808", "808s", "reese", "lowend"],
   lead: ["lead", "leads", "ld", "solo"],
   pad: ["pad", "pads"],
@@ -49,7 +49,7 @@ const DRUM_ELEMENTS = new Set<SoundClass>(["kick", "snare", "clap", "hat", "cymb
 /** Classes with no key to speak of. */
 const UNTUNED = new Set<SoundClass>([...DRUM_ELEMENTS, "drums", "fx", "noise", "texture"]);
 
-const LOOP_WORDS = new Set(["loop", "loops", "lp", "bpm", "groove", "grooves", "break", "breaks", "breakbeat", "beat", "beats", "phrase", "riff", "riffs", "arp", "arps", "fill", "fills", "tops"]);
+const LOOP_WORDS = new Set(["loop", "loops", "lp", "bpm", "groove", "grooves", "break", "breaks", "breakbeat", "beat", "beats", "phrase", "riff", "riffs", "arp", "arps", "fill", "fills", "tops", "toploop"]);
 const SHOT_WORDS = new Set(["oneshot", "oneshots", "shot", "shots", "hit", "hits", "single", "singles", "stab", "stabs", "multisample", "multisamples"]);
 
 /** Words of a name or folder: "KickPunchy_01" is kick, punchy, 01; "F#m" and "808" stay whole. */
@@ -63,7 +63,8 @@ export function tokens(text: string): string[] {
 /** Pairs of words that name one thing: "hi hat", "bass drum", "one shot". */
 const PAIRS: Record<string, string> = { "hi hat": "hihat", "hi hats": "hihats", "bass drum": "bassdrum", "kick drum": "kickdrum", "one shot": "oneshot", "one shots": "oneshots",
   "open hat": "openhat", "closed hat": "closedhat", "white noise": "noise", "pink noise": "noise", "field recording": "fieldrecording", "tape stop": "tapestop",
-  "snare roll": "snareroll", "hand clap": "handclap", "finger snap": "fingersnap", "floor tom": "floortom", "e perc": "eperc", "vinyl noise": "vinylnoise", "low end": "lowend" };
+  "snare roll": "snareroll", "hand clap": "handclap", "finger snap": "fingersnap", "floor tom": "floortom", "e perc": "eperc", "vinyl noise": "vinylnoise", "low end": "lowend",
+  "top loop": "toploop", "tops loop": "toploop", "full kit": "fullkit" };
 function joined(words: string[]): string[] {
   const out: string[] = [];
   for (let index = 0; index < words.length; index++) {
@@ -150,8 +151,9 @@ export function nameHints(relativePath: string): NameHints {
   let found: SoundClass | undefined; let from: NameHints["classFrom"];
   const named = classesIn(nameWords);
   if (named.length) {
+    // A loop of several drums, or a "drum loop" of one ("drum loop kick heavy"), is drums; a "Hat Loop" is a hat.
     const elements = new Set(named.filter((name) => DRUM_ELEMENTS.has(name)));
-    found = kind === "loop" && elements.size >= 2 ? "drums" : PRIORITY.find((name) => named.includes(name));
+    found = kind === "loop" && (elements.size >= 2 || (elements.size >= 1 && named.includes("drums"))) ? "drums" : PRIORITY.find((name) => named.includes(name));
     from = "name";
   } else {
     for (const words of folderWords) {
