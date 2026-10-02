@@ -352,6 +352,12 @@ export interface LiveFocus {
   selectedNotes?: number;
 }
 
+/**
+ * Live's transport, for a light on the beat: whether it plays, its tempo, and where the playhead was
+ * (in beats) at `at` (performance.now()), so the beat can be followed between reads; and a bar's beats.
+ */
+export interface LiveTransport { playing: boolean; tempo?: number; beat?: number; at: number; beatsPerBar?: number }
+
 /** Which picture HISTORY and NOW draw for a change. */
 export type ChangeFamily = "tempo" | "mixer" | "rename" | "structure" | "clip" | "device" | "parameter" | "locators" | "color";
 
@@ -452,6 +458,8 @@ export type SessionEvent = KernelEvent
   | { type: "doing"; text: string }
   /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
   | { type: "action"; title: string; playing?: boolean; recording?: boolean }
+  /** Live's transport as it is now (null: not known, Live gone), for the beat light. */
+  | { type: "transport"; transport: LiveTransport | null }
   /** Kumi started or stopped watching the producer work in Live (watch_me). */
   | { type: "watching"; on: boolean };
 

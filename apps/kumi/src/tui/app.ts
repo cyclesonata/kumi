@@ -3,7 +3,7 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
   type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
@@ -230,6 +230,9 @@ const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000
 
 /** "3.1s": how long a step or an answer has taken. */
 const elapsed = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+/** How much of each beat the beat light stays lit. */
+const BEAT_LIT = 0.25;
+const mixRgb = (from: Rgb, to: Rgb, amount: number): Rgb => [0, 1, 2].map((index) => Math.round(from[index]! + (to[index]! - from[index]!) * amount)) as unknown as Rgb;
 
 /** The icon of what the producer pointed at in Live. */
 function pointedIcon(pin: PinnedNode): IconKind {
@@ -323,6 +326,9 @@ export class TuiApp {
   private lastStop: TurnResult["stopReason"] | undefined;
   /** This session's side questions (/btw), oldest first. */
   private asides: Aside[] = [];
+  /** Live's transport, for the beat light; a timer draws the light's next change. */
+  private transport: LiveTransport | null = null;
+  private beatTimer: ReturnType<typeof setTimeout> | undefined;
   private activity = "connecting to Live";
   private panel: Panel | undefined;
   /** The model is writing a plan of changes (the call's id), which starts running as it's written; since when. */
@@ -548,6 +554,10 @@ export class TuiApp {
         setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
         break;
       }
+      case "transport":
+        this.transport = event.transport;
+        this.nextBeat();
+        break;
       case "watching":
         this.watching = event.on;
         this.scheduler.request();
@@ -735,7 +745,7 @@ export class TuiApp {
     if (this.closing) return this.done;
     this.closing = true;
     this.keepTreeFresh(false);
-    clearTimeout(this.wakeTimer);
+    clearTimeout(this.wakeTimer); clearTimeout(this.beatTimer);
     this.suppress = true;
     this.stream.discard();
     // A ChatGPT sign-in waiting on the browser stops listening; a half-typed key is dropped.
@@ -1718,6 +1728,40 @@ export class TuiApp {
     this.wakeTimer.unref?.();
   }
 
+  /**
+   * Where Live's playhead is now, in beats, followed from the last read at its tempo; with a bar's
+   * beats. Undefined while Live isn't playing (or isn't connected).
+   */
+  private beatNow(now = performance.now()): { beat: number; beatsPerBar?: number; tempo: number } | undefined {
+    const transport = this.transport;
+    if (!transport?.playing || !transport.tempo || transport.tempo <= 0 || transport.beat === undefined || this.connection !== "connected") return undefined;
+    return { beat: transport.beat + Math.max(0, now - transport.at) * transport.tempo / 60_000, tempo: transport.tempo, ...(transport.beatsPerBar ? { beatsPerBar: transport.beatsPerBar } : {}) };
+  }
+
+  /** While Live plays, a frame as the light comes on at each beat and as it goes off a quarter of a beat later. */
+  private nextBeat(): void {
+    clearTimeout(this.beatTimer); this.beatTimer = undefined;
+    const now = performance.now(); const at = this.beatNow(now);
+    if (!at || this.closing) { this.scheduler.request(); return; }
+    const phase = at.beat - Math.floor(at.beat);
+    const toEdge = (phase < BEAT_LIT ? BEAT_LIT - phase : 1 - phase) * 60_000 / at.tempo;
+    this.beatTimer = setTimeout(() => { this.scheduler.request(); this.nextBeat(); }, Math.max(4, Math.ceil(toEdge) + 1));
+    this.beatTimer.unref?.();
+    this.scheduler.request();
+  }
+
+  /** "● 124 BPM" in yellow, lit on the beat, while Live plays; undefined when it doesn't. */
+  private beatLight(): { text: string; dot: Style } | undefined {
+    const at = this.beatNow();
+    if (!at) return undefined;
+    const phase = at.beat - Math.floor(at.beat);
+    const bar = at.beatsPerBar && Number.isInteger(at.beatsPerBar) ? at.beatsPerBar : undefined;
+    const downbeat = bar !== undefined && Math.floor(at.beat + 1e-6) % bar === 0;
+    const lit = phase < BEAT_LIT;
+    const tempo = Number.isInteger(at.tempo) ? `${at.tempo}` : at.tempo.toFixed(1);
+    return { text: `${tempo} BPM`, dot: { fg: lit ? (downbeat ? palette.beat : mixRgb(palette.beat, palette.offbeat, 0.25)) : palette.offbeat } };
+  }
+
   private status(): { dot: Style; text: string } {
     if (this.options.mode === "inference-only" || this.connection === "disconnected" || this.connection === "error") return { dot: st.warn, text: "Live not connected" };
     if (this.connection === "connecting") return { dot: st.faint, text: "connecting to Live…" };
@@ -1726,7 +1770,15 @@ export class TuiApp {
 
   private drawHeader(screen: Screen, columns: number): void {
     const status = this.status();
-    const start = columns - 2 - textWidth(`● ${status.text}`);
+    let start = columns - 2 - textWidth(`● ${status.text}`);
+    // Live playing: a yellow light on the beat, and the tempo, beside Live's own status.
+    const light = this.beatLight();
+    if (light && start - textWidth(`● ${light.text}`) - 3 > 12) {
+      const at = start - 3 - textWidth(`● ${light.text}`);
+      screen.put(at, 0, "●", light.dot);
+      screen.put(at + 1, 0, ` ${light.text}`, st.faint);
+      start = at;
+    }
     let x = screen.put(2, 0, "Kumi", st.title);
     // The model gives way to the Set's name when the window is narrow.
     let end = start - 2;
@@ -1743,8 +1795,9 @@ export class TuiApp {
       x = screen.put(x, 0, "  ·  ", st.faint);
       screen.put(x, 0, truncate(this.setName, Math.max(0, end - x)), st.text);
     }
-    screen.put(start, 0, "●", status.dot);
-    screen.put(start + 1, 0, ` ${status.text}`, st.dim);
+    const live = columns - 2 - textWidth(`● ${status.text}`);
+    screen.put(live, 0, "●", status.dot);
+    screen.put(live + 1, 0, ` ${status.text}`, st.dim);
   }
 
   private drawConversation(screen: Screen, area: Rect): void {

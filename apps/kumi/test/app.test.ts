@@ -1701,3 +1701,29 @@ test("/btw asks on the side: the answer streams into a panel while Kumi keeps wo
   assert.ok(has(h.screen(), "up to a minute"), "/btw alone shows the last side answer again");
   await h.app.close();
 });
+
+test("while Live plays, a yellow light blinks on its beat in the header, with the tempo; it goes when Live stops", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  assert.ok(!has(h.screen(), "BPM"));
+  // On the beat: lit, brightest on a bar's first beat.
+  h.emit({ type: "transport", transport: { playing: true, tempo: 120, beat: 8, at: performance.now(), beatsPerBar: 4 } });
+  let lines = h.screen();
+  assert.match(lines[0]!, /● 120 BPM {3}● Live {2}$/);
+  const light = () => /38;2;(\d+;\d+;\d+);48;2;14;15;18m●[^●]*BPM/.exec(h.written.slice(h.written.lastIndexOf("BPM") - 120))?.[1];
+  assert.equal(light(), "255;225;77", "lit, the downbeat's yellow");
+  // Between beats: dark.
+  const sofar = h.written.length;
+  h.emit({ type: "transport", transport: { playing: true, tempo: 120, beat: 8.5, at: performance.now(), beatsPerBar: 4 } });
+  h.screen();
+  assert.match(h.written.slice(sofar), /38;2;77;68;32;48;2;14;15;18m●/, "dark between beats");
+  // The tempo changed in Live: the light follows.
+  h.emit({ type: "transport", transport: { playing: true, tempo: 123.5, beat: 9, at: performance.now() } });
+  assert.match(h.screen()[0]!, /● 123\.5 BPM/);
+  h.emit({ type: "transport", transport: { playing: false, tempo: 123.5, beat: 9.2, at: performance.now() } });
+  lines = h.screen();
+  assert.ok(!has(lines, "BPM"), "stopped: no light");
+  await h.app.close();
+});
