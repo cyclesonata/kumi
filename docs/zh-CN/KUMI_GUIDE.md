@@ -1,0 +1,234 @@
+# Kumi 指南
+
+[English](../en/KUMI_GUIDE.md) · 简体中文 · [日本語](../ja/KUMI_GUIDE.md)
+
+Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中打开的工程工作。它读取工程，按你的要求进行修改，并把每项修改显示在 HISTORY 中。它能播放、录音和渲染，聆听音频并与参考曲对比，观看视频教程，制作 Max for Live 设备，在网上查找资料，还会记住你的工作方式。
+
+要安装 Kumi 并把它连接到 Live，请按照[开始使用](../../README.zh-CN.md#开始使用)操作。本指南介绍之后的一切。按键与界面请见[命令、按键与界面](KUMI_TUI.md)；修改与撤销如何工作，请见 [Kumi 如何修改你的工程](KUMI_CHANGES.md)。
+
+## 登录并选择模型
+
+在 Kumi 中，`/login` 用于登录：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
+
+| 提供方 | 模型名称 | 登录方式 |
+| --- | --- | --- |
+| ChatGPT 套餐 | `openai-codex/<model>` | `/login`（浏览器），或 `kumi login openai-codex`（在没有浏览器的机器上加 `--device`） |
+| Anthropic API | `anthropic/<model>` | 用 API 密钥 `/login`，或 `ANTHROPIC_API_KEY` |
+| OpenAI API | `openai/<model>` | 用 API 密钥 `/login`，或 `OPENAI_API_KEY` |
+| OpenCode Zen 和 Go | `opencode/<model>`、`opencode-go/<model>` | 用 API 密钥 `/login`（两者共用一个密钥），或 `OPENCODE_API_KEY` |
+
+用 `/login` 保存的密钥优先使用；没有时，Kumi 使用环境变量中的密钥，而且无法从中退出登录（请改为取消设置该变量）。API 密钥只能粘贴到 Kumi 的密钥输入框或 `kumi login` 的提示中，绝不要粘贴到消息里。Kumi 不提供 Claude 和 Gemini 的订阅登录，因为它们的提供方不允许在第三方工具中使用。OpenCode 的 Gemini 模型暂不支持。
+
+`/model` 列出每个提供方的模型，这些模型直接从提供方读取，所以今天发布的模型无需更新 Kumi 就会出现。没有选择模型时，Kumi 使用你已登录的第一个提供方（按上表顺序）的第一个模型，并告诉你用的是哪个。`/effort` 设置模型思考的力度，可选级别取决于该模型；越低回答越快。两者都从你的下一条消息开始生效，并保留到下次使用。更换模型会保留对话，但先前模型的私有推理除外，那部分属于该模型。
+
+当回答因缺少登录或登录被拒而失败时，Kumi 会提出帮你登录，然后重新发送你的消息。当提供方不提供所选模型时，Kumi 会提出让你另选一个。
+
+## 连接 Live
+
+Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。`kumi bridge` 会把它装进 Live：
+
+1. 退出 Live，并保存你的工作。
+2. 运行 `kumi bridge`。它会请你确认 Live 已关闭（`--yes` 可预先确认），Live 正在运行时会拒绝执行。
+3. 打开 Live。第一次时，打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。
+
+`kumi bridge` 通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。它从不退出或启动 Live。之后它最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
+
+Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包括你移到别处的 User Library（为此它会读取 Live 自己的设置）。`KUMI_REMOTE_SCRIPTS_DIR` 可以覆盖这个位置。
+
+**Kumi 的 Live 扩展。** 在 Live 12.4 及更高版本上，`kumi bridge` 还会把 Kumi 的扩展放进 Live 的 Extensions 文件夹（macOS 上为 `~/Library/Application Support/Ableton/Extensions/kumi.kumi`；Windows 上 Kumi 使用 `%APPDATA%\Ableton\Extensions`，这一路径在 Windows 上尚未确认）。Live 下次打开时会启动它。这个扩展可以把 MIDI 片段直接写进编曲视图、清空轨道上的一段区域、在不播放的情况下渲染轨道的片段，并在 Live 的右键菜单（**Extensions** 下）中加入 **Ask Kumi about this**，它会把你点击的对象附加到你的下一条消息中。开启 Developer Mode（Settings → Extensions）时，Live 不会启动任何扩展，所以由桥接自己启动 Kumi 的扩展。没有这个扩展 Kumi 也能工作，`kumi doctor` 会告诉你它是否已安装、是否在运行。
+
+桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并告诉你如何连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
+
+**可选：Willington。** 装上单独安装的 Willington provider 后，Kumi 还可以编辑 Follow Actions、映射机架的宏旋钮以及设置链区域（chain zone）。它只在 macOS ARM64 上的某一个确切的 Live 版本上运行；请见[可选的 Willington 集成](WILLINGTON_INTEGRATION.md)。
+
+## 使用 Kumi
+
+Kumi 全屏运行：左边是对话，右边是 Live 面板，底部是输入框。FOCUS 跟随你在 Live 中触碰的对象，NOW 显示 Kumi 正在做什么，HISTORY 列出每项修改及其撤销。窗口宽度不足 100 列时，Live 面板会折叠成输入框上方的一条。设置 `KUMI_UI=plain`，或者把输出通过管道传给其他程序，会改为逐行的纯文本输出，适合屏幕阅读器。详情请见[命令、按键与界面](KUMI_TUI.md)。
+
+试试“描述打开的工程：轨道、速度和走带”，然后问某条轨道上有哪些设备。再请求一项修改，比如“把速度设为 124，并把 3-Audio 重命名为 Bass”：每项修改都会出现在 HISTORY 中，旁边带有 **undo**。点击 FOCUS 中的某个设备，或在 Live 中右键点击某个对象并选择 **Ask Kumi about this**，即可指向它：“这个 Saturator 太刺耳了”。
+
+Kumi 工作时，按 Enter 可以补充说明（它会在当前这一步之后读到你的消息），按 Tab 发送一条等这次回答结束后再处理的消息，`/btw` 可以顺便问个问题而不打断它。Esc 停止这次回答；已完成的步骤会保留。`/stop` 随时停止 Live（片段、走带和录音）。
+
+## 修改与撤销
+
+Kumi 把一个请求规划成一组修改，并一次性执行。每项修改都会带着一个通俗的标题（“Tempo 120 → 124 BPM”）进入 HISTORY。点击旁边的 **undo**，输入 `/undo` 撤销最近的一项，或者直接让 Kumi 撤销。撤销会准确恢复该修改所替换的内容。无法撤销时（对象已不存在，或者对某些设置而言，你之后又改了同一处），该行会显示 **kept** 并说明原因。整个计划在 Live 自己的撤销中也只是一步，所以在 Live 中按一次 Cmd-Z（Windows 上为 Ctrl-Z）就能撤回。
+
+有些修改 Kumi 无法撤回（删除轨道、裁剪片段、添加机架链）。HISTORY 会把它们标为 **kept**，而 Live 自己的撤销仍然可以撤回它们。Kumi 会在你要求时删除内容，或在请求隐含删除时这样做（“从头再来”“换掉鼓”）。
+
+**大改动前先备份。** 当一个计划进行到第三步，或进行到会删除内容的步骤时，Kumi 会把最后一次保存的工程复制一份，放在它旁边（`Song.backup-<date>.als`），并告诉你；每个已保存的版本只复制一次。未保存的工作不在文件中，所以也不在副本中；从未保存过的工程不会有副本。
+
+**在 Live 中运行 Python。** 对于其他工具够不着的地方，Kumi 可以用 Live 自己的 API 在 Live 内运行 Python。脚本所做的修改在 Live 的撤销中算一步，但不会在 HISTORY 中留下条目；用 Live 的撤销即可撤回。
+
+**Live 不允许脚本做的事：** 保存工程、导出或冻结轨道、把宏旋钮或调制器映射到参数（Willington 可以映射宏旋钮），以及编辑编曲视图的自动化通道。Kumi 会如实说明，并建议变通的办法。
+
+[Kumi 如何修改你的工程](KUMI_CHANGES.md)列出了 Kumi 能做的所有修改。
+
+## 播放、录音与渲染
+
+Kumi 会在你要求时，或者在有助于检查或展示它做出的东西时，播放和停止工程、触发片段和场景、移动播放头以及录音。如果一个计划中途停止（某一步失败，或你按了 Esc），Kumi 会停止它启动的播放和录音。如果 Live 拒绝普通的停止，Kumi 会使用桥接的紧急停止。
+
+Live 不给脚本提供并轨（bounce）功能，所以 Kumi 通过重采样来并轨：它添加一条音频轨道，从源轨道取信号（整个混音则从 “Resampling” 取信号），在编曲视图中录下你要的长度，然后解除该轨道的录音准备。录音会作为音频片段留在工程中。有了扩展，Kumi 还可以在不播放的情况下，把音频轨道自身的片段渲染成文件（取轨道设备之前的信号）。
+
+## 聆听
+
+Kumi 能听音频文件和工程中的音频片段：参考曲、采样、并轨结果或录音。它会测量：
+
+- 响度：整合 LUFS、真峰值和响度范围；
+- 十个频段的音色平衡（从超低频到空气感频段），以及每个频段的立体声宽度；
+- 动态、速度和调性；
+- 对单个声音：它的音高、泛音、包络和运动（LFO 的速率，按速度换算）；
+- 对带音符的声部：音符本身（取自前一分钟），可以写成 MIDI 片段。
+
+给出参考曲时，它会对齐响度，并说明差别最大的地方。对话中会以小型频谱显示它听到的内容，对比结果则显示为比参考曲高或低多少 dB。Kumi 自己就能读取 WAV 和 AIFF，MP3、M4A、FLAC 等格式则通过 macOS 的 `afconvert` 读取，在其他系统上通过 `ffmpeg` 读取（在 Windows 上，Kumi 会在第一次需要时下载它）。分析在你的电脑上进行：只有数字会发送给模型，音频本身绝不会。
+
+## 匹配参考曲
+
+让 Kumi 把某个东西做得像参考曲（“让贝斯听起来像这个：~/refs/bass.wav”），它会把这当作一次搜索，而不是猜测。它先聆听参考曲，在各自的轨道上搭建两到四个不同的版本，然后在后台把它们一起静默渲染，逐一与参考曲对比打分（0 到 100 分，并列出最大的差别）。接着它精修最好的那个；当没有哪个旋钮能缩小差距时，它会改变结构；在达到目标、新想法不再有帮助，或经过 12 轮或 45 分钟后停止。最后它会给出前后的分数，以及仍然存在的差别。
+
+`/goal` 加上要达到的目标会走得更远：Kumi 会一直搜索，大部分时候用自己的快速旋钮搜索，每隔几代再加入模型更大胆的想法，直到分数达到 95、你让它停下，或过了四个小时。GOAL 标签页显示进展。Esc 暂停目标，单独输入 `/goal` 会继续它（即使重启之后也可以），`/goal stop` 结束它。
+
+Kumi 从每次匹配中学到的东西会作为一条经验（✦）保留下来，供下一次使用；`/memory` 会列出它们。
+
+## 观看视频教程
+
+给 Kumi 一个视频，让它搭建视频里展示的内容。视频可以是 YouTube 教程（或任何 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 能读取的网站上的视频），也可以是你电脑上的视频文件：
+
+> 看看这个，在新轨道上做出这个贝斯：https://www.youtube.com/watch?v=…
+
+Kumi 会读取视频的标题、章节和文字内容。文字来自视频的字幕；没有字幕时，则来自视频里的语音，在你的电脑上转写。然后它会查看旁白提到某个设备、设置或数值时的画面，需要读取数值时还会放大查看。接着它用几行话说明这个视频做了什么，并在你的工程中搭建出来。视频用到了你的工程里没有的东西时（某个插件、某个采样），Kumi 会说明，并改用 Live 中最接近的设备。
+
+所需工具：
+
+- **yt-dlp**：Kumi 会在第一次时把它下载到 `~/.kumi/tools`（约 35 MB，按其发布版本的校验和验证），之后每月更新一次。
+- **ffmpeg**：用于画面和声音。在 Mac 上运行 `brew install ffmpeg`；在 Windows 上，Kumi 会在第一次时下载它（约 170 MB，经过校验）。没有它时，Kumi 只能读取视频的文字内容。
+- **whisper.cpp**：只用于没有字幕的视频。在 Mac 上运行 `brew install whisper-cpp`；在 Windows 上由 Kumi 下载。它的语音模型（约 190 MB）会在第一次时下载。
+
+`kumi doctor` 会告诉你是否已有 ffmpeg 和 whisper.cpp。视频不会被完整下载：画面和声音取自视频流中 Kumi 要看的那些时刻。最近 24 个视频保存在 `~/.kumi/videos` 中，所以再看同一个视频会很快。视频的文字和画面对 Kumi 来说只是信息，绝不是给它的指令。
+
+## 制作 Max for Live 设备
+
+用你自己的话请求一个 Live 没有的设备，Kumi 就会把它做出来，并放到你的轨道上：
+
+> 做一个 MIDI 效果器，只保留每个和弦中最低的音，然后把它放到 Keys 轨道上
+
+> 给我做一个听起来像 Erbe-Verb 的音频效果器
+
+你不会特意说明的细节由 Kumi 来决定，它会告诉你它选了什么。当设备应该像某个现有设备那样工作时，它会先查明原版是怎么工作的。设备会放进你 User Library 中的 Kumi 文件夹，Live 的 Browser 会像列出其他设备一样列出它；旋钮数量按需而定（最多三排）。这些旋钮都是普通的 Live 参数，所以你可以为它们写自动化、做映射。加载设备是 HISTORY 中的一项修改，带有撤销。
+
+MIDI 效果器用 JavaScript 编写。在做出设备之前，Kumi 会在你的电脑上用它编写的测试和它自己的检查（没有错误、每个音符都会被释放、没有遗留仍在运行的东西）来运行代码，不通过就修复。音频效果器或乐器用 GenExpr 编写，这是 Max 的 gen~ 所用的语言。效果器带有 Mix 和 Output 旋钮；乐器可同时发 8 个音，最多 32 个。两者最后都经过 Kumi 的输出级，以确保输出安全（没有 NaN、非正规数或直流偏移，并保持在 +6 dBFS 以下）。Kumi 会聆听它做出的东西，并修正它听到的问题。
+
+这需要 Max for Live（Live Suite，或加装了附加组件的 Standard）。
+
+## 查找资料
+
+当你提到它不够了解的东西时，比如某台硬件、某个插件、某个效果器的算法、某位艺人的技巧，Kumi 会搜索网络并阅读找到的内容。
+
+- **搜索**通过无需密钥的免费搜索服务进行（Exa、Parallel、Keenable 和 Firecrawl 轮流使用，都没有回应时使用 DuckDuckGo），代码则在 GitHub 上搜索。同样的搜索在 20 分钟内不会重复执行。
+- **阅读**涵盖网页、PDF、文本和代码文件、GitHub 仓库、Max 补丁和 Max for Live 设备，以及图片（由模型查看）。
+
+Kumi 查过的内容会显示在它的回答上方，每项一行。它只读取公开地址，绝不读取你的电脑或你的网络，并把网页上写的内容当作信息，绝不当作指令。
+
+## Kumi 会记住什么
+
+Kumi 保存的所有内容都会在保存时显示出来：对话中的一行，以及 HISTORY 标签页顶部带 **forget** 的一行。`/memory` 列出全部内容；选择某一项即可让它忘掉。
+
+- **笔记**（✎）：你告诉 Kumi、而 Live 无法显示的内容，比如某条轨道的用途、你想要的效果、你的习惯和喜好。关于你的笔记保存在 `~/.kumi/memory.json`；关于某个已保存工程的笔记保存在 `~/.kumi/projects` 中该工程的文件夹里。每处最多 24 条，每条一句话；满了之后最旧的一条让出位置。Kumi 不会保存工程本身就能显示的内容、它自己做过的事，或任何读起来像指令、看起来像密钥的内容，因此工程里的文字无法变成长期指令。
+- **技巧**（◆）：让 Kumi 做出的某个东西奏效的关键，保存下来以便日后用于类似的声音。只有当你接下来的操作表明你喜欢这个结果时（你播放了它、继续用它工作、保存了工程，或者直接说了），Kumi 才会保存；当你撤销它或说不要时，它会悄悄丢弃。最多 40 条，保存在 `~/.kumi/techniques.json`。
+- **配方**（↻）：可以在任何工程中重放的工作方式，比如人声效果链或重采样循环。让 Kumi 保存它刚做的事、描述一个固定流程，或者说“看我做”，然后在 Live 中手动操作，做完时告诉它：Kumi 会把发生的变化变成一个配方，每次不同的地方留作空白。按名称请求某个配方即可运行它，或者使用 `/recipes`。配方保存在 `~/.kumi/recipes` 中，每个配方一个文件。
+- **经验**（✦）：Kumi 在匹配声音时学到的东西，供下一次匹配使用。最多 60 条，保存在 `~/.kumi/playbook.json`。
+
+当某个请求需要 Kumi 的工具或 Live 的脚本接口没有提供的功能时，Kumi 会告诉你，给出变通的办法，并把缺失的能力记录在 `~/.kumi/gaps.jsonl` 中，供 Kumi 的开发者参考。这个记录绝不会被读回对话中；当你选择发送 `kumi report` 时，报告中会包含它。
+
+## 对话与离开期间的变化
+
+Kumi 把每个已保存工程的对话保存在 `~/.kumi/projects` 中：每次回答后都会保存，每个工程保留最近 20 个对话，每个最多约 256 KB（最早的交流会被丢弃）。在已保存的工程上打开 Kumi，会接着它最近的对话继续，HISTORY 中显示最近 100 项修改（不带撤销）。`/new` 开始新的对话，并保留上一个；`/conversations` 可以回到其中任何一个。未保存工程的对话会在你第一次保存时移到该工程自己的文件夹。
+
+Kumi 还会记住它最后一次看到的每个已保存工程是什么样子。下次打开时，欢迎界面会说明这期间发生了哪些变化（“Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad””），Kumi 也会把这些考虑进去。工程是按文件路径识别的，所以 Save As 之后会重新开始。
+
+## 当 Live 断开时
+
+Live 关闭或崩溃时，Kumi 会在一秒内察觉，告诉你，并保留对话。它每两秒查找一次 Live，Live 回来后会自动重新连接；正在执行的请求会回到输入框中，按一下 Enter 即可重新发送。如果 30 秒后 Live 仍未回来，Kumi 会问你 Live 是否已打开、是否已把 AbletonMcpBridge 选为 Control Surface。`/reconnect` 会立即尝试重连。
+
+Kumi 的撤销只在它与 Live 的连接持续期间有效：在 Live 重启、重新连接或 Kumi 重启之后，之前的修改会显示 **no undo**，只能用 Live 自己的撤销来撤回。`/new` 会保留连接，所以撤销仍然可用。
+
+## 更新、报告与卸载
+
+```sh
+kumi update              # 获取最新的 Kumi；Live 中的桥接较旧时一并更新
+kumi update --check      # 只告诉你是否有更新的 Kumi
+kumi update --rollback   # 回到上次更新之前的 Kumi
+kumi doctor              # 检查 Node、登录、桥接、Live、扩展和终端
+kumi report              # 出问题时生成一个可以发送的文件
+kumi uninstall           # 卸载 Kumi；加上 --all 会同时删除你的对话、笔记和登录信息
+```
+
+`update` 会获取最新版本，按其校验和验证，并先启动一次以确认它能运行，然后才把它放到位；之前的版本会保留，供 `--rollback` 使用。如果 Live 中的桥接较旧且 Live 已关闭，它接着会运行 `kumi bridge`；如果 Live 正开着，它会告诉你退出 Live 再运行 `kumi bridge`。在仓库的副本中，`update` 改为把检出向前推进（`git merge --ff-only`，有本地修改时拒绝执行），并运行 `npm run setup`。在 Kumi 中，`/update` 会先询问你，然后关闭 Kumi、更新，再用同一个对话重新打开它。
+
+Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版本或没有网络时什么也不说。在 `~/.kumi/settings.json` 中加入 `"updateCheck": false`，或者设置 `KUMI_NO_UPDATE_CHECK=1`，即可关闭这项检查。
+
+`report` 会写出 `~/kumi-report-<date and time>.txt`，其中包含 Kumi 和桥接的版本、doctor 的检查结果、你的设置、Kumi 在你上一次对话中做了什么、缺口日志，以及 Live 自身日志中来自桥接的行。密钥和令牌会被删除，你的主文件夹显示为 `~`，你的账户名显示为 `<user>`。发送前请先读一遍。
+
+`uninstall` 会移除 Kumi、它的 Node、它的启动器以及它添加的 PATH 条目，并提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时）。你的对话、笔记、配方和登录信息会保留，除非你加上 `--all`。
+
+## 限制
+
+| 项目 | 限制 |
+| --- | --- |
+| 你发送的一条消息 | 16 KiB |
+| 一次回答 | 200 个模型步骤；10 分钟没有进展，或总计 60 分钟后停止（匹配和目标的时间更长） |
+| 重试 | 提供方出错时最多重试 3 次，前提是该步骤还没有显示任何输出 |
+| 发往桥接的一个请求 | 65 秒 |
+| 一次回答中的修改 | 5,000 项（一批打击垫或参数只算一次） |
+| 计划中的 `wait` 步骤 | 30 分钟 |
+| 对话大小 | 超过约 160 KB 时，较早的 Live 读取结果会被压缩；超过约 400 KB 时，最早的交流会被丢弃 |
+| 能听的音频 | 文件的前 12 分钟 |
+| 视频转写 | 每次 90 分钟 |
+| 事先检查的可用磁盘空间 | 录音需要 100 MB（在工程所在的磁盘上；未保存的工程则在你的主文件夹所在的磁盘上），制作设备需要 100 MB（在 User Library 所在的磁盘上） |
+
+**聆听**听的是文件和录音，而不是 Live 播放时的输出。它负责测量和比较，不评判品味。
+
+**观看视频**取决于各个网站当前的情况。私密视频、仅限会员的视频以及部分有年龄限制的视频无法读取，自动生成的字幕也可能听错名称。不能接收图片的模型只能得到视频的文字内容。
+
+**桥接版本。** Kumi 在连接时读取桥接的版本，只提供该版本支持的工具。[桥接版本](KUMI_CHANGES.md#桥接版本)说明了哪些工具需要哪个版本。
+
+## 隐私：哪些内容会离开你的电脑
+
+- **你的模型提供方**会收到你的消息、对话、Kumi 从工程中读取的内容、它观看的视频画面，以及它读取的图片。
+- **网络搜索和阅读**会发送到上面提到的搜索服务，Kumi 读取的网页也会看到它的请求。Kumi 不会读取带有密钥或令牌的地址。
+- **下载**来自 GitHub（Kumi 的发布版本和更新检查、yt-dlp、ffmpeg 和 whisper.cpp）、Hugging Face（语音模型）、nodejs.org（安装程序使用的 Node）以及你指定的视频网站。
+- **音频**在你的电脑上分析；只有数字会发送给模型。
+
+轨道、片段和设备的名称、工具结果以及网页对 Kumi 来说都是数据，绝不是指令。Kumi 把它的文件保存在 `~/.kumi` 中，只有你可以读取；登录信息保存在 `~/.kumi/auth.json`。终端的滚动记录，以及提供方自己的数据保留，不在此范围内。
+
+## 文件与设置
+
+Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
+
+| 键 | 含义 |
+| --- | --- |
+| `model` | 所选模型，`<provider>/<model>`（`/model`、`kumi model`） |
+| `effort` | `low`、`medium`、`high`、`xhigh` 或 `max`；不设置时使用模型的默认值（`/effort`） |
+| `panelTab` | 你上次打开的 Live 面板标签页 |
+| `updateCheck` | `false` 关闭启动时的新版本检查 |
+
+环境变量（路径必须是绝对路径）：
+
+| 变量 | 含义 |
+| --- | --- |
+| `KUMI_MODEL` | 本次运行使用的 `<provider>/<model>`，覆盖所选模型 |
+| `KUMI_AUTH_FILE`、`KUMI_SETTINGS_FILE` | 登录信息存储和设置文件 |
+| `KUMI_MEMORY_FILE`、`KUMI_TECHNIQUES_FILE`、`KUMI_PLAYBOOK_FILE` | 关于你的笔记、技巧和经验 |
+| `KUMI_RECIPES_DIR`、`KUMI_PROJECTS_DIR`、`KUMI_GOALS_DIR` | 配方；每个工程的对话、笔记和最后状态；进行中的目标 |
+| `KUMI_INPUT_HISTORY_FILE`、`KUMI_GAPS_FILE`、`KUMI_RESTORE_FILE` | 你发送过的内容（供 ↑ 调出）、缺口日志，以及渲染中途崩溃后要恢复的 Main 音量 |
+| `KUMI_VIDEOS_DIR`、`KUMI_TOOLS_DIR` | 看过的视频，以及 Kumi 下载的程序 |
+| `KUMI_YTDLP`、`KUMI_FFMPEG`、`KUMI_WHISPER`、`KUMI_WHISPER_MODEL` | 按路径指定你自己的 yt-dlp、ffmpeg、whisper.cpp（`whisper-cli`）或语音模型（`ggml-*.bin`） |
+| `KUMI_REMOTE_SCRIPTS_DIR` | Kumi 找不到 Live 的 Remote Scripts 文件夹时，用它指定 |
+| `KUMI_LIVE_EXTENSIONS_DIR` | Kumi 找不到 Live 的 Extensions 文件夹时，指定 `kumi bridge` 放置 Kumi 扩展、`kumi doctor` 查找扩展的位置 |
+| `KUMI_BRIDGE_WAIT_SECONDS` | `kumi bridge` 等待 Live 连接的时长；`0` 表示不等待 |
+| `KUMI_NO_UPDATE_CHECK` | 设为任意值即关闭启动时的新版本检查 |
+| `KUMI_UI=plain` | 用逐行的纯文本输出代替全屏应用 |
+| `KUMI_COLOR` | 颜色检测出错时设为 `truecolor`、`256`、`16` 或 `none`；也会遵循 `NO_COLOR` |
+| `KUMI_ICONS` | 终端里的符号显示不正常时设为 `glyphs` 或 `badges`（两个字母的图标） |
+| `KUMI_TRACE=1` | 打印每次桥接调用的名称（不含参数和结果） |
+
+安装程序会读取 `KUMI_HOME`（安装到 `~/.kumi` 以外的位置；须在安装时设置，而不是之后）、`KUMI_VERSION`（安装指定的版本）、`KUMI_RELEASES`（从哪里下载；它优先于 `KUMI_VERSION`）和 `KUMI_NO_MODIFY_PATH=1`（不修改你的 PATH）。

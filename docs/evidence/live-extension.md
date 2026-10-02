@@ -3,6 +3,11 @@
 Measured on Live 12.4.15b5 (macOS, arm64) with the Extensions SDK 1.0.0-beta.1, 2026-09-30.
 Kumi's extension is `apps/live-extension`; the bridge reaches it through `apps/mcp-server/src/bridge/`.
 
+> A record of measurements on bridges 1.0.57 to 1.0.65, on macOS only; it isn't updated as the bridge
+> changes. The Remote Script's read costs below come from before reads were paged: the later numbers
+> are in "Full control and scale on real Live" in [kumi-poc.md](kumi-poc.md). The Windows folders in
+> the code are unconfirmed.
+
 ## How Live runs an extension
 
 - **Installed, Developer Mode off (a producer's Live).** Live starts every extension in
@@ -86,7 +91,8 @@ Live renamed "1-MIDI" to "1-Drum Rack" when a Drum Rack went in: names used as f
   drag by hand, rename B, end], Cmd-Z undid rename B, then the tempo, then rename A: the producer's
   edit is its own step and splits Kumi's step there.
 - A change through the bridge's three-step authority path (preview, then preflight, prepare, invoke)
-  took about 0.8 s on the small Set.
+  took about 0.8 s on the small Set. (A change now reaches Live as one request; see
+  [how a change reaches Live](../en/LIVE_SAFETY.md#how-a-change-reaches-live).)
 
 ## Reading a big Set: the Remote Script against the SDK
 
@@ -102,7 +108,7 @@ extension timing the same reads with the SDK's getters.
 | Every device and chain in the Set | 4153 ms | 56 ms |
 | One track's device tree | 349 ms (3 requests) | 0.2 ms |
 | Operator's 195 parameters with their values | 124 ms | 6.4 ms for names and ranges, 58 ms for the values fetched together (21 ms each one by one) |
-| The 20000 notes of the Arrangement clip | none (note discovery reads Session clips only) | 26 ms |
+| The 20000 notes of the Arrangement clip | none (note discovery read Session clips only; it reads Arrangement clips now) | 26 ms |
 | The whole Set in one snapshot | 7201 ms | — |
 | Every device's parameter list (69541 parameters) | — | 23 s |
 | A 20000-note Arrangement clip written | — | 277 ms (Kumi's extension) |
@@ -114,7 +120,8 @@ Kumi looked at this Set. Reads stay on the Remote Script all the same: the SDK k
 only (Device, RackDevice, DrumRackDevice, Simpler), not a device's Live class (Operator,
 InstrumentGroupDevice), and has no identity for Live's objects, which Kumi's changes check against.
 The Remote Script's device, note and parameter discovery is being made to read only what's asked, and
-to page by work so no request holds Live's UI for long.
+to page by work so no request holds Live's UI for long. (It now does: a read stops after about 30 ms of
+work on Live's thread and returns a cursor for the rest.)
 
 Duplicating the template track through the bridge's three-step change path took 0.92 s at 20 tracks,
 1.5 s at 80, 2.5 s at 140 and 3.8 s at 200: then, every change cost more the bigger the Set was.
