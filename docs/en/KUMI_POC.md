@@ -387,8 +387,8 @@ scenes", or "arrange it like this reference" with a file.
   in bars, their energy, which ones come back) and mirrors it.
 - **Variation.** Tracks come in and go out section by section. Transitions are a gap before a
   drop (tracks stop for the last beat or bar), a track's fill clip at a section's end, and a
-  riser or crash clip from an effects track ending where the next section starts. Kumi writes
-  no new parts unless you ask.
+  riser or crash ending where the next section starts: a clip from an effects track, or one of
+  your samples Kumi finds and brings in. Kumi writes no new parts unless you ask.
 - **In Live.** Your clips are copied into the Arrangement after what's there already (or where
   you say), each section gets a locator, and the playhead goes to the start. Kumi then says in
   a few lines what it built.
