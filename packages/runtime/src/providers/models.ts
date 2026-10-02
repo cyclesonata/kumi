@@ -11,7 +11,8 @@ import { apiKeyFor, EFFORTS, PROVIDER_INFO, USER_AGENT, type Effort, type Provid
 export interface ModelInfo {
   /** "<provider>/<model>", as settings and KUMI_MODEL name it. */
   id: string;
-  provider: ProviderId;
+  /** One of PROVIDERS, or a model server's id ("ollama"). */
+  provider: string;
   model: string;
   name: string;
   description?: string;
@@ -19,6 +20,14 @@ export interface ModelInfo {
   efforts: { effort: Effort; description?: string }[];
   /** Its own effort when none is chosen. */
   defaultEffort?: Effort;
+  /** False when its server says it can't use tools: it talks, but can't change the Set. */
+  tools?: boolean;
+  /** The most tokens it reads at once, as its server says. */
+  context?: number;
+  /** In memory already, so it answers without loading first. */
+  loaded?: boolean;
+  /** A model on the producer's own server: "on this computer", or the machine it's on. */
+  where?: string;
 }
 
 interface ListOptions {

@@ -1,12 +1,14 @@
 /**
  * Which model Kumi talks to, how hard it thinks, and the sign-ins behind them: what /model,
  * /effort, /login and /logout change. Models come from each provider's own list, so new ones
- * appear by themselves. Keys are checked with their provider before they're kept, and kept only
- * in Kumi's owner-only credential file.
+ * appear by themselves; models served on the producer's own computer (Ollama, LM Studio, servers
+ * named in settings.json) come from those servers, with no sign-in. Keys are checked with their
+ * provider before they're kept, and kept only in Kumi's owner-only credential file.
  */
 import {
-  apiKeyFor, checkApiKey, EFFORTS, KumiError, listModels, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, parseModelId, PROVIDER_INFO, PROVIDERS, resolveModel,
-  type CredentialStore, type Effort, type ModelBinding, type ModelInfo, type ProviderId,
+  apiKeyFor, checkApiKey, EFFORTS, KumiError, listLocalModels, listModels, localInstalled, localServers, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, parseLocalModelId, parseModelId,
+  probeLocal, PROVIDER_INFO, PROVIDERS, resolveLocalModel, resolveModel, startHint,
+  type CredentialStore, type Effort, type LocalKind, type LocalServer, type ModelBinding, type ModelInfo, type ProviderId,
 } from "@kumi/runtime";
 import { readSettings, writeSettings, type Settings } from "./config.js";
 
@@ -26,9 +28,21 @@ export interface ProviderStatus {
   keyEnv?: string;
 }
 
+/** A model server the producer runs, and whether it's answering. */
+export interface LocalStatus {
+  id: string;
+  name: string;
+  /** "on this computer", or the machine it's on. */
+  where: string;
+  running: boolean;
+  /** How to start it, when it isn't running. */
+  start?: string;
+}
+
 export interface CurrentModel {
   model?: string;
-  provider?: ProviderId;
+  /** One of PROVIDERS, or a model server's id ("ollama"). */
+  provider?: string;
   /** Its name from the provider's list, once read. */
   name?: string;
   effort?: Effort;
@@ -37,20 +51,33 @@ export interface CurrentModel {
   efforts: ModelInfo["efforts"];
   /** KUMI_MODEL set in the environment: choices last until Kumi closes. */
   pinned: boolean;
+  /** A model on the producer's own server: where it is. */
+  where?: string;
 }
 
 export interface ModelControl {
   current(): CurrentModel;
   providers(): Promise<ProviderStatus[]>;
   /**
-   * With no model chosen: the first model its provider lists, from the first provider signed in,
-   * chosen and returned. Undefined when none is signed in or no list could be read.
+   * The model servers worth showing: running, installed here but closed, or named in settings.json.
+   * Quick: a server that isn't running refuses at once.
    */
-  chooseDefault(): Promise<ModelInfo | undefined>;
-  /** The provider's models, from its own list (read once per session, then kept). */
-  models(provider: ProviderId, refresh?: boolean): Promise<ModelInfo[]>;
-  /** Use `model` from the next answer on. Throws KumiError("auth") when its provider isn't signed in. */
-  choose(model: string): Promise<void>;
+  local(): Promise<LocalStatus[]>;
+  /** What a provider or server is called: "ChatGPT", "Ollama", a server's own name. */
+  providerName(id: string): string;
+  /**
+   * With no model chosen: the first model its provider lists, from the first provider signed in, or
+   * else a model on this computer (one that can change the Set, loaded already if there is one),
+   * chosen and returned with what to say about it. Undefined when there's none to choose.
+   */
+  chooseDefault(): Promise<(ModelInfo & { note?: string }) | undefined>;
+  /** The provider's models, from its own list (read once per session, then kept); a server's, read each time. */
+  models(provider: string, refresh?: boolean): Promise<ModelInfo[]>;
+  /**
+   * Use `model` from the next answer on; returns what the producer should hear about it, once (a
+   * model that can't change the Set). Throws KumiError("auth") when its provider isn't signed in.
+   */
+  choose(model: string): Promise<string | undefined>;
   /** Undefined: the model's own default. */
   setEffort(effort: Effort | undefined): Promise<void>;
   /** Check the key with the provider, and keep it unless the provider refused it. */
@@ -69,18 +96,41 @@ export function createModelControl(options: {
   /** Called after a change that the next answer should pick up (the session builds a new kernel). */
   changed(): Promise<void>;
   fetch?: typeof fetch;
+  /** What Kumi learns about the chosen model as it's used, said once (a model that can't change the Set). */
+  say?: (message: string) => void;
+  /** Whether Ollama or LM Studio is installed here, so a closed one is shown; looked up when left out. */
+  installed?: (kind: LocalKind) => boolean;
 }): ModelControl {
   const { store, settingsFile, env } = options;
   const pinned = Boolean(env.KUMI_MODEL);
   const settings = (): Settings => readSettings(settingsFile);
   let model = env.KUMI_MODEL ?? settings().model;
   let effort = settings().effort;
-  const catalog = new Map<ProviderId, ModelInfo[]>();
-  let bound: { model: string; effort?: Effort; binding: ModelBinding } | undefined;
+  const catalog = new Map<string, ModelInfo[]>();
+  let bound: { model: string; effort?: Effort; binding: ModelBinding & { readonly note?: string | undefined } } | undefined;
+  const transport = options.fetch ? { fetch: options.fetch } : {};
 
+  const servers = (): LocalServer[] => localServers(settings().modelServers, env);
+  /** A model id's provider (or server) and model. */
+  const parse = (id: string | undefined): { provider: string; model: string; server?: LocalServer } | undefined => {
+    if (!id) return undefined;
+    const cloud = parseModelId(id);
+    if (cloud) return cloud;
+    const local = parseLocalModelId(id, servers());
+    return local ? { provider: local.server.id, model: local.model, server: local.server } : undefined;
+  };
   const infoFor = (id: string | undefined) => {
-    const provider = id ? parseModelId(id)?.provider : undefined;
+    const provider = parse(id)?.provider;
     return provider ? catalog.get(provider)?.find((item) => item.id === id) : undefined;
+  };
+  // What the producer has heard about models this session, so each thing is said once.
+  const heard = new Set<string>();
+  const once = (note: string | undefined) => { if (!note || heard.has(note)) return undefined; heard.add(note); return note; };
+  const say = (note: string) => { const fresh = once(note); if (fresh) options.say?.(fresh); };
+  const bind = async (id: string, level: Effort | undefined): Promise<ModelBinding & { readonly note?: string | undefined }> => {
+    const parsed = parse(id);
+    if (parsed?.server) return resolveLocalModel(parsed.server, parsed.model, { ...transport, ...(level ? { effort: level } : {}), onNote: say });
+    return resolveModel({ model: id, store, env, ...(level ? { effort: level } : {}), ...transport });
   };
   // The choices as they stand; with KUMI_MODEL set, the model chosen in Kumi lasts until it closes.
   const save = () => {
@@ -92,9 +142,9 @@ export function createModelControl(options: {
   const control: ModelControl = {
     current() {
       const info = infoFor(model);
-      const provider = model ? parseModelId(model)?.provider : undefined;
-      return { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(info ? { name: info.name } : {}), ...(effort ? { effort } : {}),
-        ...(info?.defaultEffort ? { defaultEffort: info.defaultEffort } : {}), efforts: info?.efforts ?? [], pinned };
+      const parsed = parse(model);
+      return { ...(model ? { model } : {}), ...(parsed ? { provider: parsed.provider } : {}), ...(info ? { name: info.name } : {}), ...(effort ? { effort } : {}),
+        ...(info?.defaultEffort ? { defaultEffort: info.defaultEffort } : {}), efforts: info?.efforts ?? [], pinned, ...(parsed?.server ? { where: parsed.server.where } : {}) };
     },
     async providers() {
       const statuses: ProviderStatus[] = [];
@@ -108,31 +158,56 @@ export function createModelControl(options: {
       }
       return statuses;
     },
+    async local() {
+      const installed = options.installed ?? ((kind: LocalKind) => localInstalled(kind, env));
+      const found = await Promise.all(servers().map(async (server): Promise<LocalStatus | undefined> => {
+        const running = await probeLocal(server, transport);
+        // A closed server is worth a line when the producer has it: named in settings.json, set in OLLAMA_HOST, or installed here.
+        const theirs = server.kind === "openai-compatible" || (server.kind === "ollama" && Boolean(env.OLLAMA_HOST)) || installed(server.kind);
+        if (!running && !theirs) return undefined;
+        return { id: server.id, name: server.name, where: server.where, running, ...(running ? {} : { start: startHint(server) }) };
+      }));
+      return found.filter((status): status is LocalStatus => Boolean(status));
+    },
+    providerName(id) {
+      if ((PROVIDERS as readonly string[]).includes(id)) return PROVIDER_INFO[id as ProviderId].name;
+      return servers().find((server) => server.id === id)?.name ?? id;
+    },
     async chooseDefault() {
       if (model) return undefined;
       for (const provider of (await control.providers()).filter((status) => status.signedIn)) {
         const first = (await control.models(provider.id).catch(() => []))[0];
         if (first) { await control.choose(first.id); return first; }
       }
+      // Signed in nowhere (or no provider answering): a model on this computer.
+      for (const server of (await control.local()).filter((status) => status.running)) {
+        const listed = await control.models(server.id).catch(() => []);
+        const pick = listed.find((item) => item.tools !== false && item.loaded) ?? listed.find((item) => item.tools !== false) ?? listed[0];
+        if (pick) { const note = await control.choose(pick.id); return { ...pick, ...(note ? { note } : {}) }; }
+      }
       return undefined;
     },
     async models(provider, refresh = false) {
+      const server = servers().find((item) => item.id === provider);
       const known = catalog.get(provider);
-      if (known && !refresh) return known;
-      const listed = await listModels(provider, { store, env, ...(options.fetch ? { fetch: options.fetch } : {}), signal: AbortSignal.timeout(15_000) });
+      // A server's models change as the producer pulls and loads them: they're read each time.
+      if (known && !refresh && !server) return known;
+      const signal = AbortSignal.timeout(15_000);
+      const listed = server ? await listLocalModels(server, { ...transport, signal })
+        : (PROVIDERS as readonly string[]).includes(provider) ? await listModels(provider as ProviderId, { store, env, ...transport, signal }) : [];
       catalog.set(provider, listed);
       return listed;
     },
     async choose(next) {
-      const parsed = parseModelId(next);
-      if (!parsed) throw new KumiError("config", `${next} isn't a model Kumi knows how to reach.`);
+      if (!parse(next)) throw new KumiError("config", `${next} isn't a model Kumi knows how to reach.`);
       const info = infoFor(next);
       // An effort the new model doesn't take goes back to its default.
       const keep = effort && (!info || info.efforts.some((level) => level.effort === effort)) ? effort : undefined;
-      const binding = await resolveModel({ model: next, store, env, ...(keep ? { effort: keep } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+      const binding = await bind(next, keep);
       model = next; effort = keep; bound = { model: next, ...(keep ? { effort: keep } : {}), binding };
       save();
       await options.changed();
+      return once(binding.note);
     },
     async setEffort(next) {
       if (next !== undefined && !(EFFORTS as readonly string[]).includes(next)) throw new KumiError("config", `${String(next)} isn't an effort level.`);
@@ -144,7 +219,7 @@ export function createModelControl(options: {
       const info = PROVIDER_INFO[provider];
       if (info.signIn !== "api-key") throw new KumiError("config", `${info.name} signs in with ChatGPT, not a key.`);
       const trimmed = key.trim();
-      const verdict = await checkApiKey(provider, trimmed, { ...(options.fetch ? { fetch: options.fetch } : {}), ...(signal ? { signal } : {}) });
+      const verdict = await checkApiKey(provider, trimmed, { ...transport, ...(signal ? { signal } : {}) });
       if (verdict === "refused") return verdict;
       await store.update(info.credential, async () => ({ type: "api-key", key: trimmed }));
       catalog.delete(provider); if (provider === "opencode") catalog.delete("opencode-go"); if (provider === "opencode-go") catalog.delete("opencode");
@@ -167,14 +242,16 @@ export function createModelControl(options: {
       if (!held) return false;
       await store.update(info.credential, async () => undefined);
       catalog.delete(provider);
-      if (model && PROVIDER_INFO[parseModelId(model)?.provider ?? provider].credential === info.credential) { bound = undefined; await options.changed(); }
+      const current = model ? parseModelId(model)?.provider : undefined;
+      if (current && PROVIDER_INFO[current].credential === info.credential) { bound = undefined; await options.changed(); }
       return true;
     },
     async binding() {
       if (!model) throw new KumiError("config", "Choose a model to talk to: type /model.");
       if (bound && bound.model === model && bound.effort === effort) return bound.binding;
-      const binding = await resolveModel({ model, store, env, ...(effort ? { effort } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+      const binding = await bind(model, effort);
       bound = { model, ...(effort ? { effort } : {}), binding };
+      if (binding.note) say(binding.note);
       return binding;
     },
   };

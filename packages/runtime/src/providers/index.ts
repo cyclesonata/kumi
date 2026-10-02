@@ -141,7 +141,7 @@ function mapImages(messages: LanguageModelV4Message[], change: (part: Extract<To
 }
 
 /** OpenAI-compatible chat carries only words in a tool result: each image becomes a line saying so. */
-function wordsOnly(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
+export function wordsOnly(messages: LanguageModelV4Message[]): LanguageModelV4Message[] {
   return mapImages(messages, (part) => ({ ...part, output: { type: "text", value: part.output.type !== "content" ? "" : part.output.value
     .map((item) => (item.type === "text" ? item.text : item.type === "file" ? "[An image this model can't be shown.]" : "")).filter(Boolean).join("\n") } }));
 }

@@ -2,8 +2,8 @@ import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { EFFORTS, parseModelId, PROVIDER_INFO, PROVIDERS, type Effort, type ProviderId } from "@kumi/runtime";
-import { KUMI_START } from "@kumi/runtime";
+import { EFFORTS, LOCAL_PROVIDERS, localServers, parseLocalModelId, parseModelId, PROVIDER_INFO, PROVIDERS, type Effort, type ProviderId, type ServerSetting } from "@kumi/runtime";
+import { KUMI, KUMI_START } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -67,38 +67,63 @@ export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KU
 
 /** Non-secret preferences: the chosen model and how hard it thinks. */
 export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string;
-  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false }
+  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false;
+  /** OpenAI-compatible model servers the producer runs (llama.cpp's server, vLLM, Jan, …), beside Ollama and LM Studio, which Kumi finds by itself. */
+  modelServers?: ServerSetting[] }
+
+/** The model servers named in settings.json that Kumi can use: a name, an http(s) address, and a key if the server wants one. */
+function serverSettings(value: unknown): ServerSetting[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 16).flatMap((entry): ServerSetting[] => {
+    const item = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    let url: URL | undefined;
+    try { url = typeof item.baseURL === "string" ? new URL(item.baseURL.trim()) : undefined; } catch { url = undefined; }
+    if (!name || name.length > 40 || /[\x00-\x1f\x7f]/.test(name) || !url || (url.protocol !== "http:" && url.protocol !== "https:")) return [];
+    const apiKey = typeof item.apiKey === "string" && /^[\x21-\x7e]{1,4096}$/.test(item.apiKey) ? item.apiKey : undefined;
+    return [{ name, baseURL: url.href, ...(apiKey ? { apiKey } : {}) }];
+  });
+}
 
 /** The settings file; a missing or unreadable file, or an unknown value, means none. */
 export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown };
-    return { ...(typeof value.model === "string" && validModel(value.model) ? { model: value.model } : {}),
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown; modelServers?: unknown };
+    const modelServers = serverSettings(value.modelServers);
+    return { ...(typeof value.model === "string" && validModel(value.model, modelServers) ? { model: value.model } : {}),
       ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}),
       ...(typeof value.panelTab === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.panelTab) ? { panelTab: value.panelTab } : {}),
-      ...(value.updateCheck === false ? { updateCheck: false as const } : {}) };
+      ...(value.updateCheck === false ? { updateCheck: false as const } : {}), ...(modelServers.length ? { modelServers } : {}) };
   } catch { return {}; }
 }
 
 export function writeSettings(file: string, next: Settings): void {
-  // The pane's tab and the update check are kept when a caller (choosing a model) doesn't say.
+  // The pane's tab and the update check are kept when a caller (choosing a model) doesn't say; the
+  // model servers the producer named, exactly as they wrote them.
   const before = readSettings(file);
   const panelTab = "panelTab" in next ? next.panelTab : before.panelTab;
   const updateCheck = "updateCheck" in next ? next.updateCheck : before.updateCheck;
-  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}) };
+  let modelServers: unknown = next.modelServers;
+  if (!("modelServers" in next)) { try { modelServers = (JSON.parse(readFileSync(file, "utf8")) as { modelServers?: unknown }).modelServers; } catch { modelServers = undefined; } }
+  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}),
+    ...(modelServers !== undefined ? { modelServers } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, file);
 }
 
-export function validModel(model: string | undefined): model is string {
-  return typeof model === "string" && model.length <= 256 && Boolean(parseModelId(model));
+/** A provider's model, or one on a model server: Ollama's, LM Studio's, or one named in settings.json. */
+export function validModel(model: string | undefined, servers: readonly ServerSetting[] = []): model is string {
+  return typeof model === "string" && model.length <= 256 && Boolean(parseModelId(model) ?? parseLocalModelId(model, localServers(servers)));
 }
 
+/** Where models come from, for messages: the providers, then the servers on this computer. */
+const SOURCES = `${[...PROVIDERS, ...LOCAL_PROVIDERS].join(", ")} (or a server in settings.json)`;
+
 export function loadInferenceConfig(env: Env = process.env): InferenceConfig {
-  if (env.KUMI_MODEL !== undefined && !validModel(env.KUMI_MODEL)) {
-    throw new Error(`KUMI_MODEL must be <provider>/<model> with provider one of ${PROVIDERS.join(", ")}.`);
+  if (env.KUMI_MODEL !== undefined && !validModel(env.KUMI_MODEL, readSettings(loadSettingsFile(env)).modelServers)) {
+    throw new Error(`KUMI_MODEL must be <provider>/<model> with provider one of ${SOURCES}.`);
   }
   const model = env.KUMI_MODEL ?? readSettings(loadSettingsFile(env)).model;
   return { ...(model ? { model } : {}), authFile: loadAuthFile(env) };
@@ -169,12 +194,14 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
     return { mode: "bridge", yes: flags.includes("--yes"), allowDirty: flags.includes("--allow-dirty") };
   }
   if (args[0] === "model" && args.length <= 2) {
-    if (args[1] !== undefined && !validModel(args[1])) throw new Error(`Use: model <provider>/<model>, with provider one of ${PROVIDERS.join(", ")}.`);
+    if (args[1] !== undefined && !validModel(args[1], readSettings(loadSettingsFile(env)).modelServers)) throw new Error(`Use: model <provider>/<model>, with provider one of ${SOURCES}.`);
     return { mode: "model", settingsFile: loadSettingsFile(env), ...(args[1] ? { model: args[1] } : {}) };
   }
   // `login` alone asks which way to sign in: a producer shouldn't need to know provider names.
   if (args.length === 1 && args[0] === "login") return { mode: "login-choose", authFile: loadAuthFile(env), piAuthFile: join(homedir(), ".pi", "agent", "auth.json"), settingsFile: loadSettingsFile(env) };
   if (args[0] === "login" || args[0] === "logout") {
+    // A model server on this computer needs no sign-in.
+    if (args[1] === "ollama" || args[1] === "lmstudio") throw new Error(`${args[1] === "ollama" ? "Ollama" : "LM Studio"} needs no sign-in: while it's open, its models are in /model, or choose one with: ${KUMI} model ${args[1]}/<model>`);
     if (!(PROVIDERS as readonly (string | undefined)[]).includes(args[1])) throw new Error(`Use: ${args[0]} <provider>, with provider one of ${PROVIDERS.join(", ")}.`);
     const provider = args[1] as ProviderId;
     if (args[0] === "logout") {
