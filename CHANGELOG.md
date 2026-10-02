@@ -3,6 +3,39 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.5.0 — 2026-10-02
+
+With the optional Willington provider installed, Kumi edits Session clip Follow Actions, rack macro
+names and mappings, the selected variation's name and rack chain zones, each with a preview, undo
+and a refusal when Live changed in between. Ordinary Kumi needs nothing new. Ships with bridge
+1.0.70.
+
+### Optional Willington edits
+
+- Willington is a separately installed native provider for one exact Live build (macOS ARM64,
+  Live 12.4 beta). Its tools appear only once it is set up and its writes enabled; see
+  [Optional Willington integration](docs/en/WILLINGTON_INTEGRATION.md).
+- `set_clip_follow_actions` sets all ten Follow Action fields of a Session clip (actions, chances,
+  linked or unlinked timing, loop count, jumps) while playback is stopped.
+- `edit_rack_mapping` renames a macro or the selected variation, and maps or unmaps a parameter on
+  a macro with a continuous, enum or boolean range, inverted where the parameter allows.
+- Rack chain zones with fades: selector zones on Audio Effect, Instrument and MIDI Effect Racks;
+  key and velocity zones on Instrument and MIDI Effect Racks.
+- Only the edit kinds the installed provider supports are offered. A missing Follow Action
+  self-test turns off Follow Action writes alone, and Live's log says why.
+- `willington.json` beside the installed bridge survives Kumi updates, with its permissions.
+
+### Bridge 1.0.70
+
+- The Willington operations above, offered only when the provider is present.
+- Racks read with Live's own macro layout; a chain lists its mixer parameters for mapping.
+- Recalling or deleting a rack variation by index happens in one step in Live.
+- An empty or missing Modulators category in Live's Browser falls back to the stock modulator
+  devices under Audio and MIDI Effects.
+- `set_clip` sets Legato and is offered before the Set has clips; a MIDI clip made earlier in a
+  plan can be used by later steps.
+- Note batches whose values Live rounds (0.1, triplets) no longer fail their check, in any order.
+
 ## 1.4.0 — 2026-10-02
 
 You can see what Kumi is doing and talk to it while it works: each step animates by kind, repeats

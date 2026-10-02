@@ -171,8 +171,8 @@ differs each time. Nothing in Live changes while Kumi watches.
 Bridge 1.0.58 adds explicit deletions, a plan as one undo step in Live, changes
 in one request each, Live's events (FOCUS follows the selection the moment it
 changes) and Kumi's Live extension; Kumi offers what needs it only from that
-bridge on. Bridge 1.0.57 lifted the caps on a Set's size. Kumi 1.4 ships with
-bridge 1.0.69, Kumi 1.3 with 1.0.68, Kumi 1.2 with 1.0.66 and Kumi 1.1 with 1.0.53. On bridge 1.0.33 in real
+bridge on. Bridge 1.0.57 lifted the caps on a Set's size. Kumi 1.5 ships with
+bridge 1.0.70, Kumi 1.4 with 1.0.69, Kumi 1.3 with 1.0.68, Kumi 1.2 with 1.0.66 and Kumi 1.1 with 1.0.53. On bridge 1.0.33 in real
 Live, the tools marked ¹ above were refused, not confirmed, or couldn't be
 tested. Two examples: the transport refused changes while Live played, and arming a
 track wasn't confirmed. Kumi reads the bridge's version when it connects and
