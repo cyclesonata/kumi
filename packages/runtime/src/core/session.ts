@@ -963,9 +963,8 @@ export function createSession(options: Options): SessionController {
       return { ...memory, ...(currentSetName ? { setName: currentSetName } : {}), saved: currentProject !== undefined };
     },
     async forget(id) { return notes?.forget(id); },
-    library() { return options.library?.status(); },
-    async taste() { return options.library ? options.library.taste() : []; },
-    async forgetTaste(id) { return Boolean(await options.library?.forgetTaste(id)); },
+    // Only with a library: without one there's nothing learned from the producer's Sets to show.
+    ...(options.library ? { library: () => options.library!.status(), taste: () => options.library!.taste(), forgetTaste: (id: string) => options.library!.forgetTaste(id) } : {}),
     async recipes() {
       if (!options.recipes) return [];
       return (await options.recipes.list()).map((recipe) => ({ name: recipe.name, about: recipe.about, params: recipe.params, steps: recipe.steps.length, used: recipe.used, created: recipe.created,

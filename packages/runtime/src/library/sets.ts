@@ -226,7 +226,9 @@ export async function readSet(path: string, options: { signal?: AbortSignal } = 
   }, options);
   if (!sawSet) throw new Error("That isn't a Live Set.");
   for (const member of members) { const group = groups.get(member.groupId!); if (group) member.track.group = group; }
-  if (scale.on !== false && scale.root !== undefined && Number.isInteger(scale.root) && scale.root >= 0 && scale.root < 12 && scale.name !== undefined) {
+  // C major is what every new Set starts in, so it says nothing about the song; any other scale was chosen.
+  const chosen = !(scale.root === 0 && (scale.name === "0" || scale.name === "Major"));
+  if (chosen && scale.on !== false && scale.root !== undefined && Number.isInteger(scale.root) && scale.root >= 0 && scale.root < 12 && scale.name !== undefined) {
     const named = /^\d+$/.test(scale.name) ? SCALES[Number(scale.name)] : scale.name;
     if (named) set.key = `${NOTES[scale.root]} ${named === "Major" || named === "Minor" ? named.toLowerCase() : named}`;
   }

@@ -129,7 +129,7 @@ export interface NameHints {
   note?: { name: string; midi: number };
   /** A lone note letter ("Stab C"): believed only if the sound agrees. */
   letter?: string;
-  /** The name's words, for search. */
+  /** The words of its name and folders. */
   words: string[];
 }
 
@@ -159,7 +159,7 @@ export function nameHints(relativePath: string): NameHints {
       if (inFolder.length) { found = PRIORITY.find((name) => inFolder.includes(name)); from = "folder"; break; }
     }
   }
-  // "808" alone is a bass in most packs; with a kick word it's the kick.
+  // A key ("Fmin"), else a note with its octave ("C3"), else a lone letter the sound has to agree with.
   const key = parseKey(file);
   const note = key ? undefined : parseNote(file);
   const letter = !key && !note ? /(?<![A-Za-z0-9#])([A-G])(#|b)?(?![A-Za-z0-9#'’])/.exec(file.replace(/[_-]/g, " ")) : undefined;
@@ -214,7 +214,7 @@ export function classify(hints: NameHints, heard: Heard): Classified {
   const midi = pitched ? Math.round(69 + 12 * Math.log2(pitched.hz / 440)) : undefined;
   const heardNote = midi !== undefined ? `${NOTE_NAMES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}` : undefined;
   let found = hints.class; let from: Classified["classFrom"] = hints.classFrom;
-  // An "808" that's long and low is a bass; a short thump, a kick.
+  // "808" alone is a bass in most packs; a short thump of one is the kick.
   if (found === "bass" && hints.words.includes("808") && !hints.words.some((word) => WORDS.bass.includes(word) && word !== "808" && word !== "808s") && kind === "one-shot" && heard.decayMs < 250 && heard.seconds < 0.8) found = "kick";
   if (!found) { found = classFromSound(kind, heard, pitched); from = found ? "sound" : undefined; }
   const note = hints.note?.name ?? (kind === "one-shot" ? heardNote : undefined);

@@ -282,6 +282,8 @@ test("Sets are read for their tempo, key, tracks, chains, plug-ins, clips and sa
     assert.deepEqual([set.tempo, set.key, set.signature, set.scenes, set.live], [87.5, "D Dorian", "4/4", 3, "Ableton Live 12.1.5"]);
     assert.deepEqual(set.tracks[0], { name: "Gtr", kind: "audio", devices: [{ name: "Audio Effect Rack", role: "rack", preset: "Amp Chain", inside: ["Amp", "Cabinet"] }], clips: { session: 2, arrangement: 0 }, samples: ["/x/a.wav", "/x/b.wav"], color: 3 });
     await assert.rejects(readSet(join(folder, "missing.als")));
+    put(join(folder, "New.als"), liveSet({ tempo: 120, root: 0, scale: 0, tracks: [] }));
+    assert.equal((await readSet(join(folder, "New.als"))).key, undefined, "C major is every new Set's, so it says nothing");
     put(join(folder, "Plain.adv"), livePreset("Eq8").toString("latin1").length ? livePreset("Eq8") : Buffer.alloc(0));
     assert.deepEqual(await readLivePreset(join(folder, "Plain.adv")), { device: "EQ Eight", category: "audio effect" });
     put(join(folder, "Not a set.als"), "plain text");
