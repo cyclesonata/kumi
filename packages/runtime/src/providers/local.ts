@@ -309,7 +309,11 @@ export async function listLocalModels(server: LocalServer, options: Transport = 
 }
 
 /** A model Kumi talks to on the producer's server, and what to tell them about it once (it can't change the Set). */
-export interface LocalBinding extends ModelBinding { readonly note: string | undefined }
+export interface LocalBinding extends ModelBinding {
+  readonly note: string | undefined;
+  /** Settles once the server has said what the model can do (or didn't answer in time), so the note is known if there is one. */
+  readonly asked: Promise<void>;
+}
 
 export interface LocalModelOptions {
   fetch?: typeof fetch;
@@ -327,7 +331,7 @@ const NO_TOOLS = "This model can't use tools here: you see the Set only as it's 
  * now, briefly, and otherwise with the first answer, so Kumi starts while Ollama is closed and works
  * as soon as it's open.
  */
-export async function resolveLocalModel(server: LocalServer, model: string, options: LocalModelOptions = {}): Promise<LocalBinding> {
+export function resolveLocalModel(server: LocalServer, model: string, options: LocalModelOptions = {}): LocalBinding {
   const base = options.fetch ?? fetch;
   // Identify Kumi honestly on every request, as with every provider.
   const identified: typeof fetch = (input, init) => { const headers = new Headers(init?.headers); headers.set("user-agent", USER_AGENT); return base(input, { ...init, headers }); };
@@ -375,6 +379,7 @@ export async function resolveLocalModel(server: LocalServer, model: string, opti
   /** A request as it goes: the model's facts known, tools left out when it can't use them, and loaded with room. */
   async function readied(callOptions: LanguageModelV4CallOptions): Promise<{ options: LanguageModelV4CallOptions; model: string }> {
     const signal = callOptions.abortSignal;
+    await asked;
     const known = facts ?? await learn(signal, false);
     let request = callOptions;
     if (known.tools === false) {
@@ -455,10 +460,11 @@ export async function resolveLocalModel(server: LocalServer, model: string, opti
       } catch (error) { if (callOptions.abortSignal?.aborted) throw error; throw fail(error, "request"); }
     }, fail);
 
-  // Asked now, briefly, so a choice can say what the model can't do; otherwise the first answer asks.
-  await learn(AbortSignal.timeout(PROBE_MS * 2), true).catch(() => undefined);
+  // Asked now, in the background, so a choice can say what the model can't do without Kumi waiting to
+  // start; a server that doesn't answer is asked again with the first answer.
+  const asked = learn(AbortSignal.timeout(PROBE_MS), true).then(() => undefined, () => undefined);
   return {
-    id: `${server.id}/${model}`, model: languageModel,
+    id: `${server.id}/${model}`, model: languageModel, asked,
     get note() { return note; },
     prepare(request: ModelRequest): LanguageModelV4CallOptions {
       return { prompt: [{ role: "system", content: request.instructions }, ...(server.kind === "ollama" ? request.messages : wordsOnly(request.messages))],

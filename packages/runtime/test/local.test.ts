@@ -72,7 +72,7 @@ const ollamaAt = (url: string) => localServers([], { OLLAMA_HOST: url })[0]!;
 const lmStudioAt = (url: string): LocalServer => ({ id: "lmstudio", kind: "lmstudio", name: "LM Studio", baseURL: `${url}/v1`, where: "on this computer" });
 interface Asking { instructions?: string; tools?: KernelTool[]; effort?: "low" | "high"; notes?: string[] }
 async function answer(server: LocalServer, model: string, options: Asking = {}) {
-  const binding = await resolveLocalModel(server, model, { ...(options.effort ? { effort: options.effort } : {}), onNote: (note) => options.notes?.push(note) });
+  const binding = resolveLocalModel(server, model, { ...(options.effort ? { effort: options.effort } : {}), onNote: (note) => options.notes?.push(note) });
   const kernel = createAgentKernel({ binding, instructions: options.instructions ?? "fixture instructions", signal: signal(), tools: options.tools ?? [tempo] });
   let text = "";
   try {
@@ -190,7 +190,9 @@ test("Ollama: a model that can't use tools still talks, without them, and Kumi n
   } finally { await fake.close(); }
   const alone = await serve(ollama({ "gemma3:4b": { capabilities: ["completion"] } }));
   try {
-    assert.match((await resolveLocalModel(ollamaAt(alone.url), "gemma3:4b")).note ?? "", /None of Ollama's models can; pull one that can use tools, then choose it with \/model\.$/);
+    const binding = resolveLocalModel(ollamaAt(alone.url), "gemma3:4b");
+    await binding.asked;
+    assert.match(binding.note ?? "", /None of Ollama's models can; pull one that can use tools, then choose it with \/model\.$/);
   } finally { await alone.close(); }
 });
 
@@ -337,7 +339,7 @@ test("a server named in settings.json says plainly when it's down, needs --jinja
     const fixed = fixedOf(INSTRUCTIONS, CATALOG);
     const about = (Math.round(fixed / 4 / 1000) * 1000).toLocaleString("en-US");
     assert.equal(small.message, `llama.cpp gives local-model room for 8,192 tokens, too few for Kumi's instructions and tools (about ${about}): start it with a context of ${contextFor(fixed).toLocaleString("en-US")} tokens or more, or choose another model with /model.`);
-    const binding = await resolveLocalModel(server, "local-model");
+    const binding = resolveLocalModel(server, "local-model");
     const kernel = createAgentKernel({ binding, instructions: "fixture instructions", signal: signal(), tools: [tempo] });
     reply = { error: { message: "the request exceeds the available context size, try increasing it", n_ctx: 16384 } };
     await assert.rejects(kernel.run("hi", signal(), () => {}), (error: unknown) => error instanceof KumiError && error.kind === "request" && /Kumi keeps it shorter from now on/.test(error.message));

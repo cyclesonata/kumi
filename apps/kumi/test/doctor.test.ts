@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
+import { localServers } from "@kumi/runtime";
 import { doctorChecks, runDoctor, type DoctorIo } from "../src/doctor.js";
 
 function setup() {
@@ -109,4 +110,28 @@ test("the doctor says whether Kumi's extension is in Live, the bridge's own, run
     assert.deepEqual(await line(), { status: "fix", text: "Kumi's extension in Live is from another bridge", next: "Run: npm run kumi -- bridge, then restart Live" });
     assert.match((await line({ liveVersion: "12.3.2" }))!.text, /Live 12\.3\.2 runs no extensions \(12\.4 and later do\)/);
   } finally { server.close(); s.cleanup(); }
+});
+
+test("the doctor names the model servers it found, says how to start one that's closed, and checks the model chosen on one", async () => {
+  const s = setup();
+  try {
+    const [ollama, lmstudio] = localServers([], {});
+    const qwen = { id: "ollama/qwen3:8b", provider: "ollama", model: "qwen3:8b", name: "qwen3:8b", efforts: [], tools: true };
+    const gemma = { ...qwen, id: "ollama/gemma3:4b", model: "gemma3:4b", name: "gemma3:4b", tools: false };
+    const modelServers = async () => [{ server: ollama!, running: true, models: [qwen, gemma] }, { server: lmstudio!, running: false }];
+    const checks = await doctorChecks(io({ ...s.env, KUMI_MODEL: "ollama/qwen3:8b" }, { modelServers }));
+    assert.deepEqual(checks[1], { status: "ok", text: "Ollama on this computer · model ollama/qwen3:8b" });
+    assert.deepEqual(checks[2], { status: "ok", text: "Model servers: Ollama on this computer (2 models, 1 can change the Set)" });
+    assert.deepEqual(checks[3], { status: "note", text: "LM Studio is installed but not running", next: "Open LM Studio and start its server (Developer tab), or run: lms server start" });
+    const missing = await doctorChecks(io({ ...s.env, KUMI_MODEL: "ollama/llama9:70b" }, { modelServers }));
+    assert.deepEqual(missing[1], { status: "fix", text: "Ollama doesn't have llama9:70b (model ollama/llama9:70b)", next: "Run: ollama pull llama9:70b" });
+    const closed = await doctorChecks(io({ ...s.env, KUMI_MODEL: "lmstudio/qwen/qwen3-8b" }, { modelServers }));
+    assert.deepEqual(closed[1], { status: "fix", text: "LM Studio isn't running (model lmstudio/qwen/qwen3-8b)", next: "Open LM Studio and start its server (Developer tab), or run: lms server start" });
+    // Signed in nowhere, a server with models is all Kumi needs.
+    const unsigned = await doctorChecks(io({ ...s.env, KUMI_MODEL: undefined, OPENAI_API_KEY: undefined }, { modelServers }));
+    assert.deepEqual(unsigned[1], { status: "ok", text: "Kumi starts with a model in Ollama, on this computer; no sign-in needed (/model changes it)" });
+    const nothing = await doctorChecks(io({ ...s.env, KUMI_MODEL: undefined, OPENAI_API_KEY: undefined }, { modelServers: async () => [] }));
+    assert.match(nothing[1]!.next ?? "", /or open Ollama or LM Studio$/);
+    assert.ok(!nothing.some((check) => /Model servers/.test(check.text)), "no line for servers that aren't there");
+  } finally { s.cleanup(); }
 });

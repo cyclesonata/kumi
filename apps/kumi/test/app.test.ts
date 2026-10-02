@@ -795,6 +795,65 @@ test("signing in to ChatGPT from Kumi shows the link to open, copies it on c, an
   await h.app.close();
 });
 
+/** Ollama running on this computer with a model that can change the Set and one that can't; LM Studio installed but closed. */
+const ON_THIS_COMPUTER = {
+  lists: { ...MODELS, ollama: [
+    { id: "ollama/qwen3:8b", provider: "ollama", model: "qwen3:8b", name: "qwen3:8b", description: "8.2B · Q4_K_M · loaded", efforts: [], tools: true, loaded: true, where: "on this computer" },
+    { id: "ollama/gemma3:4b", provider: "ollama", model: "gemma3:4b", name: "gemma3:4b", description: "4.3B · Q4_K_M · can't change the Set", efforts: [], tools: false, where: "on this computer" },
+  ] },
+  local: [{ id: "ollama", name: "Ollama", where: "on this computer", running: true },
+    { id: "lmstudio", name: "LM Studio", where: "on this computer", running: false, start: "Open LM Studio and start its server (Developer tab), or run: lms server start" }],
+  notes: { "ollama/gemma3:4b": "gemma3:4b can't use tools, so Kumi can talk with it about your Set but can't change anything. qwen3:8b on Ollama can: /model chooses it." },
+};
+
+test("/model lists the servers on this computer by name and place, a closed one with how to start it; a model that can't change the Set says so", async () => {
+  const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], ...ON_THIS_COMPUTER });
+  const h = harness(140, 40, fake.control);
+  void h.app.run();
+  await delay(5);
+  await h.type("/model\r");
+  await delay(10);
+  // Below the providers: typing narrows the list to them.
+  await h.type("computer");
+  let lines = panelLines(h.screen());
+  assert.ok(lines.some((line) => /Ollama · on this computer +running/.test(line)), lines.join("\n"));
+  assert.ok(lines.some((line) => line.includes("qwen3:8b") && line.includes("8.2B · Q4_K_M · loaded")));
+  assert.ok(lines.some((line) => line.includes("gemma3:4b") && line.includes("can't change the Set")));
+  assert.ok(lines.some((line) => /LM Studio · on this computer +not running/.test(line)));
+  assert.ok(has(lines, "Open LM Studio and start its server"));
+  assert.ok(!has(lines, "Sign in to LM Studio") && !has(lines, "Sign in to Ollama"), "no sign-in for a server");
+  await h.type("\u001b");
+  await h.type("/model\r");
+  await delay(10);
+  await h.type("gemma\r");
+  await delay(10);
+  assert.ok(fake.calls.includes("choose:ollama/gemma3:4b"));
+  lines = h.screen();
+  assert.ok(has(lines, "Kumi talks to gemma3:4b from your next message.") && has(lines, "can't use tools"), lines.join("\n"));
+  assert.match(lines[0]!, /gemma3:4b/, "the header names it");
+  await h.app.close();
+});
+
+test("signed in nowhere, Kumi starts with a model on this computer; when its server stops answering, the message is one enter from sent again", async () => {
+  const fake = fakeModels({ ...ON_THIS_COMPUTER });
+  const h = harness(140, 40, fake.control);
+  void h.app.run();
+  await delay(10);
+  assert.ok(has(h.screen(), "Kumi talks to qwen3:8b, in Ollama on this computer. /model changes it."));
+  assert.ok(!has(h.screen(), "Choose a model"), "nothing to choose first");
+  await h.type("Tighten the kick\r");
+  await delay(5);
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "error", message: "Ollama isn't running: open it, or run `ollama serve`, then send your message again.", kind: "network", provider: "ollama" });
+  h.emit({ type: "state", state: "idle" });
+  const lines = h.screen();
+  assert.ok(has(lines, "Ollama isn't running") && has(lines, "Send your message again?") && lines.some((line) => line.includes("Send it again") && line.includes("once Ollama is running")));
+  await h.type("\r");
+  await delay(5);
+  assert.deepEqual(h.calls.filter((call) => call.startsWith("submit")), ["submit:Tighten the kick", "submit:Tighten the kick"]);
+  await h.app.close();
+});
+
 test("/effort offers the levels the model takes, with its own default first; /logout asks before signing out", async () => {
   const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
   const h = harness(120, 36, fake.control);

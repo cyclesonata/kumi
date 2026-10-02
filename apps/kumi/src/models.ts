@@ -107,7 +107,9 @@ export function createModelControl(options: {
   let model = env.KUMI_MODEL ?? settings().model;
   let effort = settings().effort;
   const catalog = new Map<string, ModelInfo[]>();
-  let bound: { model: string; effort?: Effort; binding: ModelBinding & { readonly note?: string | undefined } } | undefined;
+  /** A binding, and for a model on a server, what it learns about the model (a note to say once). */
+  type Bound = ModelBinding & { readonly note?: string | undefined; readonly asked?: Promise<void> };
+  let bound: { model: string; effort?: Effort; binding: Bound } | undefined;
   const transport = options.fetch ? { fetch: options.fetch } : {};
 
   const servers = (): LocalServer[] => localServers(settings().modelServers, env);
@@ -127,7 +129,7 @@ export function createModelControl(options: {
   const heard = new Set<string>();
   const once = (note: string | undefined) => { if (!note || heard.has(note)) return undefined; heard.add(note); return note; };
   const say = (note: string) => { const fresh = once(note); if (fresh) options.say?.(fresh); };
-  const bind = async (id: string, level: Effort | undefined): Promise<ModelBinding & { readonly note?: string | undefined }> => {
+  const bind = async (id: string, level: Effort | undefined): Promise<Bound> => {
     const parsed = parse(id);
     if (parsed?.server) return resolveLocalModel(parsed.server, parsed.model, { ...transport, ...(level ? { effort: level } : {}), onNote: say });
     return resolveModel({ model: id, store, env, ...(level ? { effort: level } : {}), ...transport });
@@ -207,6 +209,8 @@ export function createModelControl(options: {
       model = next; effort = keep; bound = { model: next, ...(keep ? { effort: keep } : {}), binding };
       save();
       await options.changed();
+      // A model on a server says what it can't do with the choice.
+      await binding.asked;
       return once(binding.note);
     },
     async setEffort(next) {
@@ -251,7 +255,8 @@ export function createModelControl(options: {
       if (bound && bound.model === model && bound.effort === effort) return bound.binding;
       const binding = await bind(model, effort);
       bound = { model, ...(effort ? { effort } : {}), binding };
-      if (binding.note) say(binding.note);
+      // Said once it's known, without holding up the answer.
+      void binding.asked?.then(() => { if (binding.note) say(binding.note); });
       return binding;
     },
   };
