@@ -175,3 +175,27 @@ test("the form's checks come before any change: a missing track, a track named t
   const none = compile(material, { sections: [{ name: "A", bars: 3, fill: [] }], final: false }, { midi: false, audio: false });
   assert.ok(typeof none !== "string"); assert.deepEqual(none.placements, []);
 });
+
+test("a loop already in the Arrangement: its MIDI clips are written anew with their notes through each section, cut where a part ends; audio there is said", async () => {
+  const b = await arranged({ scenes: 2, tracks: [
+    { name: "Keys", arrangement: [{ start: 0, end: 8, name: "Keys", loop: [0, 4], notes: [{ pitch: 60, start: 0, duration: 1 }, { pitch: 64, start: 2, duration: 1 }] }] },
+    { name: "Bass", arrangement: [{ start: 0, end: 8, name: "Bass", notes: [{ pitch: 36, start: 0, duration: 4 }, { pitch: 38, start: 4, duration: 4 }] }] },
+    { name: "Vox", audio: true, arrangement: [{ start: 0, end: 8, name: "Vox" }] },
+    { name: "Drums", clips: { 0: { name: "Beat", beats: 16 } } },
+  ] });
+  try {
+    const look = JSON.parse((await tool(b.tools, "arrange").execute({ loop: { from_bar: 1, bars: 2 } }, signal())).text).material;
+    assert.deepEqual(look.loop, { bars: "1–2", tracks: ["Keys: 4 notes", "Bass: 2 notes"], audioLeftOut: "Vox: audio, which Live's scripting can't copy within the Arrangement" });
+    const result = await tool(b.tools, "arrange").execute({ loop: { from_bar: 1, bars: 2 }, sections: [{ name: "A", bars: 4 }, { name: "B", bars: 3, tracks: ["Keys", { track: "Drums", scene: 0 }] }] }, signal());
+    assert.equal(result.isError ?? false, false, result.text);
+    // It starts after the loop; the loop's clips are its own, left as they are.
+    assert.deepEqual(b.arrangement(), { Keys: ["Keys 1–3", "Keys 3–5", "Keys 5–7", "Keys 7–9", "Keys 9–10"], Bass: ["Bass 1–3", "Bass 3–5", "Bass 5–7"], Vox: ["Vox 1–3"], Drums: ["Beat 7–10"] });
+    // A looping clip's loop repeated; a part's notes cut at its end.
+    assert.deepEqual(b.written(), { Keys: ["0:60:1 2:64:1 4:60:1 6:64:1", "0:60:1 2:64:1 4:60:1 6:64:1", "0:60:1 2:64:1 4:60:1 6:64:1", "0:60:1 2:64:1"], Bass: ["0:36:4 4:38:4", "0:36:4 4:38:4"], Vox: [], Drums: [] });
+    assert.equal(b.requests.filter((request) => request.name === "live_arrangement_midi_clip_apply").length, 1, "all of them in one change");
+    assert.match(JSON.stringify(JSON.parse(result.text).notes), /Vox has audio in bars 1–2 of the Arrangement, which Live's scripting can't copy within the Arrangement/);
+    // Undo takes the written clips back too.
+    await b.integration.undo!(JSON.parse(result.text).change, signal());
+    assert.deepEqual(b.arrangement(), { Keys: ["Keys 1–3"], Bass: ["Bass 1–3"], Vox: ["Vox 1–3"], Drums: [] });
+  } finally { await b.integration.close(); }
+});

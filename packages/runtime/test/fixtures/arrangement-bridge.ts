@@ -14,7 +14,10 @@ import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
 
 export interface FixtureClip { name: string; beats: number; audio?: boolean; warped?: boolean; loopStart?: number }
-export interface FixtureTrack { name: string; audio?: boolean; group?: boolean; clips?: Record<number, FixtureClip>; arrangement?: { start: number; end: number }[] }
+export interface FixtureNote { pitch: number; start: number; duration: number; velocity?: number }
+/** A clip in the Arrangement: where it starts and ends, and a MIDI clip's notes (from its start; a looping one repeats its loop). */
+export interface FixturePlaced { start: number; end: number; name?: string; audio?: boolean; notes?: FixtureNote[]; loop?: [number, number] }
+export interface FixtureTrack { name: string; audio?: boolean; group?: boolean; clips?: Record<number, FixtureClip>; arrangement?: FixturePlaced[] }
 interface Options {
   tracks: FixtureTrack[]; scenes: number;
   locators?: { name: string; position: number }[]; playing?: boolean; tempo?: number;
@@ -25,7 +28,7 @@ interface Options {
 }
 
 interface Clip { id: number; name: string; beats: number; audio: boolean; warped: boolean; loopStart: number; loopEnd: number }
-interface Placed { id: number; start: number; end: number; name: string; from: string }
+interface Placed { id: number; start: number; end: number; name: string; from: string; audio?: boolean; notes?: FixtureNote[]; loop?: [number, number] }
 const EPOCH = 7;
 
 export function arrangementBridge(options: Options) {
@@ -36,7 +39,8 @@ export function arrangementBridge(options: Options) {
   const tracks = options.tracks.map((track) => ({
     name: track.name, audio: track.audio === true, group: track.group === true,
     slots: Array.from({ length: options.scenes }, (_, scene) => { const clip = track.clips?.[scene]; return clip ? { id: ++ids, name: clip.name, beats: clip.beats, audio: clip.audio ?? track.audio === true, warped: clip.warped ?? true, loopStart: clip.loopStart ?? 0, loopEnd: (clip.loopStart ?? 0) + clip.beats } as Clip | undefined : undefined; }),
-    arrangement: (track.arrangement ?? []).map((item): Placed => ({ id: ++ids, start: item.start, end: item.end, name: "Earlier", from: "" })),
+    arrangement: (track.arrangement ?? []).map((item): Placed => ({ id: ++ids, start: item.start, end: item.end, name: item.name ?? "Earlier", from: "", audio: item.audio ?? track.audio === true,
+      ...(item.notes ? { notes: item.notes } : {}), ...(item.loop ? { loop: item.loop } : {}) })),
   }));
   let scenes = Array.from({ length: options.scenes }, (_, index) => `Scene ${index + 1}`);
   let locators = (options.locators ?? []).map((locator) => ({ id: ++ids, ...locator }));
@@ -44,7 +48,7 @@ export function arrangementBridge(options: Options) {
   const names = ["live_status", "live_discover", "live_undo", "live_song_state", "live_undo_step_begin", "live_undo_step_end",
     "live_clip_duplicate_preview", "live_clip_duplicate_apply", "live_clip_properties_preview", "live_clip_properties_apply", "live_audio_clip_preview", "live_audio_clip_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_arrangement_section_preview", "live_arrangement_section_apply",
-    "live_transport_preview", "live_transport_apply", "live_mixer_preview", "live_mixer_apply"].filter((name) => !(options.without ?? []).includes(name));
+    "live_transport_preview", "live_transport_apply", "live_mixer_preview", "live_mixer_apply", "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply"].filter((name) => !(options.without ?? []).includes(name));
   const catalog: Tool[] = names.map((name) => ({ name, description: `bridge ${name}`, inputSchema: { type: "object", properties: {}, additionalProperties: true } }));
   const wrap = (value: JsonObject): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });
   const refusal = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text }], structuredContent: { message: text } });
@@ -66,7 +70,10 @@ export function arrangementBridge(options: Options) {
     if (kind === "locator") return [...locators].sort((a, b) => a.position - b.position).map((locator, index) => ({ ref: `${EPOCH}:locator:${index}`, name: locator.name, position: locator.position }));
     const track = path(parent, "track");
     if (kind === "clip-slot" && track) return (tracks[track[0]]?.slots ?? []).map((clip, scene) => ({ ref: `${EPOCH}:clip_slot:${track[0]}:${scene}`, parentRef: parent, sceneIndex: scene, clipRef: clip ? `${EPOCH}:clip:${track[0]}:${scene}` : null, empty: !clip }));
-    if (kind === "arrangement-clip" && track) return timeline(track[0]).map((placed) => ({ ref: arrangementRef(track[0], placed), parentRef: parent, name: placed.name, start: placed.start, endTime: placed.end, length: placed.end - placed.start }));
+    if (kind === "arrangement-clip" && track) return timeline(track[0]).map((placed) => ({ ref: arrangementRef(track[0], placed), parentRef: parent, name: placed.name, start: placed.start, endTime: placed.end,
+      length: placed.loop ? placed.loop[1] - placed.loop[0] : placed.end - placed.start, isAudio: placed.audio === true, looping: Boolean(placed.loop), loopStart: placed.loop?.[0] ?? 0, loopEnd: placed.loop?.[1] ?? placed.end - placed.start }));
+    const placedAt = path(parent, "arrangement_clip");
+    if (kind === "note" && placedAt) return (timeline(placedAt[0])[placedAt[1]]?.notes ?? []).map((note, index) => ({ ref: `${EPOCH}:note:${placedAt[0]}:${placedAt[1]}:${index}`, parentRef: parent, velocity: 100, ...note }));
     const slot = path(parent, "clip_slot");
     const clip = slot ? tracks[slot[0]]?.slots[slot[1]] : undefined;
     if (kind === "session-clip" && slot && clip) return [{ ref: `${EPOCH}:clip:${slot[0]}:${slot[1]}`, parentRef: parent, name: clip.name, length: clip.loopEnd - clip.loopStart, looping: true,
@@ -155,6 +162,18 @@ export function arrangementBridge(options: Options) {
           transaction.made = { locators: made.map((item) => item.id) };
           return wrap({ transactionId: args.transactionId, state: "applied", locators: made });
         }
+        if (transaction.name === "live_arrangement_midi_clip_preview") {
+          // Like the extension: each clip goes where its track's Arrangement is empty.
+          const made: number[] = [];
+          for (const clip of (Array.isArray(given.clips) ? given.clips : [given]) as JsonObject[]) {
+            const at = path(clip.trackRef, "track")!; const start = Number(clip.start); const end = start + Number(clip.length);
+            if (tracks[at[0]]!.arrangement.some((item) => start < item.end - 1e-9 && item.start < end - 1e-9)) return refusal("a clip goes only where the track's Arrangement is empty");
+            const placed: Placed = { id: ++ids, start, end, name: String(clip.name ?? "Clip"), from: "notes", notes: clip.notes as FixtureNote[] };
+            tracks[at[0]]!.arrangement.push(placed); made.push(placed.id);
+          }
+          transaction.made = { written: made };
+          return wrap({ transactionId: args.transactionId, state: "applied" });
+        }
         if (transaction.name === "live_transport_preview") { transaction.prior = { position: state.playhead }; state.playhead = Number(given.position); }
         return wrap({ transactionId: args.transactionId, state: "applied" });
       }
@@ -162,7 +181,7 @@ export function arrangementBridge(options: Options) {
         const transaction = pending.get(String(args.transactionId));
         if (!transaction) return refusal("Unknown or expired transaction");
         const made = transaction.made ?? {};
-        if (typeof made.placed === "number") { const found = findPlaced(made.placed); if (found) tracks[found.index]!.arrangement = tracks[found.index]!.arrangement.filter((item) => item !== found.placed); }
+        for (const id of [...(typeof made.placed === "number" ? [made.placed] : []), ...(Array.isArray(made.written) ? made.written as number[] : [])]) { const found = findPlaced(id); if (found) tracks[found.index]!.arrangement = tracks[found.index]!.arrangement.filter((item) => item !== found.placed); }
         if (Array.isArray(made.slot)) {
           const [track, scene] = made.slot as number[]; const copy = tracks[track!]!.slots[scene!];
           // Like the bridge: a copy that changed since (its loop still shortened) isn't deleted.
@@ -194,6 +213,8 @@ export function arrangementBridge(options: Options) {
     integration, requests, records, actions, state,
     /** Each track's Arrangement: its clips' names and where they start and end, in bars from 1. */
     arrangement: () => Object.fromEntries(tracks.map((track, index) => [track.name, timeline(index).map((item) => `${item.name} ${item.start / 4 + 1}–${item.end / 4 + 1}`)])),
+    /** The notes of each clip written with its notes, by track: start (beats from the clip's start) and pitch. */
+    written: () => Object.fromEntries(tracks.map((track, index) => [track.name, timeline(index).filter((item) => item.from === "notes").map((item) => (item.notes ?? []).map((note) => `${note.start}:${note.pitch}:${note.duration}`).join(" "))])),
     session: () => tracks.map((track) => track.slots.map((clip) => clip ? `${clip.name}:${clip.loopEnd - clip.loopStart}` : "")),
     scenes: () => [...scenes], locators: () => [...locators].sort((a, b) => a.position - b.position).map((locator) => `${locator.name}@${locator.position / 4 + 1}`),
     play: (playing: boolean) => { state.playing = playing; },

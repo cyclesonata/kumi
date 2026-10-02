@@ -16,7 +16,8 @@ export const ARRANGE_TOOL = "arrange";
 
 export const ARRANGE_DESCRIPTION = [
   "Lay out an arrangement in the Arrangement from the producer's own clips, in one call: the sections in order, each with its name, its length in bars and the tracks that play in it,",
-  "from Session scenes (a section plays a scene's clips, or chosen clips per track). Kumi copies the clips (whole loops, and a loop's first part where a section ends sooner), adds the gaps, fills and risers asked for,",
+  "from Session scenes (a section plays a scene's clips, or chosen clips per track) or from a loop already in the Arrangement (loop: its bars; its MIDI clips are copied with their notes).",
+  "Kumi copies the clips (whole loops, and a loop's first part where a section ends sooner), adds the gaps, fills and risers asked for,",
   "marks each section with a locator and puts the playhead at the start. It's one change: one line in HISTORY whose undo takes it all back, and one Cmd-Z in Live.",
   "Without sections it changes nothing and returns the material to plan with: each scene's clips by track with their lengths, where the Arrangement's clips end, and its locators.",
   "Vary it by subtraction and addition: tracks in and out per section; gap: tracks drop out for the last beats before the next section (the breath before a drop);",
@@ -38,6 +39,8 @@ export const ARRANGE_SCHEMA: JsonObject = { type: "object", additionalProperties
     riser: { ...CLIP, description: "A clip on a track that doesn't play here (an effects track), placed to end where the section ends" },
   } } },
   scene: { ...SCENE, description: "The scene a section plays when it names none; left out, the first scene with clips" },
+  loop: { type: "object", additionalProperties: false, required: ["from_bar", "bars"], description: "Arrange from bars already in the Arrangement instead: a section's tracks then play what they have there, unless they name a scene",
+    properties: { from_bar: { type: "integer", minimum: 1, maximum: 10000 }, bars: { type: "integer", minimum: 1, maximum: 64 } } },
   start_bar: { type: "integer", minimum: 1, maximum: 10000, description: "Where the arrangement starts; left out, after the clips already in the Arrangement" },
   final: { type: "boolean", description: "The arrangement completes the request: Kumi says what it built and you aren't called again" },
 } };
@@ -45,7 +48,7 @@ export const ARRANGE_SCHEMA: JsonObject = { type: "object", additionalProperties
 /** A track's clip, by the scene it's in (the section's scene when left out). */
 export interface ClipChoice { track: string; scene?: number }
 export interface SectionRequest { name: string; bars: number; scene?: number; tracks?: ClipChoice[]; gap?: { beats: number; tracks?: string[] }; fill: ClipChoice[]; riser?: ClipChoice }
-export interface ArrangeRequest { sections: SectionRequest[]; scene?: number; startBar?: number; final: boolean }
+export interface ArrangeRequest { sections: SectionRequest[]; scene?: number; startBar?: number; /** Bars already in the Arrangement to arrange from. */ loop?: { fromBar: number; bars: number }; final: boolean }
 
 const record = (value: unknown): JsonObject => (value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {});
 const integer = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined);
@@ -98,12 +101,19 @@ export function arrangeRequest(input: JsonObject): ArrangeRequest | string {
     }
     sections.push(section);
   }
+  const loop = input.loop === undefined ? undefined : record(input.loop);
+  if (loop && (!integer(loop.from_bar) || !integer(loop.bars))) return "loop is the bars in the Arrangement to arrange from: from_bar (1 is the first) and bars.";
   return { sections, final: input.final === true, ...(integer(input.scene) !== undefined ? { scene: integer(input.scene)! } : {}),
-    ...(integer(input.start_bar) ? { startBar: integer(input.start_bar)! } : {}) };
+    ...(integer(input.start_bar) ? { startBar: integer(input.start_bar)! } : {}), ...(loop ? { loop: { fromBar: integer(loop.from_bar)!, bars: integer(loop.bars)! } } : {}) };
 }
 
-/** A Session clip as Kumi places it: its length in beats (its loop's, when it loops) and where its loop starts. */
-export interface SourceClip { ref: string; name: string; beats: number; loopStart: number; audio: boolean; scene: number; /** Its loop can be shortened: MIDI, or warped audio. */ shortens: boolean }
+/** A note as Kumi writes it: start and duration in beats from its clip's start. */
+export interface LoopNote { pitch: number; start: number; duration: number; velocity: number; mute?: boolean; probability?: number; velocityDeviation?: number; releaseVelocity?: number }
+/**
+ * A clip as Kumi places it: a Session clip (copied), with its length in beats (its loop's, when it loops) and
+ * where its loop starts; or a track's bars of an Arrangement loop (scene -1), written anew with their notes.
+ */
+export interface SourceClip { ref: string; name: string; beats: number; loopStart: number; audio: boolean; scene: number; /** Its loop can be shortened: MIDI, or warped audio. */ shortens: boolean; notes?: LoopNote[] }
 export interface SourceTrack { ref: string; name: string; clips: SourceClip[]; /** Its clips in the Arrangement, start and end in beats. */ busy: [number, number][]; /** Scenes whose slot on it is empty. */ empty: number[] }
 export interface Material {
   beatsPerBar: number; tempo?: number;
@@ -116,6 +126,8 @@ export interface Material {
   sessionPlaying: boolean;
   /** Clips not read (a huge Session), so not offered. */
   unread: number;
+  /** The Arrangement loop arranged from, in beats, and the tracks whose clips there are audio (which can't be copied). */
+  loop?: { from: number; to: number; audio: string[] };
 }
 
 /** What arranging needs from Live: reads, quiet changes and their undo, Live's undo step, HISTORY's line. */
@@ -145,7 +157,7 @@ export interface ArrangeHost {
 const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
 /** The material, read fresh: the tracks with their Session clips, the scenes, the Arrangement's clips and locators. */
-export async function readMaterial(host: ArrangeHost, signal: AbortSignal): Promise<Material> {
+export async function readMaterial(host: ArrangeHost, signal: AbortSignal, loop?: ArrangeRequest["loop"]): Promise<Material> {
   // Reads that don't depend on each other go to Live together: they share its display ticks.
   const [sets, trackRows, sceneRows, locatorRows] = await Promise.all([
     host.read("set", { fields: ["playing"] }, signal), host.read("track", { fields: ["name", "kind", "playingSlotIndex"] }, signal),
@@ -154,7 +166,7 @@ export async function readMaterial(host: ArrangeHost, signal: AbortSignal): Prom
   const tracks = trackRows.filter((row) => typeof row.ref === "string" && row.kind !== "group");
   const [slotRows, arrangementRows] = await Promise.all([
     Promise.all(tracks.map((track) => host.read("clip-slot", { parent: track.ref, fields: ["sceneIndex", "clipRef"] }, signal))),
-    Promise.all(tracks.map((track) => host.read("arrangement-clip", { parent: track.ref, fields: ["start", "endTime", "length"] }, signal).catch(() => [] as JsonObject[])))]);
+    Promise.all(tracks.map((track) => host.read("arrangement-clip", { parent: track.ref, fields: ["name", "start", "endTime", "length", "isAudio", "looping", "loopStart", "loopEnd"] }, signal).catch(() => [] as JsonObject[])))]);
   const filled = slotRows.flatMap((slots, index) => slots.filter((slot) => typeof slot.clipRef === "string" && typeof slot.ref === "string").map((slot) => ({ index, slot })));
   const clipRows = await Promise.all(filled.slice(0, MOST_CLIPS).map(({ slot }) =>
     host.read("session-clip", { parent: slot.ref, fields: ["name", "length", "looping", "loopStart", "isAudio", "warping"] }, signal).then((rows) => rows[0])));
@@ -173,6 +185,16 @@ export async function readMaterial(host: ArrangeHost, signal: AbortSignal): Prom
     const audio = clip.isAudio === true;
     sources[index]!.clips.push({ ref: clip.ref, name: typeof clip.name === "string" ? clip.name.slice(0, 120) : "", beats, loopStart: number(clip.loopStart) ?? 0, audio, scene, shortens: !audio || clip.warping === true });
   }
+  const bpb = host.beatsPerBar();
+  const span = loop ? { from: (loop.fromBar - 1) * bpb, to: (loop.fromBar - 1 + loop.bars) * bpb, audio: [] as string[] } : undefined;
+  if (span) await Promise.all(sources.map(async (source, index) => {
+    const inside = (arrangementRows[index] ?? []).filter((row) => { const start = number(row.start) ?? Infinity; const end = number(row.endTime) ?? start; return start < span.to - EPSILON && end > span.from + EPSILON; });
+    if (!inside.length) return;
+    if (inside.some((row) => row.isAudio === true)) { span.audio.push(source.name); return; }
+    const notes = (await Promise.all(inside.map(async (row) => loopNotes(row, await host.read("note", { parent: row.ref, fields: ["pitch", "start", "duration", "velocity", "mute", "probability", "velocityDeviation", "releaseVelocity"] }, signal), span)))).flat();
+    source.clips.push({ ref: `loop:${source.ref}`, name: typeof inside[0]!.name === "string" && inside[0]!.name ? inside[0]!.name.slice(0, 120) : source.name, beats: span.to - span.from, loopStart: 0, audio: false, scene: -1, shortens: true,
+      notes: notes.sort((a, b) => a.start - b.start || a.pitch - b.pitch) });
+  }));
   const set = sets[0] ?? {};
   return {
     beatsPerBar: host.beatsPerBar(), ...(host.tempo() ? { tempo: host.tempo()! } : {}), tracks: sources,
@@ -180,8 +202,32 @@ export async function readMaterial(host: ArrangeHost, signal: AbortSignal): Prom
     locators: locatorRows.flatMap((row) => (number(row.position) !== undefined ? [{ name: typeof row.name === "string" ? row.name : "", position: number(row.position)! }] : [])),
     end: Math.max(0, ...sources.flatMap((track) => track.busy.map(([, end]) => end))),
     playing: set.playing === true, sessionPlaying: tracks.some((track) => integer(track.playingSlotIndex) !== undefined),
-    unread: Math.max(0, filled.length - MOST_CLIPS),
+    unread: Math.max(0, filled.length - MOST_CLIPS), ...(span ? { loop: span } : {}),
   };
+}
+
+/**
+ * An Arrangement clip's notes as they sound in the loop, from its start: a looping clip's loop repeated to its
+ * end. (A clip's content is taken to begin at its start, as Live makes it; one trimmed from the left plays later notes.)
+ */
+function loopNotes(clip: JsonObject, rows: JsonObject[], span: { from: number; to: number }): LoopNote[] {
+  const start = number(clip.start) ?? 0; const end = number(clip.endTime) ?? start + (number(clip.length) ?? 0);
+  const loopStart = number(clip.loopStart) ?? 0; const loopEnd = number(clip.loopEnd);
+  const period = clip.looping === true && loopEnd !== undefined && loopEnd > loopStart ? loopEnd - loopStart : undefined;
+  const notes: LoopNote[] = [];
+  for (const row of rows) {
+    const pitch = number(row.pitch); const at = number(row.start); const duration = number(row.duration);
+    if (pitch === undefined || at === undefined || duration === undefined || duration <= 0) continue;
+    const times = period ? (at >= loopStart && at < loopEnd! ? Array.from({ length: Math.ceil((end - start) / period) + 1 }, (_, turn) => start + at - loopStart + turn * period) : []) : [start + at];
+    for (const time of times) {
+      if (time < Math.max(start, span.from) - EPSILON || time >= Math.min(end, span.to) - EPSILON) continue;
+      const note: LoopNote = { pitch, start: time - span.from, duration: Math.min(duration, span.to - time), velocity: number(row.velocity) ?? 100 };
+      if (typeof row.mute === "boolean") note.mute = row.mute;
+      for (const key of ["probability", "velocityDeviation", "releaseVelocity"] as const) if (number(row[key]) !== undefined) note[key] = number(row[key])!;
+      notes.push(note);
+    }
+  }
+  return notes;
 }
 
 /** Where something goes: a clip (whole, or its loop's first `beats` when shorter) at a position. */
@@ -209,10 +255,16 @@ export function compile(material: Material, request: ArrangeRequest, shortens: {
     return `There's no track called ${JSON.stringify(named)}. Tracks with clips: ${material.tracks.filter((track) => track.clips.length).map((track) => track.name).slice(0, 32).join(", ") || "none"}.`;
   };
   const withClips = material.tracks.filter((track) => track.clips.length);
+  const looped = material.loop ? `bars ${material.loop.from / bpb + 1}–${material.loop.to / bpb} of the Arrangement` : undefined;
+  if (looped && !withClips.some((track) => track.clips.some((clip) => clip.notes))) return `There are no MIDI clips in ${looped} to arrange from${material.loop!.audio.length ? ` (${material.loop!.audio.join(", ")} ${material.loop!.audio.length === 1 ? "has" : "have"} audio there, which Live's scripting can't copy within the Arrangement: drag those clips into Session slots, or arrange from scenes)` : ""}.`;
   if (!withClips.length) return "There are no clips in the Session to arrange: record or write the loop into Session clips first.";
-  const defaultScene = request.scene ?? Math.min(...withClips.flatMap((track) => track.clips.map((clip) => clip.scene)));
+  const notes: string[] = [];
+  if (looped && material.loop!.audio.length) notes.push(`${material.loop!.audio.join(", ")} ${material.loop!.audio.length === 1 ? "has" : "have"} audio in ${looped}, which Live's scripting can't copy within the Arrangement, so ${material.loop!.audio.length === 1 ? "it isn't" : "they aren't"} in the arrangement: drag those clips into Session slots and name them as {track, scene} to bring them in.`);
+  // A loop in the Arrangement is the "scene" its sections play (-1) unless they name one.
+  const defaultScene = looped ? -1 : request.scene ?? Math.min(...withClips.flatMap((track) => track.clips.map((clip) => clip.scene)));
+  const where = (scene: number) => (scene === -1 ? looped! : `scene ${scene + 1}`);
   const start = request.startBar !== undefined ? (request.startBar - 1) * bpb : Math.max(0, Math.ceil(material.end / bpb - EPSILON)) * bpb;
-  const placements: Placement[] = []; const sections: PlannedSection[] = []; const notes: string[] = [];
+  const placements: Placement[] = []; const sections: PlannedSection[] = [];
   // Section names are their locators' too, and Live's locators can't share one: each name is new ("Drop 2").
   const taken = new Set(material.locators.map((locator) => locator.name));
   const unique = (name: string) => { let candidate = name; for (let count = 2; taken.has(candidate); count++) candidate = `${name} ${count}`; taken.add(candidate); return candidate; };
@@ -225,13 +277,13 @@ export function compile(material: Material, request: ArrangeRequest, shortens: {
     const everything = section.tracks === undefined;
     if (everything) {
       for (const track of material.tracks) { const clip = track.clips.find((item) => item.scene === scene); if (clip) plays.push({ track, clip }); }
-      if (!plays.length) return `Scene ${scene + 1} has no clips, so ${name} would be empty: name the tracks that play, or another scene.`;
+      if (!plays.length) return `${where(scene)[0]!.toUpperCase()}${where(scene).slice(1)} has no clips, so ${name} would be empty: name the tracks that play, or another scene.`;
     } else {
       for (const choice of section.tracks!) {
         const track = find(choice.track); if (typeof track === "string") return `${name}: ${track}`;
         // A track named to play whose only clip is in another scene plays that one.
         const clip = track.clips.find((item) => item.scene === (choice.scene ?? scene)) ?? (choice.scene === undefined && track.clips.length === 1 ? track.clips[0] : undefined);
-        if (!clip) { notes.push(`${track.name} has no clip in scene ${(choice.scene ?? scene) + 1}, so it doesn't play in ${name}.`); continue; }
+        if (!clip) { notes.push(`${track.name} has no clip in ${where(choice.scene ?? scene)}, so it doesn't play in ${name}.`); continue; }
         if (plays.some((item) => item.track === track)) return `${name}: ${track.name} is named twice; a track plays one clip at a time.`;
         plays.push({ track, clip });
       }
@@ -266,7 +318,8 @@ export function compile(material: Material, request: ArrangeRequest, shortens: {
         const beats = Math.min(clip.beats, end - at);
         if (beats < clip.beats - EPSILON) {
           if (beats < SHORTEST) break;
-          if (!clip.shortens || !(clip.audio ? shortens.audio : shortens.midi)) {
+          // Notes written anew are cut where the part ends; a Session clip needs its loop shortened.
+          if (!clip.notes && (!clip.shortens || !(clip.audio ? shortens.audio : shortens.midi))) {
             notes.push(`${track.name}'s clip (${clip.beats} beats) doesn't fit ${name}'s end evenly and Live can't shorten ${clip.audio ? "this audio clip (it isn't warped)" : "its loop here"}, so its last ${beats} beats are left empty.`);
             break;
           }
@@ -307,13 +360,16 @@ export function compile(material: Material, request: ArrangeRequest, shortens: {
     placements: placements.sort((a, b) => a.at - b.at || material.tracks.indexOf(a.track) - material.tracks.indexOf(b.track)), locators, notes };
 }
 
+/** How many clips with notes one change writes into the Arrangement. */
+const WRITTEN_AT_ONCE = 32;
+
 /** What a run made, and where it stopped if it did (the section it was in, and why). */
 export interface Built { copies: number; parts: number; locators: number; /** The playhead's move: not undone with the rest (it isn't part of the Set). */ playhead?: string; opened: boolean; stopped?: string; stoppedIn?: string; notes: string[] }
 
-/** Each part of a loop, made once in the Session and copied to every place it goes. */
+/** Each part of a Session clip, made once in the Session and copied to every place it goes. */
 function partsByClip(placements: readonly Placement[]): Placement[][] {
   const groups = new Map<string, Placement[]>();
-  for (const placement of placements.filter(isPart)) {
+  for (const placement of placements.filter((item) => isPart(item) && !item.clip.notes)) {
     const key = `${placement.clip.ref}|${placement.beats}`;
     groups.set(key, [...(groups.get(key) ?? []), placement]);
   }
@@ -344,7 +400,7 @@ export async function build(plan: Plan, material: Material, host: ArrangeHost, s
     host.tell(`Arranging · ${section.name}, bar ${Math.round(section.from / plan.beatsPerBar) + 1}`);
   };
   try {
-    for (const placement of plan.placements.filter((item) => !isPart(item))) {
+    for (const placement of plan.placements.filter((item) => !isPart(item) && !item.clip.notes)) {
       signal.throwIfAborted(); progress(placement);
       await host.change("duplicate_clip", { clipRef: placement.clip.ref, arrangementPosition: placement.at }, signal);
       built.copies++;
@@ -376,6 +432,16 @@ export async function build(plan: Plan, material: Material, host: ArrangeHost, s
       await takeBack();
     }
     if (scene) { if (await host.undo(scene.id, settle()).catch(() => false)) scene = undefined; }
+    // A loop from the Arrangement is written anew with its notes (cut where a part ends), many clips a change.
+    const written = plan.placements.filter((item) => item.clip.notes);
+    if (written.length) host.tell("Arranging · writing the loop's clips");
+    for (let index = 0; index < written.length; index += WRITTEN_AT_ONCE) {
+      signal.throwIfAborted();
+      const group = written.slice(index, index + WRITTEN_AT_ONCE);
+      await host.change("write_arrangement_clip", { clips: group.map((item) => ({ trackRef: item.track.ref, start: item.at, length: item.beats, name: item.clip.name,
+        notes: item.clip.notes!.filter((note) => note.start < item.beats - EPSILON).map((note) => ({ ...note, duration: Math.min(note.duration, item.beats - note.start) })) })) }, signal);
+      for (const item of group) if (isPart(item)) built.parts++; else built.copies++;
+    }
     // Locators and the playhead would make Live jump while it plays, so they wait for it to stop.
     if (plan.locators.length && material.playing) built.notes.push("Live was playing, so the sections aren't marked with locators: stop, and ask Kumi to mark them.");
     else if (plan.locators.length && !host.offers("set_locators")) built.notes.push("Live doesn't offer adding locators for this Set, so the sections aren't marked.");
@@ -431,6 +497,9 @@ export function describe(material: Material): JsonObject {
       scenes: used.slice(0, 64).map((scene) => ({ scene: scene.index, ...(scene.name ? { name: scene.name } : {}),
         clips: material.tracks.flatMap((track) => track.clips.filter((clip) => clip.scene === scene.index).map((clip) => `${track.name}: ${clip.name ? `“${clip.name}”, ` : ""}${length(clip.beats)}${clip.audio ? ", audio" : ""}`)) })),
       ...(used.length > 64 ? { moreScenes: used.length - 64 } : {}), ...(material.unread ? { clipsNotRead: material.unread } : {}),
+      ...(material.loop ? { loop: { bars: `${material.loop.from / bpb + 1}–${material.loop.to / bpb}`,
+        tracks: material.tracks.flatMap((track) => track.clips.filter((clip) => clip.notes).map((clip) => `${track.name}: ${clip.notes!.length} notes`)),
+        ...(material.loop.audio.length ? { audioLeftOut: `${material.loop.audio.join(", ")}: audio, which Live's scripting can't copy within the Arrangement` } : {}) } } : {}),
       arrangement: material.end > 0 ? { clipsEndAt: `bar ${Math.round(material.end / bpb * 100) / 100 + 1}`, ...(material.locators.length ? { locators: material.locators.slice(0, 32).map((locator) => `${locator.name} at bar ${Math.round(locator.position / bpb * 100) / 100 + 1}`) } : {}) } : { empty: true },
       ...(material.playing ? { playing: true } : {}),
     },
@@ -443,13 +512,14 @@ export async function arrange(input: JsonObject, host: ArrangeHost, signal: Abor
   const request = arrangeRequest(input);
   if (typeof request === "string") return { text: request, isError: true };
   let material: Material;
-  try { material = await readMaterial(host, signal); }
+  try { material = await readMaterial(host, signal, request.loop); }
   catch (error) { signal.throwIfAborted(); return { text: `Kumi couldn't read the Set's clips: ${message(error)}`, isError: true }; }
   if (!request.sections.length) return { text: JSON.stringify(describe(material)) };
   const plan = compile(material, request, { midi: host.offers("set_clip"), audio: host.offers("set_audio_clip") });
   if (typeof plan === "string") return { text: plan, isError: true };
   if (!plan.placements.length) return { text: "Those sections place no clips: name tracks with clips in the scenes they play.", isError: true };
-  if (!host.offers("duplicate_clip")) return { text: "Live doesn't offer copying clips into the Arrangement for this Set right now.", isError: true };
+  if (plan.placements.some((item) => !item.clip.notes) && !host.offers("duplicate_clip")) return { text: "Live doesn't offer copying clips into the Arrangement for this Set right now.", isError: true };
+  if (plan.placements.some((item) => item.clip.notes) && !host.offers("write_arrangement_clip")) return { text: "A loop in the Arrangement is copied by writing its clips with their notes, through Kumi's Live extension (Live 12.4 or later), which isn't running for this Set: arrange from Session scenes instead (drag the loop's clips into slots).", isError: true };
   const began = Date.now();
   host.tell(`Arranging ${plan.sections.length} sections, ${barsOf(plan, plan.start, plan.end)}`);
   const copy = await host.keepCopy(signal).catch(() => undefined);
