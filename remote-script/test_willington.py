@@ -290,6 +290,33 @@ class ProviderTests(unittest.TestCase):
                 self.assertTrue(any('self-test.json' in line for line in logs))
                 provider.close()
 
+    def test_follow_evidence_uses_selected_profile_library(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        import AbletonMcpBridge as wrapper
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / 'willington.json'
+            config.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': False, 'enableWrites': True}))
+            config.chmod(0o600); _protect_windows_owner_only(config)
+            library = root / 'build' / 'selected-profile' / 'libwillington.dylib'
+            library.parent.mkdir(parents=True)
+            library.write_bytes(b'selected native library')
+            # A stale root library must not be used for the evidence check.
+            (root / 'libwillington.dylib').write_bytes(b'previous version')
+            receipt = root / 'self-test.json'
+            calls = []
+            follow = types.SimpleNamespace(path=str(library), willington_enable_writes=calls.append)
+            for payload, expected in [(library.read_bytes(), True), (b'previous version', False)]:
+                receipt.write_text(json.dumps({'status': 'passed', 'library_sha256': hashlib.sha256(payload).hexdigest()}))
+                live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
+                modules = {'Live': live, 'WillingtonBindings': types.SimpleNamespace(__file__=str(root / 'bindings.py'), install=lambda: follow)}
+                with patch.object(wrapper, '__file__', str(root / '__init__.py')), patch.dict('sys.modules', modules):
+                    provider = wrapper._WillingtonProvider(mapper, None)
+                    self.assertEqual(mapper.willington_follow_writes, expected)
+                    provider.close()
+
     def test_device_owner_enable_and_teardown(self):
         import tempfile,json,types
         from pathlib import Path

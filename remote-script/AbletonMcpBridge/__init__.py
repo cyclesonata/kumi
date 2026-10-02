@@ -351,7 +351,8 @@ class _WillingtonProvider:
                         import WillingtonBindings
                         folder = Path(WillingtonBindings.__file__).parent
                         evidence = json.loads((folder / "self-test.json").read_text())
-                        digest = hashlib.sha256((folder / "libwillington.dylib").read_bytes()).hexdigest()
+                        library_path = Path(getattr(self.follow, "path", folder / "libwillington.dylib"))
+                        digest = hashlib.sha256(library_path.read_bytes()).hexdigest()
                         if evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
                             raise ValueError("current-library Follow Action self-test is required")
                         self.follow.willington_enable_writes(True)

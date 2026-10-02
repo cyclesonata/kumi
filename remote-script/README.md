@@ -1,5 +1,14 @@
 # AbletonMcpBridge Remote Script
 
+With the Willington multi-version bundle, install `WillingtonRuntime` beside the
+provider packages. At startup their `install()` functions select bindings using
+the connected Live process's OS, architecture, version and executable hash.
+Validated macOS ARM64 12.4.15b4/b5 bindings can coexist in one installation;
+unsupported builds and missing artifacts leave the native provider unavailable.
+The existing owner-only `willington.json` opt-in and write controls still apply.
+Follow Action evidence must match the selected library, so rerun its self-test
+after switching builds. Windows and Intel macOS bindings are not yet available.
+
 The optional Willington rack-zone adapter adds `selector-zone`, `key-zone`, and
 `velocity-zone` to `live_willington_device_preview`. Use `ref` for the rack and
 `targetRef` for a regular chain. Preview captures all four integer endpoints;
@@ -13,6 +22,8 @@ Install the exact-build `WillingtonRackZones` Remote Script package alongside
 the existing adapters, then add the optional `"rackZones": true` field to the
 owner-only `willington.json`. The existing `enableWrites` flag controls writes.
 The adapter is experimental on Live 12.4.15b5 ARM64; other builds are refused.
+It remains a research candidate and is not automatically selected or shipped in
+the validated multi-version bundle.
 See `docs/evidence/rack-zones-b5.json` for the tested scope and remaining limits.
 
 This directory contains a dependency-light Control Surface package and its
