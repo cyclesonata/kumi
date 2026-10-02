@@ -8567,7 +8567,20 @@ class LiveObjectMapper:
             names = []
             for item in items:
                 name = self._choice_name(item)
-                names.append(name if name is not None else str(item)[:128])
+                # An object without a name reads as its type, never its address: a fresh wrapper each read has a
+                # new one, and a row that changes on every read can never be confirmed.
+                names.append(name if name is not None else re.sub(r" at 0x[0-9A-Fa-f]+", "", str(item))[:128])
+            return names
+        def io_list(value: Any) -> list[str] | None:
+            """A Max device's audio or MIDI ins and outs, each by where it's routed (its routing type's name), else its number."""
+            if value is None: return None
+            names = []
+            for index, item in enumerate(self._items(value)):
+                name = self._choice_name(item)
+                if name is None:
+                    routing = self._read_attr(item, "routing_type")
+                    name = self._choice_name(routing) if routing is not None else None
+                names.append(name if name is not None else str(index + 1))
             return names
         def indexed_name(index: Any, choices: Any) -> str | None:
             idx = int_or_none(index); names = name_list(choices)
@@ -8629,10 +8642,10 @@ class LiveObjectMapper:
             }
         if "maxdevice" in normalized or type(device).__name__ == "MaxDevice":
             rows["maxDevice"] = {
-                "audioIns": name_list(self._read_attr(device, "audio_inputs")),
-                "audioOuts": name_list(self._read_attr(device, "audio_outputs")),
-                "midiIns": name_list(self._read_attr(device, "midi_inputs")),
-                "midiOuts": name_list(self._read_attr(device, "midi_outputs")),
+                "audioIns": io_list(self._read_attr(device, "audio_inputs")),
+                "audioOuts": io_list(self._read_attr(device, "audio_outputs")),
+                "midiIns": io_list(self._read_attr(device, "midi_inputs")),
+                "midiOuts": io_list(self._read_attr(device, "midi_outputs")),
             }
         for key, value in self._family_rows(device).items():
             rows[key] = {**rows[key], **value} if isinstance(rows.get(key), dict) and isinstance(value, dict) else value
@@ -10577,10 +10590,18 @@ class LiveObjectMapper:
         if not isinstance(track_ref, str) or not track_ref.startswith(f"{self.refs.epoch}:track:"):
             raise ValueError("an exact regular-track reference is required")
         if args.get("chainRef") is not None: return self._browser_load_into_chain(args, item, metadata, loader)
-        self._refresh(track_ref); track = self.refs.get(track_ref); regular_tracks = self._items(getattr(self.song, "tracks", [])); track_identity = self._capture_object_identity(track); track_matches = [(index, candidate) for index, candidate in enumerate(regular_tracks) if self._capture_same_object(candidate, track, track_identity)]
+        # A regular track, a return or Main (by its snapshot index: the regular tracks, then the returns, then Main).
+        self._refresh(track_ref); track = self.refs.get(track_ref); track_identity = self._capture_object_identity(track)
+        regular_tracks = self._items(getattr(self.song, "tracks", [])); return_tracks = self._items(getattr(self.song, "return_tracks", []))
+        main_track = getattr(self.song, "master_track", getattr(self.song, "main_track", None))
+        every_track = regular_tracks + return_tracks + ([main_track] if main_track is not None else [])
+        track_matches = [(index, candidate) for index, candidate in enumerate(every_track) if self._capture_same_object(candidate, track, track_identity)]
         if len(track_matches) != 1:
-            raise ValueError("browser loading is limited to one exact regular Set track")
+            raise ValueError("browser loading is limited to one exact Set track")
         track_index, track = track_matches[0]
+        # Main and the returns take audio effects only, as in Live itself.
+        if track_index >= len(regular_tracks) and (metadata["category"] in {"instruments", "drums", "sounds", "midi_effects"} or str(metadata.get("deviceType") or "") in {"instrument", "midi_effect"}):
+            raise ValueError("Main and return tracks take audio effects only")
         if track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("browser target track reference is stale")
         authority = self._top_level_device_authority(track, track_ref)
         expected_authority = {"expectedTrackIdentity": args.get("expectedTrackIdentity"), "expectedSiblings": args.get("expectedSiblings")}

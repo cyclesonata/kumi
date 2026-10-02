@@ -4657,6 +4657,26 @@ class MixerRoutingExpansionTests(unittest.TestCase):
         self.assertEqual([send.value for send in mixer.sends], [0.25, 0.75]); self.assertEqual(mixer.chain_activator.value, 0.0)
         with self.assertRaisesRegex(ValueError, "invalid"): mapper.invoke("chain-mixer.set", {**fences(), "sends": [0.5, 0.5, 0.5]})
 
+    def test_max_device_ios_read_the_same_every_time(self):
+        # Live hands out a fresh DeviceIO wrapper on every read: a row that showed its address could never be
+        # confirmed after a load (a Max audio effect's load stayed "uncertain").
+        song = FakeSong()
+        device = song.tracks[0].devices[0]
+        device.class_name = "MaxDevice"
+        class FreshIo:
+            def __init__(self, routing): self.routing_type = {"name": routing}
+        type(device).audio_inputs = property(lambda self: [FreshIo("No Input")])
+        type(device).audio_outputs = property(lambda self: [FreshIo("Main"), FreshIo("Main")])
+        try:
+            mapper = LiveObjectMapper(song)
+            first = mapper.snapshot()["tracks"][0]["devices"][0]["maxDevice"]
+            second = LiveObjectMapper(song).snapshot()["tracks"][0]["devices"][0]["maxDevice"]
+            self.assertEqual(first, second)
+            self.assertEqual(first["audioIns"], ["No Input"]); self.assertEqual(first["audioOuts"], ["Main", "Main"])
+            self.assertNotIn(" at 0x", json.dumps(first))
+        finally:
+            del type(device).audio_inputs; del type(device).audio_outputs
+
     def test_device_io_and_compressor_sidechain_shape_gated(self):
         song = FakeSong()
         device = song.tracks[0].devices[0]
