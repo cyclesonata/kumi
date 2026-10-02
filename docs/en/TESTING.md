@@ -110,8 +110,8 @@ Set versions, listening quality, or behavior in a running Live instance.
 
 CI builds one clean local unpublished tarball on Ubuntu 24.04, repeats the pack
 from a fresh detached local clone plus fresh `npm ci` and compares bytes, records
-the exact Git SHA and tarball SHA-256, then installs that same artifact on Node
-22/24 Ubuntu 24.04 and Node 24 macOS 15 and Windows Server 2025. Coverage (the
+the exact Git SHA and tarball SHA-256, then installs that same artifact on
+Ubuntu 24.04 (Node 22/24), macOS 15 and Windows Server 2025 (Node 24). Coverage (the
 functional test run), benchmarks, the FFmpeg oracle and `package:verify` run in a
 Linux job beside the candidate, and Windows runs its tests as two shards beside
 its candidate checks (`TEST_SHARD=1/2` picks a shard). Each candidate job verifies strict

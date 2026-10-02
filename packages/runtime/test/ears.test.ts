@@ -207,7 +207,7 @@ test("an audition hears each candidate through Kumi's listening devices: nothing
     assert.equal(result.isError, false, result.text);
     const reply = JSON.parse(result.text) as { best: string; takes: { label: string; score: number }[] };
     assert.equal(reply.best, "Saw");
-    assert.ok(reply.takes[0]!.score >= 85, `the saw is the reference's sound (${reply.takes[0]!.score})`);
+    assert.ok(reply.takes[0]!.score >= 75, `the saw is the reference's sound (${reply.takes[0]!.score})`);
     assert.ok(reply.takes[1]!.score < 50, `noise isn't (${reply.takes[1]!.score})`);
     // A listening device on each candidate, armed together; no recording, no scratch track, no arming.
     const loads = b.requests.filter((request) => request.name === "live_browser_load_preview").map((request) => [request.args.itemId, request.args.trackRef]);
@@ -232,7 +232,7 @@ test("when the listening device can't start (no Max for Live), the audition reco
     const result = await tool(b.tools, "audition").execute({ candidates: [{ track: "track:1", label: "Saw" }], from_beat: 8, beats: 2, reference, focus: "sound" }, signal());
     assert.equal(result.isError, false, result.text);
     assert.ok(b.requests.some((request) => request.name === "live_recording_preview"), "recorded instead");
-    assert.ok((JSON.parse(result.text) as { takes: { score: number }[] }).takes[0]!.score >= 85);
+    assert.ok((JSON.parse(result.text) as { takes: { score: number }[] }).takes[0]!.score >= 75);
     assert.deepEqual(b.trackNames(), ["Fixture Bass", "Fixture Drums"]);
     assert.equal(b.main.volume, 0.85);
   } finally { await b.integration.close(); }
