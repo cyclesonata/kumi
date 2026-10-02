@@ -57,6 +57,8 @@ const text = (value: unknown) => (typeof value === "string" && value.trim() ? va
 const EPSILON = 1e-6;
 /** The shortest part worth placing: a sixteenth. */
 const SHORTEST = 0.25;
+/** How much of the material's listing the model reads, in bytes. */
+const LISTING_BYTES = 40_000;
 /** How many Session clips Kumi reads to arrange (a huge Session's others aren't needed). */
 const MOST_CLIPS = 512;
 
@@ -156,8 +158,16 @@ export interface ArrangeHost {
 
 const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
+/** The scenes a form plays: those its sections, fills and risers name, and the default (the first with clips) when one is left out. */
+function scenesOf(request: ArrangeRequest, withClips: number[]): Set<number> {
+  const named = request.sections.flatMap((section) => [section.scene, ...(section.tracks ?? []).map((choice) => choice.scene), ...section.fill.map((fill) => fill.scene), section.riser?.scene]);
+  const unnamed = request.sections.some((section) => section.scene === undefined);
+  const fallback = request.scene ?? (withClips.length ? Math.min(...withClips) : undefined);
+  return new Set([...named, ...(unnamed && !request.loop ? [fallback] : [])].filter((scene): scene is number => scene !== undefined));
+}
+
 /** The material, read fresh: the tracks with their Session clips, the scenes, the Arrangement's clips and locators. */
-export async function readMaterial(host: ArrangeHost, signal: AbortSignal, loop?: ArrangeRequest["loop"]): Promise<Material> {
+export async function readMaterial(host: ArrangeHost, signal: AbortSignal, loop?: ArrangeRequest["loop"], request?: ArrangeRequest): Promise<Material> {
   // Reads that don't depend on each other go to Live together: they share its display ticks.
   const [sets, trackRows, sceneRows, locatorRows] = await Promise.all([
     host.read("set", { fields: ["playing"] }, signal), host.read("track", { fields: ["name", "kind", "playingSlotIndex"] }, signal),
@@ -167,7 +177,11 @@ export async function readMaterial(host: ArrangeHost, signal: AbortSignal, loop?
   const [slotRows, arrangementRows] = await Promise.all([
     Promise.all(tracks.map((track) => host.read("clip-slot", { parent: track.ref, fields: ["sceneIndex", "clipRef"] }, signal))),
     Promise.all(tracks.map((track) => host.read("arrangement-clip", { parent: track.ref, fields: ["name", "start", "endTime", "length", "isAudio", "looping", "loopStart", "loopEnd"] }, signal).catch(() => [] as JsonObject[])))]);
-  const filled = slotRows.flatMap((slots, index) => slots.filter((slot) => typeof slot.clipRef === "string" && typeof slot.ref === "string").map((slot) => ({ index, slot })));
+  const every = slotRows.flatMap((slots, index) => slots.filter((slot) => typeof slot.clipRef === "string" && typeof slot.ref === "string").map((slot) => ({ index, slot })));
+  // To build, only the clips its sections can play are read: their scenes' (and a track's only clip, which a section naming it plays).
+  const scenes = request?.sections.length ? scenesOf(request, every.map(({ slot }) => integer(slot.sceneIndex) ?? -1)) : undefined;
+  const alone = new Set(slotRows.flatMap((slots, index) => (slots.filter((slot) => typeof slot.clipRef === "string").length === 1 ? [index] : [])));
+  const filled = scenes ? every.filter(({ index, slot }) => scenes.has(integer(slot.sceneIndex) ?? -1) || alone.has(index)) : every;
   const clipRows = await Promise.all(filled.slice(0, MOST_CLIPS).map(({ slot }) =>
     host.read("session-clip", { parent: slot.ref, fields: ["name", "length", "looping", "loopStart", "isAudio", "warping"] }, signal).then((rows) => rows[0])));
   const sources: SourceTrack[] = tracks.map((track, index) => {
@@ -197,7 +211,7 @@ export async function readMaterial(host: ArrangeHost, signal: AbortSignal, loop?
   }));
   const set = sets[0] ?? {};
   return {
-    beatsPerBar: host.beatsPerBar(), ...(host.tempo() ? { tempo: host.tempo()! } : {}), tracks: sources,
+    beatsPerBar: bpb, ...(host.tempo() ? { tempo: host.tempo()! } : {}), tracks: sources,
     scenes: sceneRows.map((row, index) => ({ index: integer(row.index) ?? index, name: typeof row.name === "string" ? row.name.slice(0, 120) : "" })),
     locators: locatorRows.flatMap((row) => (number(row.position) !== undefined ? [{ name: typeof row.name === "string" ? row.name : "", position: number(row.position)! }] : [])),
     end: Math.max(0, ...sources.flatMap((track) => track.busy.map(([, end]) => end))),
@@ -491,12 +505,15 @@ export function describe(material: Material): JsonObject {
   const bpb = material.beatsPerBar;
   const length = (beats: number) => (Math.abs(beats / bpb - Math.round(beats / bpb)) < EPSILON ? `${Math.round(beats / bpb)} bar${Math.round(beats / bpb) === 1 ? "" : "s"}` : `${Math.round(beats * 100) / 100} beats`);
   const used = material.scenes.filter((scene) => material.tracks.some((track) => track.clips.some((clip) => clip.scene === scene.index)));
+  const scenes = used.map((scene) => ({ scene: scene.index, ...(scene.name ? { name: scene.name } : {}),
+    clips: material.tracks.flatMap((track) => track.clips.filter((clip) => clip.scene === scene.index).map((clip) => `${track.name}: ${clip.name ? `“${clip.name}”, ` : ""}${length(clip.beats)}${clip.audio ? ", audio" : ""}`)) }));
+  // A huge Session's listing stays readable: the first scenes, as many as fit.
+  let shown = Math.min(scenes.length, 64);
+  while (shown > 1 && JSON.stringify(scenes.slice(0, shown)).length > LISTING_BYTES) shown--;
   return {
     material: {
       ...(material.tempo ? { tempo: material.tempo } : {}), beatsPerBar: bpb,
-      scenes: used.slice(0, 64).map((scene) => ({ scene: scene.index, ...(scene.name ? { name: scene.name } : {}),
-        clips: material.tracks.flatMap((track) => track.clips.filter((clip) => clip.scene === scene.index).map((clip) => `${track.name}: ${clip.name ? `“${clip.name}”, ` : ""}${length(clip.beats)}${clip.audio ? ", audio" : ""}`)) })),
-      ...(used.length > 64 ? { moreScenes: used.length - 64 } : {}), ...(material.unread ? { clipsNotRead: material.unread } : {}),
+      scenes: scenes.slice(0, shown), ...(used.length > shown ? { moreScenes: used.length - shown } : {}), ...(material.unread ? { clipsNotRead: material.unread } : {}),
       ...(material.loop ? { loop: { bars: `${material.loop.from / bpb + 1}–${material.loop.to / bpb}`,
         tracks: material.tracks.flatMap((track) => track.clips.filter((clip) => clip.notes).map((clip) => `${track.name}: ${clip.notes!.length} notes`)),
         ...(material.loop.audio.length ? { audioLeftOut: `${material.loop.audio.join(", ")}: audio, which Live's scripting can't copy within the Arrangement` } : {}) } } : {}),
@@ -512,7 +529,7 @@ export async function arrange(input: JsonObject, host: ArrangeHost, signal: Abor
   const request = arrangeRequest(input);
   if (typeof request === "string") return { text: request, isError: true };
   let material: Material;
-  try { material = await readMaterial(host, signal, request.loop); }
+  try { material = await readMaterial(host, signal, request.loop, request); }
   catch (error) { signal.throwIfAborted(); return { text: `Kumi couldn't read the Set's clips: ${message(error)}`, isError: true }; }
   if (!request.sections.length) return { text: JSON.stringify(describe(material)) };
   const plan = compile(material, request, { midi: host.offers("set_clip"), audio: host.offers("set_audio_clip") });

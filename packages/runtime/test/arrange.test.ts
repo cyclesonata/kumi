@@ -199,3 +199,16 @@ test("a loop already in the Arrangement: its MIDI clips are written anew with th
     assert.deepEqual(b.arrangement(), { Keys: ["Keys 1–3"], Bass: ["Bass 1–3"], Vox: ["Vox 1–3"], Drums: [] });
   } finally { await b.integration.close(); }
 });
+
+test("building reads only the clips the form can play: a big Session's other scenes aren't read", async () => {
+  const wide: FixtureTrack[] = Array.from({ length: 6 }, (_, track) => ({ name: `Part ${track + 1}`, clips: Object.fromEntries(Array.from({ length: 12 }, (_, scene) => [scene, { name: `P${track + 1}.${scene + 1}`, beats: 16 }])) }));
+  const b = await arranged({ tracks: wide, scenes: 12 });
+  try {
+    const result = await tool(b.tools, "arrange").execute({ sections: [{ name: "A", bars: 8, scene: 4 }, { name: "B", bars: 8, scene: 7, tracks: ["Part 1", "Part 2"] }] }, signal());
+    assert.equal(result.isError ?? false, false, result.text);
+    const read = b.requests.filter((request) => request.name === "live_discover" && request.args.kind === "session-clip").map((request) => String(request.args.parent).split(":").at(-1));
+    assert.deepEqual([...new Set(read)].sort(), ["4", "7"]);
+    // Each whole copy is one change: 6 tracks × 2 copies, then 2 × 2, and a pair of locators and the playhead.
+    assert.equal(b.requests.filter((request) => request.name.endsWith("_apply")).length, 12 + 4 + 1 + 1);
+  } finally { await b.integration.close(); }
+});
