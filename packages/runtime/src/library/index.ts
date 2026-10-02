@@ -137,10 +137,13 @@ export function createLibrary(options: LibraryOptions): Library {
       if (message.type === "progress" && message.progress) { progress = message.progress; notify(); }
       if (message.type === "done" && message.progress) progress = message.progress;
     });
-    child.on("exit", () => { if (learner === child) learner = undefined; void finished(); });
-    child.on("error", () => { if (learner === child) learner = undefined; });
-    child.send({ type: "learn", options: { ...planning, paused } });
+    // However it ends (done, stopped, or never started), Kumi looks again later.
+    child.on("exit", () => { if (learner === child) { learner = undefined; void finished(); } });
+    child.on("error", () => { if (learner === child) { learner = undefined; void finished(); } });
+    tell(child, { type: "learn", options: { ...planning, paused } });
   }
+  /** A word to the learner; one that has gone hears nothing. */
+  function tell(child: ChildProcess | undefined, message: object) { try { child?.send(message); } catch { /* it's ending: its exit says so */ } }
   /** Learning in this process, with the same lock as the learner's. */
   async function learnHere(run: { rebuild?: boolean; signal: AbortSignal; onProgress?: (progress: LearnProgress) => void }): Promise<LearnProgress | undefined> {
     const release = await acquireLock(dir);
@@ -202,8 +205,8 @@ export function createLibrary(options: LibraryOptions): Library {
       timer = setTimeout(() => { start(); void soundIndex().catch(() => {}); }, options.delayMs ?? 4_000);
       timer.unref?.();
     },
-    pause() { if (paused) return; paused = true; learner?.send({ type: "pause" }); notify(); },
-    resume() { if (!paused) return; paused = false; learner?.send({ type: "resume" }); notify(); },
+    pause() { if (paused) return; paused = true; tell(learner, { type: "pause" }); notify(); },
+    resume() { if (!paused) return; paused = false; tell(learner, { type: "resume" }); notify(); },
     status,
     onStatus(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     tools(tools) {
@@ -249,7 +252,7 @@ export function createLibrary(options: LibraryOptions): Library {
       const child = learner;
       if (child) {
         // It stops between files, keeping what it learned; one that doesn't is ended.
-        child.send({ type: "stop" });
+        tell(child, { type: "stop" });
         await new Promise<void>((resolve) => { const kill = setTimeout(() => { child.kill(); resolve(); }, 1_500); kill.unref?.(); child.once("exit", () => { clearTimeout(kill); resolve(); }); });
       }
     },
