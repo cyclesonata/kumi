@@ -210,7 +210,7 @@ export async function writeDown(heard: Heard, options: VoiceOptions & { language
   try {
     const wav = join(folder, "voice.wav");
     await writeFile(wav, wavFile(heard.pcm), { mode: 0o600 });
-    // Live's names are English words: they help English, and would only pull another language toward it.
+    // whisper's cue is in English: it helps English, and would only pull another language toward it.
     const english = /^en\b/i.test(language);
     const write = (withVad: string | undefined) => transcribe(whisper, model, wav, { language, audioContext: audioContextFor(heard.seconds), timeoutMs: 120_000,
       ...(english ? { prompt: voicePrompt(options.names) } : {}), ...(withVad ? { vad: withVad } : {}), ...(options.signal ? { signal: options.signal } : {}) });
@@ -226,8 +226,8 @@ export async function writeDown(heard: Heard, options: VoiceOptions & { language
 }
 
 /**
- * whisper.cpp (fetched, off a Mac) and the speech model for `language`, made ready ahead: started as
- * the producer starts talking, so what they say can be written down as soon as they stop.
+ * whisper.cpp (fetched, off a Mac), the speech model for `language` and the voice activity model, made
+ * ready ahead: started as the producer starts talking, so what they say is written down as they stop.
  */
 export async function prepareVoice(options: VoiceOptions & { language?: string }): Promise<void> {
   const env = options.env ?? process.env;
@@ -256,6 +256,6 @@ export async function voiceReadiness(options: { env?: Env; toolsDir: string; pla
   const name = speechModelFor(options.language ?? "en");
   const path = env.KUMI_WHISPER_MODEL ?? join(options.toolsDir, "whisper-models", name);
   const present = existsSync(path) && statSync(path).size > 0;
-  return { ...(ffmpeg ? { ffmpeg } : {}), ...(whisper ? { whisper } : {}), model: { name, ...(present ? { path } : {}) }, fetches: platform === "win32" || platform === "linux",
+  return { ...(ffmpeg ? { ffmpeg } : {}), ...(whisper ? { whisper } : {}), model: { name, ...(present ? { path } : {}) }, fetches: Boolean(whisperAsset(platform)),
     ...(allowed !== undefined ? { allowed } : {}) };
 }

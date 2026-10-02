@@ -1,7 +1,7 @@
 /**
- * The microphone, heard through ffmpeg (AVFoundation on a Mac, DirectShow on Windows, PulseAudio on
- * Linux) as 16 kHz mono samples kept in memory, with their level as they come. On a Mac, whether the
- * terminal Kumi runs in may use the microphone is read without asking the producer anything.
+ * The microphone, heard through ffmpeg (AVFoundation on a Mac, DirectShow on Windows, PulseAudio or
+ * ALSA on Linux) as 16 kHz mono samples kept in memory, with their level as they come. On a Mac, whether
+ * the terminal Kumi runs in may use the microphone is read without asking the producer anything.
  */
 import { execFile, spawn } from "node:child_process";
 
