@@ -1,3 +1,4 @@
+import { FOLLOW_ACTION_FIELDS, validateFollowActions } from "./follow-actions.js";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -113,6 +114,7 @@ export interface LiveStatus {
   operations?: readonly string[];
   provenance?: "real-live" | "fake-live" | "simulator" | "unknown";
   /** Best-effort read-only runtime evidence reported by the adapter; every field may be unprobed (null). */
+  willingtonKinds?: string[];
   environment?: { liveVersion?: string | null; liveEdition?: string | null; os?: string | null; api?: string | null };
 }
 
@@ -250,6 +252,7 @@ export interface LiveEvent { epoch: number; sequence: number; type: typeof LIVE_
 
 /** Every operation the bridge invokes on Live (the registry's invoke operations, and the simulator's older ones). */
 export const LIVE_OPERATIONS = [
+  "willington.device.read", "willington.device.set", "clip.follow-actions.set",
   "arrangement.clip.create", "arrangement.clip.delete", "arrangement.clip.move", "arrangement.audio-clip.create", "arrangement.automation.read", "arrangement.automation.create",
   "arrangement.automation.delete", "arrangement.automation.point.insert", "arrangement.automation.point.delete", "audio.capture.cleanup", "audio.capture.emergency-stop",
   "audio.capture.inspect", "audio.capture.start", "audio.capture.status", "audio.capture.stop", "audio.clip.set", "audio.warp-marker.read", "audio.warp-marker.add",
@@ -1364,6 +1367,19 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         this.emit({ type: "object", ref: track.ref, payload: { operation, clip } });
         return { ref: clip.ref, objectIdentity: clip.objectIdentity, name: clip.name, start: position, length: clip.length, filePath, createdFingerprint: clipRevision((this.snapshot().arrangement.clips ?? []).find((row) => row.ref === clip.ref)) };
       }
+      case "clip.follow-actions.set": {
+        const clip = this.findClip(objectRef("ref"));
+        if (!this.state.tracks.some(track => track.clips.includes(clip))) throw new Error("Follow Actions require a Session clip");
+        if (clip.objectIdentity !== args.expectedObjectIdentity) throw new Error("clip identity changed since preview");
+        const prior = Object.fromEntries(FOLLOW_ACTION_FIELDS.map(field => [field, (clip as unknown as Record<string, unknown>)[field] ?? null]));
+        validateFollowActions(prior);
+        if (args.expectedAuthorityRevision !== simulatorRevision(this.sessionClipAuthority(clip.ref)) || args.expectedStateRevision !== simulatorRevision(prior)) throw new Error("clip hierarchy or Follow Action state changed since preview");
+        if (this.state.playback.transport.playing !== false || clip.isRecording !== false) throw new Error("Follow Action edits require stopped transport and a non-recording clip");
+        validateFollowActions(args);
+        for (const field of FOLLOW_ACTION_FIELDS) (clip as unknown as Record<string, unknown>)[field] = args[field];
+        this.emit({ type: "object", ref: clip.ref, payload: { operation } });
+        return { changed: true, revision: ++this.sequence };
+      }
       case "clip.set": {
         const clip = this.findClip(objectRef("ref"));
         if (clip.objectIdentity !== args.expectedObjectIdentity) throw new Error("clip identity changed since preview");
@@ -2121,7 +2137,11 @@ export class DeterministicLiveSimulator implements LiveAdapter {
         // remove_macro(), recall_selected_variation(), and
         // delete_selected_variation() take no index in the public LOM; macro
         // count changes are observable through visible_macro_count.
-        if (["remove-macro", "recall-variation", "delete-variation"].includes(action as string) && args.index !== undefined) throw new RangeError("this rack action takes no index in the public LOM");
+        if (action === "remove-macro" && args.index !== undefined) throw new RangeError("this rack action takes no index in the public LOM");
+        if ((action === "recall-variation" || action === "delete-variation") && args.index !== undefined) {
+          if (!Number.isInteger(args.index) || (args.index as number) < 0 || (args.index as number) >= (device.variationCount ?? 0)) throw new RangeError("variation index is out of range");
+          device.selectedVariationIndex = args.index as number;
+        }
         if (action === "add-macro") { device.visibleMacroCount = Math.min(16, (device.visibleMacroCount ?? 0) + 1); device.macros = [...(device.macros ?? []), { ref: ref("parameter", `${device.ref}:macro:${(device.macros ?? []).length}`), objectIdentity: `simulator:parameter:${this.sequence + 1}`, name: `Macro ${(device.macros ?? []).length + 1}`, value: 0 }]; }
         else if (action === "remove-macro") { if ((device.visibleMacroCount ?? 1) <= 1) throw new Error("cannot remove the last macro"); device.visibleMacroCount = (device.visibleMacroCount ?? 1) - 1; device.macros?.splice((device.macros ?? []).length - 1, 1); }
         else if (action === "randomize-macros") { for (const macro of device.macros ?? []) macro.value = Math.round(Math.random() * 100) / 100; }

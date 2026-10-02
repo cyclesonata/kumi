@@ -308,7 +308,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
+_READ_ONLY_INVOKES = {"session.playback", "willington.device.read", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "device.duplicate", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -943,6 +943,7 @@ class LiveObjectMapper:
             "operations": operations,
             "provenance": self.provenance,
             "environment": self._environment_probe(),
+            "willingtonKinds": (["macro-name", "macro-mapping", "variation-name"] if getattr(self, "willington_device_writes", False) else []) + (["selector-zone", "key-zone", "velocity-zone"] if getattr(self, "willington_zone_writes", False) else []),
         }
 
     def _environment_probe(self) -> dict[str, Any]:
@@ -1244,6 +1245,12 @@ class LiveObjectMapper:
             return any(all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))) for parameter in self._shape_probe()["parameter"])
         if operation == "arrangement.audio-clip.create":
             return self._offers("track", "create_audio_clip")
+        if operation == "clip.follow-actions.set":
+            # Provider readiness is independent of current clip contents. Hiding
+            # this operation in an empty Set prevents clients from planning a
+            # create-clip + Follow Action workflow. Validate the exact target
+            # and all ten fields when previewing/applying instead.
+            return self._follow_action_ready()
         if operation == "clip.set":
             return self._offers_any("clip", "muted", "color_index", "looping", method=False) or self._offers_any("arrangement_clip", "muted", "color_index", "looping", method=False)
         if operation == "locator.jump":
@@ -1365,6 +1372,8 @@ class LiveObjectMapper:
             return self._offers("pad", "delete_all_chains")
         if operation == "ownership.settle":
             return self._operation_supported("browser.load")
+        if operation in {"willington.device.read", "willington.device.set"}:
+            return getattr(self, "willington_device_writes", False) is True or getattr(self, "willington_zone_writes", False) is True
         if operation == "rack.set":
             if self._probe_classes("rack"): return self._offers("rack", "visible_macro_count", method=False)
             return any(isinstance(self._read_attr(device, "visible_macro_count"), int) and not isinstance(self._read_attr(device, "visible_macro_count"), bool) for device in self._shape_probe()["rack"])
@@ -1845,9 +1854,10 @@ class LiveObjectMapper:
             row["chains"] = self._chain_rows(device, device_ref, track_index, path, traversal, depth)
             chain_selector = self._read_attr(device, "chain_selector")
             row["chainSelector"] = None if chain_selector is None else {"ref": self.refs.put("parameter", chain_selector, f"{device_ref}:chain-selector"), "objectIdentity": self._capture_object_identity(chain_selector), "name": str(self._read_attr(chain_selector, "name") or "Chain Selector"), "value": self._read_attr(chain_selector, "value"), "min": self._read_attr(chain_selector, "min"), "max": self._read_attr(chain_selector, "max")}
-            macros = self._items(self._read_attr(device, "macros") or [])
+            macros = self._rack_macros(device)
             if len(macros) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("device macro collection exceeds its bound")
-            row["macros"] = [{"ref": self.refs.put("parameter", macro, f"{device_ref}:macro:{macro_index}"), "objectIdentity": self._capture_object_identity(macro), "name": str(self._read_attr(macro, "name") or f"Macro {macro_index + 1}"), "value": self._read_attr(macro, "value")} for macro_index, macro in enumerate(macros)]
+            parameter_refs = {parameter["objectIdentity"]: parameter["ref"] for parameter in parameters}
+            row["macros"] = [{"ref": parameter_refs.get(self._capture_object_identity(macro)) or self.refs.put("parameter", macro, f"{device_ref}:macro:{macro_index}"), "objectIdentity": self._capture_object_identity(macro), "name": str(self._read_attr(macro, "name") or f"Macro {macro_index + 1}"), "value": self._read_attr(macro, "value")} for macro_index, macro in enumerate(macros)]
             return_chains = self._items(self._read_attr(device, "return_chains") or [])
             row["returnChains"] = [self.refs.put("chain", chain, f"{device_ref}:return:{return_index}") for return_index, chain in enumerate(return_chains)]
             visible_count = self._read_attr(device, "visible_macro_count")
@@ -2582,7 +2592,18 @@ class LiveObjectMapper:
             if found is None: return None
             device, path, depth, light_row = found
             return self._device_row(device, reference, light_row["parentRef"], int(path.split(":", 1)[0]), path, light_row["chainPosition"], {"count": 0, "seen": set()}, depth)
-        device_ref, _, position = reference.partition(":parameter:")[2].rpartition(":")
+        key = reference.partition(":parameter:")[2]
+        if key.startswith(f"{self.refs.epoch}:chain:"):
+            parent = key.split(":sends:", 1)[0] if ":sends:" in key else key.rsplit(":", 1)[0]
+            return next((row for row in self._chain_parameter_rows(parent) if row["ref"] == reference), None)
+        if ":macro:" in key:
+            device_ref, position = key.rsplit(":macro:", 1)
+            found = self._device_on_path(device_ref)
+            macros = self._rack_macros(found[0]) if found is not None else []
+            if not position.isdigit() or int(position) >= len(macros): return None
+            macro = macros[int(position)]
+            return {"ref": reference, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(macro), "name": str(self._read_attr(macro, "name") or "Macro"), "value": self._read_attr(macro, "value"), "min": self._read_attr(macro, "min"), "max": self._read_attr(macro, "max"), "revision": self.refs.revision(reference)}
+        device_ref, _, position = key.rpartition(":")
         if not position.isdigit(): return None
         found = self._device_on_path(device_ref)
         parameters = self._items(getattr(found[0], "parameters", [])) if found is not None else []
@@ -2877,6 +2898,12 @@ class LiveObjectMapper:
             # holds); a clip's notes only when the requested fields or filters name them.
             wanted = set(requested_fields or []) | set(filters or {})
             items = self._slot_discovery(kind, parent, requested_fields is None or bool({"notes", "notesRevision"} & wanted))
+            if self._follow_action_ready() and set(self._FOLLOW_FIELDS) & wanted:
+                for row in items:
+                    clip = self._note_parent(row["ref"])
+                    if clip is not None: row.update(self._follow_action_fields(clip))
+        elif kind == "parameter" and isinstance(parent, str) and parent.startswith(f"{self.refs.epoch}:chain:"):
+            items = self._chain_parameter_rows(parent)
         elif kind == "parameter":
             # A device's parameters, read from that device alone (found on its track's light walk).
             device = self._parameter_parent(parent)
@@ -3078,6 +3105,25 @@ class LiveObjectMapper:
                 return vector
             except (TypeError, IndexError, AttributeError): return self._items(vector)
         return self._read_notes(clip)
+
+    def _chain_parameter_rows(self, parent: str) -> list[dict[str, Any]]:
+        index = self._ref_track_index(parent)
+        chains = [chain for _, _, _, row in self._light_walk(index) for chain in row.get("chainList", []) if chain["ref"] == parent] if index is not None else []
+        if len(chains) != 1: raise ValueError("chain parameter parent is no longer authoritative")
+        mixer = self._chain_mixer_fields(self.refs.get(parent), parent)
+        references = [mixer.get(key) for key in ("volumeRef", "panningRef", "chainActivatorRef")] + list(mixer.get("sendRefs") or [])
+        rows = []
+        for reference in dict.fromkeys(reference for reference in references if isinstance(reference, str)):
+            parameter = self.refs.get(reference)
+            minimum, maximum, value = (self._read_attr(parameter, key) for key in ("min", "max", "value"))
+            if any(type(item) not in (int, float) or not math.isfinite(item) for item in (minimum, maximum, value)): continue
+            formatter = self._read_attr(parameter, "str_for_value")
+            try: display = formatter(value) if callable(formatter) else value
+            except Exception: display = value
+            rows.append({"ref": reference, "parentRef": parent, "objectIdentity": self._capture_object_identity(parameter),
+                "name": str(self._read_attr(parameter, "name") or "Parameter"), "value": float(value), "min": float(minimum), "max": float(maximum),
+                "quantization": self._parameter_step(parameter), "displayValue": str(display), "revision": self.refs.revision(reference)})
+        return rows
 
     def _parameter_parent(self, parent: Any) -> Any:
         """The device a parameter list names, at its place now (read along its path)."""
@@ -3900,6 +3946,8 @@ class LiveObjectMapper:
             return self._arrangement_clip_move(args)
         if operation == "audio.clip.set":
             return self._audio_clip_set(args)
+        if operation == "clip.follow-actions.set":
+            return self._follow_action_set(args)
         if operation == "clip.set":
             return self._clip_set(args)
         if operation == "clip.action":
@@ -3996,6 +4044,8 @@ class LiveObjectMapper:
             return self._drum_pad_load_sample(args)
         if operation == "drum-pad.load-samples":
             return self._drum_pad_load_samples(args)
+        if operation == "willington.device.read": return self._willington_device_read(args)
+        if operation == "willington.device.set": return self._willington_device_set(args)
         if operation == "rack.set":
             return self._rack_set(args)
         if operation == "rack.action":
@@ -5498,6 +5548,72 @@ class LiveObjectMapper:
             raise
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
+
+    _FOLLOW_FIELDS = {
+        field: (suffix, {"boolean": "bool", "integer": "int"}.get(schema["type"], schema["type"]), schema.get("minimum", 0), schema.get("maximum", 1))
+        for field, suffix in {"followActionEnabled": "enabled", "followActionLinked": "linked", "followActionA": "a", "followActionB": "b", "followActionChanceA": "chance_a", "followActionChanceB": "chance_b", "followActionLoopCount": "loop_count", "followActionTime": "time", "followActionJumpA": "jump_a", "followActionJumpB": "jump_b"}.items()
+        for schema in [_registry_operation("clip.follow-actions.set")["request"]["properties"][field]]
+    }
+
+    def _follow_action_fields(self, clip: Any) -> dict[str, Any]:
+        result = {}
+        for field, (suffix, kind, minimum, maximum) in self._FOLLOW_FIELDS.items():
+            value = self._read_attr(clip, "follow_action_" + suffix)
+            if kind == "bool": valid = type(value) is bool
+            else: valid = type(value) in (int, float) and math.isfinite(value) and minimum <= value <= maximum and (kind != "int" or int(value) == value)
+            result[field] = (int(value) if kind == "int" else value) if valid else None
+        return result
+
+    def _follow_action_ready(self) -> bool:
+        return getattr(self, "willington_follow_writes", False) is True
+
+    def _follow_action_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self._follow_action_ready(): raise ValueError("Willington Follow Action writes are unavailable")
+        fields = self._FOLLOW_FIELDS
+        if set(args) != set(fields) | {"ref", "expectedObjectIdentity", "expectedAuthorityRevision", "expectedStateRevision"}:
+            raise ValueError("complete Follow Action state and authority are required")
+        reference = args["ref"]
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:clip:"):
+            raise ValueError("Follow Actions require a Session clip")
+        clip = self._note_parent(reference)
+        if clip is None or self._capture_object_identity(clip) != args["expectedObjectIdentity"]:
+            raise ValueError("clip identity changed since preview")
+        before = self._follow_action_fields(clip)
+        if any(value is None for value in before.values()): raise ValueError("Follow Action readback is unavailable")
+        revision = hashlib.sha256(self._bounded_canonical(before).encode()).hexdigest()
+        if args["expectedStateRevision"] != revision or args["expectedAuthorityRevision"] != self._clip_authority_digest(reference):
+            raise ValueError("clip hierarchy or Follow Action state changed since preview")
+        # Session clips retain playing/triggered flags while transport is stopped.
+        # Those queued states do not mean audio is advancing; check transport
+        # again at the mutation boundary, plus the target's recording state.
+        if self._read_attr(self.song, "is_playing") is not False or self._read_attr(clip, "is_recording") is not False:
+            raise ValueError("Follow Action edits require stopped transport and a non-recording clip")
+        proposed = {field: args[field] for field in fields}
+        for field, (_, kind, minimum, maximum) in fields.items():
+            value = proposed[field]
+            valid = type(value) is bool if kind == "bool" else type(value) in (int, float) and math.isfinite(value) and minimum <= value <= maximum and (kind != "int" or int(value) == value)
+            if not valid: raise ValueError("invalid Follow Action field: " + field)
+        if proposed["followActionChanceA"] + proposed["followActionChanceB"] != 100:
+            raise ValueError("Follow Action probabilities must sum to 100")
+        def write(state):
+            clip.follow_action_enabled = False
+            for field, (suffix, kind, _, _) in fields.items():
+                if field in {"followActionEnabled", "followActionChanceB"}: continue
+                value = state[field]
+                setattr(clip, "follow_action_" + suffix, int(value) if kind == "int" else value)
+            clip.follow_action_enabled = state["followActionEnabled"]
+        try:
+            write(proposed)
+            observed = self._follow_action_fields(clip)
+            if any(not (_same_number(observed[field], proposed[field]) if fields[field][1] == "number" else observed[field] == proposed[field]) for field in fields): raise ValueError("Follow Action postcondition was not confirmed")
+        except BaseException as error:
+            try:
+                write(before)
+                if self._follow_action_fields(clip) != before: raise ValueError("readback mismatch")
+            except BaseException:
+                raise ValueError("Follow Action write failed and exact rollback failed") from error
+            raise
+        return {"changed": True, "revision": self.refs.touch(reference)}
 
     _CLIP_SET_FIELDS = ("muted", "colorIndex", "looping", "loopStart", "loopEnd", "groove", "launchMode", "launchQuantization", "legato", "ramMode", "velocityAmount")
 
@@ -8139,6 +8255,169 @@ class LiveObjectMapper:
                 raise ValueError(f"drum pad {index + 1} of {len(pads)}: {str(error)[:200]}") from error
         return {"pads": loaded}
 
+    def _willington_zone_state(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not getattr(self, "willington_zone_writes", False): raise ValueError("Willington rack zones are unavailable")
+        if set(args) != {"ref", "kind", "targetRef"}: raise ValueError("invalid zone selector fields")
+        reference, target_ref = args["ref"], args["targetRef"]
+        if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:") or not isinstance(target_ref, str) or not target_ref.startswith(f"{self.refs.epoch}:chain:"):
+            raise ValueError("invalid rack or chain reference")
+        registered = self.refs.get(reference); identity = self._capture_object_identity(registered)
+        found = self._device_on_path(reference)
+        if found is None or not self._capture_same_object(found[0], registered, identity): raise ValueError("zone rack identity changed")
+        rack = found[0]; rack_class = self._read_attr(rack, "class_name")
+        if rack_class not in {"AudioEffectGroupDevice", "InstrumentGroupDevice", "MidiEffectGroupDevice"}: raise ValueError("unsupported zone rack")
+        if rack_class == "AudioEffectGroupDevice" and args["kind"] != "selector-zone": raise ValueError("Audio Effect Racks support selector zones only")
+        chain = self.refs.get(target_ref); chain_identity = self._capture_object_identity(chain)
+        if not any(self._capture_same_object(item, chain, chain_identity) for item in self._items(self._read_attr(rack, "chains") or [])):
+            raise ValueError("zone chain is no longer in this rack")
+        if not callable(getattr(chain, "get_zone", None)) or not callable(getattr(chain, "set_zone", None)): raise ValueError("zone bindings are unavailable")
+        kind = args["kind"].removesuffix("-zone")
+        zone = json.loads(chain.get_zone(kind))
+        fields = {"minimum", "maximum", "fadeMinimum", "fadeMaximum", "lowerBound", "upperBound"}
+        if not isinstance(zone, dict) or set(zone) != fields or any(type(value) is not int for value in zone.values()): raise ValueError("invalid native zone readback")
+        lower = 1 if kind == "velocity" else 0
+        if zone["lowerBound"] != lower or zone["upperBound"] != 127 or not lower <= zone["minimum"] <= zone["fadeMinimum"] <= zone["fadeMaximum"] <= zone["maximum"] <= 127:
+            raise ValueError("invalid native zone bounds")
+        state = {**zone, "deviceIdentity": identity, "targetIdentity": chain_identity, "rackClass": rack_class}
+        revision = hashlib.sha256(self._bounded_canonical(state).encode()).hexdigest()
+        return {"state": state, "stateRevision": revision}
+
+    def _willington_device_state(self, args: dict[str, Any]) -> dict[str, Any]:
+        if args.get("kind") in {"selector-zone", "key-zone", "velocity-zone"}: return self._willington_zone_state(args)
+        if not getattr(self, "willington_device_writes", False): raise ValueError("Willington device extensions are unavailable")
+        kind = args.get("kind"); reference = args.get("ref")
+        if kind not in {"macro-name", "macro-mapping", "variation-name"} or not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:"):
+            raise ValueError("invalid Willington device target")
+        expected = {"ref", "kind"} | ({"macroIndex"} if kind == "macro-name" else {"targetRef"} if kind == "macro-mapping" else set())
+        if set(args) != expected: raise ValueError("invalid selector fields for edit kind")
+        registered = self.refs.get(reference)
+        identity = self._capture_object_identity(registered)
+        found = self._device_on_path(reference)
+        if found is None or self._read_attr(found[0], "can_have_chains") is not True: raise ValueError("rack is no longer in the Set")
+        device, path, position, parent_ref, depth = found
+        if not self._capture_same_object(device, registered, identity): raise ValueError("rack identity changed")
+        # Macro and variation names need no subtree. Mapping membership is checked
+        # against this rack alone, including its nested devices and chain mixers.
+        row = self._device_row(device, reference, parent_ref, int(path.split(":", 1)[0]), path, position, {"count": 0, "seen": set()}, depth) if kind == "macro-mapping" else None
+        index = args.get("macroIndex")
+        if kind == "macro-name":
+            macros = self._rack_macros(device)
+            if type(index) is not int or not 0 <= index < len(macros): raise ValueError("macro index is invalid")
+            if not callable(getattr(device, "rename_macro", None)): raise ValueError("macro rename is unavailable")
+            state = {"name": str(macros[index].name)}
+        elif kind == "variation-name":
+            if not callable(getattr(device, "get_selected_variation_name", None)): raise ValueError("variation readback is unavailable")
+            selected = self._read_attr(device, "selected_variation_index")
+            count = self._read_attr(device, "variation_count")
+            if type(selected) is not int or type(count) is not int or not 0 <= selected < count: raise ValueError("a named rack variation must be selected")
+            name = device.get_selected_variation_name()
+            if not isinstance(name, str) or not name: raise ValueError("a named rack variation must be selected")
+            state = {"name": name, "selectedVariationIndex": selected, "variationCount": count}
+        else:
+            target_ref = args.get("targetRef")
+            if not isinstance(target_ref, str) or not target_ref.startswith(f"{self.refs.epoch}:parameter:"): raise ValueError("mapping parameter ref is invalid")
+            def contains(value):
+                if isinstance(value, dict): return any(contains(item) for item in value.values())
+                if isinstance(value, list): return any(contains(item) for item in value)
+                return value == target_ref
+            if not contains(row): raise ValueError("mapping parameter is no longer in this rack")
+            target = self.refs.get(target_ref)
+            if not callable(getattr(device, "get_macro_mapping", None)): raise ValueError("mapping readback is unavailable")
+            mapping = json.loads(device.get_macro_mapping(target))  # native mapping-context ownership check
+            state = {"mapping": json.dumps(mapping, sort_keys=True, separators=(",", ":")), "parameterValue": float(target.value),
+                     "parameterMin": float(target.min), "parameterMax": float(target.max),
+                     "macroValues": json.dumps([float(macro.value) for macro in self._rack_macros(device)]),
+                     "targetIdentity": self._capture_object_identity(target)}
+        state["deviceIdentity"] = identity
+        stable = dict(state)
+        # Live updates a mapped parameter on a later tick. Its value is derived
+        # from the captured macro values and mapping; fence those source values.
+        if kind == "macro-mapping" and mapping is not None: stable["parameterValue"] = None
+        revision = hashlib.sha256(self._bounded_canonical(stable).encode()).hexdigest()
+        return {"state": state, "stateRevision": revision}
+
+    def _willington_device_read(self, args: dict[str, Any]) -> dict[str, Any]:
+        if set(args) - {"ref", "kind", "macroIndex", "targetRef"}: raise ValueError("unknown Willington read field")
+        return self._willington_device_state(args)
+
+    def _willington_device_set(self, args: dict[str, Any]) -> dict[str, Any]:
+        selector = {key: args[key] for key in ("ref", "kind", "macroIndex", "targetRef") if key in args}
+        if set(args) != set(selector) | {"next", "expectedStateRevision"}: raise ValueError("unknown Willington write field")
+        before = self._willington_device_state(selector)
+        if args["expectedStateRevision"] != before["stateRevision"]: raise ValueError("Willington device state changed since preview")
+        if self._read_attr(self.song, "is_playing") is not False: raise ValueError("Willington edits require stopped playback")
+        state = before["state"]; desired = args["next"]
+        if not isinstance(desired, dict): raise ValueError("invalid desired state")
+        device = self.refs.get(args["ref"]); kind = args["kind"]
+        if kind in {"selector-zone", "key-zone", "velocity-zone"}:
+            fields = ("minimum", "maximum", "fadeMinimum", "fadeMaximum")
+            if set(desired) != set(fields) or any(type(value) is not int for value in desired.values()): raise ValueError("zone endpoints must be integers")
+            if not state["lowerBound"] <= desired["minimum"] <= desired["fadeMinimum"] <= desired["fadeMaximum"] <= desired["maximum"] <= state["upperBound"]:
+                raise ValueError("zone endpoints must be ordered and in bounds")
+            chain = self.refs.get(args["targetRef"])
+            def write(value): chain.set_zone(kind.removesuffix("-zone"), *[value[key] for key in fields])
+            restore = {key: state[key] for key in fields}
+            def confirmed(after): return all(after[key] == desired[key] for key in fields)
+        elif kind in {"macro-name", "variation-name"}:
+            if set(desired) != {"name"} or not isinstance(desired["name"], str) or not 1 <= len(desired["name"]) <= 256 or "\0" in desired["name"]: raise ValueError("invalid name")
+            def write(value):
+                if kind == "macro-name": device.rename_macro(args["macroIndex"], value["name"])
+                else: device.rename_selected_variation(value["name"])
+            restore = {"name": state["name"]}
+            def confirmed(after): return after["name"] == desired["name"]
+        else:
+            target = self.refs.get(args["targetRef"])
+            if set(desired) != {"mapping", "parameterValue"}: raise ValueError("invalid mapping state")
+            mapping = desired["mapping"]
+            if mapping is not None:
+                if not isinstance(mapping, dict) or set(mapping) != {"index", "minimum", "maximum", "kind"} or type(mapping["index"]) is not int or not 0 <= mapping["index"] < len(self._rack_macros(device)) or mapping["kind"] not in {"continuous", "enum", "boolean"}: raise ValueError("invalid macro mapping")
+                low, high = mapping["minimum"], mapping["maximum"]
+                if any(type(value) not in (int,float) or not math.isfinite(value) for value in (low,high)): raise ValueError("invalid mapping endpoints")
+                if mapping["kind"] == "boolean":
+                    if not 0 <= low <= high <= 127 or int(low)!=low or int(high)!=high: raise ValueError("invalid boolean mapping thresholds")
+                elif not all(state["parameterMin"] <= value <= state["parameterMax"] for value in (low, high)): raise ValueError("mapping range is out of bounds")
+                if mapping["kind"] == "enum" and (int(low)!=low or int(high)!=high): raise ValueError("enum endpoints must be whole numbers")
+            value = desired["parameterValue"]
+            if type(value) not in (float,int) or not math.isfinite(value) or not state["parameterMin"] <= value <= state["parameterMax"]: raise ValueError("invalid unmapped parameter value")
+            def write(value):
+                mapping = value["mapping"]
+                if json.loads(device.get_macro_mapping(target)) is not None: device.unmap_macro(target)
+                if mapping is None:
+                    target.value = value["parameterValue"]
+                else:
+                    device.map_macro(mapping["index"], target)
+                    if mapping["kind"] == "boolean": device.set_macro_switch_range(target, mapping["minimum"], mapping["maximum"])
+                    else: device.set_macro_mapping_range(target, mapping["minimum"], mapping["maximum"])
+            restore = {"mapping": json.loads(state["mapping"]), "parameterValue": state["parameterValue"]}
+            def confirmed(after):
+                observed = json.loads(after["mapping"])
+                if mapping is None: return observed is None and _same_number(after["parameterValue"], value)
+                return observed is not None and observed["index"]==mapping["index"] and observed["kind"]==mapping["kind"] and all(_same_number(observed[key], mapping[key]) for key in ("minimum","maximum"))
+        try:
+            write(desired)
+            after = self._willington_device_state(selector)
+            if not confirmed(after["state"]): raise ValueError("Willington device postcondition was not confirmed")
+        except BaseException as error:
+            try:
+                write(restore)
+                restored = self._willington_device_state(selector)
+                if restored["stateRevision"] != before["stateRevision"]: raise ValueError("prior state mismatch")
+            except BaseException: raise ValueError("Willington write failed and exact rollback failed") from error
+            raise
+        return {"changed": True, "revision": self.refs.touch(args["ref"]), **after}
+
+    def _rack_macros(self, device: Any) -> list[Any]:
+        # Captured Live racks publish their sixteen macros after Device On.
+        # Keep explicit collections for alternate supported shapes/test adapters.
+        explicit = self._read_attr(device, "macros")
+        if explicit is not None:
+            return self._items(explicit)
+        mapped = self._items(self._read_attr(device, "macros_mapped") or [])
+        parameters = self._items(self._read_attr(device, "parameters") or [])
+        if 0 < len(mapped) <= 16 and len(parameters) >= len(mapped) + 1:
+            return parameters[1:len(mapped) + 1]
+        return []
+
     def _rack_state(self, device: Any) -> dict[str, Any]:
         """The rack state its edits fence on, exactly as the host computes it from the snapshot's rack row:
         its pads are the ones that row lists (a Drum Rack's visible 16, not all 128 drum_pads, which
@@ -8147,7 +8426,7 @@ class LiveObjectMapper:
         return {"visibleMacroCount": int(visible) if isinstance(visible, int) and not isinstance(visible, bool) else None,
                 "selectedVariationIndex": int(selected) if isinstance(selected, int) and not isinstance(selected, bool) else None,
                 "variationCount": int(self._read_attr(device, "variation_count")) if isinstance(self._read_attr(device, "variation_count"), int) and not isinstance(self._read_attr(device, "variation_count"), bool) else None,
-                "macros": [self._capture_object_identity(macro) for macro in self._items(self._read_attr(device, "macros") or [])],
+                "macros": [self._capture_object_identity(macro) for macro in self._rack_macros(device)],
                 "chains": [self._capture_object_identity(chain) for chain in self._items(self._read_attr(device, "chains") or [])],
                 "drumPads": [self._capture_object_identity(pad) for pad in self._rack_pads(device)] if self._read_attr(device, "can_have_drum_pads") is True else []}
 
@@ -8200,9 +8479,19 @@ class LiveObjectMapper:
         method_name = {"add-macro": "add_macro", "remove-macro": "remove_macro", "randomize-macros": "randomize_macros", "insert-chain": "insert_chain", "copy-pad": "copy_pad", "store-variation": "store_variation", "recall-variation": "recall_selected_variation", "delete-variation": "delete_selected_variation", "recall-last-variation": "recall_last_used_variation"}[action]
         method = getattr(device, method_name, None)
         if not callable(method): raise ValueError(f"rack action {action} is unavailable on this Live shape")
-        if action in {"add-macro", "remove-macro", "recall-variation", "delete-variation"}:
-            # remove_macro(), recall_selected_variation(), and
-            # delete_selected_variation() take no index in the public LOM.
+        if action in {"recall-variation", "delete-variation"}:
+            if index is not None:
+                count = state["variationCount"]
+                if not isinstance(count, int) or not 0 <= index < count:
+                    raise ValueError("variation index is out of range")
+                device.selected_variation_index = index
+                if self._read_attr(device, "selected_variation_index") != index:
+                    device.selected_variation_index = state["selectedVariationIndex"]
+                    raise ValueError("variation selection was not confirmed")
+            # Selection and action run in the same main-thread dispatch. If the
+            # action raises it may have mutated; leave the host's uncertain state.
+            method()
+        elif action in {"add-macro", "remove-macro"}:
             method()
         elif action == "insert-chain": method(-1 if index is None else index)
         elif action == "copy-pad":
@@ -9492,10 +9781,11 @@ class LiveObjectMapper:
                     for parameter_index, parameter in enumerate(native_parameters):
                         numeric = (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))
                         if all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in numeric): parameters.append((parameter_index, parameter))
-                    macros = self._items(self._read_attr(device, "macros") or []) if self._read_attr(device, "can_have_chains") is True else []
+                    macros = self._rack_macros(device) if self._read_attr(device, "can_have_chains") is True else []
                     if len(parameters) + len(macros) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device parameter collection exceeds its bound")
                     parameter_rows = [(self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}"), parameter) for parameter_index, parameter in parameters]
-                    parameter_rows.extend((self.refs.put("parameter", macro, f"{device_ref}:macro:{macro_index}"), macro) for macro_index, macro in enumerate(macros))
+                    parameter_identities = {self._capture_object_identity(parameter) for _, parameter in parameter_rows}
+                    parameter_rows.extend((self.refs.put("parameter", macro, f"{device_ref}:macro:{macro_index}"), macro) for macro_index, macro in enumerate(macros) if self._capture_object_identity(macro) not in parameter_identities)
                     # Only the device holding the parameter costs its siblings; others are passed by.
                     siblings = [{"ref": current_ref, "objectIdentity": self._capture_object_identity(parameter)} for current_ref, parameter in parameter_rows] if any(current_ref == reference for current_ref, _ in parameter_rows) else []
                     consume(len(siblings))
@@ -10161,8 +10451,28 @@ class LiveObjectMapper:
     # a stable public binding; the tier labels below say so explicitly.
     _BROWSER_SEARCHABLE_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"}
 
-    def _browser_item_identity(self, path: str) -> str:
-        return f"browser-path:{hashlib.sha256(path.encode('utf-8')).hexdigest()}"
+    def _browser_item_identity(self, path: str, item: Any) -> str:
+        uri = self._read_attr(item, "uri")
+        authority = [path, uri if isinstance(uri, str) and uri else None]
+        return f"browser-path:{hashlib.sha256(self._bounded_canonical(authority).encode()).hexdigest()}"
+
+    def _browser_category(self, browser: Any, name: str) -> Any:
+        node = self._read_attr(browser, name)
+        if name != "modulators" or (node is not None and self._items(self._read_attr(node, "children") or [])):
+            return node
+        uris = {"audio_effects": {"query:AudioFx#LFO", "query:AudioFx#Shaper", "query:AudioFx#Envelope%20Follower"},
+                "midi_effects": {"query:MidiFx#Expression%20Control"}}
+        found = []; seen = set()
+        for category, wanted in uris.items():
+            children = self._items(self._read_attr(self._read_attr(browser, category), "children") or [])
+            if len(children) > MAX_DISCOVERY_COLLECTION_LENGTH:
+                raise ValueError("browser child collection exceeds its traversal bound")
+            for item in children:
+                uri = self._read_attr(item, "uri")
+                if uri in wanted and self._read_attr(item, "is_loadable") is True:
+                    if uri in seen: raise ValueError("bundled modulator identity is ambiguous")
+                    seen.add(uri); found.append(item)
+        return type("ModulatorRoot", (), {"children": tuple(found)})() if found else node
 
     def _browser_roots(self, args: dict[str, Any]) -> dict[str, Any]:
         if args: raise ValueError("browser roots takes no arguments")
@@ -10170,11 +10480,11 @@ class LiveObjectMapper:
         roots = []
         version_note = getattr(self, "_live_major_version", None) or "unknown"
         for name in sorted(self._BROWSER_CATEGORIES):
-            node = self._read_attr(browser, name)
+            node = self._browser_category(browser, name)
             if node is not None:
                 roots.append({"name": name, "binding": "unofficial-internal", "searchable": True})
         for name in ("legacy_libraries", "splice", "tunings"):
-            node = self._read_attr(browser, name)
+            node = self._browser_category(browser, name)
             if node is not None:
                 roots.append({"name": name, "binding": "unofficial-internal", "searchable": False})
         preview = getattr(browser, "preview_item", None)
@@ -10213,7 +10523,7 @@ class LiveObjectMapper:
                 if not self._items(self._read_attr(child, "children") or []) or is_device:
                     if not needle or needle in name.lower() or needle in child_path.lower():
                         if child_path in seen_ids: raise ValueError("browser item identity collision")
-                        object_identity = self._browser_item_identity(child_path)
+                        object_identity = self._browser_item_identity(child_path, child)
                         seen_ids.add(child_path); items.append({"id": child_path, "objectIdentity": object_identity, "name": name, "category": category_name, "path": child_path, "isDevice": is_device})
                 if not is_device:
                     walk(child, child_path, depth + 1)
@@ -10222,7 +10532,7 @@ class LiveObjectMapper:
         for category_name in categories:
             if len(items) >= limit:
                 break
-            node = self._read_attr(browser, category_name)
+            node = self._browser_category(browser, category_name)
             if node is not None:
                 walk(node, category_name, 0)
         return {"items": items}
@@ -10248,10 +10558,10 @@ class LiveObjectMapper:
                     if len(matches) > 1: raise ValueError("browser item identity is ambiguous")
                 elif item_id.startswith(f"{child_path}/"):
                     find(child, child_path, depth + 1)
-        find(self._read_attr(browser, item_category), item_category, 0)
+        find(self._browser_category(browser, item_category), item_category, 0)
         if len(matches) != 1: raise ValueError("browser item identity is missing or ambiguous")
         item = matches[0]; name = str(self._read_attr(item, "name") or ""); explicit_device = self._read_attr(item, "is_device"); is_device = explicit_device is True or (explicit_device is None and item_category in self._DEVICE_BROWSER_CATEGORIES and self._read_attr(item, "is_loadable") is True)
-        return item, {"id": item_id, "objectIdentity": self._browser_item_identity(item_id), "name": name, "category": item_category, "path": item_id, "isDevice": is_device}
+        return item, {"id": item_id, "objectIdentity": self._browser_item_identity(item_id, item), "name": name, "category": item_category, "path": item_id, "isDevice": is_device}
 
     def _browser_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._browser_find(args.get("itemId"))[1]
@@ -11214,8 +11524,7 @@ class LiveObjectMapper:
             raise ValueError("note batch is invalid")
         notes = [self._validated_note(clip, value) for value in values]; prior_rows = self._read_notes(clip)
         if len(prior_rows) + len(notes) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("note batch would exceed the authoritative clip-note bound")
-        prior_candidates = list(clip.get_all_notes_extended()) if hasattr(clip, "get_all_notes_extended") else []
-        prior_ids = {int(candidate.note_id) for candidate in prior_candidates if isinstance(getattr(candidate, "note_id", None), int) and not isinstance(candidate.note_id, bool)}
+        prior_ids = {row["id"] for row in prior_rows}
         try:
             spec_class = getattr(__import__("Live.Clip", fromlist=["MidiNoteSpecification"]), "MidiNoteSpecification", None)
         except Exception:
@@ -11230,18 +11539,41 @@ class LiveObjectMapper:
             elif hasattr(clip, "set_notes"): raise ValueError("legacy set_notes replacement is refused because additive completeness cannot be proven")
             else:
                 clip.add_new_notes([{"pitch": note["pitch"], "start_time": float(note["start"]), "duration": float(note["duration"]), "velocity": note["velocity"], "mute": bool(note.get("mute", False)), "channel": note["channel"], "probability": float(note.get("probability", 1.0)), "velocityDeviation": float(note.get("velocityDeviation", 0.0)), "velocity_deviation": float(note.get("velocityDeviation", 0.0)), "releaseVelocity": float(note.get("releaseVelocity", 64.0)), "release_velocity": float(note.get("releaseVelocity", 64.0))} for note in notes])
-            after_rows = self._read_notes(clip); content = lambda row: {"pitch": int(row.get("pitch", 0)), "start": float(row.get("start", row.get("start_time", 0))), "duration": float(row.get("duration", 0)), "velocity": row.get("velocity", 0), "channel": int(row.get("channel", 1)), "mute": bool(row.get("mute", False)), "probability": float(row.get("probability", 1.0) if row.get("probability") is not None else 1.0), "velocityDeviation": float(row.get("velocityDeviation", 0.0) if row.get("velocityDeviation") is not None else 0.0), "releaseVelocity": float(row.get("releaseVelocity", 64.0) if row.get("releaseVelocity") is not None else 64.0)}; canonical_content = lambda rows: self._bounded_canonical(sorted([content(row) for row in rows], key=lambda row: self._bounded_canonical(row)))
-            # Each requested note takes the first new note with its exact content, in Live's order:
-            # by content, so a batch of thousands matches in one pass instead of one per note.
-            unmatched: dict[str, deque[int]] = {}
-            for row in after_rows:
-                if isinstance(row.get("id"), int) and row["id"] not in prior_ids: unmatched.setdefault(self._bounded_canonical(content(row)), deque()).append(int(row["id"]))
+            after_rows = self._read_notes(clip)
+            # Readback rounds decimal note values to Live's native precision.
+            # Keep identities and existing notes exact; tolerate only numeric
+            # representation changes when matching the newly requested notes.
+            def content(row):
+                defaults = {"channel": 1, "mute": False, "probability": 1.0, "velocityDeviation": 0.0, "releaseVelocity": 64.0}
+                return {key: row.get(key) if row.get(key) is not None else defaults.get(key)
+                        for key in ("pitch", "start", "duration", "velocity", *defaults)}
+
+            def matches(row, wanted):
+                actual, expected = content(row), content(wanted)
+                return all(_same_number(actual[key], expected[key])
+                           if key in {"start", "duration", "probability", "velocityDeviation", "releaseVelocity"}
+                           and isinstance(actual[key], (int, float)) and isinstance(expected[key], (int, float))
+                           else actual[key] == expected[key] for key in expected)
+
+            # Native float32 content hits the same bucket regardless of note order.
+            # Keep tolerant scanning only for unusual representations.
+            def content_key(row):
+                return self._bounded_canonical({key: struct.unpack("f", struct.pack("f", float(value)))[0] if type(value) in (int, float) else value for key, value in content(row).items()})
+            unmatched = {row["id"]: row for row in after_rows if isinstance(row.get("id"), int) and row["id"] not in prior_ids}
+            by_content: dict[str, deque[int]] = {}
+            for note_id, row in unmatched.items(): by_content.setdefault(content_key(row), deque()).append(note_id)
             for note in notes:
-                candidates = unmatched.get(self._bounded_canonical(content(note)))
-                note_ids.append(candidates.popleft() if candidates else None)
-            expected_content = canonical_content(prior_rows + notes)
+                candidates = by_content.get(content_key(note))
+                while candidates and candidates[0] not in unmatched: candidates.popleft()
+                note_id = candidates.popleft() if candidates else next((note_id for note_id, row in unmatched.items() if matches(row, note)), None)
+                note_ids.append(note_id)
+                if note_id is not None: del unmatched[note_id]
             after_ids = [row.get("id") for row in after_rows]
-            if len(after_rows) != len(prior_rows) + len(notes) or any(not isinstance(note_id, int) for note_id in after_ids) or len(set(after_ids)) != len(after_ids) or any(note_id is None for note_id in note_ids) or canonical_content(after_rows) != expected_content: raise ValueError("note batch did not produce the exact complete expected state")
+            prior_after = [row for row in after_rows if row.get("id") in prior_ids]
+            prior_unchanged = sorted(prior_after, key=lambda row: row["id"]) == sorted(prior_rows, key=lambda row: row["id"])
+            if (len(after_rows) != len(prior_rows) + len(notes) or any(not isinstance(note_id, int) or isinstance(note_id, bool) for note_id in after_ids)
+                    or len(set(after_ids)) != len(after_ids) or any(note_id is None for note_id in note_ids) or unmatched or not prior_unchanged):
+                raise ValueError("note batch did not produce the exact complete expected state")
             notes_revision = hashlib.sha256(self._bounded_canonical(after_rows).encode("utf-8")).hexdigest()
             return {"added": len(notes), "noteIds": note_ids, "notesRevision": notes_revision}
         except BaseException as error:

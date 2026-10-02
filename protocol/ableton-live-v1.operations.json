@@ -3543,6 +3543,119 @@
    }
   },
   {
+   "id": "clip.follow-actions.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedObjectIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedAuthorityRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "followActionEnabled": {
+      "type": "boolean"
+     },
+     "followActionLinked": {
+      "type": "boolean"
+     },
+     "followActionA": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9
+     },
+     "followActionB": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9
+     },
+     "followActionChanceA": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+     },
+     "followActionChanceB": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+     },
+     "followActionLoopCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1073741823
+     },
+     "followActionTime": {
+      "type": "number",
+      "minimum": 0.25,
+      "maximum": 1000000000
+     },
+     "followActionJumpA": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8388608
+     },
+     "followActionJumpB": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8388608
+     }
+    },
+    "required": [
+     "ref",
+     "expectedObjectIdentity",
+     "expectedAuthorityRevision",
+     "expectedStateRevision",
+     "followActionEnabled",
+     "followActionLinked",
+     "followActionA",
+     "followActionB",
+     "followActionChanceA",
+     "followActionChanceB",
+     "followActionLoopCount",
+     "followActionTime",
+     "followActionJumpA",
+     "followActionJumpB"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "changed": {
+      "type": "boolean",
+      "const": true
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "changed",
+     "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "id": "clip.move",
    "method": "invoke",
    "request": {
@@ -15712,6 +15825,228 @@
      }
     },
     "required": [
+     "changed",
+     "revision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "willington.device.read",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "macro-name",
+       "macro-mapping",
+       "variation-name",
+       "selector-zone",
+       "key-zone",
+       "velocity-zone"
+      ]
+     },
+     "macroIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 15
+     },
+     "targetRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     }
+    },
+    "required": [
+     "ref",
+     "kind"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "state": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": {
+       "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+       ],
+       "maxLength": 2048
+      },
+      "maxProperties": 32
+     },
+     "stateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+     }
+    },
+    "required": [
+     "state",
+     "stateRevision"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "id": "willington.device.set",
+   "method": "invoke",
+   "request": {
+    "type": "object",
+    "properties": {
+     "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "macro-name",
+       "macro-mapping",
+       "variation-name",
+       "selector-zone",
+       "key-zone",
+       "velocity-zone"
+      ]
+     },
+     "macroIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 15
+     },
+     "targetRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "expectedStateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+     },
+     "next": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+       },
+       "mapping": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "properties": {
+         "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+         },
+         "minimum": {
+          "type": "number"
+         },
+         "maximum": {
+          "type": "number"
+         },
+         "kind": {
+          "type": "string",
+          "enum": [
+           "continuous",
+           "enum",
+           "boolean"
+          ]
+         }
+        },
+        "required": [
+         "index",
+         "minimum",
+         "maximum",
+         "kind"
+        ],
+        "additionalProperties": false
+       },
+       "parameterValue": {
+        "type": "number"
+       },
+       "minimum": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 127
+       },
+       "maximum": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 127
+       },
+       "fadeMinimum": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 127
+       },
+       "fadeMaximum": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 127
+       }
+      },
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "ref",
+     "kind",
+     "expectedStateRevision",
+     "next"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object",
+    "properties": {
+     "state": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": {
+       "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+       ],
+       "maxLength": 2048
+      },
+      "maxProperties": 32
+     },
+     "stateRevision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+     },
+     "changed": {
+      "type": "boolean"
+     },
+     "revision": {
+      "type": "integer",
+      "minimum": 0
+     }
+    },
+    "required": [
+     "state",
+     "stateRevision",
      "changed",
      "revision"
     ],

@@ -98,3 +98,5 @@ git diff --cached --check
 ```
 
 `dist/` and packed archives are generated outputs and must not be staged. Do not use local-only reference material as a fixture or package input. Keep stdout protocol-only and redact diagnostics on stderr. Do not modify, stage, package, copy, or expose `extensions-sdk-1.0.0-beta.0`.
+
+Optional exact-build native integration: [Willington integration](WILLINGTON_INTEGRATION.md) documents capability gates, transaction behavior, real-Live evidence and remaining restoration requirements.

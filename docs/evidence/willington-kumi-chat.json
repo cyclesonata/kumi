@@ -1,0 +1,110 @@
+{
+  "status": "passed",
+  "interface": "Kumi CLI plain chat; actual signed-in model, runtime, MCP child and real Live",
+  "model": "openai-codex/gpt-6.1-sol",
+  "live": "12.4.15b4 ARM64",
+  "fixture": "Willington API Reload",
+  "history": [
+    {
+      "title": "Changed rack macro-name",
+      "state": "undone"
+    },
+    {
+      "title": "New MIDI clip \u201cKumi Chat Follow\u201d \u00b7 0 notes",
+      "state": "undone"
+    },
+    {
+      "title": "Changed clip Follow Actions",
+      "state": "undone"
+    },
+    {
+      "title": "Mapped parameter to Macro 2",
+      "state": "undone"
+    }
+  ],
+  "followApplied": {
+    "followActionEnabled": true,
+    "followActionLinked": true,
+    "followActionA": 4,
+    "followActionB": 1,
+    "followActionChanceA": 75,
+    "followActionChanceB": 25,
+    "followActionLoopCount": 2,
+    "followActionTime": 4,
+    "followActionJumpA": 1,
+    "followActionJumpB": 1
+  },
+  "followRestored": {
+    "followActionEnabled": false,
+    "followActionLinked": true,
+    "followActionA": 4,
+    "followActionB": 0,
+    "followActionChanceA": 100,
+    "followActionChanceB": 0,
+    "followActionLoopCount": 1,
+    "followActionTime": 4,
+    "followActionJumpA": 1,
+    "followActionJumpB": 1
+  },
+  "mappingApplied": {
+    "mapping": "{\"index\":1,\"kind\":\"continuous\",\"maximum\":-0.5,\"minimum\":0.75}",
+    "parameterValue": -0.5,
+    "parameterMin": -1,
+    "parameterMax": 1,
+    "macroValues": "[32.0, 127.0, 97.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]",
+    "targetIdentity": "live:512485136008",
+    "deviceIdentity": "live:512485132008"
+  },
+  "mappingRestored": {
+    "mapping": "null",
+    "parameterValue": -0.6000000238418579,
+    "parameterMin": -1,
+    "parameterMax": 1,
+    "macroValues": "[32.0, 127.0, 97.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]",
+    "targetIdentity": "live:512485136008",
+    "deviceIdentity": "live:512485132008"
+  },
+  "modulatorSearches": [
+    {
+      "roots": [
+        "modulators"
+      ],
+      "names": [
+        "LFO"
+      ]
+    },
+    {
+      "roots": [
+        "modulators"
+      ],
+      "names": [
+        "Shaper"
+      ]
+    },
+    {
+      "roots": [
+        "modulators"
+      ],
+      "names": [
+        "Envelope Follower"
+      ]
+    },
+    {
+      "roots": [
+        "modulators"
+      ],
+      "names": [
+        "Expression Control"
+      ]
+    }
+  ],
+  "fixedDuringTrial": [
+    "Chain mixer parameter discovery was missing from Kumi; now available with chain parent",
+    "Mapping targetRef now requires fresh discovery",
+    "Technical rack history titles replaced with readable names"
+  ],
+  "limits": [
+    "No playback, scheduling, persistence or full-screen TUI validation",
+    "Variation rename was previously tested through McpHost, not this chat trial"
+  ]
+}

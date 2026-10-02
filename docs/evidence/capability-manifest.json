@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "265d7d77208a58a88ffbebc0054c16e53c3d9ee6c29cf616027402b64c40593d",
-  "operationCount": 192,
+  "registryHash": "ec05dd401ec098adb77da1c185aff1857be2bd87859afe9dda4bfeb14e04aa57",
+  "operationCount": 195,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -10,6 +10,41 @@
     "Executable operations are negotiated at connect time; reserved operations fail closed and report the actual limitation."
   ],
   "families": [
+    {
+      "family": "willington-devices",
+      "surface": "Experimental exact-build native rack bindings (optional)",
+      "operations": [
+        {
+          "id": "willington.device.read",
+          "status": "executable-negotiated",
+          "access": [
+            "read"
+          ]
+        },
+        {
+          "id": "willington.device.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        }
+      ],
+      "firstTested": "Live 12.4.15b4 ARM64: Kumi preview/apply/readback/history undo for macro names, mapping ranges and variation names (stopped fixture)"
+    },
+    {
+      "family": "willington-follow-actions",
+      "surface": "Experimental exact-build native Clip bindings (optional)",
+      "operations": [
+        {
+          "id": "clip.follow-actions.set",
+          "status": "executable-negotiated",
+          "access": [
+            "write"
+          ]
+        }
+      ],
+      "firstTested": "Live 12.4.15b4 ARM64: Kumi Session clip preview/apply/readback/history undo (stopped fixture; scheduling and persistence unverified)"
+    },
     {
       "family": "session-read",
       "surface": "Song/Track/Scene/Clip/ClipSlot/Chain/Device/Parameter (LOM)",

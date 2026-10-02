@@ -730,3 +730,63 @@ test("before a plan of three steps or more, or one that deletes, Kumi keeps a co
     assert.equal(result.isError, false); assert.equal(JSON.parse(result.text).copy, undefined);
   } finally { await unsaved.integration.close(); }
 });
+
+test("chain mixer discovery accepts a fresh chain and mapping targets require fresh provenance", async () => {
+  const b = await opened({ racks: true });
+  try {
+    const result = await tool(b.tools, "live_discover").execute({ kind: "parameter", parent: "7:chain:0:0:0" }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert(b.requests.some(request => request.name === "live_discover" && request.args.kind === "parameter" && request.args.parent === "7:chain:0:0:0"));
+    const before = b.requests.length;
+    const stale = await tool(b.tools, "set_mixer").execute({ trackRef: "7:track:0", volume: 0.5, targetRef: "7:parameter:stale" }, signal());
+    assert.equal(stale.isError, true);
+    assert.match(stale.text, /targetRef.*discovery/);
+    assert(!b.requests.slice(before).some(request => request.name.endsWith("_preview") || request.name.endsWith("_apply")));
+  } finally { await b.integration.close(); }
+});
+
+
+test("launch Legato can be planned before clips exist without bypassing bridge readiness", async () => {
+  const b = await opened();
+  try {
+    const edit = tool(b.tools, "set_clip");
+    assert.equal((edit.inputSchema.properties as JsonObject).legato && ((edit.inputSchema.properties as JsonObject).legato as JsonObject).type, "boolean");
+    const result = await edit.execute({ clipRef: "clip:missing", legato: true }, signal());
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Create a clip first/);
+    assert.match(CHANGES.find(kind => kind.tool === "set_clip_follow_actions")!.description, /set_clip with legato: true/);
+  } finally { await b.integration.close(); }
+});
+
+
+test("new MIDI clip aliases feed Legato and Follow Actions in the same plan", async () => {
+  const b = await opened({ midiClips: true });
+  try {
+    const result = await tool(b.tools, "make_changes").execute({ steps: [
+      { tool: "write_midi_clip", as: "a", input: { trackRef: "track:1", sceneIndex: 0, name: "A", length: 8, notes: [] } },
+      { tool: "write_midi_clip", as: "b", input: { trackRef: "track:1", sceneIndex: 1, name: "B", length: 8, notes: [] } },
+      { tool: "set_clip", input: { clipRef: "@a", legato: true } },
+      { tool: "set_clip_follow_actions", input: { clipRef: "@b", followActionEnabled: true } },
+    ] }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.equal(JSON.parse(result.text).done.length, 4);
+    assert.equal(b.requests.find(r => r.name === "live_clip_properties_preview")?.args.clipRef, "7:clip:0:0");
+    assert.equal(b.requests.find(r => r.name === "live_follow_actions_preview")?.args.clipRef, "7:clip:0:1");
+  } finally { await b.integration.close(); }
+});
+
+
+test("a new MIDI clip is a valid note-discovery parent and set_clip uses the advertised schema", async () => {
+  const b = await opened({ midiClips: true });
+  try {
+    const result = await tool(b.tools, "write_midi_clip").execute({ trackRef: "track:1", sceneIndex: 0, length: 8, notes: [] }, signal());
+    assert.equal(result.isError, false, result.text);
+    const clipRef = JSON.parse(result.text).ref;
+    const notes = await tool(b.tools, "live_discover").execute({ kind: "note", parent: clipRef }, signal());
+    assert.equal(notes.isError, false, notes.text);
+    assert(b.requests.some(r => r.name === "live_discover" && r.args.kind === "note" && r.args.parent === "7:clip:0:0"));
+    const observation = await b.integration.observe(signal());
+    const schema = tool(observation.tools, "set_clip").inputSchema as JsonObject;
+    assert.deepEqual((schema.properties as JsonObject).grooveRef, { type: ["string", "null"] });
+  } finally { await b.integration.close(); }
+});

@@ -1,0 +1,116 @@
+{
+  "date": "2026-09-30",
+  "liveVersion": "12.4.15b5",
+  "platform": "macOS arm64",
+  "status": "passed",
+  "scope": "Disposable saved Set, stopped transport; Kumi runtime make_changes and undo_change through the production bridge. No model conversation used.",
+  "plan": [
+    "create MIDI clip A with decimal durations",
+    "create MIDI clip B with decimal durations",
+    "enable launch Legato on A",
+    "set unlinked Other/Again 70/30 Follow Actions on A at 12 beats",
+    "set unlinked Other/Again 70/30 Follow Actions on B at 20 beats"
+  ],
+  "readback": [
+    {
+      "name": "Kumi decimal regression A",
+      "legato": true,
+      "followActionEnabled": true,
+      "followActionLinked": false,
+      "followActionA": 8,
+      "followActionB": 2,
+      "followActionChanceA": 70,
+      "followActionChanceB": 30,
+      "followActionTime": 12,
+      "notes": [
+        {
+          "pitch": 29,
+          "start": 0,
+          "duration": 0.35,
+          "velocity": 110,
+          "channel": 1,
+          "id": 1,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        },
+        {
+          "pitch": 29,
+          "start": 0.75,
+          "duration": 0.22000005203130202,
+          "velocity": 81,
+          "channel": 1,
+          "id": 2,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        },
+        {
+          "pitch": 36,
+          "start": 1.5,
+          "duration": 0.3,
+          "velocity": 96,
+          "channel": 1,
+          "id": 3,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        }
+      ]
+    },
+    {
+      "name": "Kumi decimal regression B",
+      "legato": false,
+      "followActionEnabled": true,
+      "followActionLinked": false,
+      "followActionA": 8,
+      "followActionB": 2,
+      "followActionChanceA": 70,
+      "followActionChanceB": 30,
+      "followActionTime": 20,
+      "notes": [
+        {
+          "pitch": 29,
+          "start": 0,
+          "duration": 0.35,
+          "velocity": 110,
+          "channel": 1,
+          "id": 1,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        },
+        {
+          "pitch": 29,
+          "start": 0.75,
+          "duration": 0.22000005203130202,
+          "velocity": 81,
+          "channel": 1,
+          "id": 2,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        },
+        {
+          "pitch": 36,
+          "start": 1.5,
+          "duration": 0.3,
+          "velocity": 96,
+          "channel": 1,
+          "id": 3,
+          "mute": false,
+          "probability": 1,
+          "velocityDeviation": 0,
+          "releaseVelocity": 64
+        }
+      ]
+    }
+  ],
+  "undoCount": 5,
+  "cleanup": "All five changes undone through Kumi; both original slots verified empty."
+}

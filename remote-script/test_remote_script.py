@@ -639,7 +639,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "265d7d77208a58a88ffbebc0054c16e53c3d9ee6c29cf616027402b64c40593d")
+        self.assertEqual(digest, "ec05dd401ec098adb77da1c185aff1857be2bd87859afe9dda4bfeb14e04aa57")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]
@@ -2116,6 +2116,51 @@ class ControlSurfaceTests(unittest.TestCase):
         result = mapper.invoke("note.add-batch", {"ref": clip_ref, "notes": [{"pitch": 36, "start": 0, "duration": 0.25, "velocity": 100, "channel": 1}], **self.note_authority(mapper, clip_ref)})
         self.assertEqual(result["added"], 1); self.assertEqual(result["noteIds"], [8]); self.assertRegex(result["notesRevision"], r"^[a-f0-9]{64}$")
 
+    def test_note_batch_accepts_float32_readback_and_preserves_existing_ids(self):
+        class NativePrecisionClip(FakeClip):
+            def add_new_notes(self, notes):
+                super().add_new_notes(notes)
+                for note in self.notes:
+                    for field in ("start_time", "duration", "probability", "velocityDeviation", "releaseVelocity"):
+                        if field in note: note[field] = struct.unpack("f", struct.pack("f", note[field]))[0]
+                self.notes.sort(key=lambda note: note["start_time"])
+
+        song = FakeSong(); clip = NativePrecisionClip(8); song.tracks[0].clip_slots[0].clip = clip
+        mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        note = {"pitch": 29, "start": 0.1, "duration": 0.35, "velocity": 110, "channel": 1, "probability": 0.7}
+        first = mapper.invoke("note.add-batch", {"ref": ref, "notes": [note], **self.note_authority(mapper, ref)})
+        before = mapper._read_notes(clip)
+        second = mapper.invoke("note.add-batch", {"ref": ref, "notes": [note, {**note, "start": 1.5, "duration": 0.22}], **self.note_authority(mapper, ref)})
+        self.assertEqual(first["noteIds"], [1]); self.assertEqual(second["noteIds"], [2, 3])
+        self.assertEqual(mapper._read_notes(clip)[0], before[0])
+        self.assertNotEqual(mapper._read_notes(clip)[0]["duration"], note["duration"])
+
+        # Reversed requests and native time sorting must use float32 dictionary
+        # buckets, without scanning the remaining notes for every request.
+        from unittest.mock import patch
+        import ableton_mcp_remote_script as bridge
+        notes = [{**note, "start": (index + 1) / 1000, "duration": 1 / 3} for index in reversed(range(1000))]
+        with patch.object(bridge, "_same_number", wraps=bridge._same_number) as compare:
+            third = mapper.invoke("note.add-batch", {"ref": ref, "notes": notes, **self.note_authority(mapper, ref)})
+            self.assertEqual(third["added"], 1000)
+            self.assertLess(compare.call_count, 10)
+
+    def test_note_batch_still_rejects_wrong_values_extra_notes_and_duplicate_ids(self):
+        for corruption in ("duration", "pitch", "extra", "duplicate"):
+            with self.subTest(corruption=corruption):
+                class BadClip(FakeClip):
+                    def add_new_notes(self, notes):
+                        super().add_new_notes(notes)
+                        if corruption == "duration": self.notes[-1]["duration"] += 0.01
+                        elif corruption == "pitch": self.notes[-1]["pitch"] += 1
+                        elif corruption == "extra": super().add_new_notes(notes)
+                        else: self.notes.append(dict(self.notes[-1]))
+                song = FakeSong(); clip = BadClip(4); song.tracks[0].clip_slots[0].clip = clip
+                mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+                with self.assertRaisesRegex(ValueError, "exact complete expected state"):
+                    mapper.invoke("note.add-batch", {"ref": ref, "notes": [{"pitch": 36, "start": 0, "duration": 0.35, "velocity": 100, "channel": 1}], **self.note_authority(mapper, ref)})
+                self.assertEqual(clip.notes, [])
+
     def test_midi_reads_cover_exact_clip_length_and_refuse_unbounded_or_replacing_fallbacks(self):
         class LegacyClip:
             def __init__(self, count=1): self.length = 6000.0; self.calls = []; self.count = count; self.set_called = False
@@ -2945,7 +2990,7 @@ class RealtimePlaneTests(unittest.TestCase):
             bridge.mapper.song.tracks = [target_track]
             rack = FakeDevice(); rack.can_have_chains = True; rack.chains = []; rack.macros = [rack.parameters[0]]; bridge.mapper.song.tracks[0].devices = [rack]
             rack_row = bridge.mapper.snapshot()["tracks"][0]["devices"][0]; macro_ref = rack_row["macros"][0]["ref"]; macro_authority = bridge.mapper._realtime_parameter_authority(macro_ref)
-            self.assertEqual(macro_authority["ref"], macro_ref); self.assertEqual([row["ref"] for row in macro_authority["siblings"]], [rack_row["parameters"][0]["ref"], macro_ref])
+            self.assertEqual(macro_authority["ref"], macro_ref); self.assertEqual([row["ref"] for row in macro_authority["siblings"]], [macro_ref])
             macro_arm = bridge._realtime_op("realtime.arm", {"ttlMs": 30000, "channels": ["udp-json"], "parameterRefs": [macro_ref], "targetAuthorities": [macro_authority], "outputSafety": {"safe": True, "provenance": "unit-test-operator"}})
             self.assertEqual(macro_arm["parameterRefs"], [macro_ref]); bridge._realtime.disarm()
             oversized_rack = FakeDevice(); oversized_rack.can_have_chains = True; oversized_rack.macros = []; oversized_rack.chains = [type("Chain", (), {"devices": []})() for _ in range(257)]
@@ -4773,7 +4818,7 @@ class FakeRackDevice:
         self.chains = []
         self.return_chains = []
         self.macros = [FakeMacro("Macro 1")]
-        self.macro_mapped = [True]
+        self.macros_mapped = [True]
         self.visible_macro_count = 8
         self.variation_count = 1
         self.selected_variation_index = 0
@@ -5140,6 +5185,44 @@ class RackMacroDrumPadTests(unittest.TestCase):
                 mapper.invoke("drum-pad.load-samples", bad)
         self.assertEqual([len(pad.chains) for pad in pads], [0, 0, 0])
 
+    def test_native_rack_macro_shape_and_indexed_variation(self):
+        song = FakeSong(); rack = FakeRackDevice(); del rack.macros
+        rack.parameters = [FakeParameter(), FakeParameter()]
+        rack.variation_count = 3
+        song.tracks[0].devices = [rack]; mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual(len(row["macros"]), 1)
+        self.assertEqual(row["macros"][0]["objectIdentity"], row["parameters"][1]["objectIdentity"])
+        called = []
+        rack.recall_selected_variation = lambda: called.append(rack.selected_variation_index)
+        def args(index):
+            return {"ref": row["ref"], "action": "recall-variation", "index": index,
+                    "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": host_rack_state_revision(mapper.snapshot()["tracks"][0]["devices"][0])}
+        mapper.invoke("rack.action", args(2)); self.assertEqual(called, [2])
+        with self.assertRaisesRegex(ValueError, "out of range"): mapper.invoke("rack.action", args(3))
+        self.assertEqual(called, [2])
+        stale = args(1); rack.selected_variation_index = 0
+        with self.assertRaisesRegex(ValueError, "state changed"): mapper.invoke("rack.action", stale)
+
+    def test_modulator_fallback_search_and_resolution_share_real_items(self):
+        def node(**values): return type("BrowserNode", (), values)()
+        lfo = node(name="LFO", uri="query:AudioFx#LFO", is_loadable=True, children=[])
+        impostor = node(name="LFO", uri="user:LFO", is_loadable=True, children=[])
+        browser = node(audio_effects=node(children=[lfo, impostor]), midi_effects=node(children=[]))
+        mapper = LiveObjectMapper(FakeSong())
+        with patch.object(LiveObjectMapper, "_browser", lambda self: browser):
+            self.assertIn("modulators", [item["name"] for item in mapper._browser_roots({})["roots"]])
+            rows = mapper._browser_search({"category": "modulators"})["items"]
+            self.assertEqual(len(rows), 1)
+            self.assertIs(mapper._browser_find(rows[0]["id"])[0], lfo)
+            browser.modulators = node(children=[])
+            self.assertEqual(mapper._browser_search({"category": "modulators"})["items"], rows)
+            browser.modulators = node(children=[impostor])
+            self.assertIs(mapper._browser_find(rows[0]["id"])[0], impostor)
+            self.assertNotEqual(mapper._browser_find(rows[0]["id"])[1]["objectIdentity"], rows[0]["objectIdentity"])
+            with self.assertRaisesRegex(ValueError, "identity"):
+                mapper._browser_load({"itemId": rows[0]["id"], "expectedObjectIdentity": rows[0]["objectIdentity"], "trackRef": mapper.snapshot()["tracks"][0]["ref"]})
+
     def test_rack_rows_actions_and_view(self):
         song = FakeSong()
         rack = FakeRackDevice()
@@ -5147,7 +5230,7 @@ class RackMacroDrumPadTests(unittest.TestCase):
         mapper = LiveObjectMapper(song)
         row = mapper.snapshot()["tracks"][0]["devices"][0]
         self.assertEqual(row["visibleMacroCount"], 8); self.assertEqual(row["variationCount"], 1); self.assertEqual(row["selectedVariationIndex"], 0)
-        self.assertEqual(row["macroMapped"], [True]); self.assertEqual(row["view"]["showChainDevices"], True)
+        self.assertEqual(row["macrosMapped"], [True]); self.assertEqual(row["view"]["showChainDevices"], True)
         def fences(): return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(mapper._rack_state(rack)).encode()).hexdigest()}
         self.assertTrue(mapper._operation_supported("rack.set"))
         result = mapper.invoke("rack.set", {**fences(), "selectedVariationIndex": 0})

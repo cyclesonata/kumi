@@ -217,7 +217,12 @@ test("Remote Script installer is explicit, atomic, and preserves a recoverable b
   assert.equal(readFileSync(join(destination, "ableton_mcp_remote_script.py"), "utf8"), "production-remote-script");
   writeFileSync(source, "replacement");
   assert.throws(() => installRemoteScript(source, destination), /refusing to overwrite/);
+  const willington = join(destination, "willington.json");
+  const nativeConfig = JSON.stringify({ version: 1, followActions: true, deviceTools: true, enableWrites: false });
+  writeFileSync(willington, nativeConfig, { mode: 0o600 });
   const second = installRemoteScript(source, destination, { force: true });
+  assert.equal(readFileSync(willington, "utf8"), nativeConfig);
+  if (process.platform !== "win32") assert.equal(lstatSync(willington).mode & 0o777, 0o600);
   assert.equal(second.backup !== null, true);
   assert.equal(readFileSync(join(destination, "ableton_mcp_remote_script.py"), "utf8"), "replacement");
   assert.equal(first.backup, null);

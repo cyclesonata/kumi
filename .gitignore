@@ -34,3 +34,6 @@ __pycache__/
 /apps/live-extension/node_modules/
 # scripts/build-release.mjs output
 /release/
+
+# Local review bookkeeping
+docs/evidence/willington-review.json

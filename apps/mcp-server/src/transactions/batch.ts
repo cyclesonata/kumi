@@ -169,6 +169,18 @@ export function parameterTarget(snapshot: LiveSnapshot, deviceRef: string, param
 
 export function parameterRevision(parameter: Row): number { return typeof parameter.revision === "number" ? parameter.revision : 1; }
 
+/** Native rack macros alias parameter rows. Keep each ref/identity pair once, in order. */
+export function uniqueParameterRows<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+  const seen = new Map<unknown, Set<unknown>>();
+  return rows.filter(row => {
+    const identities = seen.get(row.ref) ?? new Set<unknown>();
+    if (identities.has(row.objectIdentity)) return false;
+    identities.add(row.objectIdentity);
+    seen.set(row.ref, identities);
+    return true;
+  });
+}
+
 export function parameterAuthority(snapshot: LiveSnapshot, parameterRef: string): Row {
   for (const track of snapshot.tracks as unknown as Row[]) {
     const trackRef = typeof track.ref === "string" ? track.ref : undefined;
@@ -180,7 +192,7 @@ export function parameterAuthority(snapshot: LiveSnapshot, parameterRef: string)
         const deviceIdentity = typeof device.objectIdentity === "string" ? device.objectIdentity : undefined;
         const parameters = (Array.isArray(device.parameters) ? device.parameters : []) as unknown[];
         const macros = (Array.isArray(device.macros) ? device.macros : []) as unknown[];
-        const rows = [...parameters, ...macros].filter(isObject);
+        const rows = uniqueParameterRows([...parameters, ...macros].filter(isObject));
         const siblings = rows.map((row) => typeof row.ref === "string" && typeof row.objectIdentity === "string" ? { ref: row.ref, objectIdentity: row.objectIdentity } : undefined);
         if (trackRef && trackIdentity && deviceRef && deviceIdentity && siblings.every((row) => row !== undefined)) {
           const found = rows.find((row) => row.ref === parameterRef);

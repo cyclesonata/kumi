@@ -453,6 +453,9 @@ export function createAbletonIntegration(options: Options): Integration {
       if (typeof row.ref === "string" && row.ref.length > 0 && row.ref.length <= 256) {
         refs.set(row.ref, kind);
         if (kind === "clip-slot" && typeof row.clipRef === "string" && row.clipRef.length <= 256) refs.set(row.clipRef, "session-clip");
+        if (kind === "device" && Array.isArray(row.chainList)) for (const chain of row.chainList) {
+          if (chain && typeof chain === "object" && typeof (chain as JsonObject).ref === "string" && String((chain as JsonObject).ref).length <= 256) refs.set(String((chain as JsonObject).ref), "chain");
+        }
         const color = hexColor(row.color);
         if (/track$/.test(kind) && typeof row.name === "string") known.set(row.ref, { name: row.name.slice(0, 256), ...(color ? { color } : {}) });
       }
@@ -1164,7 +1167,12 @@ export function createAbletonIntegration(options: Options): Integration {
       // The bridge offers some tools only once the Set has what they work on (edit_rack once there's a
       // rack): a plan that just loaded one may be ahead of the bridge's catalog-changed notice, so the
       // catalog is read again before saying the change isn't available.
-      if (!tools.has(kind.preview) || !tools.has(kind.apply)) { await tools.refresh(signal); assertLease(lease, signal); }
+      if (!tools.has(kind.preview) || !tools.has(kind.apply)) {
+        // tools/list uses the host's cached capabilities. Refresh Live status first so a newly
+        // created clip or loaded device can advertise the operations it now supports.
+        await guardEpoch(signal, currentEpoch, lease);
+        await tools.refresh(signal); assertLease(lease, signal);
+      }
       if (!tools.has(kind.preview) || !tools.has(kind.apply)) throw new ObservationError(kind.unavailable ?? "That change isn't available for the open Set right now");
       if (!supported(kind)) throw new ObservationError(tooOld(kind));
       if (changesThisTurn >= MAX_CHANGES_PER_TURN) throw new ObservationError(`That's ${MAX_CHANGES_PER_TURN} changes in one answer; carry on in the next one`);
@@ -2260,7 +2268,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     // A change whose target an earlier step can create is offered by any bridge that makes changes (has undo).
     const edits: KernelTool[] = CHANGES.filter((kind) => !kind.internal && supported(kind) && ((kind.always && kind.inputSchema && tools!.has("live_undo")) || (tools!.has(kind.preview) && tools!.has(kind.apply)))).map((kind) => ({
       name: kind.tool, description: kind.description,
-      inputSchema: kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
+      inputSchema: kind.fallbackSchema ? tools!.tool(kind.preview)?.inputSchema as JsonObject ?? kind.inputSchema! : kind.inputSchema ?? (kind.schema ? kind.schema(tools!.tool(kind.preview)!.inputSchema as JsonObject) : tools!.tool(kind.preview)!.inputSchema as JsonObject),
       execute: (input, signal) => change(kind, input, signal) }));
     const actions: KernelTool[] = ACTIONS.filter((kind) => supported(kind) && tools!.has(kind.preview) && tools!.has(kind.apply)).map((kind) => ({
       name: kind.tool, description: kind.description, inputSchema: kind.inputSchema ?? tools!.tool(kind.preview)!.inputSchema as JsonObject,

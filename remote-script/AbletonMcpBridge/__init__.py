@@ -282,6 +282,105 @@ def _windows_owner_controlled(path: Path) -> bool:
             pass
 
 
+class _WillingtonProvider:
+    """Optional owner of separately installed, exact-build native adapters.
+
+    No ambient environment flags or loading paths supplied by MCP clients.
+    The adjacent owner-only file is local operator configuration, not payload.
+    """
+    def __init__(self, mapper: Any, log: Any):
+        self.mapper = mapper
+        self.follow = None
+        self.devices = None
+        self.zones = None
+        self.live = None
+        self.mapper.willington_follow_writes = False
+        self.mapper.willington_device_writes = False
+        self.mapper.willington_zone_writes = False
+        path = Path(__file__).with_name("willington.json")
+        if not path.exists(): return
+        try:
+            if path.is_symlink() or not path.is_file() or not _owner_controlled(path) or not _mode_owner_only(path) or path.stat().st_size > 4096:
+                raise ValueError("unsafe extension configuration")
+            config = json.loads(path.read_text())
+            required = {"version", "followActions", "deviceTools", "enableWrites"}
+            if not isinstance(config, dict) or not required <= set(config) <= required | {"rackZones"} or type(config["version"]) is not int or config["version"] != 1 or any(type(config[key]) is not bool for key in ("followActions", "deviceTools", "enableWrites")) or type(config.get("rackZones", False)) is not bool:
+                raise ValueError("invalid extension configuration")
+            import Live
+            if getattr(Live, "_kumi_willington_owner", None) is not None:
+                raise ValueError("native extension already owned")
+            if getattr(Live, "_willington_native_library", None) is not None and not getattr(Live, "_kumi_willington_registered", False):
+                raise ValueError("standalone Follow Action surface already installed; restart required")
+            if any(any(getattr(cls, name, None) is method for cls, name, method in getattr(item, "patches", ())) for item in getattr(Live, "_willington_device_libraries", ())):
+                raise ValueError("standalone device surface already installed")
+            chain_class = getattr(getattr(Live, "Chain", None), "Chain", None)
+            if callable(getattr(chain_class, "get_zone", None)) or callable(getattr(chain_class, "set_zone", None)):
+                raise ValueError("rack zone bindings already installed")
+            self.live = Live
+            Live._kumi_willington_owner = self
+            if config["followActions"]:
+                from WillingtonBindings import install
+                # Clip properties retain native function pointers for this Live process.
+                # The Follow package has no uninstall; reuse our disabled registration
+                # on reconnect instead of installing those properties a second time.
+                self.follow = getattr(Live, "_kumi_willington_follow_library", None)
+                if self.follow is None:
+                    self.follow = install()  # validates executable SHA and running Mach-O UUID
+                    Live._kumi_willington_follow_library = self.follow
+                self.follow.willington_enable_writes(False)
+                Live._kumi_willington_registered = True
+            if config["deviceTools"]:
+                from WillingtonDeviceTools.api import install
+                self.devices = install()
+            if config.get("rackZones", False):
+                from WillingtonRackZones.api import install
+                self.zones = install()
+            if config["enableWrites"]:
+                # Follow bindings require evidence for this exact compiled library,
+                # matching the standalone adapter's operator enablement contract.
+                if self.follow is not None:
+                    try:
+                        import hashlib
+                        import WillingtonBindings
+                        folder = Path(WillingtonBindings.__file__).parent
+                        evidence = json.loads((folder / "self-test.json").read_text())
+                        digest = hashlib.sha256((folder / "libwillington.dylib").read_bytes()).hexdigest()
+                        if evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
+                            raise ValueError("current-library Follow Action self-test is required")
+                        self.follow.willington_enable_writes(True)
+                        self.mapper.willington_follow_writes = True
+                    except Exception as error:
+                        if callable(log): log("Willington Follow Action writes unavailable: " + str(error))
+                if self.devices is not None:
+                    self.devices.enable(True)
+                    self.mapper.willington_device_writes = True
+                if self.zones is not None:
+                    self.zones.enable(True)
+                    self.mapper.willington_zone_writes = True
+            if callable(log): log("Willington extensions initialized; writes " + ("enabled" if config["enableWrites"] else "disabled"))
+        except Exception as error:
+            try: self.close()
+            except Exception: pass  # Capability flags are cleared even if native teardown fails.
+            if callable(log): log("Willington extensions unavailable: " + str(error) + "; ordinary bridge remains active")
+
+    def close(self):
+        self.mapper.willington_follow_writes = False
+        self.mapper.willington_device_writes = False
+        self.mapper.willington_zone_writes = False
+        try:
+            if self.follow is not None: self.follow.willington_enable_writes(False)
+        finally:
+            try:
+                if self.devices is not None: self.devices.uninstall()
+            finally:
+                try:
+                    if self.zones is not None: self.zones.uninstall()
+                finally:
+                    if self.live is not None and getattr(self.live, "_kumi_willington_owner", None) is self:
+                        self.live._kumi_willington_owner = None
+                    self.follow = self.devices = self.zones = None
+
+
 class AbletonMcpBridge(_ControlSurface):
     """Control Surface lifecycle wrapper around the dependency-free bridge."""
 
@@ -290,6 +389,7 @@ class AbletonMcpBridge(_ControlSurface):
         accessor = getattr(self, "song", None)
         self._bridge = _Bridge(c_instance, _read_config(), song=accessor() if callable(accessor) else None, provenance="real-live", diagnostics_validator=_diagnostics_path_safe)
         self._disconnected = False
+        self._willington = None
         self._schedule_next()
 
     def _schedule_next(self) -> None:
@@ -299,16 +399,25 @@ class AbletonMcpBridge(_ControlSurface):
     def _drain(self) -> None:
         if self._disconnected:
             return
+        if self._willington is None:
+            self._willington = _WillingtonProvider(self._bridge.mapper, getattr(self, "log_message", None))
         self._bridge.update_display()
         self._schedule_next()
 
     def update_display(self) -> None:
+        if self._willington is None:
+            self._willington = _WillingtonProvider(self._bridge.mapper, getattr(self, "log_message", None))
         self._bridge.update_display()
 
     def disconnect(self) -> None:
         self._disconnected = True
         if self._scheduled is not None:
             self._scheduled = None
+        if self._willington is not None:
+            try: self._willington.close()
+            except Exception:
+                log = getattr(self, "log_message", None)
+                if callable(log): log("Willington teardown failed; bridge disconnect continues")
         self._bridge.disconnect()
         parent_disconnect = getattr(super(), "disconnect", None)
         if callable(parent_disconnect):

@@ -1,0 +1,36 @@
+{
+  "status": "experimental-b5-tested",
+  "version": "12.4.15b5 (2026-09-24_415b783fcc)",
+  "profile_id": "live-12.4.15b5-rack-zones-arm64",
+  "library_sha256": "7401983ead1b32655678e3b2aad37225e6fbacebac9470398872b73641c0c242",
+  "native_source_sha256": "75e383bf6439061a1a03cee51e9c9e89f33570ee24f363bf9b9b091a40ab6443",
+  "tests": {
+    "zone_readback": 7,
+    "native_write_undo_redo_noop": 28,
+    "packaged_api": 7,
+    "kumi_real_live_mapper_transactions": 7,
+    "saved_and_reopened_zone_states": 7,
+    "python_bridge_tests": 20,
+    "host_transaction_tests": 13,
+    "python_bridge_regression_tests": 452,
+    "capability_manifest_tests": 1,
+    "installed_authenticated_bridge_zone_readbacks": 7,
+    "kumi_installed_host_preview_apply_idempotency_history_undo": 7,
+    "kumi_runtime_change_tests": 40,
+    "live_extension_registry_and_socket_tests": 10
+  },
+  "limits": [
+    "Audible MIDI/selector behavior untested",
+    "Max whitelist registration tested; actual live.object invocation untested",
+    "b4 and other Live builds unsupported"
+  ],
+  "evidence": {
+    "readback-b5.json": "81d740ec1778fda797e1d1d81427ad93c063f07d96f6452a0db179d8e822be17",
+    "write-undo-b5.json": "ad2a5c82f647d669ba5d1074d9e231627f31c8e0afb20e603e80de9eddd2806b",
+    "api-b5.json": "d56017d38c79f5905465e342c49a73f7110f1f2b2826be0964b8770783b57bfe",
+    "persistence-b5.json": "ab431637de5c721fffed120625f13e916db025a54d53eacf93601157203cfef6",
+    "kumi-mapper-b5.json": "b99083bcf256fd3a90511b81d9b18b0a963b8147cf61aa8acaf81ee0b1bdaeda",
+    "installed-bridge-b5.json": "dd73e4cfad7330b87b1efe4bea030e1440c40a376d22aa012c6c5da5e5879992",
+    "kumi-host-live-b5.json": "56e803ed8dbb2aaaa6ac960ace18b8a90ca247b10dc0429694c114ea995587cb"
+  }
+}
