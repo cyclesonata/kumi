@@ -21,6 +21,8 @@ export interface Tap {
   sampleRate: number;
   /** When it last said hello (ms since the epoch). */
   seenAt: number;
+  /** When it loaded in Live (ms since the epoch), from its age at that hello; undefined from an older device. */
+  loadedAt?: number;
 }
 
 /** What a device said when it started recording: where the Set was then, and whether it played. */
@@ -45,6 +47,8 @@ export interface EarsLink {
   stop(tap: Tap): void;
   /** Ask a device where it is now. */
   ping(tap: Tap, signal?: AbortSignal): Promise<Tap | undefined>;
+  /** Where Live's transport is, as a device hears it: its position in beats and whether it plays; undefined when it doesn't answer. */
+  transport(tap: Tap, signal?: AbortSignal): Promise<{ beats: number; running: boolean } | undefined>;
   close(): Promise<void>;
 }
 
@@ -87,10 +91,11 @@ function link(socket: Socket, port: number): EarsLink {
   socket.on("error", () => { /* a malformed packet or a closed peer: the next hello says where things are */ });
   socket.unref();
   function heard(args: (number | string)[], from: number): Tap | undefined {
-    const [devicePort, id, version, sampleRate, path] = args.slice(from);
+    const [devicePort, id, version, sampleRate, path, age] = args.slice(from);
     if (typeof devicePort !== "number" || typeof id !== "number" || typeof path !== "string") return undefined;
+    const seenAt = Date.now();
     const tap: Tap = { id, port: devicePort, path: path.trim(), version: typeof version === "number" ? version : Number(version) || 0,
-      sampleRate: typeof sampleRate === "number" && sampleRate > 0 ? sampleRate : 44_100, seenAt: Date.now() };
+      sampleRate: typeof sampleRate === "number" && sampleRate > 0 ? sampleRate : 44_100, seenAt, ...(typeof age === "number" && age >= 0 ? { loadedAt: seenAt - age } : {}) };
     known.set(id, tap);
     for (const watcher of [...watchers]) watcher(tap);
     return tap;
@@ -147,6 +152,14 @@ function link(socket: Socket, port: number): EarsLink {
         await ask(tap, "/kumi/ears/ping", (token) => ["", port, token], "/kumi/ears/pong", signal);
         return known.get(tap.id);
       } catch { return undefined; }
+    },
+    async transport(tap, signal) {
+      try {
+        const reply = await ask(tap, "/kumi/ears/ping", (token) => ["", port, token], "/kumi/ears/pong", signal);
+        // The pong: token, port, id, version, sample rate, place, age, then the position and whether Live plays.
+        const [beats, running] = reply.args.slice(7);
+        return typeof beats === "number" ? { beats, running: running === 1 } : undefined;
+      } catch (error) { signal?.throwIfAborted(); return undefined; }
     },
     async close() {
       if (closed) return;

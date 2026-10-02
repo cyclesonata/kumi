@@ -26,8 +26,9 @@ export interface Command {
 export const COMMANDS: Record<string, Command> = {
   save: { titles: ["Save Live Set", "Save"], target: "none", done: "Saved the Set" },
   collect_all_and_save: { titles: ["Collect All and Save"], target: "none", done: "Collected all and saved the Set" },
-  group_tracks: { titles: ["Group Tracks"], target: "tracks", done: "Grouped" },
-  ungroup_tracks: { titles: ["Ungroup Tracks"], target: "track", done: "Ungrouped" },
+  // Live 12.4 calls them Edit › Group and Ungroup (they group devices too, when devices are selected).
+  group_tracks: { titles: ["Group", "Group Tracks"], target: "tracks", done: "Grouped" },
+  ungroup_tracks: { titles: ["Ungroup", "Ungroup Tracks"], target: "track", done: "Ungrouped" },
   freeze_track: { titles: ["Freeze Track", "Freeze Tracks"], target: "track", done: "Froze" },
   unfreeze_track: { titles: ["Unfreeze Track", "Unfreeze Tracks"], target: "track", done: "Unfroze" },
   flatten_track: { titles: ["Flatten Track", "Flatten Tracks", "Flatten"], target: "track", done: "Flattened" },

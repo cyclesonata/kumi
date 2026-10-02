@@ -1,8 +1,9 @@
 /**
  * Kumi Ears: the small Max for Live audio effect Kumi puts at the end of a track's chain (or Main's)
  * when it needs to hear it. The sound passes through untouched. On Kumi's word it records what the
- * track plays into a buffer, with a third channel carrying Live's beat (plugphasor~) so every sample
- * can be placed on the Arrangement's beats, and writes it to a file Kumi reads. Kumi and the device talk
+ * track plays into a buffer, with two more channels saying where Live was: the beat's phase, sample for
+ * sample (plugphasor~), and Live's position in beats, polled every few milliseconds (plugsync~). Together
+ * they place every sample on the Arrangement's beats, wherever Live jumped. It writes that to a file Kumi reads. Kumi and the device talk
  * over OSC on this computer's loopback: the device says hello to Kumi's ports every two seconds, with
  * the port it listens on and where it sits in the Set; Kumi sends arm, write, stop and ping.
  */
@@ -14,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { devicePatcher, encodeAmxd, type Box, type Line } from "../devices/amxd.js";
 
 /** Bumped whenever the device changes: Kumi rewrites its file, and only talks to a device of this version. */
-export const EARS_VERSION = 1;
+export const EARS_VERSION = 3;
 export const EARS_NAME = "Kumi Ears";
 /** Live's Browser lists the device by this path, as it lists the devices Kumi makes. */
 export const EARS_ITEM = `user_library/Kumi/${EARS_NAME}`;
@@ -23,14 +24,15 @@ export const KUMI_PORTS = [47290, 47291, 47292, 47293, 47294] as const;
 /** Each device listens on one of these, picked from its own id in Live. */
 export const DEVICE_PORT_BASE = 47300;
 export const DEVICE_PORTS = 600;
-/** Left, right and Live's beat. */
-export const EARS_CHANNELS = 3;
+/** Left, right, the beat's phase and Live's position. */
+export const EARS_CHANNELS = 4;
 
 /** The device's own code (Max's v8), with __VERSION__, __PORTS__, __BASE__ and __SPAN__ filled in. */
 const CODE = String.raw`// Kumi Ears (made by Kumi). Kumi listens here; the sound passes through untouched.
 inlets = 1;
-outlets = 5;
-// 0: record~ (1 starts, 0 stops) · 1: buffer~ · 2: udpsend · 3: udpreceive (its port) · 4: the face's status line
+outlets = 10;
+// 0: record~ (1 starts, 0 stops) · 1: buffer~ · 2: udpsend for any other port · 3: udpreceive (its port) · 4: the face's status line
+// 5–9: a udpsend for each of Kumi's ports (one udpsend told a new port per message sends some to the wrong one)
 const VERSION = __VERSION__;
 const KUMI_PORTS = __PORTS__;
 let sampleRate = 44100;
@@ -40,8 +42,10 @@ let beats = 0;
 let running = 0;
 let ready = false;
 let armed = { beats: 0, running: 0 };
+let loadedAt = Date.now();
 const greeter = new Task(greet);
 function loaded() {
+  loadedAt = Date.now();
   try { id = Number(new LiveAPI("this_device").id) || 0; } catch (error) { id = 0; }
   if (!id) id = 1 + Math.floor(Math.random() * 100000);
   port = __BASE__ + (id % __SPAN__);
@@ -58,11 +62,16 @@ function position(value) { beats = value; }
 function where() {
   try { const device = new LiveAPI("this_device"); return String(device.unquotedpath || device.path || "").replace(/"/g, ""); } catch (error) { return ""; }
 }
-function say(to, address, args) { outlet(2, "port", to); outlet(2, address, ...args); }
+function say(to, address, args) {
+  const fixed = KUMI_PORTS.indexOf(to);
+  if (fixed >= 0) { outlet(5 + fixed, address, ...args); return; }
+  outlet(2, "port", to); outlet(2, address, ...args);
+}
 function greet() {
   if (!ready) return;
   const path = where();
-  for (const to of KUMI_PORTS) say(to, "/kumi/ears/hello", [port, id, VERSION, sampleRate, path]);
+  // How long ago it loaded, too: Live can give a new device a removed one's id, and Kumi wants the one it just put there.
+  for (const to of KUMI_PORTS) say(to, "/kumi/ears/hello", [port, id, VERSION, sampleRate, path, Date.now() - loadedAt]);
 }
 function status(text) { outlet(4, "set", text); }
 function anything(...args) {
@@ -71,7 +80,8 @@ function anything(...args) {
   switch (messagename) {
     // Every command is (what, the port to answer on, a token the answer carries back).
     case "/kumi/ears/ping":
-      say(reply, "/kumi/ears/pong", [token, port, id, VERSION, sampleRate, where()]);
+      // Where Live is now, too (its position in beats, and whether it plays).
+      say(reply, "/kumi/ears/pong", [token, port, id, VERSION, sampleRate, where(), Date.now() - loadedAt, beats, running]);
       return;
     case "/kumi/ears/arm": {
       // Seconds to hold, then where to answer: the buffer is cleared, so what wasn't recorded reads as zeros.
@@ -127,12 +137,12 @@ export function earsPatcher(): object {
   obj("obj-beat", "plugphasor~", 1, 2, [200.0, 30.0, 80.0, 22.0], ["signal", "list"]);
   obj("obj-beat1", "+~ 1.", 2, 1, [200.0, 70.0, 50.0, 22.0], ["signal"]);
   wire("obj-beat", 0, "obj-beat1", 0);
-  // Three channels into one buffer the device alone names (--- makes the name its own).
+  // Four channels into one buffer the device alone names (--- makes the name its own).
   obj("obj-record", `record~ ---kumiears ${EARS_CHANNELS}`, EARS_CHANNELS + 2, 1, [40.0, 160.0, 160.0, 22.0], ["signal"]);
   obj("obj-buffer", `buffer~ ---kumiears 1000 ${EARS_CHANNELS}`, 1, 2, [40.0, 230.0, 180.0, 22.0], ["float", "bang"]);
   wire("obj-plugin", 0, "obj-record", 0); wire("obj-plugin", 1, "obj-record", 1); wire("obj-beat1", 0, "obj-record", 2);
   // Where the Set is, polled: the beat count and whether it plays.
-  obj("obj-poll", "metro 25", 2, 1, [360.0, 60.0, 60.0, 22.0], ["bang"]);
+  obj("obj-poll", "metro 10", 2, 1, [360.0, 60.0, 60.0, 22.0], ["bang"]);
   obj("obj-pollon", "loadmess 1", 1, 1, [360.0, 30.0, 70.0, 22.0]);
   obj("obj-sync", "plugsync~", 1, 9, [360.0, 100.0, 120.0, 22.0], ["int", "int", "int", "float", "list", "float", "float", "int", "int"]);
   obj("obj-playing", "change", 1, 3, [360.0, 140.0, 50.0, 22.0], ["", "int", "int"]);
@@ -141,6 +151,10 @@ export function earsPatcher(): object {
   wire("obj-pollon", 0, "obj-poll", 0); wire("obj-poll", 0, "obj-sync", 0);
   wire("obj-sync", 0, "obj-playing", 0); wire("obj-playing", 0, "obj-playingmsg", 0);
   wire("obj-sync", 6, "obj-positionmsg", 0);
+  // And recorded: Live's own jumps wait for its launch quantization and land on a beat, where the phase alone
+  // can't show them; the position says where every stretch was.
+  obj("obj-where", "sig~", 1, 1, [480.0, 200.0, 40.0, 22.0], ["signal"]);
+  wire("obj-sync", 6, "obj-where", 0); wire("obj-where", 0, "obj-record", 3);
   obj("obj-dsp", "dspstate~", 1, 4, [600.0, 30.0, 70.0, 22.0], ["int", "float", "int", "int"]);
   obj("obj-ratemsg", "prepend samplerate", 1, 1, [600.0, 70.0, 120.0, 22.0]);
   wire("obj-dsp", 1, "obj-ratemsg", 0);
@@ -153,10 +167,13 @@ export function earsPatcher(): object {
   // Talking to Kumi.
   obj("obj-receive", `udpreceive ${DEVICE_PORT_BASE}`, 1, 1, [40.0, 400.0, 140.0, 22.0]);
   obj("obj-send", `udpsend 127.0.0.1 ${KUMI_PORTS[0]}`, 1, 0, [400.0, 520.0, 160.0, 22.0], []);
+  // One for each of Kumi's ports, so a hello to all of them reaches each.
+  KUMI_PORTS.forEach((kumiPort, index) => obj(`obj-send-${index}`, `udpsend 127.0.0.1 ${kumiPort}`, 1, 0, [40.0 + index * 150.0, 560.0, 140.0, 22.0], []));
   boxes.push({ box: { id: "obj-code", maxclass: "v8.codebox", filename: "none", code: earsCode(), fontface: 0, fontname: "Menlo", fontsize: 11.0,
-    numinlets: 1, numoutlets: 5, outlettype: ["", "", "", "", ""], patching_rect: [40.0, 450.0, 560.0, 50.0] } });
+    numinlets: 1, numoutlets: 10, outlettype: Array.from({ length: 10 }, () => ""), patching_rect: [40.0, 450.0, 560.0, 50.0] } });
   for (const source of ["obj-receive", "obj-playingmsg", "obj-positionmsg", "obj-ratemsg", "obj-loadedmsg"]) wire(source, 0, "obj-code", 0);
   wire("obj-code", 0, "obj-record", 0); wire("obj-code", 1, "obj-buffer", 0); wire("obj-code", 2, "obj-send", 0); wire("obj-code", 3, "obj-receive", 0);
+  KUMI_PORTS.forEach((_, index) => wire("obj-code", 5 + index, `obj-send-${index}`, 0));
   // Its face: the name, what it's doing, and a meter so a glance says sound passes.
   boxes.push({ box: { id: "obj-name", maxclass: "comment", text: EARS_NAME, numinlets: 1, numoutlets: 0, presentation: 1, presentation_rect: [6.0, 4.0, 100.0, 18.0],
     patching_rect: [700.0, 300.0, 100.0, 18.0], fontname: "Arial Bold", fontsize: 11.0, textcolor: MINT } });

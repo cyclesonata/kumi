@@ -4,10 +4,12 @@ import type { Hands, MenuItem } from "../src/hands/index.js";
 import { COMMANDS, findItem, shortcut } from "../src/integrations/ableton/live-command.js";
 import { opened, signal, tool } from "./fixtures/synthetic-bridge.js";
 
+// Live 12.4.15b5's own titles, as Accessibility reads them.
 const LIVE_MENUS: MenuItem[] = [
   { path: ["File", "Save Live Set"], enabled: true, key: "S", modifiers: 0 },
   { path: ["File", "Export Audio/Video…"], enabled: true, key: "R", modifiers: 1 },
-  { path: ["Edit", "Group Tracks"], enabled: true, key: "G", modifiers: 0 },
+  { path: ["Edit", "Group"], enabled: true, key: "G", modifiers: 0 },
+  { path: ["Edit", "Ungroup"], enabled: true, key: "G", modifiers: 1 },
   { path: ["Edit", "Freeze Track"], enabled: false },
   { path: ["Create", "Convert Melody to New MIDI Track"], enabled: true },
   { path: ["Create", "Bounce to New Track"], enabled: true },
@@ -31,7 +33,8 @@ function fakeHands(options: { trusted?: boolean; onMenu?: (path: readonly string
 }
 
 test("a command's menu item is found by its title wherever Live keeps it, and Live's own shortcut is said", () => {
-  assert.deepEqual(findItem(LIVE_MENUS, COMMANDS.group_tracks!.titles)?.path, ["Edit", "Group Tracks"]);
+  assert.deepEqual(findItem(LIVE_MENUS, COMMANDS.group_tracks!.titles)?.path, ["Edit", "Group"]);
+  assert.deepEqual(findItem(LIVE_MENUS, COMMANDS.ungroup_tracks!.titles)?.path, ["Edit", "Ungroup"]);
   assert.deepEqual(findItem(LIVE_MENUS, COMMANDS.export_audio!.titles)?.path, ["File", "Export Audio/Video…"], "an ellipsis doesn't stop a match");
   assert.deepEqual(findItem(LIVE_MENUS, COMMANDS.bounce_to_new_track!.titles)?.path, ["Create", "Bounce to New Track"]);
   assert.equal(findItem(LIVE_MENUS, COMMANDS.separate_stems!.titles), undefined, "not in this Live");
@@ -41,20 +44,20 @@ test("a command's menu item is found by its title wherever Live keeps it, and Li
 
 test("live_command groups tracks side by side: the first selected, the selection stretched, Live's Group Tracks pressed, the new group said", async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
-  const hands = fakeHands({ onMenu: (path) => { if (path.at(-1) === "Group Tracks") b.addTrack("2-Group"); } });
+  const hands = fakeHands({ onMenu: (path) => { if (path.at(-1) === "Group") b.addTrack("2-Group"); } });
   b = await opened({ version: "1.0.70", hands });
   try {
     const result = await tool(b.tools, "live_command").execute({ command: "group_tracks", tracks: ["Fixture Bass", "Fixture Drums"] }, signal());
     assert.equal(result.isError, false, result.text);
     const reply = JSON.parse(result.text) as { pressed: string; liveShortcut: string; newTracks: string[] };
-    assert.equal(reply.pressed, "Edit › Group Tracks");
+    assert.equal(reply.pressed, "Edit › Group");
     assert.equal(reply.liveShortcut, "⌘G");
     assert.deepEqual(reply.newTracks, ["2-Group"]);
     // Session view in front, the first track selected through the bridge, the rest by Live's own Shift-→.
     assert.ok(b.requests.some((request) => request.name === "live_view_preview" && request.args.view === "Session"));
     assert.ok(b.requests.some((request) => request.name === "live_selection_preview" && request.args.trackRef === "7:track:0"));
     assert.deepEqual(hands.keys, [["shift+right"]]);
-    assert.deepEqual(hands.pressed, [["Edit", "Group Tracks"]]);
+    assert.deepEqual(hands.pressed, [["Edit", "Group"]]);
     // HISTORY keeps it, with Live's undo the way back.
     assert.deepEqual(b.records.map((record) => [record.title, record.state]), [["Grouped 2 tracks", "kept"]]);
     assert.match(b.records[0]!.note ?? "", /Live's undo/);

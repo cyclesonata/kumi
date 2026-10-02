@@ -34,3 +34,7 @@ export const FULL_CONTROL_BRIDGE = "1.0.58";
 
 /** The bridge release with Python execution inside Live's Remote Script. */
 export const PYTHON_BRIDGE = "1.0.68";
+
+/** The bridge release Kumi's listening device needs: it confirms a Max for Live audio device's load (older ones
+ * read its ins and outs differently each time, so the load stayed unsure) and loads audio effects onto Main and the returns. */
+export const EARS_BRIDGE = "1.0.72";

@@ -83,9 +83,11 @@ const LEAD_IN_SECONDS = 3;
  * and a half bar of tail after it (releases and delays ring on). A part too near the Set's start for
  * that plays from the start (position 0).
  */
-export function renderSpan(fromBeat: number, beats: number, beatsPerBar: number, tempo: number, longer = false): { position: number; preroll: number; wait: number } {
+export function renderSpan(fromBeat: number, beats: number, beatsPerBar: number, tempo: number, longer = false,
+  /** At least this long before the part: Kumi's listening device records from before the transport moves, so a bar (two after a late start) is enough there. */
+  leadSeconds = LEAD_IN_SECONDS): { position: number; preroll: number; wait: number } {
   const bar = beatsPerBar * 60 / tempo;
-  const lead = Math.max(1, Math.ceil(LEAD_IN_SECONDS * (longer ? 2 : 1) / bar)) * beatsPerBar;
+  const lead = Math.max(longer ? 2 : 1, Math.ceil(leadSeconds * (longer ? 2 : 1) / bar)) * beatsPerBar;
   const position = fromBeat > lead ? fromBeat - lead : 0;
   const preroll = fromBeat - position;
   return { position, preroll, wait: preroll + beats + beatsPerBar / 2 };

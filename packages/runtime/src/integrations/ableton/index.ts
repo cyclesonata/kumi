@@ -20,7 +20,7 @@ import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, nextChangeId,
 import { arrange, ARRANGE_DESCRIPTION, ARRANGE_SCHEMA, ARRANGE_TOOL, type ArrangeHost } from "./arrange.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { bars, setMeter } from "./more-changes.js";
-import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, atLeast, EARS_BRIDGE, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
 import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, RENDER_DESCRIPTION, RENDER_SCHEMA, RENDER_TOOL, renderSpan, restoreStore, silentRender } from "./audition.js";
 import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
 import { summary as heardSummary } from "../../audio/tools.js";
@@ -1667,6 +1667,11 @@ export function createAbletonIntegration(options: Options): Integration {
     /** Kumi's listening devices, one at the end of each source's chain (Main's for the mix), when they're used instead of scratch tracks. */
     ears?: { link: EarsLink; taps: Map<string, Tap> };
   }
+  /** Where the playhead is now; undefined when Live doesn't say. */
+  async function playheadNow(signal: AbortSignal): Promise<number | undefined> {
+    const at = (await rows("set", { fields: ["position"] }, signal))[0]?.position;
+    return typeof at === "number" ? at : undefined;
+  }
   /** Where the transport is, to put it back after renders. */
   async function transportNow(signal: AbortSignal): Promise<NonNullable<Rig["transport"]>> {
     const set = (await rows("set", { fields: ["position", "loop"] }, signal).catch(() => [] as JsonObject[]))[0];
@@ -1721,8 +1726,11 @@ export function createAbletonIntegration(options: Options): Integration {
           // The listening devices couldn't be placed: their steps go, and the sources are recorded instead (from
           // now on in this Live, so no render waits on a device that won't start).
           await removeTaps(rig);
-          earsRefused = true;
-          rig.notes.push("Kumi's listening device didn't start in this Live (it needs Max for Live), so Kumi records to listen instead.");
+          // Only a device that never started says this Live can't run it; a refused load is about that track.
+          if (error instanceof EarsSilent) {
+            earsRefused = true;
+            rig.notes.push("Kumi's listening device didn't start in this Live (it needs Max for Live), so Kumi records to listen instead.");
+          }
           if (shared) throw error;
           delete rig.ears;
           await addScratch(rig, rig.sources, signal);
@@ -1770,7 +1778,9 @@ export function createAbletonIntegration(options: Options): Integration {
     });
     rig.sources.push(source);
   }
-  /** Kumi's end of its listening devices, opened once; undefined when they can't be used (then Kumi records instead). */
+    /** A listening device that never said hello: this Live can't run it (no Max for Live, say). */
+  class EarsSilent extends ObservationError {}
+/** Kumi's end of its listening devices, opened once; undefined when they can't be used (then Kumi records instead). */
   let earsSetup: Promise<EarsLink | undefined> | undefined;
   /** The device didn't start in this Live (no Max for Live, say): Kumi records instead until Live restarts. */
   let earsRefused = false;
@@ -1778,7 +1788,7 @@ export function createAbletonIntegration(options: Options): Integration {
   const earsFolder = join(tmpdir(), "kumi-ears", generation.slice(0, 8));
   async function earsReady(signal: AbortSignal): Promise<EarsLink | undefined> {
     if (options.ears === false || process.env.KUMI_EARS === "0" || earsRefused) return undefined;
-    if (!tools?.has("live_browser_load_preview") || !tools.has("live_browser_inspect")) return undefined;
+    if (!tools?.has("live_browser_load_preview") || !tools.has("live_browser_inspect") || !supported({ since: EARS_BRIDGE })) return undefined;
     const given = options.ears ? options.ears.open : undefined;
     earsSetup ??= (async () => {
       const link = given ? await given() : await openEarsLink();
@@ -1823,13 +1833,16 @@ export function createAbletonIntegration(options: Options): Integration {
       ears.taps.set(source.name, await placeTap(ears.link, trackRef, signal));
     }
   }
-  /** Load the device onto a track and wait for it to say hello from there. */
+  /** Load the device onto a track and wait for it to say hello from there (the one that loaded just now). */
   async function placeTap(link: EarsLink, trackRef: string, signal: AbortSignal): Promise<Tap> {
     const where = await lomTrackPath(trackRef, signal);
     const before = new Set(link.taps().map((tap) => tap.id));
+    const loading = Date.now();
     await step("load_device", { itemId: EARS_ITEM, trackRef }, signal);
-    const tap = await link.waitFor((candidate) => !before.has(candidate.id) && candidate.path.startsWith(`${where} devices `), 6_000, signal);
-    if (!tap) throw new ObservationError("Kumi's listening device didn't start on that track (Max for Live is needed: Live Suite, or Standard with Max for Live).");
+    // Live can give the new device a removed one's id: a device that says when it loaded is matched by that.
+    const fresh = (tap: Tap) => (tap.loadedAt !== undefined ? tap.loadedAt >= loading - 1_000 : !before.has(tap.id));
+    const tap = await link.waitFor((candidate) => fresh(candidate) && candidate.path.startsWith(`${where} devices `), 6_000, signal);
+    if (!tap) throw new EarsSilent("Kumi's listening device didn't start on that track (Max for Live is needed: Live Suite, or Standard with Max for Live).");
     return tap;
   }
   /** The rig's listening devices taken away now (their loads undone), before it records instead. */
@@ -1887,34 +1900,41 @@ export function createAbletonIntegration(options: Options): Integration {
         }
         const beatMs = 60 / tempo * 1000;
         for (const longer of [false, true]) {
-          const span = renderSpan(window.from, window.beats, beatsPerBar, tempo, longer);
+          const span = renderSpan(window.from, window.beats, beatsPerBar, tempo, longer, 0);
           const primeKey = `${span.position}`;
           const priming = !held || held.primed !== primeKey;
           if (priming && supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
-          // Room for the whole pass, the steps around it, and a count-in.
-          const seconds = span.wait * beatMs / 1000 + 8 + 4 * beatsPerBar * beatMs / 1000;
+          if (priming && rig.transport?.loop !== false) await step("set_transport", { loopEnabled: false }, signal);
+          // Room for the whole pass, Live's wait before it jumps (its launch quantization), and the steps around it.
+          const seconds = (span.wait + 4 * beatsPerBar) * beatMs / 1000 + 6;
           started = true;
-          if (span.position > 0) {
-            // Recording before the transport moves: the devices hear it start, the jump, and the part after it.
-            await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
-            await step("play", { action: "continue" }, signal);
-            await step("set_transport", { position: span.position, ...(priming ? { loopEnabled: false } : {}) }, signal);
-            const jumpedAt = Date.now();
-            await delay(Math.max(0, span.wait * beatMs - (Date.now() - jumpedAt)), undefined, { signal });
-          } else {
-            // Too near the Set's start for a lead-in: stopped twice, Live is at its start, and plays from there.
-            await step("play", { action: "stop" }, signal);
-            await step("play", { action: "stop" }, signal);
-            if (priming && rig.transport?.loop !== false) await step("set_transport", { loopEnabled: false }, signal);
-            await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
-            await step("play", { action: "start" }, signal);
-            let at = 0;
-            for (let check = 0; check < 6 && at < span.wait - 0.25; check++) {
-              await delay(Math.max(50, (span.wait - at) * beatMs), undefined, { signal });
-              const read = (await rows("set", { fields: ["position"] }, signal))[0]?.position;
-              if (typeof read !== "number") break;
-              at = read;
+          // The devices record from before Live moves; Live plays, then jumps to the count-in when its launch
+          // quantization says (on a beat or a bar). The position each device records says where every sample
+          // was, so the part is found wherever the jump landed.
+          await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
+          await step("play", { action: "continue" }, signal);
+          const probe = taps[0]![1];
+          // Live may start right at the count-in (stopped there): then there's nothing to jump.
+          let first: { beats: number; running: boolean } | undefined;
+          for (let check = 0; check < 8 && !first?.running; check++) {
+            first = await link.transport(probe, signal);
+            if (!first?.running) await delay(15, undefined, { signal });
+          }
+          const there = first?.running === true && first.beats >= span.position - 0.01 && first.beats <= span.position + 0.25;
+          if (!there) await step("set_transport", { position: span.position }, signal);
+          // Until a device hears Live in the count-in (after the jump) and then past the part and its tail.
+          const end = window.from + window.beats + beatsPerBar / 2;
+          const countIn = (beats: number) => beats >= span.position - 0.01 && beats < Math.max(window.from, span.position + 0.5);
+          const deadline = Date.now() + seconds * 1000;
+          let jumped = there;
+          while (Date.now() < deadline) {
+            const now_ = await link.transport(probe, signal);
+            if (now_?.running) {
+              if (countIn(now_.beats)) jumped = true;
+              if (jumped && now_.beats >= end) break;
             }
+            const ahead = jumped && now_ ? (end - now_.beats) * beatMs : 0;
+            await delay(Math.max(20, Math.min(500, ahead * 0.8)), undefined, { signal });
           }
           if (held) held.primed = primeKey;
           await step("play", { action: "stop" }, signal);
@@ -1926,8 +1946,10 @@ export function createAbletonIntegration(options: Options): Integration {
             try {
               const written = await link.write(tap, maxPath(raw), signal);
               const capture = await readCapture(raw, written.channels, written.sampleRate);
-              const stretches = runs(capture, { first: span.position > 0 ? written.beats : 0, afterJump: span.position });
-              const part = stretches.filter((run) => frameAt(run, window.from) !== undefined).at(-1);
+              // Placed by the position each device recorded (an older device's capture, by where it was armed).
+              const stretches = runs(capture, { first: written.beats, afterJump: span.position });
+              // The last stretch that played the whole part.
+              const part = stretches.filter((run) => frameAt(run, window.from) !== undefined && frameAt(run, window.from + window.beats - 1e-3) !== undefined).at(-1);
               if (!part) { if (stretches.length) late = true; return; }
               const at = frameAt(part, window.from)!;
               const lead = Math.round(LEAD_IN * capture.sampleRate);

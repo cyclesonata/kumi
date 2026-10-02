@@ -1,7 +1,7 @@
 /**
- * What a listening device wrote, made sense of: its raw 32-bit floats (left, right and Live's beat),
- * trimmed to what it recorded, cut where Live's transport ran or jumped, and placed on the Set's beats,
- * so Kumi can take exactly the part it played and hand it to the ear as an ordinary WAV.
+ * What a listening device wrote, made sense of: its raw 32-bit floats (left, right, the beat's phase and
+ * Live's position), trimmed to what it recorded, cut where Live's transport ran or jumped, and placed on
+ * the Set's beats, so Kumi can take exactly the part it played and hand it to the ear as an ordinary WAV.
  */
 import { readFile, writeFile } from "node:fs/promises";
 
@@ -10,6 +10,8 @@ export interface Capture {
   right: Float32Array;
   /** Live's beat as the device heard it: 0 not recorded, 1 recorded while stopped, 1–2 recorded while playing (1 + the beat's phase). */
   sync: Float32Array;
+  /** Live's position in beats, as the device polled it (a few milliseconds behind); from a device that records it. */
+  position?: Float32Array;
   sampleRate: number;
 }
 
@@ -20,6 +22,8 @@ export interface Run { from: number; to: number; beat: number; samplesPerBeat: n
 type Layout = { interleaved: boolean; littleEndian: boolean };
 
 const isSync = (value: number) => value === 0 || (value >= 1 && value <= 2.000001);
+/** The shortest stretch worth keeping, in frames. */
+const MIN_RUN = 64;
 
 /** A device's raw file, read. */
 export async function readCapture(file: string, channels: number, sampleRate: number): Promise<Capture> {
@@ -29,8 +33,10 @@ export async function readCapture(file: string, channels: number, sampleRate: nu
 /** The floats as a capture: the layout whose beat channel reads as one, then trimmed to the frames recorded. */
 export function parseCapture(bytes: Buffer, channels: number, sampleRate: number): Capture {
   if (channels < 3) throw new Error("A capture has left, right and the beat.");
+  // The beat's phase is the third channel; Live's position, when there's a fourth.
+  const BEAT = 2; const WHERE = channels >= 4 ? 3 : undefined;
   const frames = Math.floor(bytes.length / 4 / channels);
-  if (!frames) return { left: new Float32Array(0), right: new Float32Array(0), sync: new Float32Array(0), sampleRate };
+  if (!frames) return { left: new Float32Array(0), right: new Float32Array(0), sync: new Float32Array(0), ...(WHERE !== undefined ? { position: new Float32Array(0) } : {}), sampleRate };
   const read = (layout: Layout, channel: number, frame: number) => {
     const index = layout.interleaved ? frame * channels + channel : channel * frames + frame;
     return layout.littleEndian ? bytes.readFloatLE(index * 4) : bytes.readFloatBE(index * 4);
@@ -43,29 +49,34 @@ export function parseCapture(bytes: Buffer, channels: number, sampleRate: number
     let fits = 0; let seen = 0;
     for (let frame = 0; frame < frames; frame += step) {
       seen++;
-      const beat = read(layout, channels - 1, frame);
+      const beat = read(layout, BEAT, frame);
       const left = read(layout, 0, frame);
-      if (isSync(beat) && Number.isFinite(left) && Math.abs(left) < 1_000) fits++;
+      const where = WHERE !== undefined ? read(layout, WHERE, frame) : 0;
+      if (isSync(beat) && Number.isFinite(left) && Math.abs(left) < 1_000 && Number.isFinite(where) && Math.abs(where) < 1e7) fits++;
     }
     const score = fits / Math.max(1, seen);
     if (score > bestScore) { bestScore = score; best = layout; }
   }
   // Recording starts at the buffer's start, so what follows the last recorded frame was never written.
   let last = frames - 1;
-  while (last >= 0 && !(read(best, channels - 1, last) >= 1)) last--;
+  while (last >= 0 && !(read(best, BEAT, last) >= 1)) last--;
   const length = last + 1;
   const left = new Float32Array(length); const right = new Float32Array(length); const sync = new Float32Array(length);
+  const position = WHERE !== undefined ? new Float32Array(length) : undefined;
   for (let frame = 0; frame < length; frame++) {
-    left[frame] = read(best, 0, frame); right[frame] = read(best, 1, frame); sync[frame] = read(best, channels - 1, frame);
+    left[frame] = read(best, 0, frame); right[frame] = read(best, 1, frame); sync[frame] = read(best, BEAT, frame);
+    if (position) position[frame] = read(best, WHERE!, frame);
   }
-  return { left, right, sync, sampleRate };
+  return { left, right, sync, ...(position ? { position } : {}), sampleRate };
 }
 
 /**
  * The stretches where Live's transport ran, split where it jumped (a move of the playhead while playing).
+ * A capture with Live's position places each stretch by it, and splits where it says Live jumped on a beat
+ * (Live waits for its launch quantization, so the phase alone often can't show the jump). Without it,
  * `anchors` say what beat a stretch started near: the playhead Kumi jumped to, or where the Set was when
- * the device was armed; the beat's phase in the third channel makes that exact. A stretch with no anchor
- * near it is placed by the one before it.
+ * the device was armed; the beat's phase makes that exact. A stretch with no anchor near it is placed by
+ * the one before it.
  */
 export function runs(capture: Capture, anchors: { first?: number; afterJump?: number } = {}): Run[] {
   const { sync } = capture;
@@ -95,10 +106,17 @@ export function runs(capture: Capture, anchors: { first?: number; afterJump?: nu
     const joined = on && start >= 0 && frame > start && continues(frame);
     if (on && start < 0) { start = frame; continue; }
     if (start >= 0 && (!on || !joined)) {
-      found.push({ from: start, to: frame, beat: 0, samplesPerBeat: 1 / step });
+      // A few frames aren't a stretch: once stopped, the beat holds where it stopped and no frame follows from the last.
+      if (frame - start >= MIN_RUN) found.push({ from: start, to: frame, beat: 0, samplesPerBeat: 1 / step });
       start = on ? frame : -1;
     }
   }
+  // How long a beat is, measured where the phase comes round (the step between two samples is too coarse in
+  // 32-bit floats: a fraction of a percent, milliseconds over a bar).
+  const measured = found.map((run) => beatLength(sync, run.from, run.to)).filter((length): length is number => length !== undefined);
+  const typical = measured.length ? measured.sort((a, b) => a - b)[Math.floor(measured.length / 2)]! : 1 / step;
+  for (const run of found) run.samplesPerBeat = beatLength(sync, run.from, run.to) ?? typical;
+  if (capture.position) return found.flatMap((run) => placed(capture, run));
   // Each stretch's first beat: its phase is exact, the whole beats come from the anchor nearest it.
   let previous: Run | undefined;
   for (const [index, run] of found.entries()) {
@@ -113,10 +131,74 @@ export function runs(capture: Capture, anchors: { first?: number; afterJump?: nu
   return found;
 }
 
-/** The frame a beat falls on within a run, or undefined when the run doesn't cover it. */
+/** Samples per beat in a stretch, from where its phase comes round (to a fraction of a sample); undefined with fewer than two. */
+function beatLength(sync: Float32Array, from: number, to: number): number | undefined {
+  let first: number | undefined; let last = 0; let count = 0;
+  for (let frame = from + 1; frame < to; frame++) {
+    const before = sync[frame - 1]!; const after = sync[frame]!;
+    if (after >= before) continue;
+    // Where the phase reached 1, between the two samples.
+    const rise = after + 1 - before;
+    const at = frame - 1 + (rise > 0 ? (2 - before) / rise : 0);
+    first ??= at; last = at; count++;
+  }
+  return first !== undefined && count >= 2 ? (last - first) / (count - 1) : undefined;
+}
+
+/** How far behind Live the polled position may be, at most, in seconds; and how long it must agree to count. */
+const POSITION_LAG = 0.06;
+const AGREED = 0.06;
+
+/**
+ * A stretch placed by Live's position: every 10 ms the position (rounded to the beat the phase is in) says
+ * what beat the stretch started on. Where that changes and stays changed, Live jumped: on the last beat
+ * before the position caught up (where the phase came round), or where it caught up when no beat was there.
+ * A while that doesn't agree long enough (the position catching up after a jump the phase showed) goes with
+ * the part after it.
+ */
+function placed(capture: Capture, run: Run): Run[] {
+  const { sync, sampleRate } = capture; const position = capture.position!;
+  const hop = Math.max(1, Math.round(sampleRate / 100));
+  const perBeat = run.samplesPerBeat;
+  const samples: { frame: number; first: number }[] = [];
+  for (let frame = run.from; frame < run.to; frame += hop) {
+    const phase = Math.max(0, sync[frame]! - 1);
+    samples.push({ frame, first: Math.round(position[frame]! - phase) + phase - (frame - run.from) / perBeat });
+  }
+  // Samples in a row that agree; only those long enough count.
+  const groups: { from: number; to: number; first: number }[] = [];
+  for (const [index, sample] of samples.entries()) {
+    const last = groups.at(-1);
+    if (last && Math.abs(sample.first - last.first) < 0.02) last.to = index + 1;
+    else groups.push({ from: index, to: index + 1, first: sample.first });
+  }
+  const steady = groups.filter((group) => (group.to - group.from) * hop >= AGREED * sampleRate);
+  const found: Run[] = [];
+  let from = run.from;
+  for (const [index, group] of steady.entries()) {
+    const next = steady[index + 1];
+    let to = run.to;
+    if (next) {
+      const caughtUp = samples[next.from]!.frame;
+      to = caughtUp;
+      for (let frame = caughtUp; frame > Math.max(from + 1, caughtUp - POSITION_LAG * sampleRate); frame--) if (sync[frame]! < sync[frame - 1]!) { to = frame; break; }
+    }
+    if (to - from >= MIN_RUN) found.push({ from, to, beat: group.first + (from - run.from) / perBeat, samplesPerBeat: perBeat });
+    from = to;
+  }
+  return found;
+}
+
+/** Max's beat ramp reads 0 for its first signal vector after Live starts or jumps (64 samples; at most this). */
+const FIRST_VECTOR = 256;
+
+/**
+ * The frame a beat falls on within a run, or undefined when the run doesn't cover it. A run's first signal
+ * vector (where the ramp read 0) is Live playing too, so a beat just before the run's start is found there.
+ */
 export function frameAt(run: Run, beat: number): number | undefined {
   const frame = Math.round(run.from + (beat - run.beat) * run.samplesPerBeat);
-  return frame >= run.from && frame < run.to ? frame : undefined;
+  return frame >= Math.max(0, run.from - FIRST_VECTOR) && frame < run.to ? frame : undefined;
 }
 
 /** Part of a capture as a 32-bit float stereo WAV (what the ear reads). */

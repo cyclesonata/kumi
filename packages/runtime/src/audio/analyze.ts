@@ -726,7 +726,9 @@ function movement(mono: Float32Array, sampleRate: number, bpm?: number): SoundAn
     : change > 0 ? `opens over the note (${Math.round(early)} → ${Math.round(late)} Hz)` : `closes over the note (${Math.round(early)} → ${Math.round(late)} Hz)`;
   const rate = sampleRate / hop;
   const lfo = periodicity(valid.map((point) => Math.log2(Math.max(1, point.value))), rate, 0.5, 20);
-  const levelLfo = periodicity(levels.map((level) => Math.log10(1e-6 + level)), rate, 0.5, 20);
+  // A level's wobble means nothing in a take that's largely silence (its edges read as one).
+  const silent = levels.filter((level) => level === 0).length / Math.max(1, levels.length);
+  const levelLfo = silent > 0.2 ? undefined : periodicity(levels.map((level) => Math.log10(1e-6 + level)), rate, 0.5, 20);
   const chosen = lfo && (!levelLfo || lfo.strength >= levelLfo.strength) ? { ...lfo, on: "brightness (filter)" } : levelLfo ? { ...levelLfo, on: "level (tremolo or sidechain)" } : undefined;
   const note = chosen && bpm ? noteValue(chosen.hz, bpm) : undefined;
   return { brightness: brightnessText, ...(chosen && chosen.strength > 0.35 ? { lfo: { hz: round(chosen.hz, 2), on: chosen.on, depth: chosen.strength > 0.7 ? "strong" : "moderate", ...(note ? { atTempo: note } : {}) } } : {}) };
