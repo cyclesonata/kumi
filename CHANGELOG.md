@@ -3,10 +3,11 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## Unreleased
+## 1.6.0 — 2026-10-02
 
-On Windows, the bridge installs when Live's User Library is outside your user folder, and Kumi can
-start it. Ships with bridge 1.0.71.
+Kumi works with Live on Windows: the bridge installs when Live's User Library is outside your user
+folder, Kumi starts it, and its Remote Script loads in Live, whose own Python has no `ctypes`.
+Ships with bridge 1.0.71.
 
 ### Bridge 1.0.71
 

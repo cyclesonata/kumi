@@ -70,7 +70,7 @@ Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` st
 
 ## Status
 
-Kumi 1.5 has been tested with Ableton Live 12.4 (beta) on macOS; Windows support is in testing. Support for Renoise and Reaper is next.
+Kumi 1.6 has been tested with Ableton Live 12.4 (beta) on macOS and Windows. Support for Renoise and Reaper is next.
 
 ## Development
 
