@@ -854,6 +854,18 @@ test("signed in nowhere, Kumi starts with a model on this computer; when its ser
   await h.app.close();
 });
 
+test("Kumi opened on a model whose server is closed says so before a message waits on it", async () => {
+  const fake = fakeModels({ model: "ollama/qwen3:8b", lists: ON_THIS_COMPUTER.lists,
+    local: [{ id: "ollama", name: "Ollama", where: "on this computer", running: false, start: "Open Ollama, or run: ollama serve" }] });
+  const h = harness(140, 40, fake.control);
+  void h.app.run();
+  await delay(10);
+  const lines = h.screen();
+  assert.ok(has(lines, "Ollama isn't running, so qwen3:8b can't answer yet. Open Ollama, or run: ollama serve."), lines.join("\n"));
+  assert.ok(!has(lines, "Sign in to"), "nothing to sign in to");
+  await h.app.close();
+});
+
 test("/effort offers the levels the model takes, with its own default first; /logout asks before signing out", async () => {
   const fake = fakeModels({ model: "openai-codex/gpt-6-astra", signedIn: ["openai-codex"], lists: MODELS });
   const h = harness(120, 36, fake.control);

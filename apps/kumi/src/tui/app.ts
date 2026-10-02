@@ -1669,6 +1669,11 @@ export class TuiApp {
     }
     const status = (await models.providers()).find((provider) => provider.id === current.provider);
     if (status && !status.signedIn) this.offerFix("auth", status.id);
+    // A model on a server that's closed: said now, before a message waits on it.
+    const server = status ? undefined : (await models.local()).find((item) => item.id === current.provider);
+    if (server && !server.running && !this.closing) {
+      this.notice(`${server.name} isn't running, so ${current.name ?? current.model!.slice(current.model!.indexOf("/") + 1)} can't answer yet. ${server.start ?? "Start it"}.`, "info");
+    }
   }
 
   /** Ask a side question: its answer streams into the btw panel, and nothing joins the conversation. */
