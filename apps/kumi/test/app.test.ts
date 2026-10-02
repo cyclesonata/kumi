@@ -1727,3 +1727,50 @@ test("while Live plays, a yellow light blinks on its beat in the header, with th
   assert.ok(!has(lines, "BPM"), "stopped: no light");
   await h.app.close();
 });
+
+test("a step left running when the answer stops ends there, and what a step is doing shows in its row", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("listen to the bass\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "t1", name: "listen" });
+  h.screen();
+  h.emit({ type: "doing", text: "hearing bar 17" });
+  assert.ok(h.screen().some((line) => line.includes("listening · hearing bar 17")));
+  h.emit({ type: "turn-complete", result: { stopReason: "cancelled" }, elapsedMs: 900 });
+  h.emit({ type: "state", state: "idle" });
+  const lines = h.screen();
+  assert.ok(has(lines, "│ × listened") && !has(lines, "listening"), lines.join("\n"));
+  await h.app.close();
+});
+
+test("a message held while Kumi reads the Set goes back in the box when that's stopped, and one refused when sent comes back too", async () => {
+  let refuse = false;
+  const h = harness(120, 36, undefined, {
+    async submit(text) { if (refuse) throw new Error("Enter a nonempty prompt of at most 16 KiB"); h.calls.push(`submit:${text}`); },
+    // As the session does: idle is said before the stop resolves.
+    async cancel() { h.calls.push("cancel"); h.emit({ type: "state", state: "idle" }); },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "state", state: "running" });
+  await h.type("make the bass louder\r");
+  assert.ok(has(h.screen(), "↳ make the bass louder"));
+  await h.type("\u001b");
+  await delay(30);
+  assert.ok(h.calls.includes("cancel"));
+  assert.ok(!h.calls.some((call) => call.startsWith("submit:")), "not sent after a stop");
+  assert.ok(has(h.screen(), "make the bass louder") && !has(h.screen(), "↳ make the bass louder"));
+  await h.type("\u0015");
+  h.emit({ type: "state", state: "running" });
+  await h.type("too long, say\r");
+  refuse = true;
+  h.emit({ type: "state", state: "idle" });
+  await delay(10);
+  const lines = h.screen();
+  assert.ok(has(lines, "at most 16 KiB") && has(lines, "too long, say") && !has(lines, "↳ too long, say"), lines.join("\n"));
+  await h.app.close();
+});

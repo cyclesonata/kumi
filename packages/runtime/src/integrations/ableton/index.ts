@@ -302,12 +302,13 @@ export function createAbletonIntegration(options: Options): Integration {
    * may change), and every few seconds anyway where Live can't say when it starts.
    */
   async function readTransport(): Promise<void> {
-    if (!options.onTransport || closed || !available || lost || !tools?.has("live_discover")) return;
+    if (!options.onTransport || closed || !available || lost) return;
     if (transportReading) { transportAgain = true; return; }
     transportReading = true; clearTimeout(transportTimer);
-    // A read that fails keeps to the last one's pace.
-    let playing = lastTransport.startsWith("true");
+    // A read that fails, or can't happen yet (the bridge's tools being read again), keeps to the last one's pace.
+    let playing = lastTransport.startsWith("true"); let soon = false;
     try {
+      if (!tools?.has("live_discover")) { soon = true; return; }
       const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(3_000)]);
       if (transportReads++ % 8 === 0 && tools.has("live_song_state")) {
         const song = await tools.call("live_song_state", {}, signal, { host: true }).catch(() => undefined);
@@ -328,8 +329,8 @@ export function createAbletonIntegration(options: Options): Integration {
     finally {
       transportReading = false;
       if (transportAgain) { transportAgain = false; void readTransport(); }
-      else if (!closed && available && !lost && (playing || !transportEvents)) {
-        transportTimer = setTimeout(() => { void readTransport(); }, playing ? 4_000 : 2_500);
+      else if (!closed && available && !lost && (soon || playing || !transportEvents)) {
+        transportTimer = setTimeout(() => { void readTransport(); }, soon ? 500 : playing ? 4_000 : 2_500);
         transportTimer.unref?.();
       }
     }

@@ -424,6 +424,7 @@ export class TuiApp {
           this.pendingTurn = false;
         } else if (this.current) {
           this.current.status = this.failed ? "failed" : "stopped";
+          this.endSteps(this.current);
           this.transcript.touch(this.current);
           this.current = undefined;
         }
@@ -640,7 +641,7 @@ export class TuiApp {
       }
       case "doing": {
         const running = this.current?.steps.filter((step) => step.state === "running").at(-1);
-        if (running) running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80);
+        if (running) { running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80); this.transcript.touch(this.current!); }
         break;
       }
       case "tool-input":
@@ -675,6 +676,7 @@ export class TuiApp {
         else this.stream.discard();
         entry.status = cancelled ? "stopped" : "done";
         entry.elapsedMs = event.elapsedMs;
+        this.endSteps(entry);
         this.transcript.touch(entry);
         this.current = undefined;
         if (event.result.stopReason === "max-steps") this.notice("Kumi reached its step limit for one answer. Ask it to carry on.", "info");
@@ -686,6 +688,17 @@ export class TuiApp {
     // Kumi takes a waiting message once it's working on the answer: try again as it moves.
     if ((event.type === "text" || event.type === "tool-start" || event.type === "tool-end" || event.type === "tool-input") && this.held.some((item) => item.when === "now" && !item.taken)) this.steerHeld();
     this.scheduler.request();
+  }
+
+  /** Steps an answer left running when it ended (stopped, timed out, failed) end there, as not finished. */
+  private endSteps(entry: Assistant): void {
+    const now = performance.now();
+    for (const step of entry.steps) {
+      if (step.state !== "running") continue;
+      step.state = "error"; step.endedAt = now;
+      if (step.startedAt !== undefined) step.ms = Math.round(now - step.startedAt);
+      delete step.doing;
+    }
   }
 
   /** A message typed while Kumi works: into the answer under way at its next step ("now"), or after it ("after"). */
@@ -707,7 +720,7 @@ export class TuiApp {
    */
   private afterBusy(): void {
     // How the last work ended counts once: a message held during later work is sent as usual.
-    const back = this.lastStop === "cancelled" || this.failed;
+    const back = this.lastStop === "cancelled" || this.failed || this.cancelling;
     this.lastStop = undefined; this.failed = false;
     if (!this.held.length || this.closing) return;
     if (back) {
@@ -718,10 +731,18 @@ export class TuiApp {
       return;
     }
     const next = this.held.shift()!;
-    this.transcript.add({ kind: "user", text: sanitizeText(next.text, this.secrets).trim() });
+    const shown = this.transcript.add({ kind: "user", text: sanitizeText(next.text, this.secrets).trim() });
     this.lastSent = next.text;
     this.scroll = 0;
-    void Promise.resolve().then(() => this.send(next.text));
+    void Promise.resolve().then(async () => {
+      if (await this.send(next.text) || this.closing) return;
+      // Refused (the notice says why): it, and what waits after it, go back into the box.
+      this.transcript.remove(shown);
+      const words = [next.text, ...this.held.map((item) => item.text)];
+      this.held = [];
+      this.editor.set([...words, ...(this.editor.isEmpty ? [] : [this.editor.text])].join("\n"));
+      this.scheduler.request();
+    });
   }
 
   private get busy(): boolean {
@@ -1618,9 +1639,9 @@ export class TuiApp {
       .finally(() => { if (!this.closing) this.scheduler.request(); });
   }
 
-  /** Start a turn for a message already shown in the conversation. */
-  private async send(raw: string): Promise<void> {
-    if (this.closing) return;
+  /** Start a turn for a message already shown in the conversation; false when it was refused. */
+  private async send(raw: string): Promise<boolean> {
+    if (this.closing) return false;
     this.activity = "thinking";
     this.pendingTurn = true;
     this.scheduler.request();
@@ -1630,8 +1651,11 @@ export class TuiApp {
       // Refused before it started (busy, closed): no turn is coming.
       this.pendingTurn = false;
       if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
+      this.scheduler.request();
+      return false;
     }
     this.scheduler.request();
+    return true;
   }
 
   /**
