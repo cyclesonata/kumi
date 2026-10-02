@@ -2,6 +2,7 @@
 import type { HeardEvent, JsonObject, KernelTool } from "../core/contracts.js";
 import type { HeardNote } from "./analyze.js";
 import { AudioError, audioPath, compare, hear, type Analysis } from "./index.js";
+import { hearForm } from "./structure.js";
 
 export const LISTEN_TOOL = "listen";
 
@@ -11,6 +12,7 @@ const DESCRIPTION = [
   "for a single sound (a note, a hit, a short sample), also its pitch, harmonics (which waveform it's like), envelope and movement (filter opening or closing, wobble or tremolo rate, at the tempo when known).",
   "With compare_to, sets file against the reference with loudness matched and lists what differs most (bands, brightness, width, compression, loudness).",
   "Use it before matching a mix to a reference (EQ, compression, width, loudness moves) or rebuilding a sound (harmonics to oscillators and filter, envelope to the amp and filter envelopes, movement to an LFO's rate and target).",
+  "With form, hears a song's sections instead (in bars, with their energy and which are alike), to arrange like it.",
   "Say what you heard in the producer's terms, not as a data dump.",
 ].join(" ");
 
@@ -53,9 +55,20 @@ export function listeningTools(options: { onEvent: (event: HeardEvent) => void; 
       compare_from_seconds: { type: "number", minimum: 0, description: "Where to start listening in the reference; left out, its start" },
       seconds: { type: "number", exclusiveMinimum: 0, maximum: 720, description: "How long to listen" },
       transcribe: { type: "boolean", description: "Transcribe file's notes (its first minute): when each starts, its pitch, velocity and length, to write the sequence as MIDI" },
-      tempo: { type: "number", minimum: 20, maximum: 999, description: "The Set's tempo, so transcribed notes come in beats" } } },
+      form: { type: "boolean", description: "Hear file's form instead: its sections in bars (where each starts, how long), each one's energy, density and low end, which are alike, and its part (intro, build, peak, break, outro), to arrange like it" },
+      tempo: { type: "number", minimum: 20, maximum: 999, description: "The Set's tempo, so transcribed notes come in beats and a form's bars are counted in the Set's octave" },
+      beats_per_bar: { type: "integer", minimum: 1, maximum: 16, description: "Beats in the Set's bar, for a form (4 when left out)" } } },
     async execute(input, signal) {
       const file = typeof input.file === "string" ? input.file : "";
+      if (input.form === true) {
+        try {
+          const form = await hearForm(await locate(file, signal), { ...(typeof input.tempo === "number" ? { tempo: input.tempo } : {}), ...(typeof input.beats_per_bar === "number" ? { beatsPerBar: input.beats_per_bar } : {}), signal });
+          return { text: JSON.stringify({ form, note: "Bars are the reference's own, counted at its tempo. To mirror it, arrange with these sections (their bars, names fitting the genre) and pick which tracks play in each by its energy, density and low end." }) };
+        } catch (error) {
+          signal.throwIfAborted();
+          return { text: error instanceof AudioError ? error.message : `Kumi couldn't hear its form: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
+        }
+      }
       const focus: "mix" | "sound" | undefined = input.focus === "mix" || input.focus === "sound" ? input.focus : undefined;
       const tempo = typeof input.tempo === "number" ? input.tempo : undefined;
       const common = { ...(focus ? { focus } : {}), ...(input.transcribe === true ? { transcribe: true } : {}),
