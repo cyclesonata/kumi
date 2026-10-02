@@ -24,6 +24,7 @@ import {
   writeSecretFile,
   type BridgeConfig, stableNodeCommand,
 } from "./delivery.js";
+import { windowsPowerShell } from "./platform.js";
 
 export const LIFECYCLE_RECEIPT_VERSION = 1 as const;
 export const LIFECYCLE_ACTIONS = ["install", "activate", "upgrade", "repair", "rollback", "uninstall", "status"] as const;
@@ -231,7 +232,7 @@ function writeOwnerJson(path: string, value: unknown): void {
         const backup = `${path}.${process.pid}.replace-backup`;
         if (existsSync(backup)) rmSync(backup, { force: true });
         const script = "$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MCP_TEMP));$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MCP_PATH));$b=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MCP_BACKUP));[IO.File]::Replace($t,$p,$b,$true);[IO.File]::Delete($b)";
-        execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { env: { ...process.env, MCP_TEMP: Buffer.from(temporary).toString("base64"), MCP_PATH: Buffer.from(path).toString("base64"), MCP_BACKUP: Buffer.from(backup).toString("base64") }, stdio: "ignore" });
+        execFileSync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { env: { ...process.env, MCP_TEMP: Buffer.from(temporary).toString("base64"), MCP_PATH: Buffer.from(path).toString("base64"), MCP_BACKUP: Buffer.from(backup).toString("base64") }, stdio: "ignore" });
       } else renameSync(temporary, path);
     } else renameSync(temporary, path);
     secureWindowsFile(path);
