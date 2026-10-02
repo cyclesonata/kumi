@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { BRIDGE_DIAGNOSTICS_MAX_BYTES, NODE_ENGINE_RANGE, SUPPORTED_NODE_MAJORS, configForBridge, configForEntrypoint, stableNodeCommand, diagnostics, generateSecret, installRemoteScript, isSupportedPlatform, migrateConfig, readAnyConfig, readConfig, readSecretFile, secureWindowsDirectory, supportedNodeMajor, unsupportedNodeMessage, writeBridgeReference, writeConfig, writeSecretFile } from "../src/delivery.js";
-import { npmExecutable } from "../src/platform.js";
+import { npmExecutable, windowsPowerShell } from "../src/platform.js";
 
 test("writes a versioned config and replaces it only with explicit force", () => {
   const directory = mkdtempSync(join(tmpdir(), "ableton-mcp-"));
@@ -133,6 +133,43 @@ test("package verification selects the Windows npm shim", () => {
   assert.equal(npmExecutable("win32"), "npm.cmd");
   assert.equal(npmExecutable("darwin"), "npm");
   assert.equal(npmExecutable("linux"), "npm");
+});
+
+test("Windows PowerShell is named by its full path, wherever Windows is", () => {
+  assert.equal(windowsPowerShell({ SystemRoot: "D:\\Windows" }), "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(windowsPowerShell({ SYSTEMROOT: "C:\\WINDOWS" }), "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(windowsPowerShell({}), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+});
+
+test("a secret becomes owner-only where the account may modify files but not take ownership", { skip: process.platform !== "win32" }, () => {
+  // A User Library outside the user's profile (C:\Music, another drive): ordinary accounts get Modify there.
+  const system32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+  const sid = /S-1-[\d-]+/.exec(spawnSync(join(system32, "whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).stdout)?.[0];
+  assert.ok(sid, "the current account's SID");
+  const directory = mkdtempSync(join(tmpdir(), "ableton-mcp-modify-only-"));
+  const granted = spawnSync(join(system32, "icacls.exe"), [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)M`], { encoding: "utf8" });
+  assert.equal(granted.status, 0, granted.stderr);
+  const secretPath = join(directory, "secret");
+  writeSecretFile(secretPath);
+  assert.equal(readSecretFile(secretPath).length >= 32, true);
+  const config = join(directory, "bridge.json");
+  writeFileSync(config, "{}");
+  mkdirSync(join(directory, "AbletonMcpBridge"));
+  writeBridgeReference(join(directory, "AbletonMcpBridge", "bridge-reference.json"), config);
+});
+
+test("the bridge reads its secret when its PATH holds only Node's folder", { skip: process.platform !== "win32" }, () => {
+  // Kumi starts the bridge so; the owner-only check runs PowerShell, which isn't on that PATH.
+  const directory = mkdtempSync(join(tmpdir(), "ableton-mcp-minimal-path-"));
+  const secretPath = join(directory, "secret");
+  writeSecretFile(secretPath);
+  const delivery = new URL("../src/delivery.js", import.meta.url).href;
+  const script = `const { readSecretFile } = await import(${JSON.stringify(delivery)}); process.stdout.write(String(readSecretFile(${JSON.stringify(secretPath)}).length >= 32));`;
+  const environment: Record<string, string> = { PATH: dirname(process.execPath) };
+  for (const key of ["SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP"]) if (process.env[key]) environment[key] = process.env[key]!;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: environment });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, "true");
 });
 
 test("npm start launches the stdio server entrypoint", () => {
