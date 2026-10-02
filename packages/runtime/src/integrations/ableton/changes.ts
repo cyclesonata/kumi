@@ -21,6 +21,8 @@ export interface ChangeContext {
   ranges(deviceRef: string): Promise<{ ref: string; name: string; min?: number; max?: number; value?: number; display?: string }[]>;
   /** A sample Kumi finds itself (at random, or the best match for the words), not one already picked in this answer. */
   pick(selector: SampleSelector): Promise<{ path: string; folder: string } | undefined>;
+  /** The value that makes a parameter show `text` ("800 Hz", "-6 dB", "Saw"), from Live's own text across its range; or why not. */
+  valueFor?(parameterRef: string, text: string): Promise<number | string>;
 }
 export interface SampleSelector { words?: string[]; folders?: string[]; random?: boolean }
 
@@ -176,11 +178,16 @@ function mixerParts(prior: JsonObject, proposed: JsonObject, was: JsonObject, no
 function namedParameters(schema: JsonObject): JsonObject {
   const properties = { ...((schema.properties ?? {}) as JsonObject) };
   const NAME = { type: "string", minLength: 1, maxLength: 128, description: "The parameter's name on the device, as Live shows it; instead of parameterRef" };
+  // A value as a number in the parameter's range, or as the device shows it: Kumi reads the device's own text to place it.
+  const VALUE = { anyOf: [{ type: "number" }, { type: "string", minLength: 1, maxLength: 48 }], description: "A number in the parameter's range, or the value as the device shows it (\"800 Hz\", \"-6 dB\", \"35 %\", \"1.2 s\", \"Saw\")" };
   properties.parameter = NAME;
+  if (properties.value !== undefined) properties.value = VALUE;
   const values = properties.values as JsonObject | undefined;
   if (values && typeof values.items === "object") {
     const items = values.items as JsonObject;
-    properties.values = { ...values, items: { ...items, properties: { ...((items.properties ?? {}) as JsonObject), parameter: NAME },
+    const itemProperties: JsonObject = { ...((items.properties ?? {}) as JsonObject), parameter: NAME };
+    if (itemProperties.value !== undefined) itemProperties.value = VALUE;
+    properties.values = { ...values, items: { ...items, properties: itemProperties,
       required: ((items.required as string[] | undefined) ?? []).filter((field) => field !== "parameterRef") } };
   }
   return { ...schema, properties };
@@ -193,7 +200,7 @@ async function resolveParameters(given: JsonObject, context: ChangeContext): Pro
   const input: JsonObject = { ...given, ...(given.value !== undefined ? { value: numeric(given.value) } : {}),
     ...(Array.isArray(given.values) ? { values: given.values.map((item) => (item && typeof item === "object" && !Array.isArray(item) && "value" in item ? { ...(item as JsonObject), value: numeric((item as JsonObject).value) } : item)) } : {}) };
   const named = typeof input.parameter === "string" || (Array.isArray(input.values) && input.values.some((item) => item && typeof item === "object" && typeof (item as JsonObject).parameter === "string"));
-  if (!named) return input;
+  if (!named) return displayed(input, context);
   if (typeof input.deviceRef !== "string") return "Name the device (deviceRef) whose parameter this is.";
   const list = await context.parameters(input.deviceRef);
   const find = (name: string) => { const wanted = name.trim().toLowerCase(); return list.find((row) => row.name.toLowerCase() === wanted) ?? list.find((row) => row.name.toLowerCase().startsWith(wanted)); };
@@ -212,7 +219,38 @@ async function resolveParameters(given: JsonObject, context: ChangeContext): Pro
     const { parameter: _name, ...value } = item;
     values.push({ ...value, parameterRef: found.ref });
   }
-  return { ...rest, values };
+  return displayed({ ...rest, values }, context);
+}
+
+/**
+ * Values written as the device shows them ("800 Hz", "-6 dB", "Saw") become the values that show them, read from
+ * Live's own text across each parameter's range; numbers pass as they are. A text Kumi can't place says why.
+ */
+async function displayed(input: JsonObject, context: ChangeContext): Promise<JsonObject | string> {
+  const text = (value: unknown) => typeof value === "string" && value.trim() !== "" && !Number.isFinite(Number(value));
+  const convert = async (parameterRef: unknown, value: unknown): Promise<unknown> => {
+    if (!text(value) || typeof parameterRef !== "string") return value;
+    if (!context.valueFor) return `Give ${JSON.stringify(value)} as a number in the parameter's range: Kumi can't read this parameter's units here.`;
+    const found = await context.valueFor(parameterRef, value as string);
+    return found;
+  };
+  if (input.value !== undefined && typeof input.parameterRef === "string") {
+    const value = await convert(input.parameterRef, input.value);
+    if (typeof value === "string" && text(input.value)) return value;
+    return { ...input, value };
+  }
+  if (Array.isArray(input.values)) {
+    const values: unknown[] = [];
+    for (const item of input.values) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) { values.push(item); continue; }
+      const row = item as JsonObject;
+      const value = await convert(row.parameterRef, row.value);
+      if (typeof value === "string" && text(row.value)) return value;
+      values.push({ ...row, value });
+    }
+    return { ...input, values };
+  }
+  return input;
 }
 
 /** Live refused a value: each parameter it was for, with the range it takes and where it is now. */

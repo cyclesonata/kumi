@@ -33,6 +33,7 @@ import { openEarsLink, type EarsLink, type Tap } from "../../ears/link.js";
 import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.js";
 import { HandsError, openHands, type Hands, type MenuItem } from "../../hands/index.js";
 import { COMMANDS, findItem, LIVE_COMMAND_DESCRIPTION, LIVE_COMMAND_SCHEMA, LIVE_COMMAND_TOOL, shortcut } from "./live-command.js";
+import { DISPLAY_MAP_SCRIPT, valueForDisplay, type DisplayMap } from "./display.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -757,6 +758,25 @@ export function createAbletonIntegration(options: Options): Integration {
     return rows;
   }
   /** Preview and apply one change as a single step, then record it for HISTORY. */
+  /** Each parameter's map of Live's own text across its range, read once (by its reference: refs last while Live does). */
+  const displayMaps = new Map<string, DisplayMap>();
+  /** The value that makes a parameter show `text`, from Live's str_for_value across its range (read through Python in Live); or why not. */
+  async function valueForText(parameterRef: string, text: string, signal: AbortSignal): Promise<number | string> {
+    const long = String(lengthen(parameterRef, "parameterRef"));
+    let map = displayMaps.get(long);
+    if (!map) {
+      if (!supported({ since: PYTHON_BRIDGE }) || !tools?.has("live_run_python")) return `Give ${JSON.stringify(text)} as a number in the parameter's range: this bridge can't read the parameter's units (update it with ${KUMI} bridge).`;
+      const read = await tools.call("live_run_python", { code: DISPLAY_MAP_SCRIPT, mode: "exec", ref: long, timeoutMs: 5_000 }, AbortSignal.any([signal, lifetime.signal]), { host: true });
+      const done = read.isError ? undefined : payload(read);
+      const result = done?.ok === true ? object(done.result ?? {}) : undefined;
+      if (!result || typeof result.min !== "number" || typeof result.max !== "number" || !Array.isArray(result.grid)) return `Kumi couldn't read how this parameter shows its values; give a number in its range.`;
+      map = { min: result.min, max: result.max, items: Array.isArray(result.items) ? result.items.filter((item): item is string => typeof item === "string") : [],
+        grid: result.grid.filter((pair): pair is [number, string] => Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "string") };
+      displayMaps.set(long, map);
+      if (displayMaps.size > 4096) displayMaps.delete(displayMaps.keys().next().value!);
+    }
+    return valueForDisplay(map, text);
+  }
   function changeContext(signal: AbortSignal): ChangeContext {
     return {
       sample: (path) => samples.get(path) ?? audioFileAt(path),
@@ -770,6 +790,7 @@ export function createAbletonIntegration(options: Options): Integration {
           .map((row) => ({ ref: row.ref, name: row.name, ...(typeof row.min === "number" ? { min: row.min } : {}), ...(typeof row.max === "number" ? { max: row.max } : {}),
             ...(typeof row.value === "number" ? { value: row.value } : {}), ...(typeof row.displayValue === "string" ? { display: row.displayValue } : {}) }));
       },
+      valueFor: (parameterRef, text) => valueForText(parameterRef, text, signal),
       async pick(selector: SampleSelector) {
         const named = (selector.folders ?? []).map((folder) => folderPath(folder)).filter((folder): folder is string => Boolean(folder));
         const found = await findSamples({ folders: named.length ? named : defaultSampleFolders(), words: selector.words ?? [], limit: 50, random: selector.random === true || !(selector.words ?? []).length, signal });
