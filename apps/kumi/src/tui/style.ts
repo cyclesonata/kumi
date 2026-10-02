@@ -1,4 +1,5 @@
 /** Colours, text styles and the terminal escape codes that draw them. */
+import { release as osRelease } from "node:os";
 
 export type Rgb = readonly [number, number, number];
 
@@ -46,16 +47,24 @@ export const palette = {
   lesson: hex("#e7c88f"),
 } as const;
 
-/** Chooses the colour depth from the environment; `NO_COLOR` keeps bold and dim only. */
-export function detectColorDepth(env: NodeJS.ProcessEnv = process.env): ColorDepth {
+/**
+ * Chooses the colour depth from the environment; `NO_COLOR` keeps bold and dim only. On Windows the
+ * console has drawn 24-bit colour since Windows 10 build 14931, as Windows Terminal does, and neither
+ * says so in the environment.
+ */
+export function detectColorDepth(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform, release: string = osRelease()): ColorDepth {
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return "none";
   const forced = env.KUMI_COLOR;
   if (forced === "truecolor" || forced === "256" || forced === "16" || forced === "none") return forced;
   const colorterm = (env.COLORTERM ?? "").toLowerCase();
   if (colorterm === "truecolor" || colorterm === "24bit") return "truecolor";
   if (env.TERM_PROGRAM === "Apple_Terminal") return "256";
-  if (/-256(color)?$/.test(env.TERM ?? "")) return "256";
   if (env.TERM === "dumb") return "none";
+  if (platform === "win32") {
+    const [major = 0, , build = 0] = release.split(".").map(Number);
+    if (major >= 10 && build >= 14931) return "truecolor";
+  }
+  if (/-256(color)?$/.test(env.TERM ?? "")) return "256";
   return "16";
 }
 

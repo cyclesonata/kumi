@@ -25,6 +25,8 @@ test("badges stand in where glyphs may not show: chosen outright, or on the Linu
   assert.equal(detectIconStyle({ TERM_PROGRAM: "ghostty" }, "darwin"), "glyphs");
   assert.equal(detectIconStyle({ WT_SESSION: "x" }, "win32"), "glyphs", "Windows Terminal");
   assert.equal(detectIconStyle({ TERM_PROGRAM: "vscode" }, "win32"), "glyphs");
+  assert.equal(detectIconStyle({ TERM_PROGRAM: "WezTerm" }, "win32"), "glyphs", "any terminal that names itself");
+  assert.equal(detectIconStyle({ TERM_PROGRAM: "mintty", TERM: "xterm" }, "win32"), "glyphs", "Git Bash's own window");
   assert.equal(detectIconStyle({}, "win32"), "badges", "the old console");
   assert.equal(detectIconStyle({ TERM: "linux" }, "linux"), "badges");
   assert.equal(detectIconStyle({ KUMI_ICONS: "badges", TERM_PROGRAM: "ghostty" }, "darwin"), "badges");

@@ -62,12 +62,13 @@ export type IconStyle = "glyphs" | "badges";
 
 /**
  * Glyphs, or badges where they may not show: KUMI_ICONS chooses outright; otherwise badges on the
- * Linux console, a dumb terminal, and the old Windows console (not Windows Terminal, VS Code or ConEmu).
+ * Linux console, a dumb terminal, and the old Windows console. A Windows terminal that names itself
+ * (Windows Terminal, ConEmu, and those that set TERM_PROGRAM: VS Code, WezTerm, mintty) has the glyphs.
  */
 export function detectIconStyle(env: Readonly<Record<string, string | undefined>> = process.env, platform: string = process.platform): IconStyle {
   if (env.KUMI_ICONS === "badges" || env.KUMI_ICONS === "glyphs") return env.KUMI_ICONS;
   if (env.TERM === "linux" || env.TERM === "dumb") return "badges";
-  if (platform === "win32" && !env.WT_SESSION && env.TERM_PROGRAM !== "vscode" && !env.ConEmuANSI) return "badges";
+  if (platform === "win32" && !env.WT_SESSION && !env.TERM_PROGRAM && !env.ConEmuANSI) return "badges";
   return "glyphs";
 }
 

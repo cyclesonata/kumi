@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -16,16 +16,33 @@ type Env = Readonly<Record<string, string | undefined>>;
 export const KUMI_EXTENSION_ID = "kumi.kumi";
 
 /**
- * Live's Extensions folder: KUMI_LIVE_EXTENSIONS_DIR, else where Live keeps it (macOS: seen on Live
- * 12.4; Windows: beside Live's other folders in %APPDATA%\Ableton, to be confirmed there), found from
- * the environment it's given only: without HOME (APPDATA on Windows) there, it's undefined, so a
- * partial environment (a test's) never reaches the producer's own Live. Undefined where there's no Live.
+ * Live's Extensions folder: KUMI_LIVE_EXTENSIONS_DIR, else where Live keeps it: macOS's Application
+ * Support (seen on Live 12.4), and its Windows counterpart, %LOCALAPPDATA%\Ableton, where Live keeps its
+ * database too. Found from the environment it's given only: without HOME (LOCALAPPDATA on Windows)
+ * there, it's undefined, so a partial environment (a test's) never reaches the producer's own Live.
+ * Undefined where there's no Live.
  */
 export function liveExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
   if (env.KUMI_LIVE_EXTENSIONS_DIR) return env.KUMI_LIVE_EXTENSIONS_DIR;
   if (platform === "darwin" && env.HOME) return join(env.HOME, "Library", "Application Support", "Ableton", "Extensions");
-  if (platform === "win32" && env.APPDATA) return join(env.APPDATA, "Ableton", "Extensions");
+  if (platform === "win32" && env.LOCALAPPDATA) return join(env.LOCALAPPDATA, "Ableton", "Extensions");
   return undefined;
+}
+
+/** Where Kumi 1.6.0 and before put its extension on Windows, %APPDATA%\Ableton, which Live doesn't read. */
+export function formerExtensionsDir(env: Env = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  return platform === "win32" && !env.KUMI_LIVE_EXTENSIONS_DIR && env.APPDATA ? join(env.APPDATA, "Ableton", "Extensions") : undefined;
+}
+
+/** Takes Kumi's extension out of the folder Kumi used to put it in, and that folder too once nothing else is in it. */
+export function removeFormerExtension(env: Env = process.env, platform: NodeJS.Platform = process.platform): boolean {
+  const folder = formerExtensionsDir(env, platform);
+  if (!folder || !existsSync(join(folder, KUMI_EXTENSION_ID))) return false;
+  removeExtension(folder);
+  for (const left of [folder, join(dirname(folder), "Extensions Data")]) {
+    try { if (existsSync(left) && readdirSync(left).length === 0) rmSync(left, { recursive: true, force: true }); } catch { /* someone's own: stays */ }
+  }
+  return true;
 }
 
 /** Where Kumi's extension keeps its endpoint and secret while Live runs it. */

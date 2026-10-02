@@ -18,7 +18,7 @@ import { KUMI, KUMI_VERSION, systemProgram } from "@kumi/runtime";
 import { isLiveRunning, runProgram, type Ran } from "./bridge-setup.js";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
-import { extensionDataDir, KUMI_EXTENSION_ID, liveExtensionsDir, removeExtension } from "./live-extension.js";
+import { extensionDataDir, KUMI_EXTENSION_ID, liveExtensionsDir, removeExtension, removeFormerExtension } from "./live-extension.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 type Run = (command: string, args: readonly string[], cwd?: string) => Promise<Ran>;
@@ -274,8 +274,11 @@ async function removeBridge(io: InstalledIo, run: Run): Promise<"removed" | "kep
   const state = join(config, "..");
   const ran = await run(process.execPath, [lifecycle, "uninstall", "--remote-scripts-dir", remoteScriptsDir(io.env), "--state-dir", state, "--package-root", root!, "--apply", "--confirm-live-stopped"]);
   if (ran.code !== 0) { say(`The bridge's uninstaller refused; remove ${byHand} by hand.`); return "kept"; }
-  // Kumi's extension goes with the bridge: Live would otherwise go on starting it.
-  say(extensions && removeExtension(extensions) ? "The bridge and Kumi's extension are out of Live." : "The bridge is out of Live.");
+  // Kumi's extension goes with the bridge: Live would otherwise go on starting it. So does the copy Kumi
+  // 1.6.0 and before put where Live on Windows doesn't read.
+  const removedExtension = extensions ? removeExtension(extensions) : false;
+  const removedFormer = removeFormerExtension(io.env);
+  say(removedExtension || removedFormer ? "The bridge and Kumi's extension are out of Live." : "The bridge is out of Live.");
   return "removed";
 }
 
