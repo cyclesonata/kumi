@@ -3,6 +3,59 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## Unreleased
+
+Kumi hears what it works on, uses Live's own commands that its scripting lacks, works inside ten
+popular plug-ins, knows your library, listens when you talk, runs on models on your computer and
+turns loops into arrangements. Ships with bridge 1.0.72.
+
+### Hearing the Set
+
+- Kumi Ears, a small Max for Live device Kumi installs in your User Library, hears any track,
+  return or the whole mix: quietly over a part while Live is stopped, or as it plays. `listen`
+  hears a track, several tracks (and what clashes between them) or the mix; auditions use it
+  instead of recording. The device comes and goes with each listen. Without Max for Live, Kumi
+  records to listen, as before.
+
+### Live's own commands
+
+- Group, ungroup, freeze, unfreeze, flatten, bounce, consolidate, convert to MIDI, separate
+  stems, slice, save and export, through Live's menus. Tracks are selected by name through Live
+  12's accessibility, so Live stays where it is. macOS asks once for Accessibility.
+
+### Plug-ins
+
+- Guides for Serum 2, Vital, Ozone 12, Pro-Q 4, Pro-L 2, Saturn 2, Decapitator, OTT, Supermassive
+  and Pigments: what each does, its real parameters, and which ones Kumi can turn now.
+- Values in a parameter's own units: "800 Hz", "-6 dB", "Saw".
+- Wavetables Kumi makes, for Serum, Vital and other wavetable synths.
+
+### Library
+
+- Kumi learns your sounds, presets and Sets in the background and finds them by what they are
+  and how they sound (`find_sounds`, `find_presets`, `my_sets`). `/memory` shows the habits it
+  learned from your Sets; `kumi library` shows how far it's got.
+
+### Talking
+
+- Ctrl-T talks instead of typing. What you say is written down on your computer (whisper.cpp);
+  `/voice` sets the language and the microphone.
+
+### Models on your computer
+
+- Ollama, LM Studio and any OpenAI-compatible server, found by themselves, with no sign-in.
+  `kumi doctor` names them and how to start one that's closed.
+
+### Arrangements
+
+- `arrange` lays out an arrangement from your Session scenes or a loop: sections with locators,
+  gaps, fills and risers, as one change with one undo.
+
+### Bridge 1.0.72
+
+- A Max for Live device's load is confirmed: its ins and outs read the same every time.
+- Audio effects load onto Main and the return tracks.
+
 ## 1.6.0 — 2026-10-02
 
 Kumi works with Live on Windows: the bridge installs when Live's User Library is outside your user

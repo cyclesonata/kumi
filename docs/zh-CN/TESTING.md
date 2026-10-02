@@ -75,10 +75,12 @@ Python 测试覆盖:零依赖的 Control Surface 入口、规范注册表加载�
 软件包验证器启动已安装的生产桥接,并检查已认证的 fake Set、场景、轨道、
 子槽位与播放发现。
 
-CI 在 Ubuntu 24.04 上构建一个干净的本地未发布 tarball,上传前运行
-`package:verify`,再从全新分离的本地克隆加全新 `npm ci` 重复打包并
-比对字节,记录精确 Git SHA 与 tarball SHA-256,然后在每个 Node 22/24
-的 Ubuntu 24.04、macOS 15 与 Windows Server 2025 任务中安装同一产物。
+CI 在 Ubuntu 24.04 上构建一个干净的本地未发布 tarball,再从全新分离的
+本地克隆加全新 `npm ci` 重复打包并比对字节,记录精确 Git SHA 与 tarball
+SHA-256,然后在 Ubuntu 24.04 (Node 22/24)、macOS 15 与 Windows Server 2025
+(Node 24) 上安装同一产物。覆盖率(功能测试)、基准、FFmpeg 预言与
+`package:verify` 在与候选并行的 Linux 任务中运行;Windows 将测试按各文件的
+耗时均分为四个分片,与其候选检查并行运行(`TEST_SHARD=1/4` 选择分片)。
 每个候选任务验证严格清单/哈希,并演练生命周期计划/安装、不可用激活、
 幂等修复、非自有回滚拒绝与卸载;Windows 还测试原生 ACL 修复、联接点
 拒绝、占用文件恢复与随附的版本 2 迁移。稳定的 `Required CI` 检查只有在
