@@ -21,6 +21,12 @@ each Kumi release names the bridge it ships with.
 - Nothing is cut from the conversation: answers keep their steps, a conversation brought back comes
   back whole with its steps, and long titles wrap. Ctrl-Home and Ctrl-End go to the start and back.
 
+### Bridge 1.0.69
+
+- `run_python`'s timeout stops a tight loop on Live's Python 3.11 (`while True: pass` sent no
+  trace events there, so the script could hold Live); the script's own code is traced per
+  instruction, the clock read every 64.
+
 ## 1.3.0 — 2026-10-01
 
 Kumi does what you ask and finds a way when no tool fits; the bridge refuses only what Live can't
