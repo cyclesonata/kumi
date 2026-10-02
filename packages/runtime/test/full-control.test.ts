@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { JsonObject } from "../src/core/contracts.js";
+import type { JsonObject, LiveTransport } from "../src/core/contracts.js";
 import { opened, signal, tool } from "./fixtures/synthetic-bridge.js";
 
 const FULL = "1.0.58";
@@ -107,6 +107,25 @@ test("a selection change in Live is read at once, not at the next poll", async (
     b.liveEvent({ epoch: 7, sequence: 1, type: "selection", channel: "remote-script", payload: { track: "7:track:1" } });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(reads() > before, "the selection was read again straight away (the poll here is a minute)");
+  } finally { await b.integration.close(); }
+});
+
+test("Live's transport is read when it starts and stops: its tempo, a bar's beats, and where the playhead was when", async () => {
+  const seen: (LiveTransport | null)[] = [];
+  const b = await opened({ fullControl: true, version: FULL, renders: () => undefined, onTransport: (transport) => seen.push(transport) });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(b.requests.filter((request) => request.name === "live_subscribe").map((request) => request.args.types), [["selection", "structure", "transport"]]);
+    assert.deepEqual({ ...seen.at(-1), at: 0 }, { playing: false, tempo: b.tempo, beat: 0, beatsPerBar: 4, at: 0 });
+    const reads = () => b.requests.filter((request) => request.name === "live_discover" && request.args.kind === "set").length;
+    const before = reads();
+    b.startPlayback(8);
+    b.liveEvent({ epoch: 7, sequence: 1, type: "transport", channel: "remote-script", payload: { playing: true } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(reads() > before, "read the moment Live says it started");
+    const playing = seen.at(-1)!;
+    assert.equal(playing.playing, true);
+    assert.ok(playing.beat! >= 8 && playing.beat! < 9 && playing.at <= performance.now(), JSON.stringify(playing));
   } finally { await b.integration.close(); }
 });
 

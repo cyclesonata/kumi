@@ -1038,9 +1038,10 @@ class EnvelopeEvent:
     const slots = (await textOf(client, "live_discover", { kind: "clip-slot", parent: trackRef })).parsed.items;
     const slotRef = slots.find((item) => item.empty === false)?.ref;
     assert(typeof slotRef === "string", "no playable clip slot found");
-    const unsafe = await textOf(client, "live_clip_launch_preview", { slotRef, outputSafety: { safe: true, provenance: "unknown" } });
-    assert(unsafe.isError === true, "unsafe clip-launch preview was not refused");
-    const preview = (await textOf(client, "live_clip_launch_preview", { slotRef, outputSafety: { safe: true, provenance: "journey-operator-confirmed-headphones" } })).parsed;
+    // Output-safety evidence is optional: evidence the bridge can't use (unknown provenance) gets the bridge's own.
+    const launch = await textOf(client, "live_clip_launch_preview", { slotRef, outputSafety: { safe: true, provenance: "unknown" } });
+    assert(launch.isError !== true, "a clip-launch preview without usable output-safety evidence was refused");
+    const preview = launch.parsed;
     const [one, two] = await Promise.all([
       textOf(client, "live_clip_launch_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "journey-clip-1" }),
       textOf(client, "live_clip_launch_apply", { transactionId: preview.transactionId, confirmation: preview.confirmation, idempotencyKey: "journey-clip-1" }),

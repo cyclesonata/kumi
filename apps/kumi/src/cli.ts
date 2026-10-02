@@ -194,6 +194,7 @@ try {
         : withFallback(createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onPointed: (pin) => terminal?.handleEvent({ type: "pointed", pin }),
+          onTransport: (transport) => terminal?.handleEvent({ type: "transport", transport }),
           // Kumi's changes are kept with the conversation too, for its HISTORY when it's resumed.
           onChange: (change) => { controller.watch?.({ type: "change", change }); terminal?.handleEvent({ type: "change", change }); },
           onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },

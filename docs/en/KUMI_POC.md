@@ -339,7 +339,9 @@ and a tempo change about 4 s
 
 | Input | Behavior |
 | --- | --- |
-| Enter | Send |
+| Enter | Send; while Kumi works, it reads the message after the step under way, and the answer carries on with it |
+| Tab while Kumi works | Send the message once the answer is done instead; waiting messages show above the box, and Alt-↑ takes the last one back |
+| `/btw` and a question | Ask something on the side, any time: answered from the conversation so far, without tools, in a panel (↑↓ scroll, ←→ earlier ones, c copies, Esc closes); neither joins the conversation. `/btw` alone shows the last answer again |
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
 | `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model (on an API key, also the tokens this session's answers took; prices aren't in the providers' model lists, so Kumi shows tokens, not a cost) |
@@ -357,13 +359,20 @@ and a tempo change about 4 s
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (Kumi also reconnects on its own) |
 | ↑ and ↓ | Go through what you sent before, across `/new` and restarts (secrets are kept out of it) |
 | `/quit`, or Ctrl-C with an empty box | Close Kumi |
-| Esc or Ctrl-C during work | Stop; the steps Kumi finished stay in the conversation, the one in progress is dropped |
+| Esc or Ctrl-C during work | Stop; the steps Kumi finished stay in the conversation, the one in progress is dropped; messages still waiting go back into the box |
 | Ctrl-C while typing | Clear the input box |
-| Page Up/Down, mouse wheel | Scroll the conversation; it stays put while new text arrives |
+| Page Up/Down, mouse wheel | Scroll the conversation; it stays put while new text arrives. Nothing is cut: answers keep their steps, and a conversation brought back comes back whole |
+| Ctrl-Home, Ctrl-End | Go to the start of the conversation, and back to the latest |
 
-Only one operation runs at a time. A second message is refused while Kumi works,
-and partly typed input is preserved while output streams. Kumi's steps read as
-what it did ("looked at your Set") with their timing, never raw payloads. The
+Only one answer runs at a time: a message sent while Kumi works goes into it at
+its next step, or waits for it (Tab). Partly typed input is preserved while output
+streams. Kumi's steps read as what it did ("looked at your Set") with their timing,
+never raw payloads. A step at work has its own animation by kind (searching,
+reading a page, looking at the Set, building a device, changing, listening,
+watching, playing, recording, code), its words shimmer and its time counts up;
+NOW plays a wider version of it. The same step done several times in a row
+folds into one line ("read a page ×3") 3 seconds after the last. While Live
+plays, a yellow light blinks on its beat in the header, beside the tempo. The
 terminal is restored on exit, on crashes and on signals.
 
 ## Watching video tutorials

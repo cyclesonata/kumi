@@ -9473,7 +9473,16 @@ class LiveObjectMapper:
             if self._undo_step is None:
                 opened = self._undo_step_operation("undo.step.begin", {"label": "Kumi: Python", "timeoutMs": max(1000, timeout + 1000)}, self._request_owner)
             deadline = time.perf_counter() + timeout / 1000.0
+            ticks = [0]
             def trace(frame: Any, event: str, arg: Any) -> Any:
+                # Python 3.11 (Live 12's) sends no line event for a loop that jumps back within one line
+                # ("while True: pass"), so the script's own frames trace each instruction too; the clock
+                # is read every 64 of them.
+                if event == "opcode":
+                    ticks[0] += 1
+                    if ticks[0] & 63: return trace
+                elif event == "call" and frame is not None and frame.f_code.co_filename == "<python.run>":
+                    frame.f_trace_opcodes = True
                 if time.perf_counter() >= deadline: raise TimeoutError(f"Python exceeded timeoutMs ({timeout} ms)")
                 return trace
             sys.stdout = output

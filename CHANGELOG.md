@@ -3,6 +3,35 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.4.0 — 2026-10-02
+
+You can see what Kumi is doing and talk to it while it works: each step animates by kind, repeats
+fold into one line, Enter tells Kumi more mid-answer, Tab queues a message, `/btw` asks on the side,
+and a yellow light blinks on Live's beat. Nothing is cut from the conversation. Ships with bridge
+1.0.69.
+
+### Seeing and talking to Kumi while it works
+
+- Each step has its own animation while it runs (searching, reading a page, looking at the Set,
+  building a device, changing, listening, watching, playing, recording, code), its words shimmer
+  and its time counts up; NOW plays a wider version of it.
+- The same step done several times in a row folds into one line ("read a page ×3") 3 s after the
+  last, with a short fold.
+- Enter while Kumi works sends a message it reads after the step under way; Tab sends one for after
+  the answer. Waiting messages show above the box; Alt-↑ takes the last one back, and stopping
+  Kumi puts them back in the box.
+- `/btw` asks something on the side, any time: answered from the conversation so far, without
+  tools, in a panel; neither the question nor the answer joins the conversation.
+- While Live plays, a yellow light in the header blinks on its beat beside the tempo.
+- Nothing is cut from the conversation: answers keep their steps, a conversation brought back comes
+  back whole with its steps, and long titles wrap. Ctrl-Home and Ctrl-End go to the start and back.
+
+### Bridge 1.0.69
+
+- `run_python`'s timeout stops a tight loop on Live's Python 3.11 (`while True: pass` sent no
+  trace events there, so the script could hold Live); the script's own code is traced per
+  instruction, the clock read every 64.
+
 ## 1.3.0 — 2026-10-01
 
 Kumi does what you ask and finds a way when no tool fits; the bridge refuses only what Live can't

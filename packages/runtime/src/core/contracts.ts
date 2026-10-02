@@ -78,7 +78,8 @@ export interface KernelCheckpoint {
 }
 
 /** One exchange of a conversation, as the producer saw it. */
-export interface TranscriptLine { role: "user" | "assistant"; text: string }
+/** A line of a conversation as the producer saw it; an answer's line names the tools it called. */
+export interface TranscriptLine { role: "user" | "assistant"; text: string; tools?: string[] }
 
 export interface Kernel {
   run(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void): Promise<TurnResult>;
@@ -87,6 +88,10 @@ export interface Kernel {
   checkpoint?(): KernelCheckpoint;
   /** The settled conversation's words, for showing a resumed conversation. */
   transcript?(): TranscriptLine[];
+  /** Guidance for the turn under way, entering at its next step; false when no turn can take it. */
+  steer?(text: string): boolean;
+  /** A side question about the conversation so far, answered without tools and never kept in it. */
+  aside?(question: string, signal: AbortSignal, onText: (text: string) => void): Promise<string>;
 }
 
 export interface KernelOptions {
@@ -347,6 +352,12 @@ export interface LiveFocus {
   selectedNotes?: number;
 }
 
+/**
+ * Live's transport, for a light on the beat: whether it plays, its tempo, and where the playhead was
+ * (in beats) at `at` (performance.now()), so the beat can be followed between reads; and a bar's beats.
+ */
+export interface LiveTransport { playing: boolean; tempo?: number; beat?: number; at: number; beatsPerBar?: number }
+
 /** Which picture HISTORY and NOW draw for a change. */
 export type ChangeFamily = "tempo" | "mixer" | "rename" | "structure" | "clip" | "device" | "parameter" | "locators" | "color";
 
@@ -447,6 +458,8 @@ export type SessionEvent = KernelEvent
   | { type: "doing"; text: string }
   /** Something Kumi did in Live that isn't a change to the Set: playing, launching, recording, showing. */
   | { type: "action"; title: string; playing?: boolean; recording?: boolean }
+  /** Live's transport as it is now (null: not known, Live gone), for the beat light. */
+  | { type: "transport"; transport: LiveTransport | null }
   /** Kumi started or stopped watching the producer work in Live (watch_me). */
   | { type: "watching"; on: boolean };
 
@@ -543,6 +556,16 @@ export interface SessionController {
   start(): Promise<void>;
   /** `pinned`: what the producer points at in Kumi, which "this" means in the message. */
   submit(input: string, extra?: { pinned?: PinnedNode }): Promise<void>;
+  /**
+   * More from the producer for the answer under way: it enters the conversation at the answer's next
+   * step (a "steer" event says when). False when no answer is at a point to take it; send it later.
+   */
+  steer?(text: string): boolean;
+  /**
+   * A side question (/btw) about the conversation so far, answered while Kumi works or not, without
+   * tools; neither the question nor the answer joins the conversation. Its words stream to `onText`.
+   */
+  aside?(question: string, onText: (text: string) => void, signal?: AbortSignal): Promise<string>;
   refresh(): Promise<void>;
   /** Forget this conversation and start afresh; it stays in the Set's kept conversations. */
   newConversation(): Promise<void>;

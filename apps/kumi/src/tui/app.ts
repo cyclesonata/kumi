@@ -3,8 +3,8 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
+  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -19,13 +19,15 @@ import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
 import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
+import { renderMarkdown } from "./markdown.js";
+import { activityGlyph, activityOf, activityScene, shimmer, type Activity } from "./activity.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
 import { LOGO_HEIGHT, LOGO_LETTERS, LOGO_RULE, LOGO_WIDTH } from "./logo.js";
 import { treeRows, treeWindow, type TreeRow } from "./tree.js";
 import { TabPanel, type Tab, type TabRow } from "./tabs.js";
 import { textWidth, truncate } from "./width.js";
-import { wrap } from "./wrap.js";
+import { wrap, type Span as TextSpan } from "./wrap.js";
 
 export interface TuiOptions {
   controller: SessionController;
@@ -63,7 +65,12 @@ type Assistant = Extract<Entry, { kind: "assistant" }>;
 type Panel =
   | { kind: "pick"; picker: Picker; choose(item: PickerItem): void | Promise<void> }
   | { kind: "key"; provider: ProviderId; secret: string; checking?: boolean; status?: { text: string; tone: "info" | "warn" }; then?: () => void | Promise<void> }
-  | { kind: "chatgpt"; url?: string; abort: AbortController; then?: () => void | Promise<void> };
+  | { kind: "chatgpt"; url?: string; abort: AbortController; then?: () => void | Promise<void> }
+  /** A side question (/btw) and its answer as it comes; `at` is which of this session's side questions shows. */
+  | { kind: "btw"; at: number; scroll: number };
+
+/** A side question asked with /btw, and its answer (never part of the conversation). */
+interface Aside { question: string; answer: string; state: "asking" | "done" | "failed"; abort: AbortController }
 
 /** A row of a panel: text, a dimmer detail beside it, a note at the right edge. */
 interface PanelLine {
@@ -73,6 +80,8 @@ interface PanelLine {
   right?: { text: string; style: Style };
   /** The selected row. */
   band?: boolean;
+  /** Styled text in place of `text` (a side answer's markdown). */
+  spans?: TextSpan[];
   indent?: number;
   /** Labels in a list share a column, so their details line up. */
   labelWidth?: number;
@@ -83,6 +92,7 @@ const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking",
 
 const COMMANDS = [
   { name: "/new", about: "Forget this conversation and start fresh" },
+  { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
   { name: "/conversations", about: "Go back to an earlier conversation about this Set" },
   { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
@@ -104,6 +114,8 @@ const COMMANDS = [
 
 const MENU_NAME_WIDTH = Math.max(...COMMANDS.map((command) => command.name.length));
 
+/** Keeping notes and recipes shows as a line of its own, not a step. */
+const QUIET_TOOLS: readonly string[] = [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL];
 /** Kumi's tools that act in Live without changing the Set. */
 const ACTION_TOOLS: ReadonlySet<string> = new Set(["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"]);
 /** Offered only with a ModelControl to answer them. */
@@ -111,7 +123,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -119,7 +131,8 @@ const TREE_REFRESH_MS = 4_000;
 /** And the Arrangement strip, whose playhead moves. */
 const STRIP_REFRESH_MS = 1_500;
 const WIDE = 100;
-const MAX_OUTPUT_BYTES = 256 * 1024;
+/** Past this an answer is stopped: a model writing without end, not an answer to read (a long one is a few tens of KB). */
+const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const FAREWELL = "Kumi closed. Each Set's conversation continues next time.";
 
 const st = {
@@ -215,6 +228,12 @@ export function setNameFrom(label: string): string | undefined {
 /** "3:05": minutes and seconds (hours when it's gone that long). */
 const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const seconds = String(whole % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`; };
 
+/** "3.1s": how long a step or an answer has taken. */
+const elapsed = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+/** How much of each beat the beat light stays lit. */
+const BEAT_LIT = 0.25;
+const mixRgb = (from: Rgb, to: Rgb, amount: number): Rgb => [0, 1, 2].map((index) => Math.round(from[index]! + (to[index]! - from[index]!) * amount)) as unknown as Rgb;
+
 /** The icon of what the producer pointed at in Live. */
 function pointedIcon(pin: PinnedNode): IconKind {
   if (pin.node === "track") return "midi-track";
@@ -298,12 +317,25 @@ export class TuiApp {
   private bytes = 0;
   /** A submitted message waiting for its turn to start; other operations also report "running". */
   private pendingTurn = false;
-  /** A message typed while Kumi was connecting or reading the Set; sent as soon as it's ready. */
-  private queued: string | undefined;
+  /**
+   * Messages typed while Kumi works. "now" ones go into the answer under way at its next step (`taken`
+   * once Kumi has them); "after" ones, and any it couldn't take, are sent as Kumi finishes, one an answer.
+   */
+  private held: { text: string; when: "now" | "after"; taken?: boolean }[] = [];
+  /** How the last answer ended, for what happens to messages still waiting. */
+  private lastStop: TurnResult["stopReason"] | undefined;
+  /** This session's side questions (/btw), oldest first. */
+  private asides: Aside[] = [];
+  /** Live's transport, for the beat light; a timer draws the light's next change. */
+  private transport: LiveTransport | null = null;
+  private beatTimer: ReturnType<typeof setTimeout> | undefined;
   private activity = "connecting to Live";
   private panel: Panel | undefined;
-  /** The model is writing a plan of changes (the call's id), which starts running as it's written. */
+  /** The model is writing a plan of changes (the call's id), which starts running as it's written; since when. */
   private planning: string | undefined;
+  private planningSince = 0;
+  /** When Kumi last became busy, for NOW's animation before an answer begins. */
+  private busySince = 0;
   /** Changes Kumi made in the answer under way, for NOW. */
   private turnChanges = 0;
   /** Going through what was sent before with the up arrow: where, and what was being typed. */
@@ -380,9 +412,9 @@ export class TuiApp {
       case "state":
         if (event.state === "running") {
           if (this.pendingTurn) {
-            this.pendingTurn = false;
+            this.pendingTurn = false; this.lastStop = undefined;
             this.suppress = false; this.failed = false; this.bytes = 0; this.stream.discard();
-            this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running" }) as Assistant;
+            this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running", startedAt: performance.now() }) as Assistant;
             this.scroll = 0;
             this.planning = undefined; this.turnChanges = 0;
           }
@@ -390,14 +422,15 @@ export class TuiApp {
           this.suppress = true; this.stream.discard();
         } else if (event.state === "idle" && this.pendingTurn) {
           this.pendingTurn = false;
-        } else if (event.state === "idle" && this.queued !== undefined) {
-          const raw = this.queued; this.queued = undefined;
-          void Promise.resolve().then(() => this.send(raw));
         } else if (this.current) {
           this.current.status = this.failed ? "failed" : "stopped";
+          this.endSteps(this.current);
           this.transcript.touch(this.current);
           this.current = undefined;
         }
+        if (event.state === "idle") this.afterBusy();
+        if ((event.state === "running" || event.state === "cancelling") && !this.busySince) this.busySince = performance.now();
+        else if (event.state === "idle") this.busySince = 0;
         this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling");
         break;
       case "connection":
@@ -427,9 +460,17 @@ export class TuiApp {
         if (event.chosen) this.transcript.add({ kind: "divider", text: `Back to your conversation from ${when}` });
         else if (event.unreadable) this.notice(`Your conversation from ${when}, which this model can't continue:`, "info");
         else this.notice(`Continuing your conversation from ${when}. /new starts fresh.`, "info");
+        // The whole conversation comes back, each answer with its steps (repeats folded): nothing's cut.
+        let answer: Assistant | undefined;
         for (const line of event.lines) {
-          const text = sanitizeText(line.text, this.secrets).slice(0, 16 * 1024);
-          this.transcript.add(line.role === "user" ? { kind: "user", text } : { kind: "assistant", text, steps: [], status: "done" });
+          const text = sanitizeText(line.text, this.secrets);
+          if (line.role === "user") { answer = undefined; if (text) this.transcript.add({ kind: "user", text }); continue; }
+          answer ??= this.transcript.add({ kind: "assistant", text: "", steps: [], status: "done" }) as Assistant;
+          if (text) answer.text += `${answer.text ? "\n\n" : ""}${text}`;
+          for (const tool of line.tools ?? []) {
+            if (!QUIET_TOOLS.includes(tool)) answer.steps.push({ id: `resumed:${answer.steps.length}`, tool, label: stepLabel(tool), state: "done" });
+          }
+          this.transcript.touch(answer);
         }
         // Its HISTORY comes back too, older than anything this session changed, and without undo.
         const earlier = (event.changes ?? []).filter((change) => !this.changes.some((known) => known.id === change.id));
@@ -514,6 +555,10 @@ export class TuiApp {
         setTimeout(() => { if (!this.closing) this.scheduler.request(); }, CHANGE_FLASH_MS + 20).unref?.();
         break;
       }
+      case "transport":
+        this.transport = event.transport;
+        this.nextBeat();
+        break;
       case "watching":
         this.watching = event.on;
         this.scheduler.request();
@@ -578,20 +623,36 @@ export class TuiApp {
         else this.transcript.insertBefore({ kind: "web", lines: [line] }, this.current);
         break;
       }
+      case "steer": {
+        // Kumi took a message sent while it worked: it shows where it went in, and the answer carries on under it.
+        const at = this.held.findIndex((item) => item.when === "now" && item.taken && item.text === event.text);
+        if (at >= 0) this.held.splice(at, 1);
+        const words = sanitizeText(event.text, this.secrets).trim();
+        if (this.current) {
+          const before = this.current;
+          if (!this.suppress) before.text += this.stream.finish();
+          before.status = "done";
+          this.transcript.touch(before);
+          if (!before.text && !before.steps.length) this.transcript.remove(before);
+          this.transcript.add({ kind: "user", text: words });
+          this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running", startedAt: performance.now() }) as Assistant;
+        } else this.transcript.add({ kind: "user", text: words });
+        break;
+      }
       case "doing": {
         const running = this.current?.steps.filter((step) => step.state === "running").at(-1);
-        if (running) running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80);
+        if (running) { running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80); this.transcript.touch(this.current!); }
         break;
       }
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
-        if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
+        if (this.current && !this.suppress && event.name === "make_changes") { this.planning = event.id; this.planningSince = performance.now(); }
         break;
       case "tool-start":
         if (this.planning === event.id) this.planning = undefined;
         // Keeping notes and recipes shows as a line of its own, not a step.
-        if (!this.current || this.suppress || [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL].includes(event.name)) break;
-        this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running" });
+        if (!this.current || this.suppress || QUIET_TOOLS.includes(event.name)) break;
+        this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running", startedAt: performance.now() });
         this.transcript.touch(this.current);
         break;
       case "tool-end": {
@@ -599,6 +660,7 @@ export class TuiApp {
         if (!step || !this.current) break;
         step.state = event.isError ? "error" : "done";
         step.ms = event.elapsedMs;
+        step.endedAt = performance.now();
         delete step.doing;
         this.transcript.touch(this.current);
         break;
@@ -607,12 +669,14 @@ export class TuiApp {
         const usage = event.result.usage;
         if (usage) { this.used.input += usage.inputTokens; this.used.output += usage.outputTokens; this.used.cached += usage.cacheReadTokens; this.used.answers++; }
         const entry = this.current;
+        this.lastStop = event.result.stopReason;
         if (!entry) break;
         const cancelled = event.result.stopReason === "cancelled";
         if (!cancelled && !this.suppress) entry.text += this.stream.finish();
         else this.stream.discard();
         entry.status = cancelled ? "stopped" : "done";
         entry.elapsedMs = event.elapsedMs;
+        this.endSteps(entry);
         this.transcript.touch(entry);
         this.current = undefined;
         if (event.result.stopReason === "max-steps") this.notice("Kumi reached its step limit for one answer. Ask it to carry on.", "info");
@@ -621,7 +685,64 @@ export class TuiApp {
       default:
         break;
     }
+    // Kumi takes a waiting message once it's working on the answer: try again as it moves.
+    if ((event.type === "text" || event.type === "tool-start" || event.type === "tool-end" || event.type === "tool-input") && this.held.some((item) => item.when === "now" && !item.taken)) this.steerHeld();
     this.scheduler.request();
+  }
+
+  /** Steps an answer left running when it ended (stopped, timed out, failed) end there, as not finished. */
+  private endSteps(entry: Assistant): void {
+    const now = performance.now();
+    for (const step of entry.steps) {
+      if (step.state !== "running") continue;
+      step.state = "error"; step.endedAt = now;
+      if (step.startedAt !== undefined) step.ms = Math.round(now - step.startedAt);
+      delete step.doing;
+    }
+  }
+
+  /** A message typed while Kumi works: into the answer under way at its next step ("now"), or after it ("after"). */
+  private hold(raw: string, when: "now" | "after"): void {
+    this.held.push({ text: raw, when });
+    if (when === "now") this.steerHeld();
+    this.scheduler.request();
+  }
+
+  private steerHeld(): void {
+    const { controller } = this.options;
+    if (!controller.steer) return;
+    for (const item of this.held) if (item.when === "now" && !item.taken) item.taken = controller.steer(item.text);
+  }
+
+  /**
+   * Kumi is free again. Messages still waiting are sent, one an answer; any Kumi took but didn't get to
+   * are sent too. After a stop or a failure they go back into the box instead, to send or not.
+   */
+  private afterBusy(): void {
+    // How the last work ended counts once: a message held during later work is sent as usual.
+    const back = this.lastStop === "cancelled" || this.failed || this.cancelling;
+    this.lastStop = undefined; this.failed = false;
+    if (!this.held.length || this.closing) return;
+    if (back) {
+      const words = this.held.map((item) => item.text);
+      this.held = [];
+      this.editor.set([...words, ...(this.editor.isEmpty ? [] : [this.editor.text])].join("\n"));
+      this.recall = undefined;
+      return;
+    }
+    const next = this.held.shift()!;
+    const shown = this.transcript.add({ kind: "user", text: sanitizeText(next.text, this.secrets).trim() });
+    this.lastSent = next.text;
+    this.scroll = 0;
+    void Promise.resolve().then(async () => {
+      if (await this.send(next.text) || this.closing) return;
+      // Refused (the notice says why): it, and what waits after it, go back into the box.
+      this.transcript.remove(shown);
+      const words = [next.text, ...this.held.map((item) => item.text)];
+      this.held = [];
+      this.editor.set([...words, ...(this.editor.isEmpty ? [] : [this.editor.text])].join("\n"));
+      this.scheduler.request();
+    });
   }
 
   private get busy(): boolean {
@@ -648,12 +769,14 @@ export class TuiApp {
     if (this.closing) return this.done;
     this.closing = true;
     this.keepTreeFresh(false);
+    clearTimeout(this.wakeTimer); clearTimeout(this.beatTimer);
     this.suppress = true;
     this.stream.discard();
     // A ChatGPT sign-in waiting on the browser stops listening; a half-typed key is dropped.
     if (this.panel?.kind === "chatgpt") this.panel.abort.abort();
     if (this.panel?.kind === "key") this.panel.secret = "";
     this.panel = undefined;
+    for (const aside of this.asides) if (aside.state === "asking") aside.abort.abort();
     this.scheduler.dispose();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -720,6 +843,14 @@ export class TuiApp {
       else if (name === "escape" || name === "tab") { this.treeCursor = undefined; return; }
       else this.treeCursor = undefined;
     }
+    // While Kumi works, Tab sends what's typed after the answer under way, rather than into it.
+    if (name === "tab" && !menu.length && !ctrl && !alt && this.busy && !this.editor.isEmpty && !isCommand(this.editor.text.trim())) {
+      const raw = this.editor.text;
+      this.options.history?.add(raw); this.recall = undefined;
+      this.editor.clear();
+      this.hold(raw, "after");
+      return;
+    }
     // Tab, outside the command menu, moves into the tree, at what's selected in Live.
     if (name === "tab" && !menu.length && !ctrl && !alt) {
       const shown = this.tree && this.focus?.trackRef === this.tree.trackRef ? (this.treeCursor = 0, this.treeShown()) : undefined;
@@ -761,9 +892,20 @@ export class TuiApp {
     if (name === "right") { if (alt || ctrl) this.editor.wordRight(); else this.editor.right(); return; }
     if (alt && name === "b") { this.editor.wordLeft(); return; }
     if (alt && name === "f") { this.editor.wordRight(); return; }
+    // Alt+↑ takes back the last message still waiting (one Kumi hasn't taken yet), to change it.
+    if (alt && name === "up" && this.held.some((item) => !item.taken)) {
+      const at = this.held.map((item) => !item.taken).lastIndexOf(true);
+      const [item] = this.held.splice(at, 1);
+      this.editor.set(this.editor.isEmpty ? item!.text : `${item!.text}\n${this.editor.text}`);
+      this.recall = undefined;
+      return;
+    }
     // Up and down move between the box's lines, then (past the first or last) through what was sent before.
     if (name === "up") { if (!this.editor.vertical(width, -1)) this.recallOlder(); return; }
     if (name === "down") { if (!this.editor.vertical(width, 1)) this.recallNewer(); return; }
+    // Ctrl+Home and Ctrl+End go to the start of the conversation and back to the latest.
+    if (ctrl && name === "home") { this.scroll = Number.MAX_SAFE_INTEGER; return; }
+    if (ctrl && name === "end") { this.scroll = 0; return; }
     if (name === "home" || (ctrl && name === "a")) { this.editor.home(); return; }
     if (name === "end" || (ctrl && name === "e")) { this.editor.end(); return; }
     if (ctrl && name === "k") { this.editor.killToEnd(); return; }
@@ -780,7 +922,8 @@ export class TuiApp {
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
       && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
       && (command.name !== "/conversations" || this.options.controller.conversations !== undefined) && (command.name !== "/reconnect" || this.options.controller.reconnect !== undefined)
-      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined));
+      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined)
+      && (command.name !== "/btw" || this.options.controller.aside !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -837,13 +980,22 @@ export class TuiApp {
       this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${this.tokensUsed()}`, "info");
       return;
     }
-    // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
-    if (this.busy && !this.current && !this.pendingTurn && !isCommand(command) && this.queued === undefined) {
+    // A side question, any time: answered on its own, without tools, and kept out of the conversation.
+    if ((command === "/btw" || command.startsWith("/btw ")) && controller.aside) {
       this.editor.clear();
-      this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
-      this.queued = raw; this.lastSent = raw;
-      this.activity = "getting ready";
+      const question = command.slice(4).trim();
+      if (question) this.ask(question);
+      else if (this.asides.length) this.panel = { kind: "btw", at: this.asides.length - 1, scroll: 0 };
+      else this.notice("Ask on the side with /btw and your question: Kumi answers from the conversation so far, without stopping what it's doing.", "info");
       this.scheduler.request();
+      return;
+    }
+    // While Kumi works, a message goes into the answer under way at its next step; while it connects or
+    // reads the Set, it waits until Kumi's ready.
+    if (this.busy && !isCommand(command)) {
+      this.editor.clear();
+      if (!this.current && !this.pendingTurn) this.activity = "getting ready";
+      this.hold(raw, this.current || this.pendingTurn ? "now" : "after");
       return;
     }
     // /goal stop ends a goal, running or paused; /goal alone shows it (picking a paused one up when Kumi's free).
@@ -853,7 +1005,7 @@ export class TuiApp {
       return;
     }
     if (command === "/goal" && this.busy && this.goal) { this.editor.clear(); this.tabs.show("goal"); this.scheduler.request(); return; }
-    if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+    if (this.busy) { this.notice(`Kumi is still working: ${command.split(/\s/)[0]} once it's done, or press esc to stop it first.`, "info"); return; }
     if ((command === "/goal" || command.startsWith("/goal ")) && controller.goal) {
       this.editor.clear();
       const text = command.slice(5).trim();
@@ -1026,6 +1178,7 @@ export class TuiApp {
   private closePanel(): void {
     const panel = this.panel;
     if (panel?.kind === "chatgpt") panel.abort.abort();
+    if (panel?.kind === "btw") { const aside = this.asides[panel.at]; if (aside?.state === "asking") aside.abort.abort(); }
     if (panel?.kind === "key") panel.secret = "";
     this.panel = undefined;
     this.scheduler.request();
@@ -1038,6 +1191,7 @@ export class TuiApp {
 
   private panelInput(event: InputEvent): void {
     const panel = this.panel!;
+    if (panel.kind === "btw") { this.asideInput(panel, event); return; }
     if (event.type === "key") {
       const { name, ctrl } = event;
       if (name === "escape" || (ctrl && name === "c")) { this.closePanel(); return; }
@@ -1072,6 +1226,29 @@ export class TuiApp {
     }
     // A key is one word: spaces and line breaks a paste brings along go.
     else if (panel.kind === "key" && !panel.checking) { panel.secret = (panel.secret + event.text.replace(/[\s\x00-\x1f\x7f]/g, "")).slice(0, 4096); delete panel.status; }
+  }
+
+  /**
+   * The btw panel: esc, enter or space closes it (an answer still coming stops), ↑↓ scroll it, ←→ go
+   * through this session's other side questions, c copies the answer.
+   */
+  private asideInput(panel: Extract<Panel, { kind: "btw" }>, event: InputEvent): void {
+    const aside = this.asides[panel.at];
+    if (event.type === "key") {
+      const { name, ctrl } = event;
+      if (name === "escape" || name === "enter" || (ctrl && name === "c")) { this.closePanel(); return; }
+      if (name === "up" || name === "pageup") panel.scroll = Math.max(0, panel.scroll - (name === "up" ? 1 : 5));
+      else if (name === "down" || name === "pagedown") panel.scroll += name === "down" ? 1 : 5;
+      else if (name === "left" && panel.at > 0) { panel.at--; panel.scroll = 0; }
+      else if (name === "right" && panel.at < this.asides.length - 1) { panel.at++; panel.scroll = 0; }
+      return;
+    }
+    if (event.type !== "text") return;
+    if (event.text === " ") { this.closePanel(); return; }
+    if (event.text.toLowerCase() === "c" && aside?.answer.trim()) {
+      this.tty.write(`\u001b]52;c;${Buffer.from(aside.answer.trim(), "utf8").toString("base64")}\u0007`);
+      this.notice("Copied the side answer.", "info");
+    }
   }
 
   /** /model: every provider's models, from their own lists, under whether Kumi is signed in there. */
@@ -1449,9 +1626,22 @@ export class TuiApp {
     if (status && !status.signedIn) this.offerFix("auth", status.id);
   }
 
-  /** Start a turn for a message already shown in the conversation. */
-  private async send(raw: string): Promise<void> {
-    if (this.closing) return;
+  /** Ask a side question: its answer streams into the btw panel, and nothing joins the conversation. */
+  private ask(question: string): void {
+    const aside: Aside = { question: sanitizeText(question, this.secrets), answer: "", state: "asking", abort: new AbortController() };
+    this.asides.push(aside);
+    if (this.asides.length > 20) this.asides.shift();
+    this.panel = { kind: "btw", at: this.asides.length - 1, scroll: 0 };
+    const stream = new StreamingText(this.secrets);
+    void Promise.resolve().then(() => this.options.controller.aside!(question, (text) => { aside.answer += stream.push(text); this.scheduler.request(); }, aside.abort.signal))
+      .then((answer) => { aside.answer += stream.finish(); if (!aside.answer.trim()) aside.answer = sanitizeText(answer, this.secrets); aside.state = "done"; })
+      .catch((error: unknown) => { aside.state = "failed"; if (!aside.abort.signal.aborted) aside.answer = safeError(error, this.secrets); })
+      .finally(() => { if (!this.closing) this.scheduler.request(); });
+  }
+
+  /** Start a turn for a message already shown in the conversation; false when it was refused. */
+  private async send(raw: string): Promise<boolean> {
+    if (this.closing) return false;
     this.activity = "thinking";
     this.pendingTurn = true;
     this.scheduler.request();
@@ -1461,8 +1651,11 @@ export class TuiApp {
       // Refused before it started (busy, closed): no turn is coming.
       this.pendingTurn = false;
       if (!this.closing) this.notice(safeError(error, this.secrets), "warn");
+      this.scheduler.request();
+      return false;
     }
     this.scheduler.request();
+    return true;
   }
 
   /**
@@ -1531,18 +1724,69 @@ export class TuiApp {
     const boxHeight = visibleRows + 2;
     const boxTop = rows - 1 - boxHeight;
     const dock = pane ? 0 : 2;
-    // What the producer points at sits just above the input box, taking a line from the conversation.
+    // What the producer points at sits just above the input box, taking a line from the conversation;
+    // messages waiting for Kumi sit above that.
     const chip = this.pinned ? 1 : 0;
-    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3 - chip) };
+    const waiting = Math.min(3, this.held.length);
+    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3 - chip - waiting) };
     this.page = Math.max(1, conversation.height - 2);
     this.drawConversation(screen, conversation);
     if (pane) this.drawPane(screen, { x: left, y: 1, width: pane, height: rows - 1 });
     else this.drawDock(screen, { x: 0, y: boxTop - dock - 1, width: columns, height: dock });
     if (chip) this.drawPin(screen, 3, boxTop - dock - 2, left - 6);
+    // A panel or the / menu opens over them.
+    if (waiting && !this.panel && !this.menu().length) this.drawHeld(screen, 3, boxTop - dock - 1 - chip - waiting, left - 6, waiting);
     let cursor: Cursor | undefined = this.drawComposer(screen, { x: 1, y: boxTop, width: left - 2, height: boxHeight }, layout, visibleRows);
     if (this.panel) cursor = this.drawPanel(screen, this.panel, boxTop, left);
     else this.drawMenu(screen, boxTop, left);
     this.tty.write(this.renderer.frame(screen, this.closing ? undefined : cursor));
+  }
+
+  private wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private wakeTime: number | undefined;
+  /** A frame at `at` (performance.now() time), for something that changes by itself then. */
+  private wakeAt(at: number, now = performance.now()): void {
+    if (this.closing) return;
+    if (at <= now + 1) { this.scheduler.request(); return; }
+    if (this.wakeTimer && this.wakeTime !== undefined && this.wakeTime <= at) return;
+    clearTimeout(this.wakeTimer);
+    this.wakeTime = at;
+    this.wakeTimer = setTimeout(() => { this.wakeTimer = undefined; this.wakeTime = undefined; if (!this.closing) this.scheduler.request(); }, Math.ceil(at - now));
+    this.wakeTimer.unref?.();
+  }
+
+  /**
+   * Where Live's playhead is now, in beats, followed from the last read at its tempo; with a bar's
+   * beats. Undefined while Live isn't playing (or isn't connected).
+   */
+  private beatNow(now = performance.now()): { beat: number; beatsPerBar?: number; tempo: number } | undefined {
+    const transport = this.transport;
+    if (!transport?.playing || !transport.tempo || transport.tempo <= 0 || transport.beat === undefined || this.connection !== "connected") return undefined;
+    return { beat: transport.beat + Math.max(0, now - transport.at) * transport.tempo / 60_000, tempo: transport.tempo, ...(transport.beatsPerBar ? { beatsPerBar: transport.beatsPerBar } : {}) };
+  }
+
+  /** While Live plays, a frame as the light comes on at each beat and as it goes off a quarter of a beat later. */
+  private nextBeat(): void {
+    clearTimeout(this.beatTimer); this.beatTimer = undefined;
+    const now = performance.now(); const at = this.beatNow(now);
+    if (!at || this.closing) { this.scheduler.request(); return; }
+    const phase = at.beat - Math.floor(at.beat);
+    const toEdge = (phase < BEAT_LIT ? BEAT_LIT - phase : 1 - phase) * 60_000 / at.tempo;
+    this.beatTimer = setTimeout(() => { this.scheduler.request(); this.nextBeat(); }, Math.max(4, Math.ceil(toEdge) + 1));
+    this.beatTimer.unref?.();
+    this.scheduler.request();
+  }
+
+  /** "● 124 BPM" in yellow, lit on the beat, while Live plays; undefined when it doesn't. */
+  private beatLight(): { text: string; dot: Style } | undefined {
+    const at = this.beatNow();
+    if (!at) return undefined;
+    const phase = at.beat - Math.floor(at.beat);
+    const bar = at.beatsPerBar && Number.isInteger(at.beatsPerBar) ? at.beatsPerBar : undefined;
+    const downbeat = bar !== undefined && Math.floor(at.beat + 1e-6) % bar === 0;
+    const lit = phase < BEAT_LIT;
+    const tempo = Number.isInteger(at.tempo) ? `${at.tempo}` : at.tempo.toFixed(1);
+    return { text: `${tempo} BPM`, dot: { fg: lit ? (downbeat ? palette.beat : mixRgb(palette.beat, palette.offbeat, 0.25)) : palette.offbeat } };
   }
 
   private status(): { dot: Style; text: string } {
@@ -1553,7 +1797,15 @@ export class TuiApp {
 
   private drawHeader(screen: Screen, columns: number): void {
     const status = this.status();
-    const start = columns - 2 - textWidth(`● ${status.text}`);
+    let start = columns - 2 - textWidth(`● ${status.text}`);
+    // Live playing: a yellow light on the beat, and the tempo, beside Live's own status.
+    const light = this.beatLight();
+    if (light && start - textWidth(`● ${light.text}`) - 3 > 12) {
+      const at = start - 3 - textWidth(`● ${light.text}`);
+      screen.put(at, 0, "●", light.dot);
+      screen.put(at + 1, 0, ` ${light.text}`, st.faint);
+      start = at;
+    }
     let x = screen.put(2, 0, "Kumi", st.title);
     // The model gives way to the Set's name when the window is narrow.
     let end = start - 2;
@@ -1570,22 +1822,28 @@ export class TuiApp {
       x = screen.put(x, 0, "  ·  ", st.faint);
       screen.put(x, 0, truncate(this.setName, Math.max(0, end - x)), st.text);
     }
-    screen.put(start, 0, "●", status.dot);
-    screen.put(start + 1, 0, ` ${status.text}`, st.dim);
+    const live = columns - 2 - textWidth(`● ${status.text}`);
+    screen.put(live, 0, "●", status.dot);
+    screen.put(live + 1, 0, ` ${status.text}`, st.dim);
   }
 
   private drawConversation(screen: Screen, area: Rect): void {
     const textX = area.x + 3;
     const width = Math.max(1, area.width - 5);
-    const rows = this.transcript.rows(width);
+    const now = performance.now();
+    const rows = this.transcript.rows(width, now);
+    // Repeated steps fold a few seconds after the last of them: a frame then, and each frame while they fold.
+    const next = this.transcript.changeAt(now);
+    if (next !== undefined) this.wakeAt(next, now);
     if (!rows.length) { this.drawWelcome(screen, textX, area.y + 2, width, area.height - 2); return; }
     const total = rows.length;
-    if (this.scroll > 0 && total > this.lastTotal) this.scroll += total - this.lastTotal;
+    // Scrolled back, the view stays on what it shows as rows come (or fold away) below.
+    if (this.scroll > 0 && total !== this.lastTotal) this.scroll = Math.max(0, this.scroll + total - this.lastTotal);
     this.lastTotal = total;
     this.scroll = Math.min(this.scroll, Math.max(0, total - area.height));
     const start = Math.max(0, total - area.height - this.scroll);
     const clip: Rect = { x: area.x, y: area.y, width: area.width, height: area.height };
-    rows.slice(start, start + area.height).forEach((row, index) => this.drawRow(screen, row, textX, area.y + index, width, clip));
+    rows.slice(start, start + area.height).forEach((row, index) => this.drawRow(screen, row, textX, area.y + index, width, clip, now));
     if (this.scroll > 0) {
       const hint = "newer below · page down";
       screen.fill({ x: area.x, y: area.y + area.height - 1, width: area.width, height: 1 }, st.ground);
@@ -1593,13 +1851,32 @@ export class TuiApp {
     }
   }
 
-  private drawRow(screen: Screen, row: Row, x: number, y: number, width: number, clip: Rect): void {
+  private drawRow(screen: Screen, row: Row, x: number, y: number, width: number, clip: Rect, now: number): void {
     if (row.band) screen.fill({ x: x - 1, y, width: Math.min(row.band.width, width + 2), height: 1 }, { bg: row.band.bg });
     let column = x;
-    for (const span of row.spans) column = screen.put(column, y, span.text, span.style, clip);
-    if (row.trailing) {
-      const at = x + Math.min(width, 46) - textWidth(row.trailing.text);
-      if (at > column) screen.put(at, y, row.trailing.text, row.trailing.style, clip);
+    let trailing = row.trailing;
+    const live = row.live;
+    if (live) {
+      // What's under way moves: a step's own animation, its words shimmering, its time going up.
+      const end = x + Math.min(width, 46) - 7;
+      if (live.kind === "header") {
+        column = screen.put(column, y, "▾ ", st.faint, clip);
+        for (const span of shimmer(live.label, now - (live.since ?? 0))) column = screen.put(column, y, span.text, span.style, clip);
+        if (live.since !== undefined) trailing = { text: elapsed(now - live.since), style: st.faint };
+      } else {
+        const ms = now - live.since;
+        column = screen.put(column, y, "│ ", { fg: palette.rule }, clip);
+        const glyph = activityGlyph(live.activity, ms, this.icons === "badges");
+        column = screen.put(column, y, glyph.text, glyph.style, clip);
+        column = screen.put(column, y, " ", st.dim, clip);
+        for (const span of shimmer(live.label, ms)) column = screen.put(column, y, span.text, span.style, clip);
+        if (live.doing && end - column > 4) column = screen.put(column, y, truncate(` · ${live.doing}`, end - column), st.faint, clip);
+        trailing = { text: elapsed(ms), style: st.faint };
+      }
+    } else for (const span of row.spans) column = screen.put(column, y, span.text, span.style, clip);
+    if (trailing) {
+      const at = x + Math.min(width, 46) - textWidth(trailing.text);
+      if (at > column) screen.put(at, y, trailing.text, trailing.style, clip);
     }
   }
 
@@ -1649,7 +1926,7 @@ export class TuiApp {
     return this.changes.find((change) => change.id === this.lastChange!.id);
   }
 
-  private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style } {
+  private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style; activity?: { kind: Activity; since: number } } {
     if (this.closing) return { label: "", detail: "Closing…", detailStyle: st.dim };
     const state = this.options.controller.status().state;
     if (state === "cancelling" || this.cancelling) return { dot: st.faint, label: "stopping", detail: "Stopping…", detailStyle: st.dim };
@@ -1665,9 +1942,11 @@ export class TuiApp {
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
       if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
-      if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim };
-      if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
-      return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
+      if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim, activity: { kind: activityOf(running.tool), since: running.startedAt ?? performance.now() } };
+      if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim, activity: { kind: "code", since: this.planningSince } };
+      // Thinking since the last step ended, or since the answer began.
+      const since = this.current?.steps.at(-1)?.endedAt ?? this.current?.startedAt ?? this.busySince;
+      return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim, activity: { kind: "think", since } };
     }
     const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
     // The newer of the two shows: a change Kumi made, or what it did or kept.
@@ -1739,12 +2018,21 @@ export class TuiApp {
       screen.put(at, area.y + nowAt, "●", now.dot);
       screen.put(at + 1, area.y + nowAt, label, st.dim);
     }
-    put(nowAt + 1, now.detail, now.detailStyle);
+    const moment = performance.now();
+    if (now.activity) {
+      // What's under way shimmers, and its own animation plays under it (a change Kumi just made shows instead).
+      let column = x;
+      for (const span of shimmer(truncate(now.detail, width), moment - now.activity.since)) column = screen.put(column, area.y + nowAt + 1, span.text, span.style);
+    } else put(nowAt + 1, now.detail, now.detailStyle);
     const picture = this.flashing() ? changePicture(this.flashing()!, width, this.depth) : undefined;
     picture?.slice(0, 2).forEach((line, row) => {
       let column = x;
       for (const part of line) column = screen.put(column, area.y + nowAt + 2 + row, part.text, part.style);
     });
+    if (!picture && now.activity) {
+      let column = x;
+      for (const span of activityScene(now.activity.kind, moment - now.activity.since, Math.min(width, 28))) column = screen.put(column, area.y + nowAt + 2, span.text, span.style);
+    }
     // The lower half, anchored to the bottom: the tab strip, then the active tab (HISTORY) filling the rest.
     const bottom = this.bottomHeight(area.height);
     const top = area.y + area.height - bottom;
@@ -1827,6 +2115,23 @@ export class TuiApp {
     screen.put(x, y + 2, truncate(where, width), st.dim);
     screen.put(x, y + 3, truncate(whole, width), st.faint);
     return 4;
+  }
+
+  /**
+   * Messages waiting for Kumi, a line each, newest last: "↳ make it darker", and when it goes in: at
+   * Kumi's next step, or after this answer. More than fit fold into "and 2 more".
+   */
+  private drawHeld(screen: Screen, x: number, y: number, width: number, rows: number): void {
+    const shown = this.held.length > rows ? this.held.slice(-(rows - 1)) : this.held;
+    if (this.held.length > rows) screen.put(x, y++, `  and ${this.held.length - shown.length} more waiting · alt+↑ takes the last back`, st.faint);
+    for (const item of shown) {
+      const when = item.when === "now" && (this.current || this.pendingTurn) ? "at the next step" : "after this answer";
+      const words = sanitizeText(item.text, this.secrets).replace(/\s+/g, " ").trim();
+      let column = screen.put(x, y, "↳ ", st.faint);
+      column = screen.put(column, y, truncate(words, Math.max(1, width - textWidth(when) - 4)), st.dim);
+      screen.put(x + width - textWidth(when), y, when, st.faint);
+      y++;
+    }
   }
 
   /** "▣ Audio Effect Rack › Chain 1 › Saturator  ×": what the next messages mean by "this"; × clears it. */
@@ -2004,6 +2309,11 @@ export class TuiApp {
         screen.put(2, area.y + 1, truncate(`✓ ${last.title}`, Math.max(1, at - 4)), st.text);
         screen.put(at, area.y + 1, hint, st.accent);
         this.hits.push({ x: at, y: area.y + 1, width: textWidth(hint), action: () => { void this.undo(last.id); } });
+      } else if (now.activity) {
+        // Narrow: the step's own glyph, then its words.
+        const glyph = activityGlyph(now.activity.kind, performance.now() - now.activity.since, this.icons === "badges");
+        screen.put(2, area.y + 1, glyph.text, glyph.style);
+        screen.put(4, area.y + 1, truncate(now.detail, area.width - 6), now.detailStyle);
       } else screen.put(2, area.y + 1, truncate(now.detail, area.width - 4), now.detailStyle);
     }
   }
@@ -2014,14 +2324,16 @@ export class TuiApp {
     const width = Math.max(1, box.width - 4);
     const first = Math.max(0, Math.min(layout.cursorRow - visibleRows + 1, layout.rows.length - visibleRows));
     if (this.editor.isEmpty) {
-      const placeholder = this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything";
+      const placeholder = this.busy && (this.current || this.pendingTurn) ? "Tell Kumi more while it works" : this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything";
       screen.put(x, box.y + 1, truncate(placeholder, width), st.faint);
     } else {
       layout.rows.slice(first, first + visibleRows).forEach((row, index) => screen.put(x, box.y + 1 + index, row, st.bright, box));
     }
-    const hint = this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
+    const hint = this.panel?.kind === "btw" ? "↑↓ to scroll · c copies · esc to close" : this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
       : this.panel?.kind === "chatgpt" ? (this.panel.url ? "c copies the link · esc to cancel" : "esc to cancel")
-      : this.menu().length ? "enter to choose · esc to close" : this.busy ? "esc to stop" : "enter to send";
+      : this.menu().length ? "enter to choose · esc to close"
+      : this.busy && !this.editor.isEmpty && !isCommand(this.editor.text.trim()) ? (this.current || this.pendingTurn ? "enter sends now · tab after · esc stops" : "enter sends when ready")
+      : this.busy ? "esc to stop" : "enter to send";
     if (textWidth(hint) + 2 < width) screen.put(box.x + box.width - 2 - textWidth(hint), box.y + box.height - 1, hint, st.faint);
     return { x: x + layout.cursorColumn, y: box.y + 1 + layout.cursorRow - first };
   }
@@ -2066,6 +2378,25 @@ export class TuiApp {
         lines.push({ text: item.label, style: item.inert ? st.faint : chosen ? st.accent : st.text, indent: 2, band: chosen, labelWidth,
           ...(item.detail ? { detail: { text: item.detail, style: chosen ? st.bright : st.dim } } : {}), ...(right ? { right } : {}) });
       });
+    } else if (panel.kind === "btw") {
+      const aside = this.asides[panel.at];
+      const which = this.asides.length > 1 ? `${panel.at + 1} of ${this.asides.length} · ←→` : undefined;
+      lines.push({ text: `btw · ${aside?.question.replaceAll("\n", " ") ?? ""}`, style: st.title, ...(which ? { right: { text: which, style: st.faint } } : {}) });
+      if (aside && !aside.answer.trim()) {
+        const glyph = activityGlyph("think", performance.now());
+        lines.push({ text: "", style: st.dim, spans: aside.state === "asking" ? [glyph, { text: " thinking it over…", style: st.dim }] : [{ text: "No answer came back.", style: st.faint }] });
+      } else if (aside) {
+        const rows = renderMarkdown(aside.answer.trim(), inner, aside.state === "failed" ? st.warn : st.text);
+        const room = Math.max(3, Math.min(16, space - 4));
+        panel.scroll = Math.max(0, Math.min(panel.scroll, rows.length - room));
+        const shown = rows.slice(panel.scroll, panel.scroll + room);
+        shown.forEach((row, index) => {
+          const more = index === 0 && panel.scroll > 0 ? `↑ ${panel.scroll} more` : index === shown.length - 1 && panel.scroll + room < rows.length ? `↓ ${rows.length - panel.scroll - room} more` : undefined;
+          lines.push({ text: "", style: st.text, spans: row.spans, ...(more ? { right: { text: more, style: st.faint } } : {}) });
+        });
+        if (aside.state === "asking") lines.push({ text: "", style: st.dim, spans: [activityGlyph("think", performance.now())] });
+      }
+      if (aside?.state === "asking") this.scheduler.request();
     } else if (panel.kind === "key") {
       const info = PROVIDER_INFO[panel.provider];
       lines.push({ text: `Sign in to ${info.name}`, style: st.title });
@@ -2099,8 +2430,9 @@ export class TuiApp {
       if (line.band) screen.fill({ x: 1, y, width, height: 1 }, st.selected);
       const start = x + (line.indent ?? 0);
       const end = x + inner - (line.right ? textWidth(line.right.text) + 2 : 0);
-      const label = truncate(line.text, Math.max(1, end - start));
-      let column = screen.put(start, y, label, line.style);
+      let column = start;
+      if (line.spans) for (const span of line.spans) column = screen.put(column, y, span.text, span.style, { x: start, y, width: Math.max(1, end - start), height: 1 });
+      else column = screen.put(start, y, truncate(line.text, Math.max(1, end - start)), line.style);
       if (line.detail) {
         column = Math.max(column, start + (line.labelWidth ?? 0)) + 2;
         if (column < end) screen.put(column, y, truncate(line.detail.text, end - column), line.detail.style);

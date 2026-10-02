@@ -6,7 +6,7 @@ import { basename, dirname, extname, isAbsolute } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, Observation, StreamingCall } from "../../core/contracts.js";
+import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, LiveTransport, Observation, StreamingCall } from "../../core/contracts.js";
 import { MIX_CANDIDATE } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
@@ -104,6 +104,8 @@ interface Options {
   onFocus?: (focus: LiveFocus | null) => void;
   /** The producer pointed at something in Live (its right-click "Ask Kumi about this"): pin it for their next message. */
   onPointed?: (pin: PinnedNode) => void;
+  /** Live's transport, read when it starts or stops and now and then while it plays (null when Live's gone). */
+  onTransport?: (transport: LiveTransport | null) => void;
   focusIntervalMs?: number;
   /** A change Kumi made or undid in Live, for HISTORY. */
   onChange?: (change: ChangeRecord) => void;
@@ -213,7 +215,7 @@ export function createAbletonIntegration(options: Options): Integration {
   /** The bridge's own connection dropped (its process ended, say): look for Live, and start a fresh bridge when it answers. */
   const loseAccess = () => {
     if (closed || closingStarted || (lost && !available)) return;
-    available = false; focusFeed?.stop();
+    available = false; focusFeed?.stop(); clearTimeout(transportTimer); reportTransport(null);
     if (!lost) { lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "bridge"); }
     keepLooking();
   };
@@ -221,6 +223,7 @@ export function createAbletonIntegration(options: Options): Integration {
   const loseLive = () => {
     if (closed || closingStarted || lost) return;
     lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "live");
+    clearTimeout(transportTimer); reportTransport(null);
     keepLooking();
   };
   async function openEndpoint(signal: AbortSignal): Promise<McpEndpoint> {
@@ -267,15 +270,74 @@ export function createAbletonIntegration(options: Options): Integration {
     if (connected.onLiveEvent) unlisten.push(connected.onLiveEvent(liveEvent));
   }
   let subscribed = false;
+  /** Live says when its transport starts and stops (else it's read every few seconds). */
+  let transportEvents = false;
   /** Once per connection, where the bridge has Live's events: then the focus poll is only a heartbeat. */
   async function subscribe(signal: AbortSignal) {
-    if (subscribed || !tools?.has("live_subscribe")) return;
+    if (subscribed || !tools?.has("live_subscribe")) { void readTransport(); return; }
     subscribed = true;
-    try { if (!(await tools.call("live_subscribe", { types: ["selection", "structure"] }, signal, { host: true })).isError) focusFeed?.slow(); }
-    catch { subscribed = false; }
+    try {
+      // The transport too, for the beat light; a Live that can't tell it is subscribed without.
+      let result = options.onTransport ? await tools.call("live_subscribe", { types: ["selection", "structure", "transport"] }, signal, { host: true }) : undefined;
+      transportEvents = result !== undefined && !result.isError;
+      if (!transportEvents) result = await tools.call("live_subscribe", { types: ["selection", "structure"] }, signal, { host: true });
+      if (!result!.isError) focusFeed?.slow();
+    } catch { subscribed = false; transportEvents = false; }
+    void readTransport();
+  }
+  let transportTimer: ReturnType<typeof setTimeout> | undefined;
+  let transportReading = false; let transportAgain = false;
+  /** A bar's beats, from the time signature: read with the first read, then now and then. */
+  let barBeats: number | undefined; let transportReads = 0;
+  let lastTransport = "";
+  const reportTransport = (transport: LiveTransport | null) => {
+    const key = transport ? `${transport.playing}:${transport.tempo}:${transport.beatsPerBar}:${transport.playing ? transport.beat : ""}` : "null";
+    if (key === lastTransport) return;
+    lastTransport = key;
+    try { options.onTransport?.(transport); } catch { /* a listener failure must not affect Live */ }
+  };
+  /**
+   * Read the transport: whether Live plays, its tempo, and where the playhead is, timed to the middle of
+   * the read so the beat can be followed between reads. Again in a few seconds while it plays (the tempo
+   * may change), and every few seconds anyway where Live can't say when it starts.
+   */
+  async function readTransport(): Promise<void> {
+    if (!options.onTransport || closed || !available || lost) return;
+    if (transportReading) { transportAgain = true; return; }
+    transportReading = true; clearTimeout(transportTimer);
+    // A read that fails, or can't happen yet (the bridge's tools being read again), keeps to the last one's pace.
+    let playing = lastTransport.startsWith("true"); let soon = false;
+    try {
+      if (!tools?.has("live_discover")) { soon = true; return; }
+      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(3_000)]);
+      if (transportReads++ % 8 === 0 && tools.has("live_song_state")) {
+        const song = await tools.call("live_song_state", {}, signal, { host: true }).catch(() => undefined);
+        const state = song && !song.isError ? payload(song) : {};
+        const numerator = Number(state.signatureNumerator); const denominator = Number(state.signatureDenominator);
+        if (numerator > 0 && denominator > 0) barBeats = numerator * 4 / denominator;
+      }
+      const sent = performance.now();
+      const read = await tools.call("live_discover", { kind: "set", fields: ["tempo", "position", "playing"], limit: 1 }, signal, { host: true });
+      const at = (sent + performance.now()) / 2;
+      const row = read.isError ? undefined : (payload(read).items as JsonObject[] | undefined)?.[0];
+      if (row && !closed) {
+        playing = row.playing === true;
+        reportTransport({ playing, at, ...(typeof row.tempo === "number" ? { tempo: row.tempo } : {}), ...(typeof row.position === "number" ? { beat: row.position } : {}),
+          ...(barBeats ? { beatsPerBar: barBeats } : {}) });
+      }
+    } catch { /* the next read tries again */ }
+    finally {
+      transportReading = false;
+      if (transportAgain) { transportAgain = false; void readTransport(); }
+      else if (!closed && available && !lost && (soon || playing || !transportEvents)) {
+        transportTimer = setTimeout(() => { void readTransport(); }, soon ? 500 : playing ? 4_000 : 2_500);
+        transportTimer.unref?.();
+      }
+    }
   }
   function liveEvent(event: JsonObject) {
     if (event.type === "selection" || event.type === "structure") focusFeed?.poke();
+    if (event.type === "transport") void readTransport();
     if (event.type === "pointed" && options.onPointed) {
       const pin = pointedPin(event);
       if (pin) { try { options.onPointed(pin); } catch { /* a listener failure must not affect Live */ } }
@@ -2598,7 +2660,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       const remembered = project?.path && options.projectStore && available && !lost
         ? Promise.race([saveNow(2_000), new Promise<void>((resolve) => { setTimeout(resolve, 2_500).unref?.(); })]) : Promise.resolve();
       closing = remembered.then(() => {
-        closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop();
+        closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop(); clearTimeout(transportTimer);
         for (const remove of unlisten) remove();
         return tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
       });

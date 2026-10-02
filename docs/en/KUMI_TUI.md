@@ -125,6 +125,19 @@ old line-by-line interface (`terminal.ts`).
    an API key; NOW keeps "goal · 81% · gen 12 · 3:05". Lessons from matching are
    `✦` lines, listed in `/memory` with forget.
 
+7. ~~**Activity and talking while Kumi works**~~: done. Each kind of step has
+   its own animation while it runs, a glyph in its row (a dot circling for a
+   search, lines read down a page, blocks filling for a device, a fader for a
+   change, a level meter for listening) and a wider scene under NOW (a scanner,
+   words lit one by one, tracks looked over, blocks stacking, a knob gliding, a
+   meter, a playhead); the words shimmer and the time counts up. Repeated steps
+   fold into one line ("read a page ×3") 3 s after the last: the extra lines fade,
+   then go one by one. Enter while Kumi works sends a message it reads after the
+   step under way; Tab, one for after the answer; both wait above the box.
+   `/btw` asks on the side, in a panel, kept out of the conversation. While Live
+   plays, a yellow light in the header blinks on its beat (from Live's transport
+   events and its tempo, no MIDI setup), brightest on the bar's first beat.
+
 Done alongside: the welcome screen catches you up on a saved Set ("Since you were
 last here · 3 days ago", a few plain-words lines); once the conversation has
 started, the same summary arrives as a note.

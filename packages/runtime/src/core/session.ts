@@ -383,7 +383,7 @@ export function createSession(options: Options): SessionController {
       kernel = { value, key: observation.key, revision, lifetime: built.lifetime };
       const set = observation.project?.name ?? "this Set";
       if (unreadable) {
-        emit({ type: "resumed", savedAt: unreadable.savedAt, lines: transcriptOf(unreadable.checkpoint.messages).slice(-20), unreadable: true });
+        emit({ type: "resumed", savedAt: unreadable.savedAt, lines: transcriptOf(unreadable.checkpoint.messages), unreadable: true });
         emit({ type: "notice", message: "Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here." });
       } else {
         if (reason === "set") emit({ type: "notice", message: resumed ? `The open Set changed; continuing your conversation about ${set}.` : "The open Set changed; starting a fresh conversation." });
@@ -392,7 +392,7 @@ export function createSession(options: Options): SessionController {
         // Show the earlier exchanges when this conversation isn't already on screen.
         // Changes HISTORY shows already (made while Kumi's been running) aren't listed again.
         const earlier = conversationChanges.filter((change) => !ours(change));
-        if (resumed && (first || reason === "set" || picked)) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.().slice(-20) ?? [],
+        if (resumed && (first || reason === "set" || picked)) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.() ?? [],
           ...(earlier.length ? { changes: earlier } : {}), ...(picked ? { chosen: true } : {}) });
       }
     }
@@ -858,6 +858,19 @@ export function createSession(options: Options): SessionController {
         if (!run) return result;
         try { return await runMatch(op, run, result, ask); } finally { matching = undefined; lastRun = run; learnFrom(run, carried); }
       }, undefined, input);
+    },
+    steer(text) {
+      // Only an answer the model is working on takes it: it goes in after the step under way.
+      const held = kernel?.value;
+      if (state === "closed" || !active?.isTurn || active.phase !== "inference" || !held?.steer) return false;
+      if (!text.trim() || Buffer.byteLength(text) > 16 * 1024) return false;
+      return held.steer(text);
+    },
+    async aside(question, onText, signal) {
+      if (state === "closed") throw new Error("Session is closed");
+      const held = kernel?.value;
+      if (!held?.aside) throw new KumiError("request", "Kumi isn't ready for a side question yet; ask again in a moment.");
+      return held.aside(question, signal ?? new AbortController().signal, onText);
     },
     refresh() {
       if (!started) return Promise.reject(new Error("Session is not started"));
