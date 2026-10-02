@@ -112,7 +112,9 @@ export function createModelControl(options: {
   let bound: { model: string; effort?: Effort; binding: Bound } | undefined;
   const transport = options.fetch ? { fetch: options.fetch } : {};
 
-  const servers = (): LocalServer[] => localServers(settings().modelServers, env);
+  // The servers as settings.json names them, read again whenever their list is asked for (not on every frame drawn).
+  let named: LocalServer[] | undefined;
+  const servers = (): LocalServer[] => (named ??= localServers(settings().modelServers, env));
   /** A model id's provider (or server) and model. */
   const parse = (id: string | undefined): { provider: string; model: string; server?: LocalServer } | undefined => {
     if (!id) return undefined;
@@ -163,6 +165,7 @@ export function createModelControl(options: {
       return statuses;
     },
     async local() {
+      named = undefined;
       const installed = options.installed ?? ((kind: LocalKind) => localInstalled(kind, env));
       const found = await Promise.all(servers().map(async (server): Promise<LocalStatus | undefined> => {
         const running = await probeLocal(server, transport);
