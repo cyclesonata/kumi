@@ -4,6 +4,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { windowsPowerShell } from "../platform.js";
 import { readExtensionEndpoint } from "./extension-channel.js";
 
 /**
@@ -76,7 +77,7 @@ export function parseExtensionHosts(listing: string): { kumi: string[]; live: bo
 
 export function runningExtensionHosts(): { kumi: string[]; live: boolean } {
   const listing = process.platform === "win32"
-    ? spawnSync("powershell", ["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { $_.CommandLine }"], { encoding: "utf8", windowsHide: true })
+    ? spawnSync(windowsPowerShell(), ["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { $_.CommandLine }"], { encoding: "utf8", windowsHide: true })
     : spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
   return parseExtensionHosts(listing.stdout ?? "");
 }

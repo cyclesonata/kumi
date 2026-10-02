@@ -70,7 +70,7 @@ Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業
 
 ## 現状
 
-Kumi 1.5 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows 対応は確認中です。次は Renoise と Reaper への対応を予定しています。
+Kumi 1.6 は macOS と Windows 上の Ableton Live 12.4（ベータ）で確認しています。次は Renoise と Reaper への対応を予定しています。
 
 ## 開発
 

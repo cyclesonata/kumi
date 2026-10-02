@@ -119,7 +119,9 @@ def _read_config() -> dict[str, Any]:
 def _owner_controlled(path: Path) -> bool:
     """Require the current account to own each security-sensitive file."""
     if os.name == "nt":
-        return _windows_owner_controlled(path) and _windows_acl_owner_only(path)
+        # The ACL check compares the owner with the process token too, so it decides alone where the
+        # native comparison can't be made: Live's own Python on Windows comes without ctypes.
+        return _windows_owner_controlled(path) is not False and _windows_acl_owner_only(path)
     try:
         return path.stat().st_uid == os.getuid()
     except (AttributeError, OSError):
@@ -172,26 +174,31 @@ def _windows_acl_owner_only(path: Path) -> bool:
         )
         environment = dict(os.environ)
         environment["ABLETON_MCP_ACL_PATH"] = encoded
+        # Live has no console of its own: without this flag each check would open a console window.
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-            capture_output=True, timeout=10, env=environment,
+            capture_output=True, timeout=10, env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return result.returncode == 0
     except (AttributeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
         return False
 
 
-def _windows_owner_controlled(path: Path) -> bool:
+def _windows_owner_controlled(path: Path) -> bool | None:
     """Compare the file owner SID with the current process token on Windows.
 
     ``stat().st_uid`` is not a Windows security identity and is commonly zero
     or otherwise synthetic on Windows.  Use the native security descriptor and
-    token APIs instead, without adding a platform-specific dependency.
+    token APIs instead, without adding a platform-specific dependency.  None
+    where ctypes isn't there to ask with (Live's own Python on Windows).
     """
     security_descriptor = None
     try:
-        import ctypes
-        from ctypes import wintypes
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except ImportError:
+            return None
 
         advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { platform, versions } from "node:process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { LiveStatus } from "./live.js";
+import { windowsPowerShell } from "./platform.js";
 import { toolPolicyFromEnv } from "./tool-catalog.js";
 
 export const CONFIG_VERSION = 1;
@@ -140,7 +141,7 @@ function windowsAclVerifyCommand(): string {
 /** Verify an owner-only Windows DACL through the security API without parsing localized or serialized output. */
 function windowsOwnerOnlyAcl(path: string): { ok: true } | { ok: false; reason: string } {
   const encodedPath = Buffer.from(path, "utf8").toString("base64");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsAclVerifyCommand()], {
+  const result = spawnSync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsAclVerifyCommand()], {
     encoding: "utf8", env: { ...process.env, ABLETON_MCP_ACL_PATH: encodedPath }, stdio: ["ignore", "ignore", "pipe"], timeout: 15_000,
   });
   if (result.error) return { ok: false, reason: "verification command could not run" };
@@ -171,13 +172,20 @@ export function secureWindowsFile(path: string): void {
     const encodedPath = Buffer.from(path, "utf8").toString("base64");
     // Build a fresh protected DACL from the process-token SID. This avoids
     // localized account names and cannot retain inherited or explicit broad ACEs.
+    // The DACL goes first and alone: an owner may always write it, while changing
+    // the owner needs the take-ownership right, which a folder outside the user's
+    // profile (a User Library on C:\ or another drive) grants no ordinary account.
+    // The owner is then set only where it isn't this user already (an elevated
+    // process creates files owned by Administrators); the new DACL grants that right.
     const script = "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ABLETON_MCP_ACL_PATH));" +
       "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;" +
       "$a=New-Object System.Security.AccessControl.FileSecurity;" +
-      "$a.SetOwner($sid);$a.SetAccessRuleProtection($true,$false);" +
+      "$a.SetAccessRuleProtection($true,$false);" +
       "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid,[System.Security.AccessControl.FileSystemRights]::FullControl,[System.Security.AccessControl.AccessControlType]::Allow);" +
-      "[void]$a.AddAccessRule($rule);[System.IO.File]::SetAccessControl($p,$a)";
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      "[void]$a.AddAccessRule($rule);[System.IO.File]::SetAccessControl($p,$a);" +
+      "if ([System.IO.File]::GetAccessControl($p).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {" +
+      " $o=New-Object System.Security.AccessControl.FileSecurity;$o.SetOwner($sid);[System.IO.File]::SetAccessControl($p,$o) }";
+    execFileSync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
       encoding: "utf8", env: { ...process.env, ABLETON_MCP_ACL_PATH: encodedPath }, stdio: ["ignore", "pipe", "pipe"],
     });
     const verdict = windowsOwnerOnlyAcl(path);
@@ -194,14 +202,17 @@ export function secureWindowsDirectory(path: string): void {
   if (platform !== "win32") return;
   try {
     const encodedPath = Buffer.from(path, "utf8").toString("base64");
+    // As secureWindowsFile: the DACL first and alone, the owner only where it isn't this user already.
     const script = "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ABLETON_MCP_ACL_PATH));" +
       "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;" +
       "$a=New-Object System.Security.AccessControl.DirectorySecurity;" +
-      "$a.SetOwner($sid);$a.SetAccessRuleProtection($true,$false);" +
+      "$a.SetAccessRuleProtection($true,$false);" +
       "$inherit=[System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit';" +
       "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid,[System.Security.AccessControl.FileSystemRights]::FullControl,$inherit,[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow);" +
-      "[void]$a.AddAccessRule($rule);[System.IO.Directory]::SetAccessControl($p,$a)";
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8", env: { ...process.env, ABLETON_MCP_ACL_PATH: encodedPath }, stdio: ["ignore", "pipe", "pipe"] });
+      "[void]$a.AddAccessRule($rule);[System.IO.Directory]::SetAccessControl($p,$a);" +
+      "if ([System.IO.Directory]::GetAccessControl($p).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {" +
+      " $o=New-Object System.Security.AccessControl.DirectorySecurity;$o.SetOwner($sid);[System.IO.Directory]::SetAccessControl($p,$o) }";
+    execFileSync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8", env: { ...process.env, ABLETON_MCP_ACL_PATH: encodedPath }, stdio: ["ignore", "pipe", "pipe"] });
     const verdict = windowsOwnerOnlyAcl(path);
     if (!verdict.ok) throw new Error(`Windows directory ACL verification rejected the applied descriptor: ${verdict.reason}`);
   } catch (error) {
