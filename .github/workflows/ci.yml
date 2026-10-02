@@ -164,8 +164,8 @@ jobs:
         env:
           CANDIDATE_DIR: ${{ runner.temp }}/ableton-candidate
         run: node scripts/verify-candidate.mjs "$CANDIDATE_DIR/${{ needs.candidate.outputs.artifact_name }}" "$CANDIDATE_DIR/candidate-metadata.json" | tee "$RUNNER_TEMP/candidate-verification.json"
-      - if: matrix.verify
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        if: matrix.verify
         with:
           name: candidate-verification-${{ matrix.os }}-node-${{ matrix.node }}
           path: ${{ runner.temp }}/candidate-verification.json

@@ -22,9 +22,12 @@ for (const version of ["22.0.0-rc.1", "24.0.0-nightly.1", "not-a-version"]) if (
 const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 const nodeJob = workflow.match(/^  node:\n([\s\S]*?)(?=^  [a-z][a-z-]*:\n)/m)?.[1];
 if (!nodeJob) throw new Error("CI Node job is missing");
-const matrixMatch = nodeJob.match(/^\s*node:\s*\[([^\]]+)\]\s*$/m);
-if (!matrixMatch) throw new Error("CI Node matrix is missing or dynamic");
-const matrix = matrixMatch[1].split(",").map((value) => Number(value.trim()));
+// The matrix names its Node majors either as a list (node: [22, 24]) or across include entries ({ …, node: 24, … }):
+// together they must be exactly the supported majors, and a failure must not cancel the rest.
+const listed = nodeJob.match(/^\s*node:\s*\[([^\]]+)\]\s*$/m)?.[1].split(",").map((value) => Number(value.trim()));
+const included = [...nodeJob.matchAll(/^\s*- \{[^}\n]*\bnode:\s*(\d+)[^}\n]*\}\s*$/gm)].map((match) => Number(match[1]));
+if (!listed && !included.length) throw new Error("CI Node matrix is missing or dynamic");
+const matrix = [...new Set([...(listed ?? []), ...included])].sort((a, b) => a - b);
 if (JSON.stringify(matrix) !== JSON.stringify(majors) || !/^\s*fail-fast:\s*false\s*$/m.test(nodeJob)) throw new Error("CI Node matrix semantics disagree with canonical package policy");
 const pythonJob = workflow.match(/^  remote-script:\n([\s\S]*?)(?=^  [a-z][a-z-]*:\n)/m)?.[1];
 if (!pythonJob || !/^\s*fail-fast:\s*false\s*$/m.test(pythonJob)) throw new Error("CI Python matrix must remain complete after a failure");
@@ -32,8 +35,9 @@ const requiredJob = workflow.match(/^  required:\n([\s\S]*)$/m)?.[1];
 const requiredFragments = [
   "name: Required CI",
   "if: always()",
-  "needs: [candidate, node, remote-script]",
+  "needs: [candidate, quality, node, remote-script]",
   'test "${{ needs.candidate.result }}" = "success"',
+  'test "${{ needs.quality.result }}" = "success"',
   'test "${{ needs.node.result }}" = "success"',
   'test "${{ needs.remote-script.result }}" = "success"',
 ];
