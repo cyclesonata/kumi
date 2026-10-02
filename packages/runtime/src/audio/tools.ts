@@ -6,7 +6,7 @@ import { AudioError, audioPath, compare, hear, type Analysis } from "./index.js"
 export const LISTEN_TOOL = "listen";
 
 const DESCRIPTION = [
-  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_samples finds audio files by words in folders the producer names, such as ~/Downloads) or, for an audio clip in the Set, its clipRef.",
+  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_sounds finds audio files by words in folders the producer names, such as ~/Downloads) or, for an audio clip in the Set, its clipRef.",
   "Measures loudness (integrated LUFS, true peak, loudness range), tonal balance in named bands, stereo width per band, dynamics, tempo, key and the energy over time as a small text spectrogram;",
   "for a single sound (a note, a hit, a short sample), also its pitch, harmonics (which waveform it's like), envelope and movement (filter opening or closing, wobble or tremolo rate, at the tempo when known).",
   "With compare_to, sets file against the reference with loudness matched and lists what differs most (bands, brightness, width, compression, loudness).",

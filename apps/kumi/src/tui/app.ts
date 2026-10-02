@@ -3,13 +3,13 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type LibraryStatus, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
   type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
 import type { ModelControl } from "../models.js";
-import { sanitizeText, StreamingText, webWords } from "../text.js";
+import { libraryLine, sanitizeText, StreamingText, webWords } from "../text.js";
 import type { UpdateControl } from "../update.js";
 import { Editor, type EditorLayout } from "./editor.js";
 import { Picker, type PickerItem } from "./picker.js";
@@ -123,7 +123,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -287,6 +287,8 @@ export class TuiApp {
   private catchUp: CatchUp | undefined;
   /** A newer Kumi's version, once the startup check or /update found one. */
   private newer: string | undefined;
+  /** What Kumi knows of the producer's library, and how learning it is going. */
+  private library: LibraryStatus | undefined;
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
@@ -374,6 +376,7 @@ export class TuiApp {
     this.options.input.once("end", () => { void this.finish(0); });
     this.options.output.once("error", () => { void this.finish(1); });
     if (this.options.startupNotice) this.notice(this.options.startupNotice, "info");
+    this.library = this.options.controller.library?.();
     this.scheduler.request();
     void Promise.resolve().then(() => { if (!this.closing) return this.options.controller.start(); }).catch((error: unknown) => {
       if (!this.closing) void this.finish(1, `Kumi couldn't start: ${safeError(error, this.secrets)}`);
@@ -442,6 +445,9 @@ export class TuiApp {
         break;
       case "observation":
         this.setName = setNameFrom(event.label);
+        break;
+      case "library":
+        this.library = event.status;
         break;
       case "focus":
         this.touched = touchedNext(this.focus, event.focus, this.touched);
@@ -977,7 +983,8 @@ export class TuiApp {
     if (command === "/status") {
       this.editor.clear();
       const status = controller.status();
-      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${this.tokensUsed()}`, "info");
+      const library = libraryLine(this.options.controller.library?.() ?? this.library);
+      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${library ? ` · ${library}` : ""}${this.tokensUsed()}`, "info");
       return;
     }
     // A side question, any time: answered on its own, without tools, and kept out of the conversation.
@@ -1399,8 +1406,8 @@ export class TuiApp {
    */
   private async openMemory(): Promise<void> {
     const { controller } = this.options;
-    const [memory, techniques, recipes, lessons] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([]),
-      controller.lessons?.() ?? Promise.resolve([])]);
+    const [memory, techniques, recipes, lessons, taste] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([]),
+      controller.lessons?.() ?? Promise.resolve([]), controller.taste?.() ?? Promise.resolve([])]);
     if (!memory) return;
     const now = Date.now();
     const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
@@ -1420,20 +1427,24 @@ export class TuiApp {
       ...(controller.lessons ? [{ heading: true, label: "What Kumi learned matching sounds" }, ...(lessons.length
         ? lessons.map((lesson): PickerItem => ({ label: clean(lesson.line, 160), value: `lesson:${lesson.id}`, note: since(lesson.at, now), noteTone: "faint" }))
         : [{ label: "None yet: what won when Kumi matched a sound to a reference", inert: true }])] : []),
+      ...(controller.taste ? [{ heading: true, label: "From your Sets" }, ...(taste.length
+        ? taste.map((line): PickerItem => ({ label: clean(line.line, 160), value: `taste:${line.id}` }))
+        : [{ label: this.library?.state === "learning" || this.library?.state === "paused" ? "Learning your Sets…" : "Nothing yet: how you work, from your own Live Sets", inert: true }])] : []),
     ];
     const picker = new Picker("What Kumi remembers · notes, techniques and recipes", items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => {
       const [kind, ...rest] = item.value!.split(":"); const id = rest.join(":");
       if (kind === "recipe") { const recipe = recipes.find((candidate) => candidate.name === id); if (recipe) this.recipeActions(recipe); return; }
-      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : kind === "lesson" ? "Forget this lesson?" : "Forget this note?", [
+      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : kind === "lesson" ? "Forget this lesson?" : kind === "taste" ? "Forget this, from your Sets?" : "Forget this note?", [
         { label: "Forget it", detail: item.label, value: "yes" },
         { label: "Keep it", value: "no" },
       ]);
       this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
         this.closePanel();
         if (answer.value !== "yes") return;
-        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : kind === "lesson" ? await controller.forgetLesson?.(id) : await controller.forget?.(id);
-        if (!gone) this.notice(`That ${kind === "technique" || kind === "lesson" ? kind : "note"} was already gone.`, "info");
+        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : kind === "lesson" ? await controller.forgetLesson?.(id) : kind === "taste" ? await controller.forgetTaste?.(id) : await controller.forget?.(id);
+        if (!gone) this.notice(`That ${kind === "technique" || kind === "lesson" ? kind : kind === "taste" ? "line" : "note"} was already gone.`, "info");
+        else if (kind === "taste") this.notice(`Forgot, from your Sets: ${item.label}`, "info");
       } };
       this.scheduler.request();
     } };
@@ -1907,6 +1918,8 @@ export class TuiApp {
     }
     add();
     add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
+    const library = libraryLine(this.library);
+    if (library) add(library, st.faint);
     if (this.newer) { add(); add(`Kumi ${this.newer} is out · /update gets it`, st.accent); }
     // The wordmark goes above, when the window has room for it and everything under it.
     if (width >= LOGO_WIDTH && height >= rows.length + LOGO_HEIGHT + 1) {

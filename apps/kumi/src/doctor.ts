@@ -7,8 +7,8 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
-import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
+import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, readLibraryState, since, whisperHint, type ProviderId } from "@kumi/runtime";
+import { findBridgeConfig, loadAuthFile, loadLibraryDir, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
@@ -123,6 +123,20 @@ async function extensionCheck(env: Env, configPath: string, server: BridgeServer
   return { status: "ok", text: `Kumi's extension ${installed.version} is in Live; it starts with Live` };
 }
 
+/** What Kumi knows of the producer's library, and whether it's still learning it. */
+async function libraryCheck(env: Env, now = Date.now()): Promise<Check | undefined> {
+  let dir: string;
+  try { dir = loadLibraryDir(env); } catch { return undefined; }
+  const state = await readLibraryState(dir).catch(() => undefined);
+  const counted = (sounds: number, presets: number, sets: number) => `${sounds.toLocaleString("en-US")} sounds, ${presets.toLocaleString("en-US")} presets, ${sets.toLocaleString("en-US")} Sets`;
+  if (state?.learning) {
+    const { learning } = state;
+    return { status: "ok", text: `Learning your library in the background${learning.phase === "sounds" && learning.sounds.todo ? `: ${learning.sounds.done.toLocaleString("en-US")} of ${learning.sounds.todo.toLocaleString("en-US")} new sounds` : ""}${state.last ? ` (knows ${counted(state.last.sounds, state.last.presets, state.last.sets)})` : ""}` };
+  }
+  if (state?.last) return { status: "ok", text: `Knows your library: ${counted(state.last.sounds, state.last.presets, state.last.sets)} (learned ${since(state.last.finishedAt, now)})` };
+  return { status: "note", text: "Kumi hasn't learned your library yet", next: `It learns by itself while Kumi runs; ${KUMI} library shows where it's at` };
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
@@ -180,6 +194,8 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     try { accessSync(projects, constants.W_OK); } catch { try { accessSync(dirname(projects), constants.W_OK); } catch { writable = false; } }
     checks.push(writable ? { status: "ok", text: `Remembers Sets in ${tilde(projects)}` } : { status: "note", text: `Can't write ${tilde(projects)}, so Kumi won't catch you up on Sets`, next: "Check that folder's permissions, or set KUMI_PROJECTS_DIR" });
   } catch { /* an invalid KUMI_PROJECTS_DIR is reported when Kumi starts */ }
+  const library = await libraryCheck(env);
+  if (library) checks.push(library);
   // Watching videos: yt-dlp comes by itself when first needed; ffmpeg and whisper.cpp are the producer's.
   const programs = await (io.videoPrograms ?? (async () => ({ ffmpeg: await findFfmpeg({ env, toolsDir: loadToolsDir(env), installedOnly: true }), whisper: await findWhisper({ env, toolsDir: loadToolsDir(env), installedOnly: true }) })))().catch(() => ({ ffmpeg: undefined, whisper: undefined }));
   if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });

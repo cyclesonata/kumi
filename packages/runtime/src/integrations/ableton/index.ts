@@ -47,8 +47,8 @@ const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: ac
 /** How many devices added while watching Kumi reads the settings of. */
 const WATCH_DEVICES = 12;
 const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools (or play, record, fire_scene and the like) with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) lets a recording run, as in bouncing a sound to audio: route and arm a new audio track, record, play, wait, stop. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
-const FIND_SAMPLES = "find_samples";
-const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
+const FIND_SAMPLES = "find_sounds";
+const FIND_SAMPLES_DESCRIPTION = "Find sounds on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
 const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
   folders: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 }, description: "Folders to search, such as ~/Samples; Live's User Library when empty" },
   words: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 64 }, description: "Every word must appear in the file's name or its folders" },
@@ -180,7 +180,7 @@ export function createAbletonIntegration(options: Options): Integration {
   const known = new Map<string, KnownTrack>();
   /** Kumi's changes while this bridge connection lives; its transactions are what undo uses. */
   const changes = new Map<string, Applied>();
-  /** Samples find_samples returned, by path, with the folder searched (any other audio file loads by its path too). */
+  /** Samples find_sounds returned, by path, with the folder searched (any other audio file loads by its path too). */
   const samples = new Map<string, Sample>();
   let changesThisTurn = 0;
   /** Samples Kumi picked itself in this answer, so random picks don't repeat. */

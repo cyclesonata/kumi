@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import {
-  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createMemoryStore, createProjectStore, createRecipeStore, createGoalStore, createPlaybookStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
+  createAbletonIntegration, createAgentKernel, createConversationStore, createInferenceOnlyIntegration, createLibrary, createMemoryStore, createProjectStore, createRecipeStore, createGoalStore, createPlaybookStore, createSession, createTechniqueStore, configurePrograms, KUMI_VERSION, KumiError, openCredentialStore, withFallback,
   type Kernel, type KernelCheckpoint,
 } from "@kumi/runtime";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join } from "node:path";
-import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadGoalsDir, loadMemoryFile, loadRestoreFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
+import { liveUserLibrary, loadConfig, loadGapsFile, loadInputHistoryFile, loadGoalsDir, loadLibraryDir, loadMemoryFile, loadRestoreFile, loadPlaybookFile, loadTechniquesFile, loadProjectsDir, loadRecipesDir, loadSettingsFile, loadToolsDir, loadVideosDir, readSettings, safeError, SUPPORTED_NODE_MAJORS, writeSettings } from "./config.js";
 import { openInputHistory } from "./history.js";
 import { setupBridge } from "./bridge-setup.js";
 import { readBridgeServer, runDoctor, type LiveProbe } from "./doctor.js";
 import { writeReport } from "./report.js";
+import { runLibrary } from "./library.js";
 import { checkCheckout, newerKumi, olderBridge, runUpdate, type UpdateControl } from "./update.js";
 import { checkRelease, newerRelease, rollbackInstalled, uninstallInstalled, updateInstalled } from "./install.js";
 import { authStatus, login, logout, openBrowser } from "./login.js";
@@ -45,6 +46,7 @@ ${helpRows([
   [sub("model [<provider>/<model>]"), "Show or choose the model"],
   [sub("auth"), "Show which providers are usable (no secrets)"],
   [sub("doctor"), "Check sign-in, the bridge, Live and the terminal"],
+  [sub("library"), "What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"],
   [sub("update"), "Bring Kumi up to date, and the bridge in Live when it's older"],
   [sub("update --check"), "Say whether there's a newer Kumi, without installing it"],
   ...(INSTALLED ? [[sub("update --rollback"), "Go back to the Kumi you had before the last update"] as const, [sub("uninstall"), "Remove Kumi (your conversations and notes stay unless you say)"] as const] : []),
@@ -140,6 +142,11 @@ try {
     if (INSTALLED) process.exitCode = await uninstallInstalled({ out: process.stdout, env: process.env, input: process.stdin }, config);
     else { process.stdout.write("This Kumi runs from a copy of its repository; delete that folder to remove it (your files are in ~/.kumi).\n"); process.exitCode = 1; }
   }
+  else if (config.mode === "library") {
+    const cancel = new AbortController(); const interrupt = () => cancel.abort(); process.once("SIGINT", interrupt);
+    try { process.exitCode = await runLibrary({ out: process.stdout, env: process.env, rebuild: config.rebuild, signal: cancel.signal }); }
+    finally { process.removeListener("SIGINT", interrupt); }
+  }
   else if (config.mode === "report") process.exitCode = await writeReport({ out: process.stdout, env: process.env, probeLive, ...(bundledBridgeVersion ? { bundledBridgeVersion } : {}) });
   else if (config.mode === "help") process.stdout.write(HELP);
   else if (config.mode === "version") process.stdout.write(`Kumi ${KUMI_VERSION}\n`);
@@ -183,6 +190,8 @@ try {
       if (credential.type === "oauth") secrets.push(credential.access, credential.refresh); else secrets.push(credential.key);
     }
     let terminal: Terminal | undefined;
+    // The producer's sounds, presets and Sets, learned in the background (held while Live plays).
+    const library = createLibrary({ dir: loadLibraryDir(), folders: readSettings(loadSettingsFile()).libraryFolders ?? [], projectsDir: loadProjectsDir() });
     // A missing sign-in or model isn't a reason not to start: the app offers /login and /model.
     const models = createModelControl({ store, settingsFile: loadSettingsFile(), env: process.env, changed: async () => { await controller.reconfigure?.(); } });
     const controller = createSession({
@@ -194,7 +203,7 @@ try {
         : withFallback(createAbletonIntegration({ onConnection, bridgeConfig: config.bridgeConfig,
           onFocus: (focus) => terminal?.handleEvent({ type: "focus", focus }),
           onPointed: (pin) => terminal?.handleEvent({ type: "pointed", pin }),
-          onTransport: (transport) => terminal?.handleEvent({ type: "transport", transport }),
+          onTransport: (transport) => { if (transport?.playing) library.pause(); else library.resume(); terminal?.handleEvent({ type: "transport", transport }); },
           // Kumi's changes are kept with the conversation too, for its HISTORY when it's resumed.
           onChange: (change) => { controller.watch?.({ type: "change", change }); terminal?.handleEvent({ type: "change", change }); },
           onAction: (action) => { controller.watch?.({ type: "action", ...action }); terminal?.handleEvent({ type: "action", ...action }); },
@@ -227,6 +236,7 @@ try {
       gaps: loadGapsFile(),
       watch: { videosDir: loadVideosDir(), toolsDir: loadToolsDir() },
       web: true,
+      library,
     });
     // The full-screen app needs a real terminal; pipes, and KUMI_UI=plain (e.g. for screen readers), get plain lines.
     const fullScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.env.KUMI_UI !== "plain";
@@ -244,6 +254,7 @@ try {
     const terminate = () => { void terminal?.close(); };
     process.on("SIGINT", interrupt); process.on("SIGTERM", terminate);
     const running = terminal.run();
+    library.start();
     // A newer Kumi, asked at most once a day while Kumi starts (in the background: nothing waits for it, and
     // nothing is said without one). "updateCheck": false in settings.json, or KUMI_NO_UPDATE_CHECK, turns it off.
     if (readSettings(loadSettingsFile()).updateCheck !== false && !process.env.KUMI_NO_UPDATE_CHECK) {
@@ -253,6 +264,8 @@ try {
     try { process.exitCode = await running; }
     finally {
       process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", terminate);
+      // Learning stops between files; what it learned is kept for next time.
+      await library.close().catch(() => {});
       // Normally exit naturally. A leaked dependency handle must not hang the TUI
       // indefinitely after bounded cleanup. Only this Kumi process is terminated.
       if (!updateAfter) {

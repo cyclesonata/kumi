@@ -484,7 +484,7 @@ function countOnsets(strength: Float64Array): number {
 }
 
 /** Tempo from the onset curve's autocorrelation, 60–200 BPM, preferring the 90–160 range listeners tap. */
-function estimateTempo(strength: Float64Array, rate: number): { bpm: number; confidence: number } | null {
+export function estimateTempo(strength: Float64Array, rate: number): { bpm: number; confidence: number } | null {
   const minLag = Math.floor(rate * 60 / 200); const maxLag = Math.ceil(rate * 60 / 60);
   if (strength.length < maxLag * 3) return null;
   const mean = strength.reduce((sum, value) => sum + value, 0) / strength.length;
@@ -515,7 +515,7 @@ function estimateTempo(strength: Float64Array, rate: number): { bpm: number; con
 const MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 /** The key whose (Krumhansl–Kessler) profile best matches the music's pitch classes. */
-function estimateKey(chroma: Float64Array): { name: string; confidence: number } | null {
+export function estimateKey(chroma: Float64Array): { name: string; confidence: number } | null {
   const total = chroma.reduce((sum, value) => sum + value, 0);
   if (!(total > 0)) return null;
   const correlate = (profile: number[], tonic: number) => {
@@ -583,7 +583,7 @@ function amplitudeEnvelope(mono: Float32Array, sampleRate: number) {
 }
 
 /** YIN pitch (cumulative mean normalized difference), computed with FFT autocorrelation. */
-function trackPitch(mono: Float32Array, sampleRate: number): { hz: number; confidence: number; at: number }[] {
+export function trackPitch(mono: Float32Array, sampleRate: number): { hz: number; confidence: number; at: number }[] {
   const size = 2048; const maxLag = size; const hop = 1024;
   const out: { hz: number; confidence: number; at: number }[] = [];
   const fftSize = 4096;
