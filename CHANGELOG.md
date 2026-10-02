@@ -3,7 +3,12 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## Unreleased
+## 1.4.0 — 2026-10-02
+
+You can see what Kumi is doing and talk to it while it works: each step animates by kind, repeats
+fold into one line, Enter tells Kumi more mid-answer, Tab queues a message, `/btw` asks on the side,
+and a yellow light blinks on Live's beat. Nothing is cut from the conversation. Ships with bridge
+1.0.69.
 
 ### Seeing and talking to Kumi while it works
 
