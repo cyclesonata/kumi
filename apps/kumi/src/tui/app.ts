@@ -19,6 +19,7 @@ import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
 import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
+import { activityGlyph, activityOf, activityScene, shimmer, type Activity } from "./activity.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
 import { LOGO_HEIGHT, LOGO_LETTERS, LOGO_RULE, LOGO_WIDTH } from "./logo.js";
@@ -104,6 +105,8 @@ const COMMANDS = [
 
 const MENU_NAME_WIDTH = Math.max(...COMMANDS.map((command) => command.name.length));
 
+/** Keeping notes and recipes shows as a line of its own, not a step. */
+const QUIET_TOOLS: readonly string[] = [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL];
 /** Kumi's tools that act in Live without changing the Set. */
 const ACTION_TOOLS: ReadonlySet<string> = new Set(["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"]);
 /** Offered only with a ModelControl to answer them. */
@@ -111,7 +114,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -119,7 +122,8 @@ const TREE_REFRESH_MS = 4_000;
 /** And the Arrangement strip, whose playhead moves. */
 const STRIP_REFRESH_MS = 1_500;
 const WIDE = 100;
-const MAX_OUTPUT_BYTES = 256 * 1024;
+/** Past this an answer is stopped: a model writing without end, not an answer to read (a long one is a few tens of KB). */
+const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const FAREWELL = "Kumi closed. Each Set's conversation continues next time.";
 
 const st = {
@@ -215,6 +219,9 @@ export function setNameFrom(label: string): string | undefined {
 /** "3:05": minutes and seconds (hours when it's gone that long). */
 const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const seconds = String(whole % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`; };
 
+/** "3.1s": how long a step or an answer has taken. */
+const elapsed = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+
 /** The icon of what the producer pointed at in Live. */
 function pointedIcon(pin: PinnedNode): IconKind {
   if (pin.node === "track") return "midi-track";
@@ -302,8 +309,11 @@ export class TuiApp {
   private queued: string | undefined;
   private activity = "connecting to Live";
   private panel: Panel | undefined;
-  /** The model is writing a plan of changes (the call's id), which starts running as it's written. */
+  /** The model is writing a plan of changes (the call's id), which starts running as it's written; since when. */
   private planning: string | undefined;
+  private planningSince = 0;
+  /** When Kumi last became busy, for NOW's animation before an answer begins. */
+  private busySince = 0;
   /** Changes Kumi made in the answer under way, for NOW. */
   private turnChanges = 0;
   /** Going through what was sent before with the up arrow: where, and what was being typed. */
@@ -382,7 +392,7 @@ export class TuiApp {
           if (this.pendingTurn) {
             this.pendingTurn = false;
             this.suppress = false; this.failed = false; this.bytes = 0; this.stream.discard();
-            this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running" }) as Assistant;
+            this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running", startedAt: performance.now() }) as Assistant;
             this.scroll = 0;
             this.planning = undefined; this.turnChanges = 0;
           }
@@ -398,6 +408,8 @@ export class TuiApp {
           this.transcript.touch(this.current);
           this.current = undefined;
         }
+        if ((event.state === "running" || event.state === "cancelling") && !this.busySince) this.busySince = performance.now();
+        else if (event.state === "idle") this.busySince = 0;
         this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling");
         break;
       case "connection":
@@ -427,9 +439,17 @@ export class TuiApp {
         if (event.chosen) this.transcript.add({ kind: "divider", text: `Back to your conversation from ${when}` });
         else if (event.unreadable) this.notice(`Your conversation from ${when}, which this model can't continue:`, "info");
         else this.notice(`Continuing your conversation from ${when}. /new starts fresh.`, "info");
+        // The whole conversation comes back, each answer with its steps (repeats folded): nothing's cut.
+        let answer: Assistant | undefined;
         for (const line of event.lines) {
-          const text = sanitizeText(line.text, this.secrets).slice(0, 16 * 1024);
-          this.transcript.add(line.role === "user" ? { kind: "user", text } : { kind: "assistant", text, steps: [], status: "done" });
+          const text = sanitizeText(line.text, this.secrets);
+          if (line.role === "user") { answer = undefined; if (text) this.transcript.add({ kind: "user", text }); continue; }
+          answer ??= this.transcript.add({ kind: "assistant", text: "", steps: [], status: "done" }) as Assistant;
+          if (text) answer.text += `${answer.text ? "\n\n" : ""}${text}`;
+          for (const tool of line.tools ?? []) {
+            if (!QUIET_TOOLS.includes(tool)) answer.steps.push({ id: `resumed:${answer.steps.length}`, tool, label: stepLabel(tool), state: "done" });
+          }
+          this.transcript.touch(answer);
         }
         // Its HISTORY comes back too, older than anything this session changed, and without undo.
         const earlier = (event.changes ?? []).filter((change) => !this.changes.some((known) => known.id === change.id));
@@ -585,13 +605,13 @@ export class TuiApp {
       }
       case "tool-input":
         // A plan takes seconds to write; its changes start as it's written.
-        if (this.current && !this.suppress && event.name === "make_changes") this.planning = event.id;
+        if (this.current && !this.suppress && event.name === "make_changes") { this.planning = event.id; this.planningSince = performance.now(); }
         break;
       case "tool-start":
         if (this.planning === event.id) this.planning = undefined;
         // Keeping notes and recipes shows as a line of its own, not a step.
-        if (!this.current || this.suppress || [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL].includes(event.name)) break;
-        this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running" });
+        if (!this.current || this.suppress || QUIET_TOOLS.includes(event.name)) break;
+        this.current.steps.push({ id: event.id, tool: event.name, label: stepLabel(event.name), state: "running", startedAt: performance.now() });
         this.transcript.touch(this.current);
         break;
       case "tool-end": {
@@ -599,6 +619,7 @@ export class TuiApp {
         if (!step || !this.current) break;
         step.state = event.isError ? "error" : "done";
         step.ms = event.elapsedMs;
+        step.endedAt = performance.now();
         delete step.doing;
         this.transcript.touch(this.current);
         break;
@@ -648,6 +669,7 @@ export class TuiApp {
     if (this.closing) return this.done;
     this.closing = true;
     this.keepTreeFresh(false);
+    clearTimeout(this.wakeTimer);
     this.suppress = true;
     this.stream.discard();
     // A ChatGPT sign-in waiting on the browser stops listening; a half-typed key is dropped.
@@ -764,6 +786,9 @@ export class TuiApp {
     // Up and down move between the box's lines, then (past the first or last) through what was sent before.
     if (name === "up") { if (!this.editor.vertical(width, -1)) this.recallOlder(); return; }
     if (name === "down") { if (!this.editor.vertical(width, 1)) this.recallNewer(); return; }
+    // Ctrl+Home and Ctrl+End go to the start of the conversation and back to the latest.
+    if (ctrl && name === "home") { this.scroll = Number.MAX_SAFE_INTEGER; return; }
+    if (ctrl && name === "end") { this.scroll = 0; return; }
     if (name === "home" || (ctrl && name === "a")) { this.editor.home(); return; }
     if (name === "end" || (ctrl && name === "e")) { this.editor.end(); return; }
     if (ctrl && name === "k") { this.editor.killToEnd(); return; }
@@ -1545,6 +1570,19 @@ export class TuiApp {
     this.tty.write(this.renderer.frame(screen, this.closing ? undefined : cursor));
   }
 
+  private wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private wakeTime: number | undefined;
+  /** A frame at `at` (performance.now() time), for something that changes by itself then. */
+  private wakeAt(at: number, now = performance.now()): void {
+    if (this.closing) return;
+    if (at <= now + 1) { this.scheduler.request(); return; }
+    if (this.wakeTimer && this.wakeTime !== undefined && this.wakeTime <= at) return;
+    clearTimeout(this.wakeTimer);
+    this.wakeTime = at;
+    this.wakeTimer = setTimeout(() => { this.wakeTimer = undefined; this.wakeTime = undefined; if (!this.closing) this.scheduler.request(); }, Math.ceil(at - now));
+    this.wakeTimer.unref?.();
+  }
+
   private status(): { dot: Style; text: string } {
     if (this.options.mode === "inference-only" || this.connection === "disconnected" || this.connection === "error") return { dot: st.warn, text: "Live not connected" };
     if (this.connection === "connecting") return { dot: st.faint, text: "connecting to Live…" };
@@ -1577,15 +1615,20 @@ export class TuiApp {
   private drawConversation(screen: Screen, area: Rect): void {
     const textX = area.x + 3;
     const width = Math.max(1, area.width - 5);
-    const rows = this.transcript.rows(width);
+    const now = performance.now();
+    const rows = this.transcript.rows(width, now);
+    // Repeated steps fold a few seconds after the last of them: a frame then, and each frame while they fold.
+    const next = this.transcript.changeAt(now);
+    if (next !== undefined) this.wakeAt(next, now);
     if (!rows.length) { this.drawWelcome(screen, textX, area.y + 2, width, area.height - 2); return; }
     const total = rows.length;
-    if (this.scroll > 0 && total > this.lastTotal) this.scroll += total - this.lastTotal;
+    // Scrolled back, the view stays on what it shows as rows come (or fold away) below.
+    if (this.scroll > 0 && total !== this.lastTotal) this.scroll = Math.max(0, this.scroll + total - this.lastTotal);
     this.lastTotal = total;
     this.scroll = Math.min(this.scroll, Math.max(0, total - area.height));
     const start = Math.max(0, total - area.height - this.scroll);
     const clip: Rect = { x: area.x, y: area.y, width: area.width, height: area.height };
-    rows.slice(start, start + area.height).forEach((row, index) => this.drawRow(screen, row, textX, area.y + index, width, clip));
+    rows.slice(start, start + area.height).forEach((row, index) => this.drawRow(screen, row, textX, area.y + index, width, clip, now));
     if (this.scroll > 0) {
       const hint = "newer below · page down";
       screen.fill({ x: area.x, y: area.y + area.height - 1, width: area.width, height: 1 }, st.ground);
@@ -1593,13 +1636,32 @@ export class TuiApp {
     }
   }
 
-  private drawRow(screen: Screen, row: Row, x: number, y: number, width: number, clip: Rect): void {
+  private drawRow(screen: Screen, row: Row, x: number, y: number, width: number, clip: Rect, now: number): void {
     if (row.band) screen.fill({ x: x - 1, y, width: Math.min(row.band.width, width + 2), height: 1 }, { bg: row.band.bg });
     let column = x;
-    for (const span of row.spans) column = screen.put(column, y, span.text, span.style, clip);
-    if (row.trailing) {
-      const at = x + Math.min(width, 46) - textWidth(row.trailing.text);
-      if (at > column) screen.put(at, y, row.trailing.text, row.trailing.style, clip);
+    let trailing = row.trailing;
+    const live = row.live;
+    if (live) {
+      // What's under way moves: a step's own animation, its words shimmering, its time going up.
+      const end = x + Math.min(width, 46) - 7;
+      if (live.kind === "header") {
+        column = screen.put(column, y, "▾ ", st.faint, clip);
+        for (const span of shimmer(live.label, now - (live.since ?? 0))) column = screen.put(column, y, span.text, span.style, clip);
+        if (live.since !== undefined) trailing = { text: elapsed(now - live.since), style: st.faint };
+      } else {
+        const ms = now - live.since;
+        column = screen.put(column, y, "│ ", { fg: palette.rule }, clip);
+        const glyph = activityGlyph(live.activity, ms);
+        column = screen.put(column, y, glyph.text, glyph.style, clip);
+        column = screen.put(column, y, " ", st.dim, clip);
+        for (const span of shimmer(live.label, ms)) column = screen.put(column, y, span.text, span.style, clip);
+        if (live.doing && end - column > 4) column = screen.put(column, y, truncate(` · ${live.doing}`, end - column), st.faint, clip);
+        trailing = { text: elapsed(ms), style: st.faint };
+      }
+    } else for (const span of row.spans) column = screen.put(column, y, span.text, span.style, clip);
+    if (trailing) {
+      const at = x + Math.min(width, 46) - textWidth(trailing.text);
+      if (at > column) screen.put(at, y, trailing.text, trailing.style, clip);
     }
   }
 
@@ -1649,7 +1711,7 @@ export class TuiApp {
     return this.changes.find((change) => change.id === this.lastChange!.id);
   }
 
-  private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style } {
+  private nowLine(): { dot?: Style; label: string; detail: string; detailStyle: Style; activity?: { kind: Activity; since: number } } {
     if (this.closing) return { label: "", detail: "Closing…", detailStyle: st.dim };
     const state = this.options.controller.status().state;
     if (state === "cancelling" || this.cancelling) return { dot: st.faint, label: "stopping", detail: "Stopping…", detailStyle: st.dim };
@@ -1665,9 +1727,11 @@ export class TuiApp {
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
       if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
-      if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim };
-      if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim };
-      return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim };
+      if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim, activity: { kind: activityOf(running.tool), since: running.startedAt ?? performance.now() } };
+      if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim, activity: { kind: "code", since: this.planningSince } };
+      // Thinking since the last step ended, or since the answer began.
+      const since = this.current?.steps.at(-1)?.endedAt ?? this.current?.startedAt ?? this.busySince;
+      return { dot, label, detail: this.current ? "thinking" : this.activity, detailStyle: st.dim, activity: { kind: "think", since } };
     }
     const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
     // The newer of the two shows: a change Kumi made, or what it did or kept.
@@ -1739,12 +1803,21 @@ export class TuiApp {
       screen.put(at, area.y + nowAt, "●", now.dot);
       screen.put(at + 1, area.y + nowAt, label, st.dim);
     }
-    put(nowAt + 1, now.detail, now.detailStyle);
+    const moment = performance.now();
+    if (now.activity) {
+      // What's under way shimmers, and its own animation plays under it (a change Kumi just made shows instead).
+      let column = x;
+      for (const span of shimmer(truncate(now.detail, width), moment - now.activity.since)) column = screen.put(column, area.y + nowAt + 1, span.text, span.style);
+    } else put(nowAt + 1, now.detail, now.detailStyle);
     const picture = this.flashing() ? changePicture(this.flashing()!, width, this.depth) : undefined;
     picture?.slice(0, 2).forEach((line, row) => {
       let column = x;
       for (const part of line) column = screen.put(column, area.y + nowAt + 2 + row, part.text, part.style);
     });
+    if (!picture && now.activity) {
+      let column = x;
+      for (const span of activityScene(now.activity.kind, moment - now.activity.since, Math.min(width, 28))) column = screen.put(column, area.y + nowAt + 2, span.text, span.style);
+    }
     // The lower half, anchored to the bottom: the tab strip, then the active tab (HISTORY) filling the rest.
     const bottom = this.bottomHeight(area.height);
     const top = area.y + area.height - bottom;
@@ -2004,6 +2077,11 @@ export class TuiApp {
         screen.put(2, area.y + 1, truncate(`✓ ${last.title}`, Math.max(1, at - 4)), st.text);
         screen.put(at, area.y + 1, hint, st.accent);
         this.hits.push({ x: at, y: area.y + 1, width: textWidth(hint), action: () => { void this.undo(last.id); } });
+      } else if (now.activity) {
+        // Narrow: the step's own glyph, then its words.
+        const glyph = activityGlyph(now.activity.kind, performance.now() - now.activity.since);
+        screen.put(2, area.y + 1, glyph.text, glyph.style);
+        screen.put(4, area.y + 1, truncate(now.detail, area.width - 6), now.detailStyle);
       } else screen.put(2, area.y + 1, truncate(now.detail, area.width - 4), now.detailStyle);
     }
   }

@@ -365,7 +365,8 @@ test("long conversations stay in budget: earlier reads are cleared in requests a
   assert.equal(output(prompt[6]), output({ role: "tool", content: [{ type: "tool-result", toolCallId: "c3", toolName: "read", output: { type: "text", value: big } }] }));
   assert.match(output(prompt[4]), /current_observation_untrusted/);
   assert.match(output(h.kernel.checkpoint().messages[2]), /Kumi cleared the rest/);
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "answer 1", "two", "answer 2", "three", "answer 3"]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["one", "answer 1", "two", "answer 2", "three", "answer 3"]);
+  assert.deepEqual(h.kernel.transcript().flatMap((line) => line.tools ?? []), ["read", "read", "read"], "each answer's steps come back with it");
   await h.kernel.close();
 });
 
@@ -380,14 +381,14 @@ test("a stopped turn keeps the steps it finished, with a note; the step in progr
   await h.kernel.run("one", new AbortController().signal, () => {});
   mode = "fail";
   await assert.rejects(h.kernel.run("two", new AbortController().signal, () => {}));
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "fine", "two", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["one", "fine", "two", STOPPED_NOTE]);
   assert.deepEqual(h.kernel.checkpoint().messages.slice(3).map((message) => (message as { role: string }).role), ["assistant", "tool", "assistant"], "the read and its result stay; the failed step goes");
   mode = "hang";
   const controller = new AbortController();
   const stopped = h.kernel.run("three", controller.signal, () => {});
   await delay(20); controller.abort();
   assert.equal((await stopped).stopReason, "cancelled");
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text).slice(-2), ["three", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text).slice(-2), ["three", STOPPED_NOTE]);
   const settled = h.kernel.checkpoint().messages;
   mode = "hang-first";
   const early = new AbortController();
@@ -424,7 +425,7 @@ test("when a stopped turn's steps are kept, so is the budget's trimming for them
   mode = "fail";
   await assert.rejects(h.kernel.run("four", new AbortController().signal, () => {}));
   assert.match(JSON.stringify(h.kernel.checkpoint().messages[0]), /Kumi removed the earlier part/, "the model is told the start is gone");
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["four", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["four", STOPPED_NOTE]);
   await h.kernel.close();
 });
 

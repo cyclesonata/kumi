@@ -383,7 +383,7 @@ export function createSession(options: Options): SessionController {
       kernel = { value, key: observation.key, revision, lifetime: built.lifetime };
       const set = observation.project?.name ?? "this Set";
       if (unreadable) {
-        emit({ type: "resumed", savedAt: unreadable.savedAt, lines: transcriptOf(unreadable.checkpoint.messages).slice(-20), unreadable: true });
+        emit({ type: "resumed", savedAt: unreadable.savedAt, lines: transcriptOf(unreadable.checkpoint.messages), unreadable: true });
         emit({ type: "notice", message: "Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here." });
       } else {
         if (reason === "set") emit({ type: "notice", message: resumed ? `The open Set changed; continuing your conversation about ${set}.` : "The open Set changed; starting a fresh conversation." });
@@ -392,7 +392,7 @@ export function createSession(options: Options): SessionController {
         // Show the earlier exchanges when this conversation isn't already on screen.
         // Changes HISTORY shows already (made while Kumi's been running) aren't listed again.
         const earlier = conversationChanges.filter((change) => !ours(change));
-        if (resumed && (first || reason === "set" || picked)) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.().slice(-20) ?? [],
+        if (resumed && (first || reason === "set" || picked)) emit({ type: "resumed", savedAt: resumed.savedAt, lines: value.transcript?.() ?? [],
           ...(earlier.length ? { changes: earlier } : {}), ...(picked ? { chosen: true } : {}) });
       }
     }

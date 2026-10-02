@@ -114,7 +114,7 @@ test("typing and sending, then streaming text and steps in plain words, then the
   let lines = h.screen();
   assert.ok(has(lines, "The kick and bass are fighting around 200 Hz, [redacted]."), "secrets never reach the screen");
   assert.ok(!lines.join("\n").includes("private-token"));
-  assert.ok(has(lines, "│ … looked at your Set"));
+  assert.ok(lines.some((line) => /│ \S looking at your Set/.test(line)), "a step at work says what it's doing, in its own animation");
   assert.ok(has(lines, "working") && has(lines, "esc to stop"));
   h.emit({ type: "tool-end", id: "t1", name: "live_discover", isError: false, elapsedMs: 300 });
   lines = h.screen();
@@ -122,7 +122,8 @@ test("typing and sending, then streaming text and steps in plain words, then the
   h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 3100 });
   h.emit({ type: "state", state: "idle" });
   lines = h.screen();
-  assert.ok(has(lines, "▸ 1 step · 3.1s"));
+  assert.ok(has(lines, "▾ 1 step · 3.1s"));
+  assert.ok(has(lines, "│ ✓ looked at your Set"), "a finished answer keeps its steps");
   assert.ok(has(lines, "Ready"));
   assert.ok(!has(lines, "live_discover"), "tool names stay out of sight");
   await h.app.close();

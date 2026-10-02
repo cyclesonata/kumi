@@ -78,7 +78,8 @@ export interface KernelCheckpoint {
 }
 
 /** One exchange of a conversation, as the producer saw it. */
-export interface TranscriptLine { role: "user" | "assistant"; text: string }
+/** A line of a conversation as the producer saw it; an answer's line names the tools it called. */
+export interface TranscriptLine { role: "user" | "assistant"; text: string; tools?: string[] }
 
 export interface Kernel {
   run(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void): Promise<TurnResult>;
