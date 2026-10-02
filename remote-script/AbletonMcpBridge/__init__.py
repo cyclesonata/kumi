@@ -341,7 +341,19 @@ class _WillingtonProvider:
                 self.devices = install()
             if config.get("rackZones", False):
                 from WillingtonRackZones.api import install
-                self.zones = install()
+                unavailable_errors = ()
+                try:
+                    from WillingtonRuntime import ComponentUnavailableError
+                except ImportError:
+                    pass  # Older single-build packages have no typed availability error.
+                else:
+                    unavailable_errors = (ComponentUnavailableError,)
+                try:
+                    self.zones = install()
+                except unavailable_errors as error:
+                    # Exact-profile refusal occurs before any native loading or patches.
+                    # Other failures still trigger full teardown in the outer handler.
+                    if callable(log): log("Willington Rack Zones unavailable: " + str(error))
             if config["enableWrites"]:
                 # Follow bindings require evidence for this exact compiled library,
                 # matching the standalone adapter's operator enablement contract.

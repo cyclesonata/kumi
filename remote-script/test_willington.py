@@ -290,6 +290,138 @@ class ProviderTests(unittest.TestCase):
                 self.assertTrue(any('self-test.json' in line for line in logs))
                 provider.close()
 
+    def test_refused_rack_zone_profile_preserves_follow_and_device_tools(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        from test_remote_script import FakeRackDevice
+        import AbletonMcpBridge as wrapper
+        class ComponentUnavailableError(RuntimeError): pass
+        refusal = 'Willington WillingtonRackZones unavailable: 0 exact validated profiles'
+        for writes in (False, True):
+            with self.subTest(enableWrites=writes), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                config = root / 'willington.json'
+                config.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True,
+                                              'rackZones': True, 'enableWrites': writes}))
+                config.chmod(0o600); _protect_windows_owner_only(config)
+                library = root / 'libwillington.dylib'; library.write_bytes(b'validated follow library')
+                (root / 'self-test.json').write_text(json.dumps({
+                    'status': 'passed', 'library_sha256': hashlib.sha256(library.read_bytes()).hexdigest()}))
+                song = FakeSong(); clip = FollowClip(); rack = FakeRackDevice()
+                song.tracks[0].clip_slots[0].clip = clip; song.tracks[0].devices = [rack]
+                rack.rename_macro = lambda index, name: setattr(rack.macros[index], 'name', name)
+                mapper = LiveObjectMapper(song); live = types.SimpleNamespace(); calls = []; logs = []
+                follow = types.SimpleNamespace(path=str(library),
+                    willington_enable_writes=lambda value: calls.append(('follow', value)))
+                devices = types.SimpleNamespace(enable=lambda value: calls.append(('devices', value)),
+                    uninstall=lambda: calls.append(('devices', 'uninstall')))
+                def refuse_zones():
+                    calls.append(('zones', 'install'))
+                    raise ComponentUnavailableError(refusal)
+                modules = {'Live': live,
+                    'WillingtonBindings': types.SimpleNamespace(__file__=str(root / 'bindings.py'), install=lambda: follow),
+                    'WillingtonDeviceTools.api': types.SimpleNamespace(install=lambda: devices),
+                    'WillingtonRackZones.api': types.SimpleNamespace(install=refuse_zones),
+                    'WillingtonRuntime': types.SimpleNamespace(ComponentUnavailableError=ComponentUnavailableError)}
+                with patch.object(wrapper, '__file__', str(root / '__init__.py')), patch.dict('sys.modules', modules):
+                    provider = wrapper._WillingtonProvider(mapper, logs.append)
+                    self.assertIs(provider.follow, follow); self.assertIs(provider.devices, devices)
+                    self.assertIsNone(provider.zones); self.assertIs(live._kumi_willington_owner, provider)
+                    self.assertEqual(mapper.willington_follow_writes, writes)
+                    self.assertEqual(mapper.willington_device_writes, writes)
+                    self.assertFalse(mapper.willington_zone_writes)
+                    self.assertNotIn(('devices', 'uninstall'), calls)
+                    self.assertIn('Willington Rack Zones unavailable: ' + refusal, logs)
+                    self.assertFalse(any('extensions unavailable' in line for line in logs))
+                    self.assertEqual(mapper._operation_supported('clip.follow-actions.set'), writes)
+                    self.assertEqual(mapper._operation_supported('willington.device.set'), writes)
+                    if writes:
+                        snapshot = mapper.snapshot(); row = snapshot['tracks'][0]['clips'][0]
+                        before = mapper._follow_action_fields(clip)
+                        mapper.invoke('clip.follow-actions.set', {**before, 'followActionEnabled': True,
+                            'ref': row['ref'], 'expectedObjectIdentity': row['objectIdentity'],
+                            'expectedAuthorityRevision': mapper._clip_authority_digest(row['ref']),
+                            'expectedStateRevision': hashlib.sha256(mapper._bounded_canonical(before).encode()).hexdigest()})
+                        self.assertTrue(clip.follow_action_enabled)
+                        selector = {'ref': snapshot['tracks'][0]['devices'][0]['ref'], 'kind': 'macro-name', 'macroIndex': 0}
+                        state = mapper.invoke('willington.device.read', selector)
+                        mapper.invoke('willington.device.set', {**selector, 'next': {'name': 'Preserved'},
+                            'expectedStateRevision': state['stateRevision']})
+                        self.assertEqual(rack.macros[0].name, 'Preserved')
+                    provider.close(); provider.close()
+                    self.assertEqual(calls.count(('devices', 'uninstall')), 1)
+                    self.assertEqual(calls[-1], ('devices', 'uninstall'))
+                    self.assertFalse(mapper.willington_follow_writes)
+                    self.assertFalse(mapper.willington_device_writes)
+                    self.assertFalse(mapper.willington_zone_writes)
+                    self.assertIsNone(live._kumi_willington_owner)
+                    self.assertIsNone(provider.follow); self.assertIsNone(provider.devices)
+
+    def test_unexpected_zone_startup_failures_still_tear_down_all_providers(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        import AbletonMcpBridge as wrapper
+        class ComponentUnavailableError(RuntimeError): pass
+        for failure in ('install', 'enable'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); config = root / 'willington.json'
+                config.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True,
+                                              'rackZones': True, 'enableWrites': True}))
+                config.chmod(0o600); _protect_windows_owner_only(config)
+                calls = []; logs = []; live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
+                follow = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(('follow', value)))
+                devices = types.SimpleNamespace(enable=lambda value: calls.append(('devices', value)),
+                    uninstall=lambda: calls.append(('devices', 'uninstall')))
+                def fail(): raise RuntimeError('unexpected zone ' + failure + ' failure')
+                zones = types.SimpleNamespace(enable=lambda value: fail(),
+                    uninstall=lambda: calls.append(('zones', 'uninstall')))
+                modules = {'Live': live,
+                    'WillingtonBindings': types.SimpleNamespace(__file__=str(root / 'bindings.py'), install=lambda: follow),
+                    'WillingtonDeviceTools.api': types.SimpleNamespace(install=lambda: devices),
+                    'WillingtonRackZones.api': types.SimpleNamespace(install=fail if failure == 'install' else lambda: zones),
+                    'WillingtonRuntime': types.SimpleNamespace(ComponentUnavailableError=ComponentUnavailableError)}
+                with patch.object(wrapper, '__file__', str(root / '__init__.py')), patch.dict('sys.modules', modules):
+                    provider = wrapper._WillingtonProvider(mapper, logs.append)
+                    self.assertFalse(mapper.willington_follow_writes)
+                    self.assertFalse(mapper.willington_device_writes)
+                    self.assertFalse(mapper.willington_zone_writes)
+                    self.assertIsNone(provider.follow); self.assertIsNone(provider.devices); self.assertIsNone(provider.zones)
+                    self.assertIsNone(live._kumi_willington_owner)
+                    self.assertEqual(calls.count(('devices', 'uninstall')), 1)
+                    self.assertEqual(calls.count(('zones', 'uninstall')), int(failure == 'enable'))
+                    self.assertEqual(calls.count(('follow', False)), 2)
+                    self.assertTrue(any('extensions unavailable: unexpected zone ' + failure in line for line in logs))
+                    provider.close()
+                    self.assertEqual(calls.count(('devices', 'uninstall')), 1)
+
+    def test_legacy_rack_zone_packages_without_typed_runtime_still_install(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        import AbletonMcpBridge as wrapper
+        for runtime in (None, types.SimpleNamespace()):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); config = root / 'willington.json'
+                config.write_text(json.dumps({'version': 1, 'followActions': False, 'deviceTools': False,
+                                              'rackZones': True, 'enableWrites': True}))
+                config.chmod(0o600); _protect_windows_owner_only(config)
+                calls = []; logs = []; live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
+                zones = types.SimpleNamespace(enable=calls.append, uninstall=lambda: calls.append('uninstall'))
+                modules = {'Live': live, 'WillingtonRuntime': runtime,
+                           'WillingtonRackZones.api': types.SimpleNamespace(install=lambda: zones)}
+                with patch.object(wrapper, '__file__', str(root / '__init__.py')), patch.dict('sys.modules', modules):
+                    provider = wrapper._WillingtonProvider(mapper, logs.append)
+                    self.assertIs(provider.zones, zones); self.assertIs(live._kumi_willington_owner, provider)
+                    self.assertTrue(mapper.willington_zone_writes)
+                    self.assertEqual(calls, [True])
+                    self.assertFalse(any('unavailable' in line for line in logs))
+                    provider.close(); provider.close()
+                    self.assertEqual(calls, [True, 'uninstall'])
+                    self.assertFalse(mapper.willington_zone_writes)
+                    self.assertIsNone(live._kumi_willington_owner)
+
     def test_follow_evidence_uses_selected_profile_library(self):
         import tempfile, json, types
         from pathlib import Path
