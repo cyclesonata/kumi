@@ -42,7 +42,9 @@ Inside Kumi, `/login` signs in: to ChatGPT with your plan (the browser opens and
 the sign-in comes back on `localhost:1455`), or to Anthropic, OpenAI or OpenCode
 with an API key, pasted into a box that shows only dots. Kumi checks a key with
 its provider before keeping it. `/model` lists every provider's models, read from
-the provider itself, so a model released today is there without a Kumi update.
+the provider itself, so a model released today is there without a Kumi update,
+and the models on this computer, which need no sign-in
+([models on this computer](#models-on-this-computer)).
 With no model chosen yet, Kumi starts with the first model a signed-in provider
 lists, and says which. `/effort` sets how hard the model thinks, from the levels
 that model takes (lower answers sooner). `/logout` signs out. Choices apply from
@@ -58,6 +60,7 @@ kumi login anthropic               # asks for the key without showing it; also o
 kumi logout <provider>             # remove Kumi's sign-in there
 kumi model                         # show the model
 kumi model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
+kumi model ollama/<model>          # one on this computer (also lmstudio/<model>); no sign-in
 kumi auth                          # which providers are usable; never prints secrets
 kumi doctor                        # check Node, sign-in, the bridge, Live and the terminal
 kumi update                        # bring Kumi up to date, and the bridge in Live when it's older
@@ -111,6 +114,9 @@ repository file.
 | Anthropic API | `anthropic/<model>` | `/login` with an API key, or `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | `/login` with an API key, or `OPENAI_API_KEY` |
 | OpenCode Zen / Go | `opencode/<model>`, `opencode-go/<model>` | `/login` with an API key (one for both), or `OPENCODE_API_KEY` |
+| Ollama, on this computer | `ollama/<model>` | None: found while it runs |
+| LM Studio, on this computer | `lmstudio/<model>` | None: found while its server runs |
+| Another OpenAI-compatible server | `<name>/<model>` | Named in `~/.kumi/settings.json`, with a key if it wants one |
 
 Effort goes to ChatGPT and OpenAI models as their reasoning effort and to Claude
 as its `effort`; each model offers its own levels, and "Default" leaves it to the
@@ -129,7 +135,9 @@ yet.
 | --- | --- |
 | `KUMI_MODEL` | `<provider>/<model>` for this run, overriding the chosen model |
 | `KUMI_AUTH_FILE` | Credential store path; default `~/.kumi/auth.json` |
-| `KUMI_SETTINGS_FILE` | Settings (chosen model and effort) path; default `~/.kumi/settings.json` |
+| `KUMI_SETTINGS_FILE` | Settings (chosen model, effort, model servers) path; default `~/.kumi/settings.json` |
+| `OLLAMA_HOST` | Where Ollama listens, as Ollama reads it; default `127.0.0.1:11434` |
+| `LM_API_TOKEN` | LM Studio's API token, when its server requires one |
 | `KUMI_MEMORY_FILE` | Notes about you; default `~/.kumi/memory.json` |
 | `KUMI_INPUT_HISTORY_FILE` | What you sent, for the up arrow (keys and tokens left out); default `~/.kumi/input-history` |
 | `KUMI_TECHNIQUES_FILE` | Techniques Kumi learned from what it built that you liked; default `~/.kumi/techniques.json` |
@@ -152,6 +160,38 @@ Kumi identifies itself to providers (`kumi/<version>` User-Agent, `originator: k
 for ChatGPT). Requests are stateless: conversation history, including encrypted
 reasoning, lives in Kumi's process and is replayed per request. There are no
 ambient instructions, skills, extensions, shell, filesystem, coding, or web tools.
+
+### Models on this computer
+
+- **Ollama** and **LM Studio** are found while they run, with no sign-in.
+  `/model` lists each as its own provider ("Ollama · on this computer"), with
+  the models the server has, read from it; one that's installed but closed says
+  how to start it. Signed in nowhere, Kumi starts with one of their models that
+  can change the Set, one already loaded if there is one.
+- **Any other OpenAI-compatible server** (llama.cpp's `llama-server`, vLLM,
+  Jan…) goes in `~/.kumi/settings.json`. Its name becomes its id (`llama.cpp` is
+  `llama-cpp/<model>`), and an address without a path gets `/v1`:
+
+  ```json
+  { "modelServers": [
+    { "name": "llama.cpp", "baseURL": "http://127.0.0.1:8080/v1" },
+    { "name": "Studio PC", "baseURL": "http://192.168.1.20:8000/v1", "apiKey": "…" }
+  ] }
+  ```
+
+- **Room for Kumi's request.** Its instructions and tools alone are about 85 KB
+  (25-30k tokens). Kumi asks Ollama for room for them, the conversation and an
+  answer (about 57k tokens), up to what the model reads at most, and has LM
+  Studio load a model with that room when it isn't loaded with enough (it says
+  so when it reloads one). A server named in settings.json keeps its own
+  window: Kumi reads it where the server says, and keeps the conversation to
+  it. The room takes memory, often more than the model itself.
+- **A model that can't use tools** (as its server says) still talks about the
+  Set but can't change it; Kumi says so once and names one of the server's
+  models that can.
+- `/effort` offers levels only where the server reports them (Ollama's
+  thinking levels, LM Studio's reasoning options).
+- `kumi doctor` lists the servers it finds and what each has.
 
 ## Connect to Live
 
@@ -637,6 +677,15 @@ sending, when you choose.
   plainly with the fix offered (sign in, choose another model). An unbuilt Kumi,
   invalid configuration or startup failure is reported with the command that
   fixes it. Neither includes provider payloads or credentials.
+- **Models on this computer:** a server that isn't running, a model it doesn't
+  have, a model too big for the memory free, a window too small for Kumi's
+  instructions and tools, or a server stopping partway is each said with what
+  to do (`ollama serve`, `ollama pull <model>`, a smaller model, a larger
+  context), and Kumi offers to send the message again or choose another model.
+  A conversation that outgrows a server's window is kept shorter from then on.
+  Answers are mended as they stream where servers differ (calls without ids,
+  arguments as objects, thinking in `<think>` tags, no finish reason). Frames
+  and other pictures from Kumi's tools reach a local model only as words.
 - **Listening** hears files and recordings, not Live's output as it plays. It
   measures and compares; it doesn't judge taste. The model says what it heard
   from those numbers. Very long files are heard in part (up to 12 minutes).
@@ -654,7 +703,8 @@ sending, when you choose.
 ## Privacy and verification
 
 Your prompts, in-memory conversation and returned Live metadata are sent to the
-selected inference provider. Track/device names and tool results are untrusted
+selected inference provider; with a model on this computer they stay on it (a
+server named in settings.json gets them wherever it runs). Track/device names and tool results are untrusted
 data, not instructions or permission grants. Reading Live is not local-only.
 Kumi keeps saved Sets' conversations and its notes in `~/.kumi`, readable only by
 you; terminal scrollback and the provider's retention policies are separate.
