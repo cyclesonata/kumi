@@ -261,6 +261,17 @@ class RemoteScriptTests(unittest.TestCase):
             with patch("AbletonMcpBridge.os.getuid", return_value=path.stat().st_uid + 1):
                 self.assertFalse(_owner_controlled(path))
 
+    def test_windows_owner_check_rests_on_the_acl_where_ctypes_is_missing(self):
+        # Live's own Python on Windows comes without ctypes: the native comparison can't be made there.
+        package = __import__("AbletonMcpBridge")
+        path = Path(__file__).resolve()
+        with patch.dict(sys.modules, {"ctypes": None}):
+            self.assertIsNone(package._windows_owner_controlled(path))
+            for verdict in (True, False):
+                with patch("AbletonMcpBridge.os.name", "nt"), patch("AbletonMcpBridge._windows_acl_owner_only", return_value=verdict) as acl:
+                    self.assertEqual(_owner_controlled(path), verdict)
+                    acl.assert_called_once_with(path)
+
     def test_scheduled_callback_does_not_touch_bridge_after_disconnect(self):
         surface = object.__new__(__import__("AbletonMcpBridge").AbletonMcpBridge)
         surface._disconnected = True
