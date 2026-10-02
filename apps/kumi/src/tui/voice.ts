@@ -66,7 +66,8 @@ export class VoiceInput {
   /** Each take's number: what an earlier take hears back is dropped. */
   private take = 0;
   private abort: AbortController | undefined;
-  private listening: Listening | undefined;
+  /** The microphone while it's open. */
+  private mic: Listening | undefined;
   /** When this phase began. */
   private since = 0;
   /** When the take began, and whether ctrl+t began it (not /voice). */
@@ -90,16 +91,17 @@ export class VoiceInput {
   constructor(private readonly control: VoiceControl, private readonly host: VoiceHost) {}
 
   get active(): boolean { return this.phase !== "idle"; }
-  private get open(): boolean { return this.phase === "starting" || this.phase === "listening"; }
+  /** Getting ready to listen, or listening: ctrl+t now stops. */
+  get listening(): boolean { return this.phase === "starting" || this.phase === "listening"; }
 
   /** ctrl+t pressed; `repeat`: the terminal says it's held down. */
   press(repeat = false): void {
     const now = performance.now();
-    if (repeat) { if (this.open) this.held = "release"; return; }
+    if (repeat) { if (this.listening) this.held = "release"; return; }
     if (now < this.quietUntil) { this.quietUntil = now + LET_GO_MS; return; }
     if (this.phase === "idle") { this.start(true); return; }
     // Writing down: the next take waits for it.
-    if (!this.open) return;
+    if (!this.listening) return;
     if (this.held === "repeat" || (!this.releases && this.keyed && now - this.pressedAt < REPEAT_MS)) { this.held = "repeat"; this.lastPress = now; this.extend(); return; }
     this.quietUntil = now + LET_GO_MS;
     this.stop();
@@ -108,7 +110,7 @@ export class VoiceInput {
   /** ctrl+t let go, where the terminal says so: held down, listening stops as it's let go. */
   release(): void {
     this.releases = true;
-    if (this.open && this.keyed && performance.now() - this.pressedAt >= HOLD_MS) this.stop();
+    if (this.listening && this.keyed && performance.now() - this.pressedAt >= HOLD_MS) this.stop();
   }
 
   /** Enter: listening stops and what was said is sent; writing down, it's sent once written. False when it isn't voice's. */
@@ -125,7 +127,7 @@ export class VoiceInput {
     if (this.phase === "idle") return false;
     this.take++;
     this.abort?.abort();
-    const listening = this.listening;
+    const listening = this.mic;
     this.reset();
     listening?.cancel();
     return true;
@@ -140,7 +142,7 @@ export class VoiceInput {
     this.host.animate(true); this.host.redraw();
     void this.control.listen(this.io(take, abort)).then((listening) => {
       if (take !== this.take) { listening.cancel(); return; }
-      this.listening = listening; this.phase = "listening"; this.since = performance.now(); this.progress = undefined;
+      this.mic = listening; this.phase = "listening"; this.since = performance.now(); this.progress = undefined;
       this.sampler = setInterval(() => this.sample(), STEP_MS);
       this.sampler.unref?.();
       void listening.ended.then((why) => { if (take === this.take && this.phase === "listening") this.ended(why); });
@@ -156,12 +158,12 @@ export class VoiceInput {
   stop(send = false, at = performance.now()): void {
     clearTimeout(this.letGo); this.letGo = undefined;
     if (this.phase === "starting") { this.cancel(); return; }
-    const listening = this.listening;
+    const listening = this.mic;
     if (this.phase !== "listening" || !listening) return;
     const take = this.take; const abort = this.abort!;
     const short = at - this.since < SHORT_MS;
     clearInterval(this.sampler); this.sampler = undefined;
-    this.listening = undefined; this.phase = "writing"; this.since = performance.now(); this.progress = undefined;
+    this.mic = undefined; this.phase = "writing"; this.since = performance.now(); this.progress = undefined;
     this.sendAfter ||= send || this.control.choices().send;
     this.host.redraw();
     void listening.stop().then(async (heard) => {
@@ -210,7 +212,7 @@ export class VoiceInput {
 
   /** While listening: the meter's next level, and the limits: quiet after speaking ends a tap's listening, and so does two minutes. */
   private sample(): void {
-    const listening = this.listening;
+    const listening = this.mic;
     if (!listening || this.phase !== "listening") return;
     this.levels.push(listening.level());
     if (this.levels.length > METER) this.levels.shift();
@@ -223,7 +225,7 @@ export class VoiceInput {
     clearTimeout(this.letGo);
     this.letGo = setTimeout(() => {
       this.letGo = undefined;
-      if (this.open) { this.quietUntil = performance.now() + LET_GO_MS; this.stop(false, this.lastPress); }
+      if (this.listening) { this.quietUntil = performance.now() + LET_GO_MS; this.stop(false, this.lastPress); }
     }, LET_GO_MS);
     this.letGo.unref?.();
   }
@@ -231,13 +233,13 @@ export class VoiceInput {
   /** The microphone stopped by itself: a test's file played through (as if stopped), or it went away (what was heard is still written down). */
   private ended(why: VoiceError | undefined): void {
     if (!why) { this.stop(); return; }
-    if ((this.listening?.seconds ?? 0) < 1) { this.fail(why); return; }
+    if ((this.mic?.seconds ?? 0) < 1) { this.fail(why); return; }
     this.host.notice(why.message, "warn");
     this.stop();
   }
 
   private fail(error: unknown): void {
-    const listening = this.listening;
+    const listening = this.mic;
     this.reset();
     listening?.cancel();
     if (error instanceof Error && error.name === "AbortError") return;
@@ -249,7 +251,7 @@ export class VoiceInput {
   private reset(): void {
     clearTimeout(this.letGo); this.letGo = undefined;
     clearInterval(this.sampler); this.sampler = undefined;
-    this.phase = "idle"; this.listening = undefined; this.abort = undefined; this.held = undefined; this.sendAfter = false; this.progress = undefined;
+    this.phase = "idle"; this.mic = undefined; this.abort = undefined; this.held = undefined; this.sendAfter = false; this.progress = undefined;
     this.host.animate(false);
     this.host.redraw();
   }

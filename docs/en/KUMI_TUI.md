@@ -43,6 +43,12 @@ every state below.
   has a fix offers it: a missing or refused sign-in asks "Sign in to Anthropic?"
   and resends the message after; a model the provider doesn't offer opens the
   list. Changes apply from the next message, so they're allowed mid-answer.
+- **Talking instead of typing.** Ctrl-T listens; pressed again, or let go after
+  holding it, it stops. While Kumi listens, the input box's bottom line shows a
+  pulsing mint `●`, the time and a level meter (`▁▃▅▇`), and the keys that apply
+  at its right; what was said is written down on the computer and lands in the
+  box at the cursor, for Enter. No panel and no red: in Live, red means recording.
+  The empty box's hint says "ctrl+t to talk". `/voice` holds the settings.
 - **Memory is quiet.** Kumi keeps notes on its own as it answers; each shows as
   one faint line in the conversation, never a step, a prompt or a graph.
   `/memory` lists the notes (about you, about this Set) in a panel like
@@ -61,7 +67,8 @@ Built from terminal primitives in `apps/kumi/src/tui/`, no UI framework:
    and signals.
 2. **Input**: keys with modifiers (xterm and CSI u encodings), pastes, mouse and
    focus events, sequences split across reads, and a lone Escape resolved by a
-   short timeout.
+   short timeout. With the kitty protocol, a held key's repeats and its let-go
+   are events of their own.
 3. **Screen and renderer**: a grid of cells with grapheme widths; each frame is
    diffed against the previous one and only changed cells are written, inside a
    synchronized update. Colour degrades from 24-bit to 256, 16 and none.
@@ -77,7 +84,8 @@ On top of these, `app.ts` draws the layout and handles input: an editor for the
 input box (`editor.ts`), the conversation as entries laid out per width
 (`transcript.ts`), the `/` menu, scrolling that holds its place while text
 arrives, and the narrow layout. Terminals that support the kitty keyboard
-protocol report Shift+Enter distinctly. `KUMI_UI=plain` or piped output keeps the
+protocol report Shift+Enter distinctly, and when Ctrl-T is let go (hold it to
+talk); elsewhere its repeats stopping say so. `KUMI_UI=plain` or piped output keeps the
 old line-by-line interface (`terminal.ts`).
 
 ## Next

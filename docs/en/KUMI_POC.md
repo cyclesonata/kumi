@@ -342,7 +342,9 @@ and a tempo change about 4 s
 | Enter | Send; while Kumi works, it reads the message after the step under way, and the answer carries on with it |
 | Tab while Kumi works | Send the message once the answer is done instead; waiting messages show above the box, and Alt-↑ takes the last one back |
 | `/btw` and a question | Ask something on the side, any time: answered from the conversation so far, without tools, in a panel (↑↓ scroll, ←→ earlier ones, c copies, Esc closes); neither joins the conversation. `/btw` alone shows the last answer again |
+| `/voice` | Start or stop listening; send what you say as soon as you stop; the language you speak; the microphone |
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
+| Ctrl-T | Talk instead of typing: press it again to stop, or hold it while you talk; what you said lands in the input box. Enter stops and sends at once, Esc drops it ([talking to Kumi](#talking-to-kumi)) |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
 | `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model (on an API key, also the tokens this session's answers took; prices aren't in the providers' model lists, so Kumi shows tokens, not a cost) |
 | `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
@@ -374,6 +376,41 @@ NOW plays a wider version of it. The same step done several times in a row
 folds into one line ("read a page ×3") 3 seconds after the last. While Live
 plays, a yellow light blinks on its beat in the header, beside the tempo. The
 terminal is restored on exit, on crashes and on signals.
+
+## Talking to Kumi
+
+Press **Ctrl-T** and say what you want, then press it again. What you said lands
+in the input box; Enter sends it.
+
+- **Hold to talk.** Hold Ctrl-T while you talk, and let go to stop. Terminals with
+  the kitty keyboard protocol (kitty, Ghostty, WezTerm, iTerm2) say when it's let
+  go; elsewhere (Terminal, Windows Terminal) Kumi follows the key's own repeats.
+- **While Kumi listens**, the input box shows a pulsing dot, the time and a level
+  meter. Enter stops and sends at once; Esc drops it. After you've spoken, 3
+  seconds of quiet stops it by itself (not while you hold the key). Two minutes
+  at most at a time.
+- **While Kumi works**, what you say goes into the answer under way, as a typed
+  message would.
+- **`/voice`**: start or stop listening; send what you say as soon as you stop,
+  without Enter; the language you speak (English, your computer's, or any); the
+  microphone.
+- **Private.** The audio stays on your computer: ffmpeg hears the microphone,
+  whisper.cpp writes down what you said on this computer, and the recording is
+  deleted as soon as it's written down. Only the words leave, and only when you
+  send them.
+- **What it needs**: ffmpeg and whisper.cpp (`brew install ffmpeg whisper-cpp` on a
+  Mac; Kumi fetches them on Windows and Linux), and a speech model, which Kumi
+  fetches the first time you talk (about 190 MB, shared with video watching),
+  with a voice activity model (under 1 MB) that keeps music and noise from
+  becoming words. Each is checked against its published checksum. `kumi doctor`
+  says whether talking is ready.
+- **The first time on a Mac**, macOS asks whether your terminal app may use the
+  microphone. Kumi says if it isn't allowed, and offers to open System Settings ›
+  Privacy & Security › Microphone.
+- **When it can't hear you**, Kumi says why (no permission, only silence from the
+  microphone, only quiet, no words it could make out) and offers the fix: the
+  privacy settings, or another microphone.
+- Talking is in the full-screen app; plain lines (`KUMI_UI=plain`) are typed only.
 
 ## Watching video tutorials
 

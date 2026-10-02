@@ -822,8 +822,10 @@ export class TuiApp {
 
   private onInput(event: InputEvent): void {
     if (this.closing) return;
-    // ctrl+t talks, from anywhere but a key or a sign-in being entered; let go (where the terminal says), a held one stops.
-    if (this.voice && (event.type === "key" || event.type === "release") && event.name === "t" && event.ctrl && !event.alt && this.panel?.kind !== "key" && this.panel?.kind !== "chatgpt") {
+    // ctrl+t talks, from a list or the box; not over a key or a sign-in being entered, or a side answer still coming.
+    // Let go (where the terminal says), a held one stops.
+    const busyPanel = this.panel && this.panel.kind !== "pick" && (this.panel.kind !== "btw" || this.asides[this.panel.at]?.state === "asking");
+    if (this.voice && (event.type === "key" || event.type === "release") && event.name === "t" && event.ctrl && !event.alt && !busyPanel) {
       if (event.type === "release") this.voice.release();
       else {
         if (this.panel) this.closePanel();
@@ -1455,7 +1457,7 @@ export class TuiApp {
     const build = (): PickerItem[] => {
       const choices = control.choices();
       return [
-        { label: voice.active ? "Stop listening" : "Start listening", detail: "ctrl+t, or hold it while you talk", value: "listen" },
+        { label: voice.listening ? "Stop listening" : "Start listening", detail: "ctrl+t, or hold it while you talk", value: "listen" },
         { label: "Send when you stop", detail: choices.send ? "What you say is sent at once" : "What you say waits in the box for enter", value: "send", note: choices.send ? "on" : "off", noteTone: choices.send ? "accent" : "faint" },
         { label: "Language", detail: "What you speak", value: "language", note: languageName(choices.language), noteTone: "faint" },
         { label: "Microphone", detail: "What Kumi listens through", value: "microphone", note: choices.microphone ?? "system default", noteTone: "faint" },
@@ -1464,7 +1466,7 @@ export class TuiApp {
     const picker = new Picker("Talk to Kumi", build());
     picker.select(select);
     this.panel = { kind: "pick", picker, choose: (item) => {
-      if (item.value === "listen") { this.closePanel(); if (voice.active) voice.stop(); else voice.start(); return; }
+      if (item.value === "listen") { this.closePanel(); if (voice.listening) voice.stop(); else voice.start(); return; }
       if (item.value === "send") { control.choose({ send: !control.choices().send }); picker.setItems(build()); this.scheduler.request(); return; }
       if (item.value === "language") { this.openVoiceLanguage(); return; }
       return this.openMicrophones();

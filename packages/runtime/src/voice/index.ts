@@ -120,16 +120,19 @@ export async function listen(options: VoiceOptions & { microphone?: string; ffmp
     device = (await listMicrophones(ffmpeg, platform))[0];
     if (!device) throw new VoiceError("device", "Kumi found no microphone on this computer. Plug one in, or check that Windows sees it (Settings › System › Sound › Input).");
   }
-  options.signal?.throwIfAborted();
-  const capture = startCapture(ffmpeg, file ? ["-re", "-i", file] : microphoneInput(platform, device));
-  const abandon = () => { void capture.stop(); };
   const stopped = new Promise<string>((resolve) => options.signal?.addEventListener("abort", () => resolve("stopped"), { once: true }));
-  const failed = await Promise.race([capture.started.then(() => undefined), capture.ended.then((why) => why ?? "it sent no sound"), stopped]);
-  if (failed !== undefined || options.signal?.aborted) {
-    abandon();
+  const open = async (input: string[]) => {
     options.signal?.throwIfAborted();
-    throw new VoiceError("device", `Kumi couldn't open the microphone (${failed}).${keptQuiet(platform, env, "open")}`);
-  }
+    const capture = startCapture(ffmpeg, input);
+    const failed = await Promise.race([capture.started.then(() => undefined), capture.ended.then((why) => why ?? "it sent no sound"), stopped]);
+    if (failed !== undefined || options.signal?.aborted) { void capture.stop(); options.signal?.throwIfAborted(); }
+    return { capture, failed };
+  };
+  let { capture, failed } = await open(file ? ["-re", "-i", file] : microphoneInput(platform, device));
+  // An ffmpeg built without PulseAudio (some Linux builds) hears ALSA's default instead.
+  if (failed && !file && platform === "linux" && /pulse/i.test(failed)) ({ capture, failed } = await open(["-f", "alsa", "-i", device || "default"]));
+  if (failed !== undefined) throw new VoiceError("device", `Kumi couldn't open the microphone (${failed}).${keptQuiet(platform, env, "open")}`);
+  const abandon = () => { void capture.stop(); };
   return {
     get seconds() { return capture.seconds; },
     get spoke() { return capture.meter.speaking; },
