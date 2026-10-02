@@ -272,6 +272,17 @@ class RemoteScriptTests(unittest.TestCase):
                     self.assertEqual(_owner_controlled(path), verdict)
                     acl.assert_called_once_with(path)
 
+    def test_windows_acl_check_runs_windows_powershell_by_its_full_path_without_a_window(self):
+        package = __import__("AbletonMcpBridge")
+        seen = {}
+        def run(args, **kwargs):
+            seen["args"], seen["kwargs"] = args, kwargs
+            return types.SimpleNamespace(returncode=0)
+        with patch("AbletonMcpBridge.subprocess.run", run), patch.dict(os.environ, {"SYSTEMROOT": r"D:\Windows"}):
+            self.assertTrue(package._windows_acl_owner_only(Path("C:/Kumi/bridge-reference.json")))
+        self.assertEqual(seen["args"][0], os.path.join(r"D:\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
+        self.assertEqual(seen["kwargs"]["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
     def test_scheduled_callback_does_not_touch_bridge_after_disconnect(self):
         surface = object.__new__(__import__("AbletonMcpBridge").AbletonMcpBridge)
         surface._disconnected = True

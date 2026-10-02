@@ -5,9 +5,10 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { secretPermissions } from "../src/delivery.js";
 import { LIVE_REGISTRY_HASH } from "../src/live.js";
 import { assertNoLinkedAncestors, runLifecycle, type LifecycleOptions, type LifecycleReceipt } from "../src/lifecycle.js";
 
@@ -477,6 +478,59 @@ test("uninstall retires an owned rollback generation and supports idempotent pen
     const retried = await runLifecycle({ ...options, action: "uninstall", packageRoot: join(root, "removed-package") });
     assert.equal(retried.verification.alreadyUninstalled, true); assert.equal(existsSync(pending), false); assert.deepEqual(receipt(options).retained, { pendingCleanup: [], preserved: [] });
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a lock left by a lifecycle process that has gone is taken over; one whose owner still runs is not", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ableton-lifecycle-stale-lock-"));
+  try {
+    const packageRoot = fixturePackage(root, "1.0.0", "one");
+    const options = await withPorts(lifecycleOptions(root, packageRoot, "install"));
+    await runLifecycle(options);
+    const lock = join(options.stateDirectory, "lifecycle.lock");
+    const owned = (pid: number) => writeFileSync(lock, `${JSON.stringify({ version: 1, pid, startedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+    // A kumi bridge stopped with Ctrl-C while it waited for Live: its lifecycle's lock stayed behind.
+    owned(spawnSync(process.execPath, ["-e", ""]).pid!);
+    assert.equal((await runLifecycle({ ...options, action: "repair" })).state, "completed");
+    assert.equal(existsSync(lock), false, "taken over, then released");
+    owned(process.ppid);
+    await assert.rejects(runLifecycle({ ...options, action: "repair" }), /another lifecycle operation owns the state lock/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A new folder on another drive or volume than the temp folder, where there's one (CI's Windows runners have D:). */
+function otherVolume(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const temp = parse(tmpdir()).root.toLowerCase();
+  for (const candidate of [process.env.RUNNER_TEMP, "D:\\", "E:\\"]) {
+    if (!candidate || parse(candidate).root.toLowerCase() === temp) continue;
+    try { return mkdtempSync(join(candidate, "ableton-lifecycle-volume-")); } catch { /* not there, or not writable */ }
+  }
+  return undefined;
+}
+
+test("a User Library on another drive than the bridge's state upgrades, rolls back and uninstalls", async (context) => {
+  const other = otherVolume();
+  if (!other) { context.skip("no second drive here"); return; }
+  const root = mkdtempSync(join(tmpdir(), "ableton-lifecycle-volumes-"));
+  try {
+    const packageOne = fixturePackage(root, "1.0.0", "one"); const packageTwo = fixturePackage(root, "2.0.0", "two");
+    const remoteScriptsDirectory = join(other, "Live Remote Scripts ü"); mkdirSync(remoteScriptsDirectory, { recursive: true });
+    const options = await withPorts(lifecycleOptions(root, packageOne, "install", { remoteScriptsDirectory }));
+    const module = join(remoteScriptsDirectory, "AbletonMcpBridge", "ableton_mcp_remote_script.py");
+    await runLifecycle(options);
+    // The generation before goes into the owner state, on the other drive, where a rename can't take it.
+    await runLifecycle({ ...options, action: "upgrade", packageRoot: packageTwo, ...artifactOptions(packageTwo) });
+    assert.match(readFileSync(module, "utf8"), /two/);
+    assert.match(readFileSync(join(receipt(options).previous!.remoteBackup, "ableton_mcp_remote_script.py"), "utf8"), /one/);
+    // And back: the Remote Script reads its reference only while it's owner-only.
+    await runLifecycle({ ...options, action: "rollback", packageRoot: packageTwo });
+    assert.match(readFileSync(module, "utf8"), /one/);
+    assert.equal(secretPermissions(join(remoteScriptsDirectory, "AbletonMcpBridge", "bridge-reference.json")), "owner-only");
+    assert.equal((await runLifecycle({ ...options, action: "status", apply: false, confirmLiveStopped: false })).verification.installationIntegrityValid, true);
+    await runLifecycle({ ...options, action: "uninstall" });
+    assert.equal(existsSync(join(remoteScriptsDirectory, "AbletonMcpBridge")), false);
+    assert.equal(receipt(options).status, "uninstalled");
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); }
 });
 
 test("uninstall removes exact owned files, preserves secrets by default, purges explicitly, and quarantines drift", async () => {

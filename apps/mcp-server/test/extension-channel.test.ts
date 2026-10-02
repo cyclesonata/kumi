@@ -267,7 +267,9 @@ test("Live keeps Kumi's extension in its Extensions folder, and its data beside 
   assert.deepEqual(kumiExtensionFolders({}, "darwin", "/Users/p"), { code: join("/Users/p", "Library", "Application Support", "Ableton", "Extensions", "kumi.kumi"), data: join("/Users/p", "Library", "Application Support", "Ableton", "Extensions Data", "kumi.kumi") });
   assert.deepEqual(kumiExtensionFolders({ ABLETON_MCP_LIVE_EXTENSIONS_DIR: "/x/Extensions" }, "darwin", "/Users/p"), { code: join("/x/Extensions", "kumi.kumi"), data: join("/x", "Extensions Data", "kumi.kumi") });
   assert.equal(kumiExtensionFolders({}, "linux", "/home/p"), undefined);
-  assert.match(kumiExtensionFolders({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32", "C:/Users/p")!.data, /AppData[\\/]Roaming[\\/]Ableton[\\/]Extensions Data[\\/]kumi\.kumi$/);
+  // Windows: %LOCALAPPDATA%\Ableton, where Live keeps its database too; it doesn't read %APPDATA%'s.
+  assert.match(kumiExtensionFolders({ LOCALAPPDATA: "C:/Users/p/AppData/Local", APPDATA: "C:/Users/p/AppData/Roaming" }, "win32", "C:/Users/p")!.data, /AppData[\\/]Local[\\/]Ableton[\\/]Extensions Data[\\/]kumi\.kumi$/);
+  assert.match(kumiExtensionFolders({}, "win32", "C:/Users/p")!.code, /AppData[\\/]Local[\\/]Ableton[\\/]Extensions[\\/]kumi\.kumi$/);
 });
 
 test("a host that can't reach Live (Developer Mode off) isn't started again until Live starts again", async () => {
