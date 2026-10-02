@@ -21,10 +21,13 @@ to maintain `minimum <= fadeMinimum <= fadeMaximum <= maximum`.
 Install the exact-build `WillingtonRackZones` Remote Script package alongside
 the existing adapters, then add the optional `"rackZones": true` field to the
 owner-only `willington.json`. The existing `enableWrites` flag controls writes.
-The adapter is experimental on Live 12.4.15b5 ARM64; other builds are refused.
-It remains a research candidate and is not automatically selected or shipped in
-the validated multi-version bundle.
-See `docs/evidence/rack-zones-b5.json` for the tested scope and remaining limits.
+Rack Zones is supported on Live 12.4.15b5 macOS ARM64 and included in the
+validated multi-version bundle. Default installation selects its exact b5 profile;
+other builds remain unavailable. The current validation adds 42 actual signal-gating
+checks, 49 fade measurements and seven actual Max `live.object` write/read/restore
+checks to the earlier Kumi transaction tests. See the
+[Willington completion evidence](https://github.com/cyclesonata/willington/tree/feat/platform-version-bindings/evidence/rack-zones/b5/completion-2026-10-02)
+and `docs/evidence/rack-zones-b5.json` for the measured scope.
 
 This directory contains a dependency-light Control Surface package and its
 transport implementation. Live loads `AbletonMcpBridge/__init__.py` and calls
