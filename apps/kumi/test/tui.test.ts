@@ -138,13 +138,26 @@ test("keys: text, controls, arrows with modifiers, function keys and Alt combina
   assert.deepEqual(await parse(["\u001bb\u001bB\u001b\r\u001b\u007f"]), [key("b", { alt: true }), key("b", { alt: true, shift: true }), key("enter", { alt: true }), key("backspace", { alt: true })]);
 });
 
-test("keys: Shift+Enter in CSI u and modifyOtherKeys forms, and key releases ignored", async () => {
-  assert.deepEqual(await parse(["\u001b[13;2u", "\u001b[27;2;13~", "\u001b[97;5u", "\u001b[97;5:3u", "\u001b[97;2u"]), [
-    key("enter", { shift: true }), key("enter", { shift: true }), key("a", { ctrl: true }), { type: "text", text: "A" },
-  ]);
+test("keys: Shift+Enter in CSI u and modifyOtherKeys forms, and a key let go is its own event", async () => {
+  assert.deepEqual(await parse(["\u001b[13;2u", "\u001b[27;2;13~", "\u001b[97;5u", "\u001b[97;5:3u", "\u001b[97;2u", "\u001b[97;2:3u"]), [
+    key("enter", { shift: true }), key("enter", { shift: true }), key("a", { ctrl: true }), { ...key("a", { ctrl: true }), type: "release" }, { type: "text", text: "A" },
+  ], "letting go of a letter types nothing");
   assert.deepEqual(await parse(["\u001b[27u\u001b[99;5u\u001b[106;5u\u001b[13;3u"]), [
     key("escape"), key("c", { ctrl: true }), key("j", { ctrl: true }), key("enter", { alt: true }),
   ], "with the kitty protocol on, Escape and Ctrl combinations arrive as CSI u");
+});
+
+test("keys: with the kitty protocol saying so, a held key repeats and is let go, in every form a key takes", async () => {
+  const release = (name: string, mods: { ctrl?: boolean; alt?: boolean; shift?: boolean } = {}) => ({ ...key(name, mods), type: "release" });
+  const repeat = (name: string, mods: { ctrl?: boolean; alt?: boolean; shift?: boolean } = {}) => ({ ...key(name, mods), repeat: true });
+  // ctrl+t held, then let go: a press, its repeats, and the let-go.
+  assert.deepEqual(await parse(["\u001b[116;5u", "\u001b[116;5:2u\u001b[116;5:2u", "\u001b[116;5:3u"]), [key("t", { ctrl: true }), repeat("t", { ctrl: true }), repeat("t", { ctrl: true }), release("t", { ctrl: true })]);
+  // Arrows, F1–F4 and the ~ keys say so after their modifiers; letting go never presses them again.
+  assert.deepEqual(await parse(["\u001b[1;1:2A\u001b[1;1:3A\u001b[1;5:3C\u001b[1;1:3P\u001b[5;1:3~\u001b[3;1:2~\u001b[27;1:3u"]), [
+    repeat("up"), release("up"), release("right", { ctrl: true }), release("f1"), release("pageup"), repeat("delete"), release("escape"),
+  ]);
+  // A letter held repeats as text, and an explicit press is a press.
+  assert.deepEqual(await parse(["\u001b[97;1:2u\u001b[116;5:1u"]), [{ type: "text", text: "a" }, key("t", { ctrl: true })]);
 });
 
 test("keys: a lone Escape waits briefly, and sequences split across reads still decode", async () => {
@@ -216,7 +229,7 @@ test("the terminal is taken over and always given back, even twice", () => {
   tty.start();
   assert.equal(input.isRaw, true);
   assert.ok(written.startsWith("\u001b[?1049h"), "alternate screen first");
-  assert.ok(written.includes("\u001b[?1006h") && written.includes("\u001b[?2004h") && written.includes("\u001b[?7l") && written.includes("\u001b[>1u"));
+  assert.ok(written.includes("\u001b[?1006h") && written.includes("\u001b[?2004h") && written.includes("\u001b[?7l") && written.includes("\u001b[>3u"), "keys reported unambiguously, with repeats and let-gos");
   assert.deepEqual(tty.size, { columns: 100, rows: 30 });
   input.write("\u001b[A");
   output.emit("resize");

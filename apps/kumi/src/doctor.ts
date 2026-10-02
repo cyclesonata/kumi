@@ -7,12 +7,13 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
+import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, terminalApp, voiceReadiness, whisperHint, type ProviderId, type VoiceReadiness } from "@kumi/runtime";
 import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
 import { extensionAnswers, extensionDataDir, extensionSource, installedExtension, liveExtensionsDir, readExtension, runningExtension } from "./live-extension.js";
+import { systemLanguage } from "./voice.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -45,6 +46,8 @@ export interface DoctorIo {
   bundledBridgeVersion?: string;
   /** Where ffmpeg and whisper.cpp are, for watching videos; looked up (nothing fetched) when left out. */
   videoPrograms?: () => Promise<{ ffmpeg?: string | undefined; whisper?: string | undefined }>;
+  /** What talking to Kumi needs and has; looked up (nothing fetched, nothing asked) when left out. */
+  voice?: () => Promise<VoiceReadiness>;
 }
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
@@ -123,6 +126,23 @@ async function extensionCheck(env: Env, configPath: string, server: BridgeServer
   return { status: "ok", text: `Kumi's extension ${installed.version} is in Live; it starts with Live` };
 }
 
+/**
+ * Talking to Kumi (ctrl+t): what's missing, or that it's ready. Never a fix: Kumi works without it, and
+ * off a Mac it fetches what it needs the first time the producer talks.
+ */
+export function voiceCheck(voice: VoiceReadiness, env: Env, platform: string = process.platform): Check {
+  if (!voice.fetches && (!voice.ffmpeg || !voice.whisper)) {
+    const both = !voice.ffmpeg && !voice.whisper;
+    const install = platform === "darwin" ? `brew install ${[!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper-cpp" : ""].filter(Boolean).join(" ")}`
+      : [!voice.ffmpeg ? ffmpegHint() : "", !voice.whisper ? whisperHint() : ""].filter(Boolean).join("; ");
+    return { status: "note", text: `Talking to Kumi (ctrl+t) needs ${both ? "ffmpeg and whisper.cpp" : !voice.ffmpeg ? "ffmpeg" : "whisper.cpp"}`, next: `Install ${both ? "them" : "it"}: ${install}` };
+  }
+  if (voice.allowed === false) return { status: "note", text: `Talking to Kumi (ctrl+t): macOS isn't letting ${terminalApp(env)} use the microphone`, next: "Allow it in System Settings › Privacy & Security › Microphone" };
+  const later = [!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper.cpp" : "", !voice.model.path ? "its speech model (about 190 MB)" : ""].filter(Boolean);
+  if (later.length) return { status: "ok", text: `Talking to Kumi (ctrl+t): Kumi fetches ${later.join(" and ").replace(/ and (?=.* and )/, ", ")} the first time you talk` };
+  return { status: "ok", text: "Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer" };
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
@@ -185,6 +205,8 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });
   else if (!programs.whisper) checks.push({ status: "note", text: "Watches videos; one without captions needs whisper.cpp for its words", next: `Install it: ${whisperHint()}` });
   else checks.push({ status: "ok", text: "Watches videos: frames with ffmpeg, speech with whisper.cpp" });
+  const voice = await (io.voice ?? (() => voiceReadiness({ env, toolsDir: loadToolsDir(env), language: readSettings(loadSettingsFile(env)).voice?.language ?? systemLanguage(env) })))().catch(() => undefined);
+  if (voice) checks.push(voiceCheck(voice, env));
   const terminal = io.terminal ?? { isTTY: Boolean(process.stdout.isTTY), ...(process.stdout.columns ? { columns: process.stdout.columns } : {}), ...(process.stdout.rows ? { rows: process.stdout.rows } : {}) };
   if (!terminal.isTTY) checks.push({ status: "note", text: "Not a terminal window here, so Kumi uses plain lines" });
   else {

@@ -9,6 +9,7 @@ export { READ_WEB_TOOL, SEARCH_WEB_TOOL, webTools } from "./web/tool.js";
 export { createWebClient, type WebClient } from "./web/net.js";
 export { findFfmpeg, findWhisper, findYtDlp, watchVideo, youtubeId, type Watched, type WatchRequest } from "./video/index.js";
 export { configurePrograms, ffmpegHint, whisperHint } from "./video/programs.js";
+export { listen, listMicrophones, microphoneAllowed, prepareVoice, terminalApp, voicePrompt, voiceReadiness, VoiceError, writeDown, type Heard, type Listening, type VoiceReadiness, type VoiceTrouble } from "./voice/index.js";
 export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { KUMI_VERSION } from "./version.js";

@@ -18,6 +18,7 @@ import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
+import { createVoiceControl } from "./voice.js";
 import { INSTALLED, KUMI, KUMI_START } from "@kumi/runtime";
 
 /** One row of help: the command (as this Kumi is run) and what it does, lined up in two columns. */
@@ -238,6 +239,8 @@ try {
     const updates: UpdateControl = { current: KUMI_VERSION, check: () => INSTALLED ? checkRelease(process.env) : checkCheckout(), request: () => { updateAfter = true; } };
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser, updates,
+      // Talking instead of typing (ctrl+t): the microphone, written down on this computer.
+      voice: createVoiceControl({ toolsDir: loadToolsDir(), settingsFile: loadSettingsFile(), open: openBrowser }),
       panelTab: { load: () => readSettings(loadSettingsFile()).panelTab, save: (id) => { try { writeSettings(loadSettingsFile(), { ...readSettings(loadSettingsFile()), panelTab: id }); } catch { /* next time, then */ } } },
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: ${KUMI} update` } : {}) });
     const interrupt = () => terminal?.interrupt();

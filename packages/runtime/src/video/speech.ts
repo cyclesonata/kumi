@@ -17,6 +17,13 @@ export interface TranscribeOptions {
   /** How far it is, 0–100. */
   onProgress?: (percent: number) => void;
   timeoutMs?: number;
+  /**
+   * How much of whisper's 30-second window to read, in its frames (50 a second, at most 1500): a
+   * short recording is written down several times faster when the silence after it isn't read.
+   */
+  audioContext?: number;
+  /** whisper.cpp's voice activity model: only stretches of speech are written down, never music or noise. */
+  vad?: string;
 }
 
 /** Transcribe `wav` (16 kHz mono) with `whisper` and `model`: timed lines, as captions would be. */
@@ -24,7 +31,9 @@ export function transcribe(whisper: string, model: string, wav: string, options:
   const out = join(dirname(wav), `.transcript-${randomUUID()}`);
   const language = options.language?.split(/[-_]/)[0]?.toLowerCase();
   const args = ["-m", model, "-f", wav, "-oj", "-of", out, "-pp", "-sns", "-l", model.includes(".en") ? "en" : language && /^[a-z]{2,3}$/.test(language) ? language : "auto",
-    ...(options.prompt ? ["--prompt", options.prompt.slice(0, 600)] : [])];
+    ...(options.prompt ? ["--prompt", options.prompt.slice(0, 600)] : []),
+    ...(options.audioContext && options.audioContext < 1500 ? ["-ac", String(Math.max(64, Math.round(options.audioContext)))] : []),
+    ...(options.vad ? ["--vad", "-vm", options.vad] : [])];
   return new Promise<Cue[]>((resolve, reject) => {
     const child = spawn(whisper, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true, ...(options.signal ? { signal: options.signal } : {}) });
     let tail = "";

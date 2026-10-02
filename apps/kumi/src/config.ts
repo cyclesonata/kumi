@@ -65,27 +65,50 @@ export const loadInputHistoryFile = (env: Env = process.env) => absoluteFile(env
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(kumiDir(env), "projects"));
 
+/** How the producer talks to Kumi (/voice). */
+export interface VoiceSettings {
+  /** What's said is sent as soon as they stop, without enter. */
+  send?: true;
+  /** The language spoken: "en", another's code, or "auto" to detect it; the system's when unset. */
+  language?: string;
+  /** A microphone by name; the system's default when unset. */
+  microphone?: string;
+}
+
 /** Non-secret preferences: the chosen model and how hard it thinks. */
 export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string;
-  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false }
+  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false;
+  voice?: VoiceSettings }
+
+/** Voice settings as kept, without anything that isn't one. */
+function voiceSettings(value: unknown): VoiceSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { send, language, microphone } = value as { send?: unknown; language?: unknown; microphone?: unknown };
+  const settings: VoiceSettings = { ...(send === true ? { send: true as const } : {}), ...(typeof language === "string" && /^(auto|[a-z]{2,3})$/.test(language) ? { language } : {}),
+    ...(typeof microphone === "string" && microphone.length <= 200 && !/[\x00-\x1f\x7f]/.test(microphone) && microphone.trim() ? { microphone } : {}) };
+  return Object.keys(settings).length ? settings : undefined;
+}
 
 /** The settings file; a missing or unreadable file, or an unknown value, means none. */
 export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown };
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown; voice?: unknown };
+    const voice = voiceSettings(value.voice);
     return { ...(typeof value.model === "string" && validModel(value.model) ? { model: value.model } : {}),
       ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}),
       ...(typeof value.panelTab === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.panelTab) ? { panelTab: value.panelTab } : {}),
-      ...(value.updateCheck === false ? { updateCheck: false as const } : {}) };
+      ...(value.updateCheck === false ? { updateCheck: false as const } : {}), ...(voice ? { voice } : {}) };
   } catch { return {}; }
 }
 
 export function writeSettings(file: string, next: Settings): void {
-  // The pane's tab and the update check are kept when a caller (choosing a model) doesn't say.
+  // The pane's tab, the update check and the voice settings are kept when a caller (choosing a model) doesn't say.
   const before = readSettings(file);
   const panelTab = "panelTab" in next ? next.panelTab : before.panelTab;
   const updateCheck = "updateCheck" in next ? next.updateCheck : before.updateCheck;
-  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}) };
+  const voice = voiceSettings("voice" in next ? next.voice : before.voice);
+  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}),
+    ...(voice ? { voice } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
