@@ -86,7 +86,8 @@ export function localServers(settings: readonly ServerSetting[] = [], env: Env =
   ];
   const taken = new Set<string>([...PROVIDERS, ...LOCAL_PROVIDERS]);
   for (const setting of settings) {
-    const word = setting.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "server";
+    // Runs of anything else are one dash already, so a dash at either end is trimmed singly.
+    const word = setting.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "server";
     let id = word;
     for (let n = 2; taken.has(id); n++) id = `${word}-${n}`;
     taken.add(id);
