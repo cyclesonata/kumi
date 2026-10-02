@@ -4,6 +4,7 @@
  * plug-ins they reach for, their returns and main chain, and how they name and colour tracks. Each
  * line says how much of their work it's drawn from, and each can be forgotten.
  */
+import { suspectNote } from "../core/memory.js";
 import type { SetDevice, SetSummary, SetTrack } from "./sets.js";
 
 export type Role = "drums" | "bass" | "vocal" | "keys" | "pad" | "lead" | "guitar" | "fx";
@@ -67,8 +68,10 @@ export interface Taste { sets: number; lines: TasteLine[]; at: number }
 const count = <T>(items: Iterable<T>) => { const counts = new Map<T, number>(); for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1); return counts; };
 const top = <T>(counts: Map<T, number>, limit: number) => [...counts].sort((a, b) => b[1] - a[1]).slice(0, limit);
 const plural = (value: number, one: string, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
+/** A name from the producer's files, fit to quote: short, and never one that reads as orders or holds a secret. */
+const quotable = (name: string) => { const clean = name.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 32); return clean && !suspectNote(clean) ? clean : undefined; };
 /** A device as a chain shows it: a rack by the name it was given. */
-const shown = (device: SetDevice) => (device.role === "rack" && device.preset ? `${device.preset} (${device.name})` : device.name);
+const shown = (device: SetDevice) => { const named = device.role === "rack" && device.preset ? quotable(device.preset) : undefined; return named ? `${named} (${device.name})` : quotable(device.name) ?? "a device"; };
 const isEffect = (device: SetDevice) => device.role === "audio" || (device.role === "rack" && device.name === "Audio Effect Rack");
 const isInstrument = (device: SetDevice) => device.role === "instrument" || (device.role === "rack" && (device.name === "Instrument Rack" || device.name === "Drum Rack"));
 /** Live's own name for a new track ("1-Audio", "2 MIDI", "Audio 3"): no habit in it. */
@@ -151,7 +154,7 @@ export function buildTaste(sets: readonly SetSummary[], now = Date.now()): Taste
   }
   // Plug-ins and Live's devices, by how many tracks use them.
   const everything = sets.flatMap((set) => [...set.tracks, ...set.returns, ...(set.main ? [set.main] : [])]);
-  const plugins = top(count(everything.flatMap((track) => track.plugins ?? [])), 6);
+  const plugins = top(count(everything.flatMap((track) => (track.plugins ?? []).map(quotable).filter((name): name is string => Boolean(name)))), 6);
   if (plugins.length) add("plugins", `Plug-ins used most: ${plugins.map(([name, uses]) => `${name} (${plural(uses, "track")})`).join(", ")}`);
   const native = top(count(everything.flatMap((track) => [...new Set(track.devices.filter((device) => !device.plugin && device.role !== "rack").map((device) => device.name))])), 8);
   if (native.length >= 3) add("devices", `Live devices used most: ${native.map(([name, uses]) => `${name} (${uses})`).join(", ")}`);
@@ -163,7 +166,7 @@ export function buildTaste(sets: readonly SetSummary[], now = Date.now()): Taste
     const caps = lettered.filter((name) => name === name.toUpperCase()).length; const lower = lettered.filter((name) => name === name.toLowerCase()).length;
     if (caps >= lettered.length * 0.6) habits.push("in capitals"); else if (lower >= lettered.length * 0.6) habits.push("in lower case");
     if (names.filter((name) => /^\d{1,3}[\s._-]/.test(name)).length >= names.length * 0.5) habits.push("numbered (“01 Kick”)");
-    const repeated = top(count(names.map((name) => name.replace(/^\d{1,3}[\s._-]+/, "").replace(/\s+\d+$/, ""))), 8).filter(([, uses]) => uses >= 2);
+    const repeated = top(count(names.map((name) => quotable(name.replace(/^\d{1,3}[\s._-]+/, "").replace(/\s+\d+$/, ""))).filter((name): name is string => Boolean(name))), 8).filter(([, uses]) => uses >= 2);
     if (repeated.length) habits.push(`often ${repeated.map(([name]) => `“${name.slice(0, 24)}”`).join(", ")}`);
     if (habits.length) add("names", `Track names: ${habits.join("; ")}`);
   }
@@ -175,7 +178,7 @@ export function buildTaste(sets: readonly SetSummary[], now = Date.now()): Taste
     if (colour !== undefined && uses! >= 3 && uses! >= coloured.length * 0.5) colours.push(`${ROLE_NAMES[role][0].toLowerCase()} ${colourName(colour) ?? "colour"} (colour ${colour})`);
   }
   if (colours.length) add("colours", `Colours: ${colours.join(", ")}`);
-  const groups = top(count(sets.flatMap((set) => [...new Set(set.tracks.filter((track) => track.kind === "group").map((track) => track.name.trim()).filter((name) => name && !DEFAULT_NAME.test(name)))])), 5).filter(([, uses]) => uses >= 2);
+  const groups = top(count(sets.flatMap((set) => [...new Set(set.tracks.filter((track) => track.kind === "group").map((track) => quotable(track.name)).filter((name): name is string => Boolean(name) && !DEFAULT_NAME.test(name!)))])), 5).filter(([, uses]) => uses >= 2);
   if (groups.length) add("groups", `Groups: ${groups.map(([name, uses]) => `“${name.slice(0, 24)}” (${uses} Sets)`).join(", ")}`);
   const sizes = sets.map((set) => set.tracks.length).sort((a, b) => a - b);
   if (sets.length >= 3) add("size", `Set size: usually ${sizes[Math.floor(sizes.length / 4)]}–${sizes[Math.floor(sizes.length * 3 / 4)]} tracks`);

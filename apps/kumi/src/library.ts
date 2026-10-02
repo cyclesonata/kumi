@@ -22,6 +22,7 @@ export interface LibraryIo {
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 const grouped = (value: number) => value.toLocaleString("en-US");
+const counted = (value: number, one: string) => `${grouped(value)} ${one}${value === 1 ? "" : "s"}`;
 const minutes = (ms: number) => (ms < 90_000 ? `${Math.max(1, Math.round(ms / 1000))} seconds` : `${Math.round(ms / 60_000)} minutes`);
 
 /** "1,204 of 8,311 new sounds", as learning goes. */
@@ -53,7 +54,7 @@ export async function runLibrary(io: LibraryIo): Promise<number> {
       });
       if (result === null) return 1;
       if (!result) { out.write("Kumi is learning your library in another window right now. Quit that Kumi first, then run this again.\n"); return 1; }
-      out.write(`${out.isTTY ? "\n" : ""}Learned ${grouped(result.sounds.known)} sounds, ${grouped(result.presets.known)} presets and ${grouped(result.sets.known)} Sets in ${minutes((result.finishedAt ?? now()) - result.startedAt)}.\n\n`);
+      out.write(`${out.isTTY ? "\n" : ""}Learned ${counted(result.sounds.known, "sound")}, ${counted(result.presets.known, "preset")} and ${counted(result.sets.known, "Set")} in ${minutes((result.finishedAt ?? now()) - result.startedAt)}.\n\n`);
     }
     const state = await readLibraryState(dir);
     const logs = libraryLogs(dir);
@@ -63,7 +64,7 @@ export async function runLibrary(io: LibraryIo): Promise<number> {
     if (!sounds.size && !presets.size && !sets.size && !state?.learning) {
       lines.push("  Not learned yet. Kumi learns it by itself in the background while it runs,", `  or here, now: ${KUMI} library --rebuild`);
     } else {
-      lines.push(`  Sounds    ${grouped(sounds.size)}${nameOnly ? ` (${grouped(nameOnly)} known by name only: Kumi couldn't read them)` : ""}`, `  Presets   ${grouped(presets.size)}`, `  Sets      ${grouped(sets.size)}`);
+      lines.push(`  Sounds    ${grouped(sounds.size)}${nameOnly ? ` (${grouped(nameOnly)} known by name only: Kumi couldn't read ${nameOnly === 1 ? "it" : "them"})` : ""}`, `  Presets   ${grouped(presets.size)}`, `  Sets      ${grouped(sets.size)}`);
       if (state?.learning) {
         const learning = state.learning;
         lines.push(`  Learning  now: ${learning.phase === "sounds" ? `${grouped(learning.sounds.done)} of ${grouped(learning.sounds.todo)} new sounds` : `${learning.phase}…`}`);

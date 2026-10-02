@@ -16,8 +16,8 @@ export const FIND_SOUNDS_TOOL = "find_sounds";
 export const FIND_PRESETS_TOOL = "find_presets";
 export const MY_SETS_TOOL = "my_sets";
 
-/** How far learning has got, for a result to say. */
-export interface LearningState { learning: boolean; sounds: number; todo?: number; done?: number }
+/** How far learning has got, for a result to say; `first`: it hasn't finished once yet. */
+export interface LearningState { learning: boolean; first?: boolean; sounds: number; todo?: number; done?: number }
 
 export interface LibraryAccess {
   /** The sounds as learned so far, freshly read. */
@@ -146,8 +146,16 @@ export function libraryTools(library: LibraryAccess, options: { resolve?: (named
       const result = index.search({ words, limit, random, ...(like ? { like } : {}), ...(kind ? { kind } : {}), ...(cls ? { classes: [cls] } : {}),
         ...(tempo !== undefined ? { bpm: tempo } : {}), ...(typeof input.key === "string" && input.key.trim() ? { key: input.key.trim() } : {}),
         ...(minSeconds !== undefined ? { minSeconds } : {}), ...(maxSeconds !== undefined ? { maxSeconds } : {}), ...(folders.length ? { folders } : {}) });
-      // Words the library can't place yet (its sounds still being learned) may still be in names it hasn't reached: say so.
-      return { text: JSON.stringify({ sounds: result.hits.map(soundRow), matched: result.matched, ...(like ? { like: like.name } : {}),
+      const rows = result.hits.map(soundRow);
+      // Learning for the first time: names it hasn't reached yet are searched as before, after what it knows.
+      if (state.first && state.learning && !like && words.length && rows.length < limit && !kind && !cls && tempo === undefined && !input.key) {
+        const named = await findSamples({ folders: folders.length ? folders : defaultSampleFolders(), words, limit, random, signal }).catch(() => undefined);
+        for (const sample of named?.samples ?? []) {
+          if (rows.length >= limit || rows.some((row) => row.path === sample.path)) continue;
+          rows.push({ name: sample.name, path: sample.path, ...(sample.seconds !== undefined ? { seconds: sample.seconds } : {}), why: "found by its name; not learned yet" });
+        }
+      }
+      return { text: JSON.stringify({ sounds: rows, matched: Math.max(result.matched, rows.length), ...(like ? { like: like.name } : {}),
         library: `${grouped(index.size)} sounds`, ...learningNote(state) }) };
     } };
 

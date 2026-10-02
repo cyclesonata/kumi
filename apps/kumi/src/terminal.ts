@@ -256,6 +256,8 @@ export function createTerminal(options: Options): Terminal {
       if (verb === "/forget") {
         // A line from the producer's Sets is u and its place in /memory's list.
         if (argument?.startsWith("u") && controller.forgetTaste) {
+          // The ids are places in /memory's list: read it when it hasn't been shown yet.
+          if (!tasteLines.length) tasteLines = await controller.taste?.() ?? [];
           const line = tasteLines[Number(argument.slice(1)) - 1];
           if (!line || !await controller.forgetTaste(line.id)) notice("[memory] Use: /forget <id>, with an id from /memory.");
           else notice(`[memory] Forgot, from your Sets: ${line.line}`);

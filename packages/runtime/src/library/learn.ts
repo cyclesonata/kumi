@@ -133,6 +133,7 @@ interface Finds { sounds: Found[]; presets: Found[]; sets: Found[]; seen: Set<st
 /** Folders that never hold the producer's sounds: Live's own metadata, backups, project copies. */
 const SKIP = new Set(["ableton folder info", "ableton project info", "__macosx", "node_modules", "$recycle.bin", "system volume information", "defaults"]);
 const PROJECT_COPIES = new Set(["recorded", "processed", "imported", "freeze", "consolidated"]);
+const backupSet = (path: string) => /\.backup-|\[\d{4}-\d{2}-\d{2} \d{6}\]\.als$/i.test(path);
 const MAX_DEPTH = 16;
 
 /** Every sound, preset and Set under a folder (links aren't followed: they could lead out, or round). */
@@ -158,7 +159,7 @@ async function walk(source: Source, kinds: { sounds: boolean; presets: boolean; 
       if (!entry.isFile()) continue;
       const extension = extname(lower);
       // A Set's backup copies ("Song.backup-2026-…als") aren't more of the producer's work.
-      if (extension === ".als" && /\.backup-|\[\d{4}-\d{2}-\d{2} \d{6}\]\.als$/.test(lower)) continue;
+      if (extension === ".als" && backupSet(lower)) continue;
       const list = kinds.sounds && SAMPLE_EXTENSIONS.has(extension) ? found.sounds : kinds.presets && PRESET_EXTENSIONS.has(extension) ? found.presets : kinds.sets && extension === ".als" ? found.sets : undefined;
       if (!list || found.seen.has(full)) continue;
       found.seen.add(full);
@@ -263,7 +264,7 @@ export async function learn(options: LearnOptions): Promise<LearnProgress> {
     .map((path) => ({ path, label: basename(path), kind: "folder" as const }));
   for (const source of setsOnly) if (await walk(source, { sounds: false, presets: false, sets: true }, found, signal, 6)) walked.push(source.path);
   for (const path of options.setFiles ?? []) {
-    if (found.seen.has(path) || /\.backup-/.test(basename(path))) continue;
+    if (found.seen.has(path) || backupSet(basename(path))) continue;
     try { const info = await stat(path); found.seen.add(path); found.sets.push({ path, size: info.size, mtime: Math.round(info.mtimeMs), source: { path: dirname(path), label: basename(dirname(path)), kind: "folder" }, relative: basename(path) }); }
     catch { /* gone */ }
   }
@@ -277,7 +278,7 @@ export async function learn(options: LearnOptions): Promise<LearnProgress> {
   const vanished = (path: string) => !existsSync(path) && existsSync(dirname(dirname(path)));
   const gone = <T extends Entry>(known: Map<T["path"], T>, seen: Found[], log: Log<T>, outside = false) => {
     const present = new Set(seen.map((file) => file.path));
-    const lost = [...known.keys()].filter((path) => !present.has(path) && (within(path) || (outside && vanished(path))));
+    const lost = [...known.keys()].filter((path) => !present.has(path) && (within(path) || (outside && (vanished(path) || backupSet(path)))));
     for (const path of lost) known.delete(path);
     return lost.length ? log.append(lost.map((path) => ({ path, size: 0, mtime: 0, gone: true as const }))) : Promise.resolve();
   };

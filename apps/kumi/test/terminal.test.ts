@@ -256,3 +256,31 @@ test("plain lines list a Set's conversations and go back to one; /reconnect and 
   assert.match(f.output, /New conversation\. Kumi won't use what's above/);
   f.input.end(); await f.done;
 });
+
+test("plain mode says once that it's learning the library, puts it in /status, and lists and forgets what it learned from the producer's Sets", async () => {
+  const input = new PassThrough() as PassThrough & { isTTY: boolean; isRaw: boolean; setRawMode(value: boolean): void };
+  input.isTTY = false; input.isRaw = false; input.setRawMode = () => {};
+  let output = "";
+  const sink = Object.assign(new Writable({ write(chunk, _encoding, callback) { output += String(chunk); callback(); } }), { isTTY: false, columns: 200 });
+  let lines = [{ id: "tempo", line: "Tempo: usually 124 BPM" }, { id: "chain-vocal", line: "Vocals: EQ Eight → Compressor" }];
+  const controller: SessionController = {
+    async start() {}, async submit() {}, async refresh() {}, async newConversation() {}, async cancel() {}, async close() {},
+    status() { return { state: "idle", connection: "disconnected", turns: 0 }; }, async undo() { return undefined; },
+    async memory() { return { producer: [], set: [], saved: true }; },
+    library: () => ({ state: "learning", sounds: 10, presets: 2, sets: 1, todo: 50, done: 10 }),
+    async taste() { return lines; },
+    async forgetTaste(id) { const had = lines.some((line) => line.id === id); lines = lines.filter((line) => line.id !== id); return had; },
+  };
+  const terminal = createTerminal({ controller, input, output: sink, models: fakeModels().control, mode: "inference-only", closeTimeoutMs: 25 });
+  const done = terminal.run();
+  await delay(0);
+  for (let index = 0; index < 3; index++) terminal.handleEvent({ type: "library", status: { state: "learning", sounds: index, presets: 0, sets: 0, todo: 50, done: index } });
+  input.write("/status\n/memory\n/forget u2\n/forget u9\n"); await delay(20);
+  input.end(); assert.equal(await done, 0);
+  const text = stripVTControlCharacters(output);
+  assert.equal(text.split("Learning your library in the background…").length - 1, 1, "said once");
+  assert.match(text, /\[status\].*; Learning your library in the background · 10 of 50 sounds/);
+  assert.match(text, /\[memory\] From your Sets: u1 Tempo: usually 124 BPM · u2 Vocals: EQ Eight → Compressor/);
+  assert.match(text, /\[memory\] Forgot, from your Sets: Vocals: EQ Eight → Compressor/);
+  assert.match(text, /\[memory\] Use: \/forget <id>/);
+});

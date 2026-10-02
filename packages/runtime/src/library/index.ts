@@ -6,18 +6,16 @@
  * otherwise stays out of the way.
  */
 import { fork, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { open, readdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { KernelTool, LibraryStatus, SessionEvent } from "../core/contracts.js";
 import type { WebClient } from "../web/net.js";
-import { learn, libraryLogs, pluginPresetFolders, setFolders, LOG_VERSION, type LearnProgress, type PresetEntry, type SetEntry, type SoundEntry } from "./learn.js";
+import { learn, libraryLogs, LOG_VERSION, type LearnProgress, type PresetEntry, type SetEntry, type SoundEntry } from "./learn.js";
+import { planLearning, rememberedFile, rememberedFolders, type PlanOptions } from "./plan.js";
 import { manualTool } from "./manual.js";
 import { SoundIndex } from "./search.js";
-import { librarySources, recentSets, type Source, type SourceOptions } from "./sources.js";
+import { librarySources, type Source, type SourceOptions } from "./sources.js";
 import { acquireLock, readState, writeState, type LibraryState } from "./state.js";
 import { LogReader, readJson, writeJson } from "./store.js";
 import { tasteInstructions, type Taste, type TasteLine } from "./taste.js";
@@ -74,23 +72,6 @@ export interface Library {
   close(): Promise<void>;
 }
 
-/** Where Kumi's own record of each saved Set says it is (the first line of its last-seen.json). */
-async function kumiSets(projectsDir: string | undefined): Promise<string[]> {
-  if (!projectsDir) return [];
-  const found: string[] = [];
-  for (const id of await readdir(projectsDir).catch(() => [] as string[])) {
-    if (!/^[0-9a-f]{32}$/.test(id)) continue;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    try {
-      handle = await open(join(projectsDir, id, "last-seen.json"), "r");
-      const buffer = Buffer.alloc(2048); const { bytesRead } = await handle.read(buffer, 0, 2048, 0);
-      const path = /"path":"((?:[^"\\]|\\.)*)"/.exec(buffer.toString("utf8", 0, bytesRead))?.[1];
-      if (path) { const value = JSON.parse(`"${path}"`) as string; if (value.endsWith(".als") && existsSync(value)) found.push(value); }
-    } catch { /* no record */ } finally { await handle?.close().catch(() => {}); }
-  }
-  return found;
-}
-
 export function createLibrary(options: LibraryOptions): Library {
   const dir = resolve(options.dir);
   const readers = { sounds: new LogReader<SoundEntry>(join(dir, "sounds.jsonl"), "sounds", LOG_VERSION), presets: new LogReader<PresetEntry>(join(dir, "presets.jsonl"), "presets", LOG_VERSION),
@@ -110,8 +91,10 @@ export function createLibrary(options: LibraryOptions): Library {
   let remembered: string[] | undefined;
   void readState(dir).then((state) => { saved = state; notify(); }, () => {});
 
-  const foldersFile = join(dir, "folders.json"); const forgottenFile = join(dir, "forgotten.json");
-  const rememberedFolders = async () => (remembered ??= ((await readJson<string[]>(foldersFile)) ?? []).filter((folder) => typeof folder === "string"));
+  const forgottenFile = join(dir, "forgotten.json");
+  const remembering = async () => (remembered ??= await rememberedFolders(dir));
+  const planning: PlanOptions = { dir, ...(options.folders ? { folders: options.folders } : {}), ...(options.projectsDir ? { projectsDir: options.projectsDir } : {}),
+    ...(options.sources ? { sources: options.sources } : {}), ...(options.findSets === false ? { findSets: false } : {}), ...(options.workers !== undefined ? { workers: options.workers } : {}) };
   function sources(): Source[] {
     // Live's preferences are read at most once a minute.
     if (sourceCache && Date.now() - sourceCache.at < 60_000) return sourceCache.sources;
@@ -140,35 +123,26 @@ export function createLibrary(options: LibraryOptions): Library {
     // Look again in a while: new downloads, new Sets.
     if (!closed) { clearTimeout(timer); timer = setTimeout(() => start(), options.everyMs ?? 30 * 60_000); timer.unref?.(); }
   };
-  async function plan() {
-    await rememberedFolders();
-    sourceCache = undefined;
-    const recent = options.findSets === false ? [] : [...new Set([...recentSets(options.sources), ...await kumiSets(options.projectsDir)])];
-    const home = options.sources?.home ?? homedir(); const platform = options.sources?.platform ?? process.platform;
-    return { dir, sources: sources(), setFolders: options.findSets === false ? [] : setFolders(recent, home, platform), setFiles: recent,
-      pluginPresets: options.findSets === false ? [] : pluginPresetFolders(home, platform).filter((folder) => existsSync(folder)), ...(options.workers !== undefined ? { workers: options.workers } : {}) };
-  }
   function start(): void {
     if (closed || learner || inProcess) return;
     clearTimeout(timer);
-    void plan().then((plan) => {
-      if (closed || learner || inProcess) return;
-      progress = { phase: "looking", sounds: { known: status().sounds, todo: 0, done: 0 }, presets: { known: status().presets, todo: 0, done: 0 }, sets: { known: status().sets, todo: 0, done: 0 }, failed: 0, startedAt: Date.now() };
-      notify();
-      if (options.fork === false) { void learnHere({ signal: new AbortController().signal }, plan).then(finished, finished); return; }
-      const child = fork(fileURLToPath(new URL("./learner.js", import.meta.url)), [], { stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [], serialization: "json" });
-      learner = child;
-      child.on("message", (message: { type: string; progress?: LearnProgress }) => {
-        if (message.type === "progress" && message.progress) { progress = message.progress; notify(); }
-        if (message.type === "done" && message.progress) progress = message.progress;
-      });
-      child.on("exit", () => { if (learner === child) learner = undefined; void finished(); });
-      child.on("error", () => { if (learner === child) learner = undefined; });
-      child.send({ type: "learn", options: { ...plan, paused } });
-    }).catch(() => { progress = undefined; notify(); });
+    sourceCache = undefined;
+    progress = { phase: "looking", sounds: { known: status().sounds, todo: 0, done: 0 }, presets: { known: status().presets, todo: 0, done: 0 }, sets: { known: status().sets, todo: 0, done: 0 }, failed: 0, startedAt: Date.now() };
+    notify();
+    if (options.fork === false) { void learnHere({ signal: new AbortController().signal }).then(finished, finished); return; }
+    // The learner works out what to look through itself, off Kumi's main thread.
+    const child = fork(fileURLToPath(new URL("./learner.js", import.meta.url)), [], { stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [], serialization: "json" });
+    learner = child;
+    child.on("message", (message: { type: string; progress?: LearnProgress }) => {
+      if (message.type === "progress" && message.progress) { progress = message.progress; notify(); }
+      if (message.type === "done" && message.progress) progress = message.progress;
+    });
+    child.on("exit", () => { if (learner === child) learner = undefined; void finished(); });
+    child.on("error", () => { if (learner === child) learner = undefined; });
+    child.send({ type: "learn", options: { ...planning, paused } });
   }
   /** Learning in this process, with the same lock as the learner's. */
-  async function learnHere(run: { rebuild?: boolean; signal: AbortSignal; onProgress?: (progress: LearnProgress) => void }, planned?: Awaited<ReturnType<typeof plan>>): Promise<LearnProgress | undefined> {
+  async function learnHere(run: { rebuild?: boolean; signal: AbortSignal; onProgress?: (progress: LearnProgress) => void }): Promise<LearnProgress | undefined> {
     const release = await acquireLock(dir);
     if (!release) return undefined;
     const controller = new AbortController();
@@ -176,7 +150,7 @@ export function createLibrary(options: LibraryOptions): Library {
     const signal = AbortSignal.any([controller.signal, run.signal]);
     let latest: LearnProgress | undefined;
     try {
-      const result = await learn({ ...(planned ?? await plan()), ...(run.rebuild ? { rebuild: true } : {}), signal,
+      const result = await learn({ ...await planLearning(planning), ...(run.rebuild ? { rebuild: true } : {}), signal,
         gate: () => (paused ? new Promise<void>((resolve) => { const check = setInterval(() => { if (!paused || signal.aborted) { clearInterval(check); resolve(); } }, 200); }) : Promise.resolve()),
         onProgress: (value) => { latest = value; progress = value; notify(); run.onProgress?.(value); } });
       await writeState(dir, result);
@@ -188,7 +162,7 @@ export function createLibrary(options: LibraryOptions): Library {
     } finally { inProcess = undefined; progress = undefined; held = undefined; await release(); notify(); }
   }
   async function soundIndex(): Promise<SoundIndex> {
-    await rememberedFolders();
+    await remembering();
     if ((await readers.sounds.refresh()).changed) stale = true;
     const current = sources();
     const key = current.map((source) => source.path).join("\n");
@@ -201,7 +175,7 @@ export function createLibrary(options: LibraryOptions): Library {
   }
   const learning = (): LearningState => {
     const now = status();
-    return { learning: now.state === "learning" || now.state === "paused", sounds: now.sounds, ...(now.todo !== undefined ? { todo: now.todo, done: now.done ?? 0 } : {}) };
+    return { learning: now.state === "learning" || now.state === "paused", first: !now.learnedAt, sounds: now.sounds, ...(now.todo !== undefined ? { todo: now.todo, done: now.done ?? 0 } : {}) };
   };
   async function readTaste(): Promise<{ taste: Taste | undefined; forgotten: Set<string> }> {
     const taste = await readJson<Taste>(join(dir, "taste.json"));
@@ -239,11 +213,11 @@ export function createLibrary(options: LibraryOptions): Library {
         sets: async () => { await readers.sets.refresh(); return readers.sets.entries.values(); },
         learning,
         remember(folders: readonly string[]) {
-          void rememberedFolders().then(async (known) => {
+          void remembering().then(async (known) => {
             const added = folders.filter((folder) => !known.includes(folder) && !sources().some((source) => folder === source.path || folder.startsWith(`${source.path}${sep}`)));
             if (!added.length) return;
             remembered = [...known, ...added].slice(-32);
-            await writeJson(foldersFile, remembered);
+            await writeJson(rememberedFile(dir), remembered);
             sourceCache = undefined;
             start();
           }).catch(() => {});

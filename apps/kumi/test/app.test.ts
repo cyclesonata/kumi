@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
-import type { ChangeRecord, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
+import type { ChangeRecord, LibraryStatus, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
 import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, touchedNext, TuiApp, type TuiOptions } from "../src/tui/app.js";
 import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
@@ -1772,5 +1772,36 @@ test("a message held while Kumi reads the Set goes back in the box when that's s
   await delay(10);
   const lines = h.screen();
   assert.ok(has(lines, "at most 16 KiB") && has(lines, "too long, say") && !has(lines, "↳ too long, say"), lines.join("\n"));
+  await h.app.close();
+});
+
+test("the welcome screen and /status say how learning the library goes; /memory lists what Kumi learned from your Sets and forgets a line", async () => {
+  const forgotten: string[] = [];
+  let library: LibraryStatus = { state: "learning", sounds: 120, presets: 40, sets: 3, todo: 900, done: 120 };
+  const h = harness(240, 36, undefined, {
+    library: () => library,
+    async memory() { return { producer: [], set: [], saved: true, setName: "Night Drive" }; },
+    async taste() { return [{ id: "chain-vocal", line: "Vocals: EQ Eight → Compressor → Reverb (on 4 of 4 vocal tracks)" }, { id: "tempo", line: "Tempo: usually 124–126 BPM" }]; },
+    async forgetTaste(id) { forgotten.push(id); return true; },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  assert.ok(has(h.screen(), "Learning your library in the background · 120 of 900 sounds"), "the first time, one quiet line on the welcome screen");
+  library = { state: "ready", sounds: 1020, presets: 40, sets: 3, learnedAt: Date.now() };
+  h.emit({ type: "library", status: library });
+  assert.ok(has(h.screen(), "Your library: 1,020 sounds · 40 presets · 3 Sets"));
+  await h.type("/status\r");
+  assert.ok(has(h.screen(), "· Your library: 1,020 sounds · 40 presets · 3 Sets"));
+  await h.type("/memory\r");
+  const lines = h.screen();
+  for (const text of ["From your Sets", "Vocals: EQ Eight → Compressor → Reverb (on 4 of 4 vocal tracks)", "Tempo: usually 124–126 BPM"]) assert.ok(has(lines, text), text);
+  await h.type("vocals");
+  await h.type("\r");
+  assert.ok(has(h.screen(), "Forget this, from your Sets?"));
+  await h.type("\r");
+  await delay(5);
+  assert.deepEqual(forgotten, ["chain-vocal"]);
+  assert.ok(has(h.screen(), "Forgot, from your Sets: Vocals: EQ Eight → Compressor → Reverb"));
   await h.app.close();
 });
