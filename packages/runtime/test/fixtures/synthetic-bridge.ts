@@ -4,6 +4,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTool, LiveFocus, LiveTransport, PinnedNode } from "../../src/core/contracts.js";
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
+import type { EarsLink } from "../../src/ears/link.js";
 import { lowDisk } from "../../src/core/disk.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,7 +32,8 @@ type Options = {
   /** What's selected in Live, as the focus feed reports it. */ onFocus?: (focus: LiveFocus | null) => void;
   /** Live's transport, for the beat light. */ onTransport?: (transport: LiveTransport | null) => void;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
-  /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
+  /** Where the audition keeps Main's level while it renders. */ restoreFile?: string;
+  /** Kumi's listening devices: a fake link, and the Browser listing the device (live_browser_inspect). Off when left out. */ ears?: { open: () => Promise<EarsLink> } };
 export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
@@ -68,7 +70,7 @@ export function bridge(options: Options = {}) {
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
-    "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
+    "live_browser_load_preview", "live_browser_load_apply", ...(options.ears ? ["live_browser_inspect"] : []), ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
     ...(options.racks || options.lateRacks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
     ...(options.savedSet ? ["live_project_backup_preview", "live_project_backup_apply"] : []),
     ...(options.renders ? ["live_transport_preview", "live_song_state", "live_track_structure_preview", "live_track_structure_apply", ...(options.parameters ? [] : ["live_device_parameter_preview", "live_device_parameter_apply"])] : []),
@@ -357,7 +359,7 @@ export function bridge(options: Options = {}) {
     onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}), ...(options.onTransport ? { onTransport: options.onTransport } : {}),
     // Never the producer's own ~/.kumi: each bridge its own file.
     restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
-    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
+    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false });
   return {
     integration, requests, records, states, actions, auditions, released, pins, get tempo() { return tempo; },
     /** Live sends an event (notifications/live_event). */

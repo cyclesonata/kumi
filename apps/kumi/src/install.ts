@@ -10,11 +10,11 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { KUMI, KUMI_VERSION } from "@kumi/runtime";
+import { EARS_NAME, KUMI, KUMI_VERSION } from "@kumi/runtime";
 import { isLiveRunning, runProgram, type Ran } from "./bridge-setup.js";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
@@ -273,8 +273,10 @@ async function removeBridge(io: InstalledIo, run: Run): Promise<"removed" | "kep
   const state = join(config, "..");
   const ran = await run(process.execPath, [lifecycle, "uninstall", "--remote-scripts-dir", remoteScriptsDir(io.env), "--state-dir", state, "--package-root", root!, "--apply", "--confirm-live-stopped"]);
   if (ran.code !== 0) { say(`The bridge's uninstaller refused; remove ${byHand} by hand.`); return "kept"; }
-  // Kumi's extension goes with the bridge: Live would otherwise go on starting it.
+  // Kumi's extension goes with the bridge: Live would otherwise go on starting it. Its listening device goes too.
   say(extensions && removeExtension(extensions) ? "The bridge and Kumi's extension are out of Live." : "The bridge is out of Live.");
+  const scripts = remoteScriptsDir(io.env);
+  if (basename(scripts) === "Remote Scripts") rmSync(join(dirname(scripts), "Kumi", `${EARS_NAME}.amxd`), { force: true });
   return "removed";
 }
 

@@ -34,5 +34,6 @@ export function withFallback(primary: Integration, fallback: () => Integration, 
     arrangementStrip: async (signal) => current.arrangementStrip?.(signal),
     audition: async (request, signal) => current.audition ? current.audition(request, signal) : "Kumi isn't connected to Live, so it can't render anything to hear.",
     goal: async (request, signal) => current.goal ? current.goal(request, signal) : "Kumi isn't connected to Live, so it can't pursue a goal.",
+    hear: async (request, signal) => current.hear ? current.hear(request, signal) : "Kumi isn't connected to Live, so it can't hear the Set.",
   };
 }

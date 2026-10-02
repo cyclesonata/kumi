@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute } from "node:path";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, LiveTransport, Observation, StreamingCall } from "../../core/contracts.js";
+import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, HeardTake, HearRequest, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, LiveTransport, Observation, StreamingCall } from "../../core/contracts.js";
 import { MIX_CANDIDATE } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
@@ -27,6 +28,9 @@ import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 import { KUMI } from "../../command.js";
+import { EARS_ITEM, installEars } from "../../ears/device.js";
+import { openEarsLink, type EarsLink, type Tap } from "../../ears/link.js";
+import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -129,6 +133,11 @@ interface Options {
   restoreFile?: string;
   /** Each audition, for the conversation's round lines. */
   onAudition?: (event: AuditionEvent) => void;
+  /**
+   * Kumi's listening devices (Kumi Ears): on by default, false to always record instead (scratch tracks).
+   * Tests give their own link (and skip writing the device into a User Library).
+   */
+  ears?: false | { open: () => Promise<EarsLink> };
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
@@ -223,6 +232,8 @@ export function createAbletonIntegration(options: Options): Integration {
   const loseLive = () => {
     if (closed || closingStarted || lost) return;
     lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "live");
+    // Live may come back with Max for Live: its listening device is tried again.
+    earsRefused = false;
     clearTimeout(transportTimer); reportTransport(null);
     keepLooking();
   };
@@ -1611,6 +1622,8 @@ export function createAbletonIntegration(options: Options): Integration {
     steps: string[];
     transport?: { position?: number; loop?: boolean };
     notes: string[];
+    /** Kumi's listening devices, one at the end of each source's chain (Main's for the mix), when they're used instead of scratch tracks. */
+    ears?: { link: EarsLink; taps: Map<string, Tap> };
   }
   /** Where the transport is, to put it back after renders. */
   async function transportNow(signal: AbortSignal): Promise<NonNullable<Rig["transport"]>> {
@@ -1622,7 +1635,11 @@ export function createAbletonIntegration(options: Options): Integration {
   async function openRig(candidates: readonly AuditionRequest["candidates"][number][], fromBeat: number | undefined, beats: number | undefined, signal: AbortSignal): Promise<Rig> {
     const rig: Rig = { tag: randomUUID().slice(0, 4), sources: [], from: fromBeat ?? 0, beats: beats ?? 8, steps: [], notes: [], clips: candidates.some((candidate) => candidate.clip) };
     rig.transport = await transportNow(signal);
+    // Kumi's listening devices hear each source where it is; without them (no Max for Live, say) it records.
+    const link = await earsReady(signal);
     const tracks = await rows("track", { fields: ["name"] }, signal);
+    /** A source shares its name with another track: recording (routed by name) can't render it. */
+    let shared = false;
     for (const [index, candidate] of candidates.entries()) {
       // The whole mix: what Main plays, which Resampling records before Main's fader (so Main can stay silent).
       if (candidate.mix) {
@@ -1632,8 +1649,11 @@ export function createAbletonIntegration(options: Options): Integration {
       // By its reference from this turn, or (a goal resumed after a restart) by its name.
       const found = tracks.find((track) => track.ref === candidate.track) ?? tracks.find((track) => track.name === candidate.track);
       if (!found || typeof found.name !== "string") throw new ObservationError(`${candidate.track} isn't a track in this turn's discovery; discover again.`);
-      // Live routes by name: two tracks of one name can't be told apart.
-      if (tracks.filter((track) => track.name === found.name).length > 1) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
+      // Recording routes by name: two tracks of one name can't be told apart (a listening device needs no name).
+      if (tracks.filter((track) => track.name === found.name).length > 1) {
+        if (!link) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
+        shared = true;
+      }
       // Named twice (by reference and by name): rendered once.
       if (rig.sources.some((source) => source.name === found.name)) continue;
       rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}`, ...(candidate.clip ? { clip: candidate.clip } : {}) });
@@ -1651,7 +1671,21 @@ export function createAbletonIntegration(options: Options): Integration {
         for (const source of rig.sources) longest = Math.max(longest, await copyClip(rig, source.track, source.clip, signal, source));
         rig.beats = beats ?? Math.min(32, longest || 8);
       }
-      await addScratch(rig, rig.sources, signal);
+      if (link) {
+        rig.ears = { link, taps: new Map() };
+        try { await placeTaps(rig, rig.sources, signal); }
+        catch (error) {
+          signal.throwIfAborted();
+          // The listening devices couldn't be placed: their steps go, and the sources are recorded instead (from
+          // now on in this Live, so no render waits on a device that won't start).
+          await removeTaps(rig);
+          earsRefused = true;
+          rig.notes.push("Kumi's listening device didn't start in this Live (it needs Max for Live), so Kumi records to listen instead.");
+          if (shared) throw error;
+          delete rig.ears;
+          await addScratch(rig, rig.sources, signal);
+        }
+      } else await addScratch(rig, rig.sources, signal);
     });
     } catch (error) { await closeRig(rig); throw error; }
     return rig;
@@ -1690,15 +1724,206 @@ export function createAbletonIntegration(options: Options): Integration {
     const source = { ...candidate, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}` };
     await quietly(rig.steps, async () => {
       if (rig.clips) await copyClip(rig, candidate.track, candidate.clip ?? "first", signal, source);
-      await addScratch(rig, [source], signal);
+      if (rig.ears) await placeTaps(rig, [source], signal); else await addScratch(rig, [source], signal);
     });
     rig.sources.push(source);
+  }
+  /** Kumi's end of its listening devices, opened once; undefined when they can't be used (then Kumi records instead). */
+  let earsSetup: Promise<EarsLink | undefined> | undefined;
+  /** The device didn't start in this Live (no Max for Live, say): Kumi records instead until Live restarts. */
+  let earsRefused = false;
+  /** Where the devices write what they heard, and the WAVs made from it (gone when Kumi closes). */
+  const earsFolder = join(tmpdir(), "kumi-ears", generation.slice(0, 8));
+  async function earsReady(signal: AbortSignal): Promise<EarsLink | undefined> {
+    if (options.ears === false || process.env.KUMI_EARS === "0" || earsRefused) return undefined;
+    if (!tools?.has("live_browser_load_preview") || !tools.has("live_browser_inspect")) return undefined;
+    const given = options.ears ? options.ears.open : undefined;
+    earsSetup ??= (async () => {
+      const link = given ? await given() : await openEarsLink();
+      await mkdir(earsFolder, { recursive: true, mode: 0o700 });
+      if (given) return link;
+      // The device in the User Library's Kumi folder (rewritten only when this Kumi's differs), and listed by Live's Browser.
+      const installed = await installEars(options.userLibrary ?? userLibrary());
+      const deadline = Date.now() + (installed.written ? 20_000 : 4_000);
+      while (Date.now() < deadline) {
+        const seen = await tools!.call("live_browser_inspect", { itemId: EARS_ITEM }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(5_000)])).then((read) => !read.isError, () => false);
+        if (seen) return link;
+        await delay(400, undefined, { signal: lifetime.signal });
+      }
+      await link.close();
+      return undefined;
+    })().catch(() => undefined);
+    const link = await earsSetup;
+    // Not ready this time (the Browser hadn't listed it yet, say): asked again next time.
+    if (!link) earsSetup = undefined;
+    signal.throwIfAborted();
+    return link;
+  }
+  /** Where a track is in Live's own terms ("live_set tracks 3", "live_set return_tracks 0", "live_set master_track"), from its reference. */
+  async function lomTrackPath(trackRef: string, signal: AbortSignal): Promise<string> {
+    const long = String(lengthen(trackRef, "trackRef"));
+    if (/:main_track:/.test(long)) return "live_set master_track";
+    const ret = /:return_track:(\d+)$/.exec(long);
+    if (ret) return `live_set return_tracks ${Number(ret[1])}`;
+    const index = Number(/:track:(\d+)$/.exec(long)?.[1]);
+    if (!Number.isInteger(index)) throw new ObservationError("Kumi couldn't tell where that track is; discover it again.");
+    // A reference's number counts the regular tracks, then the returns, then Main.
+    const regular = (await rows("track", { fields: ["name"] }, signal)).length;
+    if (index < regular) return `live_set tracks ${index}`;
+    const returns = (await rows("return-track", { fields: ["name"] }, signal)).length;
+    return index < regular + returns ? `live_set return_tracks ${index - regular}` : "live_set master_track";
+  }
+  /** A listening device at the end of each source's chain (Main's for the mix), quietly: the rig's own steps, undone when it closes. */
+  async function placeTaps(rig: Rig, sources: Rig["sources"], signal: AbortSignal): Promise<void> {
+    const ears = rig.ears!;
+    for (const source of sources) {
+      const trackRef = source.mix ? (await mainVolume(signal)).ref : source.track;
+      ears.taps.set(source.name, await placeTap(ears.link, trackRef, signal));
+    }
+  }
+  /** Load the device onto a track and wait for it to say hello from there. */
+  async function placeTap(link: EarsLink, trackRef: string, signal: AbortSignal): Promise<Tap> {
+    const where = await lomTrackPath(trackRef, signal);
+    const before = new Set(link.taps().map((tap) => tap.id));
+    await step("load_device", { itemId: EARS_ITEM, trackRef }, signal);
+    const tap = await link.waitFor((candidate) => !before.has(candidate.id) && candidate.path.startsWith(`${where} devices `), 6_000, signal);
+    if (!tap) throw new ObservationError("Kumi's listening device didn't start on that track (Max for Live is needed: Live Suite, or Standard with Max for Live).");
+    return tap;
+  }
+  /** The rig's listening devices taken away now (their loads undone), before it records instead. */
+  async function removeTaps(rig: Rig): Promise<void> {
+    const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+    const loads = rig.steps.filter((id) => changes.get(id)?.record.family === "device");
+    for (const id of [...loads].reverse()) {
+      await undoChange(id, cleanup).catch(() => undefined);
+      changes.delete(id);
+      rig.steps.splice(rig.steps.indexOf(id), 1);
+    }
+    rig.ears?.taps.clear();
+  }
+  /** A path as Max reads it: forward slashes everywhere. */
+  const maxPath = (file: string) => file.replace(/\\/g, "/");
+  /** The WAVs of earlier passes go once there are many: a goal hears hundreds. */
+  async function pruneEars(): Promise<void> {
+    try {
+      const names = (await readdir(earsFolder)).filter((name) => name.endsWith(".wav"));
+      if (names.length <= 96) return;
+      const dated = await Promise.all(names.map(async (name) => ({ name, at: statSync(join(earsFolder, name)).mtimeMs })));
+      for (const { name } of dated.sort((a, b) => a.at - b.at).slice(0, names.length - 64)) await rm(join(earsFolder, name), { force: true });
+    } catch { /* tidying is best effort */ }
+  }
+  /**
+   * One silent pass through the listening devices: Main to -inf (written down first, for a crash), every
+   * device recording, the part played, Main back exactly. Nothing is recorded into the Set and no track is
+   * armed or added. Each source's file (the part cut out on Live's beat, a moment before it) and where the
+   * part starts in it.
+   */
+  async function earsPass(rig: Rig, signal: AbortSignal): Promise<Map<string, { file: string; start: number }>> {
+    const tempo = currentTempo!;
+    const link = rig.ears!.link;
+    const files = new Map<string, { file: string; start: number }>();
+    const held = rig.hold;
+    let prior = held?.main?.prior;
+    let mainRef = held?.main?.ref;
+    if (prior === undefined) {
+      const main = await mainVolume(signal);
+      if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
+      prior = main.volume; mainRef = main.ref;
+      const pending = restore.load();
+      if (prior === 0 && pending && (pending.path ? pending.path === project?.path : pending.set === currentSet)) prior = pending.volume;
+    }
+    const window = rig.window ?? { from: rig.from, beats: rig.beats };
+    const taps = [...rig.ears!.taps.entries()];
+    let started = false;
+    let failed = true;
+    try {
+      await quietly(undefined, async () => {
+        if (!held?.main) {
+          restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior!, at: now().getTime() });
+          await step("set_mixer", { trackRef: mainRef!, volume: 0 }, signal);
+          if (held) held.main = { ref: mainRef!, prior: prior! };
+        }
+        const beatMs = 60 / tempo * 1000;
+        for (const longer of [false, true]) {
+          const span = renderSpan(window.from, window.beats, beatsPerBar, tempo, longer);
+          const primeKey = `${span.position}`;
+          const priming = !held || held.primed !== primeKey;
+          if (priming && supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
+          // Room for the whole pass, the steps around it, and a count-in.
+          const seconds = span.wait * beatMs / 1000 + 8 + 4 * beatsPerBar * beatMs / 1000;
+          started = true;
+          if (span.position > 0) {
+            // Recording before the transport moves: the devices hear it start, the jump, and the part after it.
+            await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
+            await step("play", { action: "continue" }, signal);
+            await step("set_transport", { position: span.position, ...(priming ? { loopEnabled: false } : {}) }, signal);
+            const jumpedAt = Date.now();
+            await delay(Math.max(0, span.wait * beatMs - (Date.now() - jumpedAt)), undefined, { signal });
+          } else {
+            // Too near the Set's start for a lead-in: stopped twice, Live is at its start, and plays from there.
+            await step("play", { action: "stop" }, signal);
+            await step("play", { action: "stop" }, signal);
+            if (priming && rig.transport?.loop !== false) await step("set_transport", { loopEnabled: false }, signal);
+            await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
+            await step("play", { action: "start" }, signal);
+            let at = 0;
+            for (let check = 0; check < 6 && at < span.wait - 0.25; check++) {
+              await delay(Math.max(50, (span.wait - at) * beatMs), undefined, { signal });
+              const read = (await rows("set", { fields: ["position"] }, signal))[0]?.position;
+              if (typeof read !== "number") break;
+              at = read;
+            }
+          }
+          if (held) held.primed = primeKey;
+          await step("play", { action: "stop" }, signal);
+          started = false;
+          // Each device writes what it heard; the part is cut out of the stretch the transport played it in.
+          let late = false;
+          await Promise.all(taps.map(async ([name, tap]) => {
+            const raw = join(earsFolder, `${randomUUID()}.raw`);
+            try {
+              const written = await link.write(tap, maxPath(raw), signal);
+              const capture = await readCapture(raw, written.channels, written.sampleRate);
+              const stretches = runs(capture, { first: span.position > 0 ? written.beats : 0, afterJump: span.position });
+              const part = stretches.filter((run) => frameAt(run, window.from) !== undefined).at(-1);
+              if (!part) { if (stretches.length) late = true; return; }
+              const at = frameAt(part, window.from)!;
+              const lead = Math.round(LEAD_IN * capture.sampleRate);
+              const end = Math.min(part.to, at + Math.ceil((window.beats + beatsPerBar / 2) * part.samplesPerBeat));
+              const wav = join(earsFolder, `${randomUUID()}.wav`);
+              await writeCaptureWav(wav, capture, at - lead, end);
+              files.set(name, { file: wav, start: Math.min(at, lead) / capture.sampleRate });
+            } catch (error) {
+              rig.notes.push(error instanceof Error ? error.message.slice(0, 200) : "A listening device didn't write what it heard.");
+            } finally { await rm(raw, { force: true }).catch(() => undefined); }
+          }));
+          if (!late) break;
+          if (longer) rig.notes.push("Live jumped past the part's start before Kumi could hear it; listen again.");
+        }
+      });
+      failed = false;
+    } finally {
+      const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+      if (started) await stopEverything(cleanup);
+      // Every device stops recording, whatever happened.
+      for (const [, tap] of taps) link.stop(tap);
+      if (!held || failed) {
+        if (!held) {
+          const back = await quietly(undefined, () => putMainBack(prior!, cleanup));
+          if (back) restore.clear();
+          else rig.notes.push(`Main may still be silent: set it back to ${faderDb(prior!)} in Live.`);
+        }
+      }
+      void pruneEars();
+    }
+    return files;
   }
   /**
    * One silent pass: Main to -inf (written down first, for a crash), every scratch track armed and
    * recording, the part played, Main back exactly. Each source's file and where the part starts in it.
    */
   async function renderPass(rig: Rig, signal: AbortSignal): Promise<Map<string, { file: string; start: number }>> {
+    if (rig.ears) return earsPass(rig, signal);
     const tempo = currentTempo!;
     // Where a pass's time goes, for probing throughput (KUMI_TIMING=1 prints it).
     let lapAt = Date.now(); const laps: string[] = [];
@@ -2214,6 +2439,94 @@ export function createAbletonIntegration(options: Options): Integration {
     }
   }
   /**
+   * Hear tracks (or the mix) in the Set, the way the producer would: while Live plays and no stretch is
+   * named, through Kumi's listening devices as it plays (nothing else in Live is touched); otherwise a
+   * quiet pass over the stretch (the loop, or from the playhead), as an audition renders, with nothing
+   * to compare. Each one's file and where its part starts.
+   */
+  async function hearInSet(request: HearRequest, originalSignal: AbortSignal): Promise<HeardTake[] | string> {
+    if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
+    const tempo = currentTempo;
+    if (!tempo) return "Kumi doesn't know the Set's tempo yet; try again.";
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    const set = (await rows("set", { fields: ["playing", "position", "loop"] }, signal).catch(() => [] as JsonObject[]))[0];
+    const tell = (title: string, playing?: boolean) => { try { options.onAction?.({ title, ...(playing !== undefined ? { playing } : {}) }); } catch { /* a listener failure must not affect Live */ } };
+    if (set?.playing === true && request.fromBeat === undefined) {
+      const link = await earsReady(signal);
+      if (link) return hearAsItPlays(link, request, tell, signal);
+    }
+    if (!supported({ since: RENDER_BRIDGE })) return tooOld({ since: RENDER_BRIDGE });
+    if (rendering) return "Kumi is already listening to something; wait for it.";
+    // Stopped: the loop when it's on, else from the playhead, a few bars.
+    const loop = set?.loop && typeof set.loop === "object" ? set.loop as JsonObject : undefined;
+    const looped = loop?.enabled === true && typeof loop.length === "number" && loop.length > 0;
+    const fromBeat = request.fromBeat ?? (looped ? (typeof loop!.start === "number" ? loop!.start : 0) : typeof set?.position === "number" ? set.position : 0);
+    const beats = Math.min(64, request.beats ?? (looped ? loop!.length as number : 4 * beatsPerBar));
+    const candidates = request.mix ? [{ track: MIX_CANDIDATE, mix: true, label: "The whole mix" }] : request.tracks.map((track) => ({ track }));
+    tell(`Listening quietly from ${bars(fromBeat)}`, true);
+    rendering = true;
+    let rig: Rig | undefined;
+    const takes: HeardTake[] = [];
+    try {
+      rig = await openRig(candidates, fromBeat, beats, signal);
+      const rendered = await renderPass(rig, signal);
+      for (const source of rig.sources) {
+        const found = rendered.get(source.name);
+        if (found) takes.push({ label: source.mix ? "The whole mix" : source.name, file: found.file, start: found.start, seconds: beats * 60 / tempo, live: false });
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      return error instanceof Error ? error.message.slice(0, 400) : "Kumi couldn't hear that.";
+    } finally {
+      if (rig) await closeRig(rig);
+      rendering = false;
+      tell("Listened", false);
+    }
+    if (!takes.length) return `Nothing came through${rig?.notes.length ? `: ${rig.notes.join(" ")}` : ""}. Is something playing there in the Arrangement (its clips at ${bars(fromBeat)}, the track not muted)?`;
+    return takes;
+  }
+  /** Hear tracks (or the mix) for a few seconds as Live plays them: a listening device each, taken away after. */
+  async function hearAsItPlays(link: EarsLink, request: HearRequest, tell: (title: string, playing?: boolean) => void, signal: AbortSignal): Promise<HeardTake[] | string> {
+    const seconds = Math.min(60, Math.max(2, request.seconds ?? 8));
+    const steps: string[] = [];
+    const placed: { label: string; tap: Tap }[] = [];
+    try {
+      await quietly(steps, async () => {
+        if (request.mix) { placed.push({ label: "The whole mix", tap: await placeTap(link, (await mainVolume(signal)).ref, signal) }); return; }
+        const tracks = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+        for (const named of request.tracks) {
+          const found = tracks.find((track) => track.ref === named) ?? tracks.find((track) => track.name === named);
+          if (!found || typeof found.ref !== "string") throw new ObservationError(`${named} isn't a track in this turn's discovery; discover it again.`);
+          placed.push({ label: typeof found.name === "string" ? found.name : named, tap: await placeTap(link, found.ref, signal) });
+        }
+      });
+      tell(`Listening to ${placed.length === 1 ? placed[0]!.label : `${placed.length} tracks`} as it plays (${Math.round(seconds)} s)`);
+      await Promise.all(placed.map(({ tap }) => link.arm(tap, seconds + 2, signal)));
+      await delay(seconds * 1000, undefined, { signal });
+      const takes: HeardTake[] = [];
+      await Promise.all(placed.map(async ({ label, tap }) => {
+        const raw = join(earsFolder, `${randomUUID()}.raw`);
+        try {
+          const written = await link.write(tap, maxPath(raw), signal);
+          const capture = await readCapture(raw, written.channels, written.sampleRate);
+          const wav = join(earsFolder, `${randomUUID()}.wav`);
+          await writeCaptureWav(wav, capture, 0, capture.left.length);
+          takes.push({ label, file: wav, start: 0, seconds: capture.left.length / capture.sampleRate, live: true });
+        } finally { await rm(raw, { force: true }).catch(() => undefined); }
+      }));
+      return takes.sort((a, b) => placed.findIndex((item) => item.label === a.label) - placed.findIndex((item) => item.label === b.label));
+    } catch (error) {
+      signal.throwIfAborted();
+      return error instanceof Error ? error.message.slice(0, 400) : "Kumi couldn't hear that.";
+    } finally {
+      for (const { tap } of placed) link.stop(tap);
+      const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+      await quietly(undefined, async () => { for (const id of [...steps].reverse()) { await undoChange(id, cleanup).catch(() => undefined); changes.delete(id); } });
+      tell("Listened");
+      void pruneEars();
+    }
+  }
+  /**
    * An audition cut off by a crash left Main silent: with that Set open again, Main goes back to where
    * it was, and the producer is told (with any scratch tracks to delete). What was said, or nothing.
    */
@@ -2475,6 +2788,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     },
     audioFile: (named, signal) => clipFile(named, signal),
     audition: (request, signal) => audition(request, signal),
+    hear: (request, signal) => hearInSet(request, signal),
     goal: (request, signal) => openGoal(request, signal),
     async observe(originalSignal, hints) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
@@ -2659,9 +2973,13 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       // Remember the Set as Kumi leaves it, so next time's catch-up starts here (bounded).
       const remembered = project?.path && options.projectStore && available && !lost
         ? Promise.race([saveNow(2_000), new Promise<void>((resolve) => { setTimeout(resolve, 2_500).unref?.(); })]) : Promise.resolve();
-      closing = remembered.then(() => {
+      closing = remembered.then(async () => {
         closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop(); clearTimeout(transportTimer);
         for (const remove of unlisten) remove();
+        // The listening devices' socket, and what they wrote this session.
+        const link = await earsSetup?.catch(() => undefined);
+        await link?.close().catch(() => undefined);
+        await rm(earsFolder, { recursive: true, force: true }).catch(() => undefined);
         return tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
       });
       return closing;

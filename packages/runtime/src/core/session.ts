@@ -202,7 +202,8 @@ export function createSession(options: Options): SessionController {
   const recipes = options.recipes ? recipeTools({ store: options.recipes, plan: () => planTool, onEvent: (event) => emit(event) }) : [];
   // Files are found by path; the integration can also name something in the Set by its file.
   const listening = options.listen ? listeningTools({ onEvent: (event) => emit(event),
-    resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
+    resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined),
+    hear: (request, signal) => integration?.hear?.(request, signal) ?? Promise.resolve("Kumi isn't connected to Live, so it can't hear the Set.") }) : [];
   const watching = options.watch ? videoTools({ ...options.watch, onEvent: (event) => emit(event) }) : [];
   const browsing = options.web ? webTools({ onEvent: (event) => emit(event), ...(typeof options.web === "object" ? { client: options.web.client } : {}) }) : [];
   // Techniques are drafted by the model and kept by what the producer does next.

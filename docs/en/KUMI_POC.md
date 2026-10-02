@@ -300,11 +300,26 @@ track, a sample, a bounce or a recording. It measures:
 Given a reference, it matches the loudness and says what differs most, so it can
 match a mix's EQ and compression or rebuild a sound. The conversation shows what
 it heard as a small spectrum, and a comparison as dB over or under the
-reference. To hear a track or the mix, Kumi records it first (resampling), then
-listens to the recording. It reads WAV and AIFF itself, and MP3, M4A, FLAC and
-the like through macOS's `afconvert`, or elsewhere `ffmpeg`, which Kumi fetches
-on Windows and Linux the first time it's needed. The analysis runs on your
-computer: only the numbers go to the model, never the audio.
+reference. It reads WAV and AIFF itself, and MP3, M4A, FLAC and the like through
+macOS's `afconvert`, or elsewhere `ffmpeg`, which Kumi fetches on Windows and
+Linux the first time it's needed. The analysis runs on your computer: only the
+numbers go to the model, never the audio.
+
+**Hearing the Set.** Ask about a track or the mix ("is the bass muddy?", "what
+clashes with the kick?") and Kumi hears it in Live directly, with nothing to set up:
+
+- **While Live plays**, it listens to what's playing, a few seconds, and leaves
+  Main and the transport alone.
+- **While Live is stopped**, it plays the loop (or a few bars from the playhead,
+  or the part you name) with Main silenced, and puts Main back.
+- **Several tracks at once:** each one's sound, and where two sit in the same band
+  at similar levels.
+- **How:** Kumi Ears, a small Max for Live device Kumi brings (`kumi bridge` puts it
+  in your User Library's Kumi folder). Kumi places it at the end of a track's chain
+  when it needs to hear it and takes it away after. Sound passes through it
+  untouched, and nothing is recorded into your Set.
+- Auditions and goals hear their candidates the same way: no scratch tracks, no
+  arming. Without Max for Live, Kumi records to listen instead, as before.
 
 ## Recipes and watching you work
 
@@ -637,8 +652,8 @@ sending, when you choose.
   plainly with the fix offered (sign in, choose another model). An unbuilt Kumi,
   invalid configuration or startup failure is reported with the command that
   fixes it. Neither includes provider payloads or credentials.
-- **Listening** hears files and recordings, not Live's output as it plays. It
-  measures and compares; it doesn't judge taste. The model says what it heard
+- **Listening** hears files, recordings and the Set's tracks and mix (through Kumi
+  Ears, which needs Max for Live). It measures and compares; it doesn't judge taste. The model says what it heard
   from those numbers. Very long files are heard in part (up to 12 minutes).
 - **Watching videos** depends on the sites as they are: yt-dlp keeps up with
   them, and Kumi fetches it afresh each month. Private, members-only and some
@@ -698,6 +713,6 @@ also times the reads a big Set depends on (tracks, and the Set snapshot Kumi
 catches up from), without touching `~/.kumi`.
 
 Next: a picture in NOW for the kinds of change that have none yet (locators,
-new tracks, devices), undo that outlives the bridge connection, hearing Live's
-output directly, and the bridge's scale limits (see the evidence, "Scale on real
+new tracks, devices), undo that outlives the bridge connection, and the bridge's
+scale limits (see the evidence, "Scale on real
 Live").

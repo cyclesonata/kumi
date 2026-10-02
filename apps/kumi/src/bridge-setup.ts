@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
 import { extensionSource, installExtension, liveExtensionsDir } from "./live-extension.js";
-import { KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
+import { EARS_NAME, installEars, KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 export interface Ran { code: number; stdout: string; stderr: string }
@@ -120,6 +120,19 @@ function placeExtension(io: BridgeSetupIo, say: (line?: string) => void, bridgeR
   }
 }
 
+/**
+ * Puts Kumi's listening device in the User Library's Kumi folder (beside the Remote Scripts folder), so Live's
+ * Browser lists it before Kumi first needs it. Never fatal: Kumi writes it again when it needs it.
+ */
+async function placeEars(say: (line?: string) => void, scripts: string): Promise<void> {
+  const library = dirname(scripts);
+  if (basename(scripts) !== "Remote Scripts" || !existsSync(library)) return;
+  try {
+    const placed = await installEars(library);
+    if (placed.written) say(`Added Kumi's listening device to your User Library (Kumi › ${EARS_NAME}): Kumi puts it on a track when it needs to hear it, and takes it away after.`);
+  } catch { /* Kumi writes it when it first listens */ }
+}
+
 /** The package folder a bridge configuration's entry (<package>/dist/src/cli.js) belongs to. */
 const packageRootOf = (entry: string | undefined) => (entry ? dirname(dirname(dirname(entry))) : undefined);
 
@@ -145,6 +158,7 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
     say(`The Ableton bridge ${bundled} is installed, the same as Kumi's.`);
     // A bridge installed before Kumi had an extension gets it now; Live loads it when it next opens.
     placeExtension(io, say, [installedRoot, bridgeDir].filter((root): root is string => Boolean(root)), await (io.liveRunning ?? (() => isLiveRunning(run)))());
+    await placeEars(say, scripts);
     return 0;
   }
   say(config ? `Kumi's bridge is ${bundled}; the one Live uses is ${installed ?? "older"}. Updating it takes a minute.` : `Kumi will install the Ableton bridge ${bundled}: the Remote Script Live loads, and the local server Kumi talks to.`);
@@ -202,6 +216,7 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   if (!applied.ok) { say(`The bridge's installer stopped, and put back what was there: ${applied.reason}`); return 1; }
   say(`Done: the Ableton bridge ${bundled} is installed (${tilde(scripts)}).`);
   placeExtension(io, say, [root], false);
+  await placeEars(say, scripts);
   say("");
   say(config ? "Now open Live. Kumi connects on its own." : "Now open Live, and in Settings → Link, Tempo & MIDI choose AbletonMcpBridge as a Control Surface. Kumi connects on its own.");
 

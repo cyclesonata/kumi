@@ -175,7 +175,22 @@ export interface Integration {
   audition?(request: AuditionRequest, signal: AbortSignal): Promise<AuditionResult | string>;
   /** A goal's render rig over these candidates (kept open across generations), or why not. */
   goal?(request: AuditionRequest, signal: AbortSignal): Promise<GoalRig | string>;
+  /** Hear tracks (or the mix) in the Set directly: as they play now, or quietly over a stretch of the Arrangement; a file each, or why not. */
+  hear?(request: HearRequest, signal: AbortSignal): Promise<HeardTake[] | string>;
 }
+
+/** What to hear in the Set: tracks by reference or name (or the whole mix), and when. */
+export interface HearRequest {
+  tracks: string[];
+  mix?: boolean;
+  /** A stretch of the Arrangement to play quietly, in beats; left out, what's playing now (or, stopped, the loop or the playhead's part). */
+  fromBeat?: number;
+  beats?: number;
+  /** How long to hear what's playing now. */
+  seconds?: number;
+}
+/** One thing heard: its name, its file, where the part starts in it, and whether it was heard as it played. */
+export interface HeardTake { label: string; file: string; start: number; seconds?: number; live: boolean }
 
 /** A goal's candidate chain in Live: its track, what it is, and the knobs a search may move. */
 export interface GoalSlotInfo { name: string; label: string; chain: string; knobs: Knob[] }

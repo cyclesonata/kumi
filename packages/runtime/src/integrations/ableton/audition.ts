@@ -1,7 +1,8 @@
 /**
  * Auditioning: Kumi renders what it built (one track, or several candidates in one pass), listens,
- * and sets it against a reference, in one call. The render is silent: Main goes to -inf while Live
- * records each source's Post FX onto a scratch track, and comes back exactly, whatever happens.
+ * and sets it against a reference, in one call. The render is silent: Main goes to -inf while Kumi's
+ * listening devices hear each source after its devices (or, without them, Live records each source's
+ * Post FX onto a scratch track), and comes back exactly, whatever happens.
  * What's here is what doesn't need Live: the tool's shape, the arithmetic of a render, and the file
  * that puts Main back after a crash.
  */
@@ -15,10 +16,10 @@ export type { AuditionCandidate, AuditionRequest, AuditionResult, AuditionTake }
 export const AUDITION_TOOL = "audition";
 
 export const AUDITION_DESCRIPTION = [
-  "Hear what you built, quietly, and how close it is to a reference, in one call: Kumi renders each candidate track (its Post FX, so its devices are in it) onto a scratch track with Main silenced,",
-  "listens, compares with the reference, then removes the scratch tracks and puts everything back. Up to 8 candidates render together in one real-time pass, so try several ideas at once (different instruments, chains, settings on separate tracks).",
+  "Hear what you built, quietly, and how close it is to a reference, in one call: Kumi plays the part with Main silenced and hears each candidate track after its devices,",
+  "compares it with the reference, then puts everything back. Up to 8 candidates are heard together in one real-time pass, so try several ideas at once (different instruments, chains, settings on separate tracks).",
   "Say where the part is: from_beat and beats in the Arrangement, or a Session clip per candidate (clip), which Kumi plays from the Arrangement for the render and removes after.",
-  "A candidate can be the whole mix ({\"mix\": true}, on its own): what Main plays at from_beat, recorded as quietly as a track (through Resampling); audition it against a reference to match a mix, changing EQ, compression and levels between rounds.",
+  "A candidate can be the whole mix ({\"mix\": true}, on its own): what Main plays at from_beat, heard as quietly as a track; audition it against a reference to match a mix, changing EQ, compression and levels between rounds.",
   "Returns each candidate's closeness to the reference (0–100) with the biggest gaps in words, and what it heard. A silent render is reported, not compared. Without a reference it only listens.",
 ].join(" ");
 
