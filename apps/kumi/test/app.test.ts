@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
-import type { ChangeRecord, LibraryStatus, SessionController, SessionEvent, TurnState } from "@kumi/runtime";
+import { VoiceError, type ChangeRecord, type LibraryStatus, type SessionController, type SessionEvent, type TurnState } from "@kumi/runtime";
 import { changePicture, chipColor, fitCrumbs, focusPath, setNameFrom, touchedNext, TuiApp, type TuiOptions } from "../src/tui/app.js";
 import { palette } from "../src/tui/style.js";
 import { Editor } from "../src/tui/editor.js";
@@ -13,6 +13,7 @@ import { RESTORE } from "../src/tui/tty.js";
 import type { ModelControl } from "../src/models.js";
 import { openInputHistory, type InputHistory } from "../src/history.js";
 import { fakeModels, MODELS } from "./fake-models.js";
+import { fakeVoice } from "./fake-voice.js";
 import { VirtualTerminal } from "./vt.js";
 
 const opened: TuiApp[] = [];
@@ -1886,5 +1887,190 @@ test("when a conversation already fills the screen, learning the library the fir
   h.emit({ type: "library", status: { state: "learning", sounds: 0, presets: 0, sets: 0, todo: 10, done: 0 } });
   h.emit({ type: "library", status: { state: "learning", sounds: 1, presets: 0, sets: 0, todo: 10, done: 1 } });
   assert.equal(h.screen().filter((line) => line.includes("Learning your library in the background…")).length, 1);
+  await h.app.close();
+});
+
+/** ctrl+t as terminals send it: a control character, or with the kitty protocol pressed, repeating and let go. */
+const CTRL_T = "\u0014";
+const KITTY_T = { press: "\u001b[116;5u", repeat: "\u001b[116;5:2u", release: "\u001b[116;5:3u" };
+const talking = (voice: ReturnType<typeof fakeVoice>, columns = 120, rows = 36) => harness(columns, rows, undefined, {}, undefined, { voice: voice.control });
+
+test("ctrl+t listens, its time and level under the box; pressed again, what was said lands in the box for enter to send", async () => {
+  const voice = fakeVoice();
+  const h = talking(voice);
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  assert.ok(has(h.screen(), "ctrl+t to talk"), "an empty box says how to talk");
+  // The kitty protocol's press and let-go: a tap.
+  await h.type(KITTY_T.press + KITTY_T.release);
+  let lines = h.screen();
+  assert.deepEqual(voice.calls, ["listen"]);
+  assert.ok(has(lines, "Listening…") && has(lines, "● 0:00") && has(lines, "ctrl+t to stop · enter to send · esc to cancel"), lines.join("\n"));
+  await delay(200);
+  assert.ok(has(h.screen(), "▇▇"), "the meter shows the level as it comes");
+  await delay(250);
+  await h.type(KITTY_T.press + KITTY_T.release);
+  lines = h.screen();
+  assert.deepEqual(voice.calls, ["listen", "stop", "write Night Drive"], "the Set's name helps it be written down right");
+  assert.ok(lines.some((line) => line.includes("make the bass darker") && !line.includes("│")), "what was said is in the input box");
+  assert.ok(has(lines, "enter to send") && !has(lines, "Listening…"));
+  assert.ok(!h.calls.some((call) => call.startsWith("submit")), "it waits for enter");
+  await h.type("\r");
+  assert.ok(h.calls.includes("submit:make the bass darker"));
+  await h.app.close();
+});
+
+test("held down, ctrl+t talks until it's let go: told by the terminal, or by its repeats stopping", async () => {
+  const voice = fakeVoice();
+  const h = talking(voice);
+  void h.app.run();
+  await delay(5);
+  // The kitty protocol says it repeats as it's held, then that it's let go.
+  await h.type(KITTY_T.press);
+  await h.type(KITTY_T.repeat + KITTY_T.repeat);
+  assert.ok(has(h.screen(), "let go to stop · esc to cancel"));
+  await delay(400);
+  await h.type(KITTY_T.release);
+  assert.deepEqual(voice.calls, ["listen", "stop", "write "]);
+  assert.ok(has(h.screen(), "make the bass darker"));
+  await h.app.close();
+  // Elsewhere ctrl+t is a control character, repeating while it's held: listening stops once the repeats do.
+  const legacy = fakeVoice();
+  const l = talking(legacy);
+  void l.app.run();
+  await delay(5);
+  await l.type(CTRL_T);
+  await delay(300);
+  for (let repeat = 0; repeat < 6; repeat++) await l.type(CTRL_T);
+  assert.ok(has(l.screen(), "let go to stop"), "the repeats say it's held");
+  assert.deepEqual(legacy.calls, ["listen"], "still listening while it repeats");
+  await delay(450);
+  assert.deepEqual(legacy.calls, ["listen", "stop", "write "]);
+  assert.ok(has(l.screen(), "make the bass darker"));
+  // A press undone at once (a quick double tap) writes nothing down.
+  await l.type("\u0015" + CTRL_T);
+  await l.type(CTRL_T);
+  await delay(450);
+  assert.equal(legacy.calls.filter((call) => call.startsWith("write")).length, 1, "too short to write down");
+  assert.ok(!has(l.screen(), "make the bass darker") && !has(l.screen(), "Listening…"));
+  await l.app.close();
+});
+
+test("while listening, enter stops and sends at once; esc and ctrl+c drop it, before stopping Kumi", async () => {
+  const voice = fakeVoice({ words: "add a reverb" });
+  const h = talking(voice);
+  void h.app.run();
+  await delay(5);
+  await h.type(KITTY_T.press + KITTY_T.release);
+  await delay(450);
+  await h.type("\r");
+  assert.ok(h.calls.includes("submit:add a reverb"), h.calls.join(", "));
+  // While Kumi works, esc drops the listening first; Kumi stops at the next esc.
+  h.emit({ type: "state", state: "running" });
+  await h.type(CTRL_T);
+  assert.ok(has(h.screen(), "Listening…"));
+  await h.type("\u001b");
+  assert.ok(!has(h.screen(), "Listening…") && voice.calls.at(-1) === "cancel");
+  assert.ok(!h.calls.includes("cancel"), "Kumi kept working");
+  await h.type(CTRL_T);
+  await h.type("\u0003");
+  assert.ok(!has(h.screen(), "Listening…") && !h.calls.includes("cancel"));
+  await h.type("\u001b");
+  assert.ok(h.calls.includes("cancel"));
+  await h.app.close();
+});
+
+test("what was said goes in at the cursor, spaced from the words around it; a tap's listening stops itself after quiet", async () => {
+  const voice = fakeVoice({ words: "darker" });
+  const h = talking(voice);
+  void h.app.run();
+  await delay(5);
+  await h.type("make the bass");
+  await h.type(CTRL_T);
+  await delay(450);
+  voice.sound.spoke = true; voice.sound.quietMs = 3_200;
+  await delay(150);
+  assert.deepEqual(voice.calls, ["listen", "stop", "write "], "quiet after speaking stopped it");
+  assert.ok(has(h.screen(), "make the bass darker"));
+  // Chosen in /voice: what's said is sent as soon as it's written down.
+  voice.control.choose({ send: true });
+  voice.sound.spoke = false;
+  await h.type("\u0015");
+  await h.type(CTRL_T);
+  await delay(450);
+  voice.sound.spoke = true;
+  await delay(150);
+  assert.ok(h.calls.includes("submit:darker"), h.calls.join(", "));
+  await h.app.close();
+});
+
+test("when listening fails, Kumi says why and offers the fix: the privacy settings, or another microphone", async () => {
+  const refused = fakeVoice({ listen: new VoiceError("permission", "macOS isn't letting Terminal use the microphone. Allow it in System Settings › Privacy & Security › Microphone, then try again.") });
+  const h = talking(refused);
+  void h.app.run();
+  await delay(5);
+  await h.type(CTRL_T);
+  let lines = h.screen();
+  assert.ok(has(lines, "macOS isn't letting Terminal use the microphone.") && has(lines, "Let Kumi hear the microphone?"), lines.join("\n"));
+  assert.ok(!has(lines, "Listening…"));
+  await h.type("\r");
+  assert.ok(refused.calls.includes("privacy"));
+  await h.app.close();
+  // Nothing heard is said quietly, without a panel: speaking again is the fix.
+  const quiet = fakeVoice({ write: new VoiceError("quiet", "Kumi didn't hear you: the microphone picked up only quiet. Speak a little closer, or check its input level.") });
+  const q = talking(quiet);
+  void q.app.run();
+  await delay(5);
+  await q.type(KITTY_T.press + KITTY_T.release);
+  await delay(450);
+  await q.type(KITTY_T.press + KITTY_T.release);
+  lines = q.screen();
+  assert.ok(has(lines, "Kumi didn't hear you") && !has(lines, "Fix the microphone?"));
+  // A microphone that sends only silence: the privacy settings, or another microphone.
+  const silent = fakeVoice({ write: new VoiceError("silence", "Kumi got only silence from the microphone.") });
+  const m = talking(silent);
+  void m.app.run();
+  await delay(5);
+  await m.type(KITTY_T.press + KITTY_T.release);
+  await delay(450);
+  await m.type(KITTY_T.press + KITTY_T.release);
+  lines = m.screen();
+  assert.ok(has(lines, "Fix the microphone?") && has(lines, "Choose another microphone"));
+  await m.type("\u001b[B\r");
+  await delay(10);
+  assert.ok(has(m.screen(), "Scarlett 2i2 USB"), "the microphones to choose from");
+  await m.app.close();
+});
+
+test("/voice starts listening and sets how: sending at once, the language spoken, the microphone", async () => {
+  const voice = fakeVoice();
+  const h = talking(voice);
+  void h.app.run();
+  await delay(5);
+  await h.type("/vo");
+  assert.ok(has(h.screen(), "/voice"), "the menu offers it");
+  await h.type("\u0015/voice\r");
+  let lines = h.screen();
+  for (const text of ["Talk to Kumi", "Start listening", "Send when you stop", "off", "Language", "English", "Microphone", "system default"]) assert.ok(has(lines, text), text);
+  await h.type("\u001b[B\r");
+  assert.ok(voice.calls.includes('choose {"send":true}'));
+  assert.ok(has(h.screen(), "What you say is sent at once"));
+  await h.type("\u001b[B\r");
+  lines = h.screen();
+  assert.ok(has(lines, "The language you speak") && has(lines, "Japanese") && has(lines, "Any language"), "the computer's language is offered");
+  await h.type("\u001b[B\r");
+  assert.ok(voice.calls.includes('choose {"language":"ja"}'));
+  assert.ok(has(h.screen(), "Japanese"), "back in /voice, the language chosen");
+  await h.type("\u001b[B\r");
+  await delay(10);
+  assert.ok(has(h.screen(), "System default") && has(h.screen(), "MacBook Pro Microphone"));
+  await h.type("\u001b[B\u001b[B\r");
+  assert.ok(voice.calls.includes('choose {"microphone":"Scarlett 2i2 USB"}'));
+  await h.type("\u001b[A\u001b[A\u001b[A\r");
+  assert.ok(has(h.screen(), "Listening…") && voice.calls.includes("listen"));
+  await h.type("\u001b");
+  await h.type("/help\r");
+  assert.ok(has(h.screen(), "ctrl+t talks instead"));
   await h.app.close();
 });

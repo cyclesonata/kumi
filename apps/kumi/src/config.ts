@@ -68,12 +68,24 @@ export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KU
 /** What Kumi learned of the producer's library: their sounds, presets and Sets. */
 export const loadLibraryDir = (env: Env = process.env) => absoluteFile(env, "KUMI_LIBRARY_DIR", join(kumiDir(env), "library"));
 
+/** How the producer talks to Kumi (/voice). */
+export interface VoiceSettings {
+  /** What's said is sent as soon as they stop, without enter. */
+  send?: true;
+  /** The language spoken: "en", another's code, or "auto" to detect it; the system's when unset. */
+  language?: string;
+  /** A microphone by name; the system's default when unset. */
+  microphone?: string;
+}
+
 /** Non-secret preferences: the chosen model and how hard it thinks. */
 export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string;
   /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false;
   /** More folders for Kumi to learn sounds, presets and Sets from (full paths or ~/…), besides Live's own. */ libraryFolders?: string[];
   /** OpenAI-compatible model servers the producer runs (llama.cpp's server, vLLM, Jan, …), beside Ollama and LM Studio, which Kumi finds by itself. */
-  modelServers?: ServerSetting[] }
+  modelServers?: ServerSetting[];
+  /** Talking to Kumi: whether what's said is sent at once, its language, and the microphone. */
+  voice?: VoiceSettings }
 
 /** The model servers named in settings.json that Kumi can use: a name, an http(s) address, and a key if the server wants one. */
 function serverSettings(value: unknown): ServerSetting[] {
@@ -89,30 +101,41 @@ function serverSettings(value: unknown): ServerSetting[] {
   });
 }
 
+/** Voice settings as kept, without anything that isn't one. */
+function voiceSettings(value: unknown): VoiceSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { send, language, microphone } = value as { send?: unknown; language?: unknown; microphone?: unknown };
+  const settings: VoiceSettings = { ...(send === true ? { send: true as const } : {}), ...(typeof language === "string" && /^(auto|[a-z]{2,3})$/.test(language) ? { language } : {}),
+    ...(typeof microphone === "string" && microphone.length <= 200 && !/[\x00-\x1f\x7f]/.test(microphone) && microphone.trim() ? { microphone } : {}) };
+  return Object.keys(settings).length ? settings : undefined;
+}
+
 /** The settings file; a missing or unreadable file, or an unknown value, means none. */
 export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown; libraryFolders?: unknown; modelServers?: unknown };
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown; libraryFolders?: unknown; modelServers?: unknown; voice?: unknown };
     const folders = Array.isArray(value.libraryFolders) ? value.libraryFolders.filter((folder): folder is string => typeof folder === "string" && folder.length > 0 && folder.length <= 1024).slice(0, 64) : [];
     const modelServers = serverSettings(value.modelServers);
+    const voice = voiceSettings(value.voice);
     return { ...(typeof value.model === "string" && validModel(value.model, modelServers) ? { model: value.model } : {}),
       ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}),
       ...(typeof value.panelTab === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.panelTab) ? { panelTab: value.panelTab } : {}),
-      ...(value.updateCheck === false ? { updateCheck: false as const } : {}), ...(folders.length ? { libraryFolders: folders } : {}), ...(modelServers.length ? { modelServers } : {}) };
+      ...(value.updateCheck === false ? { updateCheck: false as const } : {}), ...(folders.length ? { libraryFolders: folders } : {}), ...(modelServers.length ? { modelServers } : {}), ...(voice ? { voice } : {}) };
   } catch { return {}; }
 }
 
 export function writeSettings(file: string, next: Settings): void {
-  // The pane's tab, the update check and the library's folders are kept when a caller (choosing a model) doesn't
-  // say; the model servers the producer named, exactly as they wrote them.
+  // The pane's tab, the update check, the library's folders and the voice settings are kept when a caller (choosing
+  // a model) doesn't say; the model servers the producer named, exactly as they wrote them.
   const before = readSettings(file);
   const panelTab = "panelTab" in next ? next.panelTab : before.panelTab;
   const updateCheck = "updateCheck" in next ? next.updateCheck : before.updateCheck;
   const libraryFolders = "libraryFolders" in next ? next.libraryFolders : before.libraryFolders;
   let modelServers: unknown = next.modelServers;
   if (!("modelServers" in next)) { try { modelServers = (JSON.parse(readFileSync(file, "utf8")) as { modelServers?: unknown }).modelServers; } catch { modelServers = undefined; } }
+  const voice = voiceSettings("voice" in next ? next.voice : before.voice);
   const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}),
-    ...(libraryFolders?.length ? { libraryFolders } : {}), ...(modelServers !== undefined ? { modelServers } : {}) };
+    ...(libraryFolders?.length ? { libraryFolders } : {}), ...(modelServers !== undefined ? { modelServers } : {}), ...(voice ? { voice } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });

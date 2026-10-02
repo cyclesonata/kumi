@@ -19,6 +19,7 @@ import { authStatus, login, logout, openBrowser } from "./login.js";
 import { createModelControl } from "./models.js";
 import { createTerminal, type Terminal } from "./terminal.js";
 import { createTui } from "./tui/app.js";
+import { createVoiceControl } from "./voice.js";
 import { INSTALLED, KUMI, KUMI_START } from "@kumi/runtime";
 
 /** One row of help: the command (as this Kumi is run) and what it does, lined up in two columns. */
@@ -63,7 +64,8 @@ Kumi reads the open Live Set and makes the changes you ask for; each change can 
 and bounces when you ask, listens to audio (a reference, a sample, a recording) and compares it, keeps short notes
 of what you tell it that Live can't show, and saves your ways of working as recipes to replay, including ones it
 learns by watching you.
-In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /undo /refresh /reconnect /new /update /quit. Ctrl-C cancels work, or exits if idle.
+In a session: /help /status /model /effort /login /logout /memory /recipes /conversations /voice /undo /refresh /reconnect /new /update /quit. Ctrl-C cancels work, or exits if idle.
+Ctrl-T talks instead of typing: what you say is written down on this computer (whisper.cpp) and lands in the input box.
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = `The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: ${KUMI} bridge`;
@@ -254,6 +256,8 @@ try {
     const updates: UpdateControl = { current: KUMI_VERSION, check: () => INSTALLED ? checkRelease(process.env) : checkCheckout(), request: () => { updateAfter = true; } };
     terminal = (fullScreen ? createTui : createTerminal)({ controller, input: process.stdin, output: process.stdout, models, mode: config.mode, secrets,
       history: openInputHistory(loadInputHistoryFile(), secrets), openBrowser, updates,
+      // Talking instead of typing (ctrl+t): the microphone, written down on this computer.
+      voice: createVoiceControl({ toolsDir: loadToolsDir(), settingsFile: loadSettingsFile(), open: openBrowser }),
       panelTab: { load: () => readSettings(loadSettingsFile()).panelTab, save: (id) => { try { writeSettings(loadSettingsFile(), { ...readSettings(loadSettingsFile()), panelTab: id }); } catch { /* next time, then */ } } },
       ...(config.mode === "inference-only" && config.bridgeMissing ? { startupNotice: BRIDGE_MISSING } : stale ? { startupNotice: `The bridge in Live is ${stale.installed}, older than this Kumi's (${stale.bundled}), so some changes aren't offered. Quit Kumi and Live, then run: ${KUMI} update` } : {}) });
     const interrupt = () => terminal?.interrupt();

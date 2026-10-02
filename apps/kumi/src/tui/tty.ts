@@ -12,9 +12,10 @@ import { InputParser, type InputEvent } from "./keys.js";
 export type TtyInput = Readable & { isTTY?: boolean; isRaw?: boolean; setRawMode?: (enabled: boolean) => unknown };
 export type TtyOutput = Writable & { isTTY?: boolean; columns?: number; rows?: number; fd?: number };
 
-// \u001b[>1u asks terminals that support it (kitty, Ghostty, WezTerm, iTerm2) to report keys
-// unambiguously, so Shift+Enter is distinct from Enter and Escape needs no timeout. Others ignore it.
-const ENTER = "\u001b[?1049h\u001b[?7l\u001b[?25l\u001b[?2004h\u001b[?1004h\u001b[>1u";
+// \u001b[>3u asks terminals that support it (kitty, Ghostty, WezTerm, iTerm2) to report keys
+// unambiguously, so Shift+Enter is distinct from Enter and Escape needs no timeout, and to say when
+// a key repeats and when it's let go (ctrl+t held down talks until it's let go). Others ignore it.
+const ENTER = "\u001b[?1049h\u001b[?7l\u001b[?25l\u001b[?2004h\u001b[?1004h\u001b[>3u";
 const MOUSE_ON = "\u001b[?1000h\u001b[?1002h\u001b[?1006h";
 export const RESTORE = "\u001b[?2026l\u001b[0m\u001b[<u\u001b[?1006l\u001b[?1002l\u001b[?1000l\u001b[?1004l\u001b[?2004l\u001b[?7h\u001b[?25h\u001b[?1049l";
 

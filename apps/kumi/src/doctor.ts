@@ -9,13 +9,14 @@ import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
 import {
   apiKeyFor, canBuildHands, ffmpegHint, findFfmpeg, findWhisper, listLocalModels, localInstalled, localServers, OPENAI_CODEX, openCredentialStore, openHands, parseLocalModelId, parseModelId, probeLocal, PROVIDER_INFO,
-  readLibraryState, since, startHint, whisperHint, type LocalServer, type ModelInfo, type ProviderId,
+  readLibraryState, since, startHint, terminalApp, voiceReadiness, whisperHint, type LocalServer, type ModelInfo, type ProviderId, type VoiceReadiness,
 } from "@kumi/runtime";
 import { findBridgeConfig, loadAuthFile, loadLibraryDir, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
 import { extensionAnswers, extensionDataDir, extensionSource, installedExtension, liveExtensionsDir, readExtension, runningExtension } from "./live-extension.js";
+import { systemLanguage } from "./voice.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -52,6 +53,8 @@ export interface DoctorIo {
   hands?: () => Promise<Check | undefined>;
   /** The model servers worth a line (running, installed, or named in settings.json) and their models; each asked when left out. */
   modelServers?: () => Promise<ServerFinding[]>;
+  /** What talking to Kumi needs and has; looked up (nothing fetched, nothing asked) when left out. */
+  voice?: () => Promise<VoiceReadiness>;
 }
 
 /** A model server the doctor looked for: running (with its models, when it listed them), or the producer's but not running. */
@@ -211,6 +214,23 @@ function serverChecks(servers: readonly ServerFinding[], env: Env, said?: string
   return checks;
 }
 
+/**
+ * Talking to Kumi (ctrl+t): what's missing, or that it's ready. Never a fix: Kumi works without it, and
+ * off a Mac it fetches what it needs the first time the producer talks.
+ */
+export function voiceCheck(voice: VoiceReadiness, env: Env, platform: string = process.platform): Check {
+  if (!voice.fetches && (!voice.ffmpeg || !voice.whisper)) {
+    const both = !voice.ffmpeg && !voice.whisper;
+    const install = platform === "darwin" ? `brew install ${[!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper-cpp" : ""].filter(Boolean).join(" ")}`
+      : [!voice.ffmpeg ? ffmpegHint() : "", !voice.whisper ? whisperHint() : ""].filter(Boolean).join("; ");
+    return { status: "note", text: `Talking to Kumi (ctrl+t) needs ${both ? "ffmpeg and whisper.cpp" : !voice.ffmpeg ? "ffmpeg" : "whisper.cpp"}`, next: `Install ${both ? "them" : "it"}: ${install}` };
+  }
+  if (voice.allowed === false) return { status: "note", text: `Talking to Kumi (ctrl+t): macOS isn't letting ${terminalApp(env)} use the microphone`, next: "Allow it in System Settings › Privacy & Security › Microphone" };
+  const later = [!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper.cpp" : "", !voice.model.path ? "its speech model (about 190 MB)" : ""].filter(Boolean);
+  if (later.length) return { status: "ok", text: `Talking to Kumi (ctrl+t): Kumi fetches ${later.join(" and ").replace(/ and (?=.* and )/, ", ")} the first time you talk` };
+  return { status: "ok", text: "Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer" };
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
@@ -282,6 +302,8 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   // Live's own menus (grouping, freezing, bouncing, saving…): the helper, and on a Mac, Accessibility for this terminal.
   const hands = await (io.hands ?? handsCheck)();
   if (hands) checks.push(hands);
+  const voice = await (io.voice ?? (() => voiceReadiness({ env, toolsDir: loadToolsDir(env), language: readSettings(loadSettingsFile(env)).voice?.language ?? systemLanguage(env) })))().catch(() => undefined);
+  if (voice) checks.push(voiceCheck(voice, env));
   const terminal = io.terminal ?? { isTTY: Boolean(process.stdout.isTTY), ...(process.stdout.columns ? { columns: process.stdout.columns } : {}), ...(process.stdout.rows ? { rows: process.stdout.rows } : {}) };
   if (!terminal.isTTY) checks.push({ status: "note", text: "Not a terminal window here, so Kumi uses plain lines" });
   else {
