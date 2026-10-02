@@ -41,6 +41,11 @@ export interface AgentKernelOptions extends KernelOptions {
 export interface AgentKernel extends Kernel {
   /** Queue guidance for the running turn; it enters at the next model boundary. False when idle. */
   steer(text: string): boolean;
+  /**
+   * A side question about the conversation so far (the turn under way included, up to its last
+   * finished step), answered in one model call without tools. It never enters the conversation.
+   */
+  aside(question: string, signal: AbortSignal, onText: (text: string) => void): Promise<string>;
   /** Settled conversation only; an in-flight turn is never included. */
   checkpoint(): Checkpoint;
   transcript(): TranscriptLine[];
@@ -62,6 +67,8 @@ const MAX_REPLY = 8 * 1024;
 /** Images one tool result shows, and the media types models read. */
 const MAX_TOOL_IMAGES = 16;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+/** Says what a side question is, ahead of its words. */
+const ASIDE_NOTE = "(A side question while you work. Answer it briefly, in plain words, from what's above; use no tools. It doesn't change the request you're working on, and your answer isn't kept in the conversation.)";
 /** Ends a stopped turn's kept steps, for the model and in the transcript. */
 export const STOPPED_NOTE = "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
 
@@ -87,11 +94,13 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   // What the conversation was made with besides its messages: some models' reasoning is bound to it.
   const toolsKey = createHash("sha256").update(JSON.stringify({ instructions, specs })).digest("base64url").slice(0, 22);
   let history = options.checkpoint ? restore(options.checkpoint, binding.id, toolsKey) : [];
-  let running: { steering: string[] } | undefined;
+  /** The turn under way: guidance waiting for its next step, and what it has said and done so far. */
+  let running: { steering: string[]; context?: () => LanguageModelV4Message[] } | undefined;
   let active: Promise<TurnResult> | undefined;
   let closing: Promise<void> | undefined;
 
-  async function turn(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void, steering: string[]): Promise<TurnResult> {
+  async function turn(input: string, signal: AbortSignal, emit: (event: KernelEvent) => void, state: NonNullable<typeof running>): Promise<TurnResult> {
+    const { steering } = state;
     const failed = new AbortController();
     const abort = AbortSignal.any([signal, lifetime.signal, failed.signal]);
     // A throwing listener must not leave a half-delivered turn in history.
@@ -107,6 +116,12 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     // What this turn sends as the earlier conversation, fitted to the budget. It becomes the
     // history only when the turn settles; fitting is deterministic, so the next turn sends the same.
     let earlier = history;
+    // A side question sees this turn up to its last finished step: a call still waiting for its result is left out.
+    state.context = () => {
+      const last = messages[messages.length - 1];
+      const end = last?.role === "assistant" && last.content.some((part) => part.type === "tool-call") ? messages.length - 1 : messages.length;
+      return [...earlier, ...messages.slice(0, end)];
+    };
     // A stopped turn (cancelled, timed out or failed) keeps the steps it finished, each model reply
     // with all its tool results, so the conversation says what those steps changed in Live. The
     // step in progress goes; a turn that finished no tool round leaves no trace.
@@ -255,13 +270,36 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       if (running) return Promise.reject(new Error("Kernel is busy; cancel first"));
       if (signal.aborted) return Promise.resolve({ stopReason: "cancelled" });
       const state = running = { steering: [] as string[] };
-      active = turn(input, signal, emit, state.steering).finally(() => { running = undefined; active = undefined; });
+      active = turn(input, signal, emit, state).finally(() => { running = undefined; active = undefined; });
       return active;
     },
     steer(text) {
       if (!running || closing || !text.trim() || Buffer.byteLength(text) > MAX_STEER) return false;
       running.steering.push(text);
       return true;
+    },
+    async aside(question, signal, onText) {
+      if (closing) throw new Error("Kernel is closed");
+      const words = question.trim();
+      if (!words || Buffer.byteLength(words) > MAX_STEER) throw new KumiError("request", "Ask a side question of at most 16 KiB.");
+      const context = running?.context?.() ?? history;
+      const fitted = fit(context, [user(`${ASIDE_NOTE}\n\n${words}`)], budget);
+      const messages = fitted.history === context ? [...context, ...fitted.turn] : [...withoutReasoning(fitted.history), ...fitted.turn];
+      // The same instructions and tools as the conversation (some providers need the tools its calls name), none to call.
+      const request = { ...binding.prepare({ instructions, messages, tools: specs, sessionId }), toolChoice: { type: "none" as const } };
+      const abort = AbortSignal.any([signal, lifetime.signal]);
+      for (let attempt = 0; ; attempt++) {
+        let delivered = false;
+        try {
+          const { stream: parts } = await binding.model.doStream({ ...request, abortSignal: abort });
+          const result = await consume(parts, abort, (text) => { delivered = true; onText(text); });
+          return result.content.map((part) => (part.type === "text" ? part.text : "")).join("").trim();
+        } catch (error) {
+          const wait = attempt < MAX_RETRIES && !delivered && !abort.aborted ? retryDelayMs(error, attempt) : undefined;
+          if (wait === undefined) throw abort.aborted || error instanceof KumiError ? error : describeFailure(error, binding.id);
+          await delay(wait, undefined, { signal: abort });
+        }
+      }
     },
     checkpoint() {
       if (running) throw new Error("Kernel is busy; checkpoint between turns");

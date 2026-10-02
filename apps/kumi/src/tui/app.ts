@@ -4,7 +4,7 @@
  */
 import {
   FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type ModelInfo, type ProviderId,
-  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip,
+  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
@@ -19,6 +19,7 @@ import { FrameScheduler } from "./scheduler.js";
 import { Screen, type Rect } from "./screen.js";
 import { detectColorDepth, hex, palette, StyleTable, type ColorDepth, type Rgb, type Style } from "./style.js";
 import { doingLabel, MEMORY_GLYPHS, stepLabel, Transcript, type Entry, type MemoryKind, type Row } from "./transcript.js";
+import { renderMarkdown } from "./markdown.js";
 import { activityGlyph, activityOf, activityScene, shimmer, type Activity } from "./activity.js";
 import { Tty, type TtyInput, type TtyOutput } from "./tty.js";
 import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from "./icons.js";
@@ -26,7 +27,7 @@ import { LOGO_HEIGHT, LOGO_LETTERS, LOGO_RULE, LOGO_WIDTH } from "./logo.js";
 import { treeRows, treeWindow, type TreeRow } from "./tree.js";
 import { TabPanel, type Tab, type TabRow } from "./tabs.js";
 import { textWidth, truncate } from "./width.js";
-import { wrap } from "./wrap.js";
+import { wrap, type Span as TextSpan } from "./wrap.js";
 
 export interface TuiOptions {
   controller: SessionController;
@@ -64,7 +65,12 @@ type Assistant = Extract<Entry, { kind: "assistant" }>;
 type Panel =
   | { kind: "pick"; picker: Picker; choose(item: PickerItem): void | Promise<void> }
   | { kind: "key"; provider: ProviderId; secret: string; checking?: boolean; status?: { text: string; tone: "info" | "warn" }; then?: () => void | Promise<void> }
-  | { kind: "chatgpt"; url?: string; abort: AbortController; then?: () => void | Promise<void> };
+  | { kind: "chatgpt"; url?: string; abort: AbortController; then?: () => void | Promise<void> }
+  /** A side question (/btw) and its answer as it comes; `at` is which of this session's side questions shows. */
+  | { kind: "btw"; at: number; scroll: number };
+
+/** A side question asked with /btw, and its answer (never part of the conversation). */
+interface Aside { question: string; answer: string; state: "asking" | "done" | "failed"; abort: AbortController }
 
 /** A row of a panel: text, a dimmer detail beside it, a note at the right edge. */
 interface PanelLine {
@@ -74,6 +80,8 @@ interface PanelLine {
   right?: { text: string; style: Style };
   /** The selected row. */
   band?: boolean;
+  /** Styled text in place of `text` (a side answer's markdown). */
+  spans?: TextSpan[];
   indent?: number;
   /** Labels in a list share a column, so their details line up. */
   labelWidth?: number;
@@ -84,6 +92,7 @@ const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking",
 
 const COMMANDS = [
   { name: "/new", about: "Forget this conversation and start fresh" },
+  { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
   { name: "/conversations", about: "Go back to an earlier conversation about this Set" },
   { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
@@ -114,7 +123,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -305,8 +314,15 @@ export class TuiApp {
   private bytes = 0;
   /** A submitted message waiting for its turn to start; other operations also report "running". */
   private pendingTurn = false;
-  /** A message typed while Kumi was connecting or reading the Set; sent as soon as it's ready. */
-  private queued: string | undefined;
+  /**
+   * Messages typed while Kumi works. "now" ones go into the answer under way at its next step (`taken`
+   * once Kumi has them); "after" ones, and any it couldn't take, are sent as Kumi finishes, one an answer.
+   */
+  private held: { text: string; when: "now" | "after"; taken?: boolean }[] = [];
+  /** How the last answer ended, for what happens to messages still waiting. */
+  private lastStop: TurnResult["stopReason"] | undefined;
+  /** This session's side questions (/btw), oldest first. */
+  private asides: Aside[] = [];
   private activity = "connecting to Live";
   private panel: Panel | undefined;
   /** The model is writing a plan of changes (the call's id), which starts running as it's written; since when. */
@@ -390,7 +406,7 @@ export class TuiApp {
       case "state":
         if (event.state === "running") {
           if (this.pendingTurn) {
-            this.pendingTurn = false;
+            this.pendingTurn = false; this.lastStop = undefined;
             this.suppress = false; this.failed = false; this.bytes = 0; this.stream.discard();
             this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running", startedAt: performance.now() }) as Assistant;
             this.scroll = 0;
@@ -400,14 +416,12 @@ export class TuiApp {
           this.suppress = true; this.stream.discard();
         } else if (event.state === "idle" && this.pendingTurn) {
           this.pendingTurn = false;
-        } else if (event.state === "idle" && this.queued !== undefined) {
-          const raw = this.queued; this.queued = undefined;
-          void Promise.resolve().then(() => this.send(raw));
         } else if (this.current) {
           this.current.status = this.failed ? "failed" : "stopped";
           this.transcript.touch(this.current);
           this.current = undefined;
         }
+        if (event.state === "idle") this.afterBusy();
         if ((event.state === "running" || event.state === "cancelling") && !this.busySince) this.busySince = performance.now();
         else if (event.state === "idle") this.busySince = 0;
         this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling");
@@ -598,6 +612,22 @@ export class TuiApp {
         else this.transcript.insertBefore({ kind: "web", lines: [line] }, this.current);
         break;
       }
+      case "steer": {
+        // Kumi took a message sent while it worked: it shows where it went in, and the answer carries on under it.
+        const at = this.held.findIndex((item) => item.when === "now" && item.taken && item.text === event.text);
+        if (at >= 0) this.held.splice(at, 1);
+        const words = sanitizeText(event.text, this.secrets).trim();
+        if (this.current) {
+          const before = this.current;
+          if (!this.suppress) before.text += this.stream.finish();
+          before.status = "done";
+          this.transcript.touch(before);
+          if (!before.text && !before.steps.length) this.transcript.remove(before);
+          this.transcript.add({ kind: "user", text: words });
+          this.current = this.transcript.add({ kind: "assistant", text: "", steps: [], status: "running", startedAt: performance.now() }) as Assistant;
+        } else this.transcript.add({ kind: "user", text: words });
+        break;
+      }
       case "doing": {
         const running = this.current?.steps.filter((step) => step.state === "running").at(-1);
         if (running) running.doing = sanitizeText(event.text, this.secrets).replaceAll("\n", " ").slice(0, 80);
@@ -628,6 +658,7 @@ export class TuiApp {
         const usage = event.result.usage;
         if (usage) { this.used.input += usage.inputTokens; this.used.output += usage.outputTokens; this.used.cached += usage.cacheReadTokens; this.used.answers++; }
         const entry = this.current;
+        this.lastStop = event.result.stopReason;
         if (!entry) break;
         const cancelled = event.result.stopReason === "cancelled";
         if (!cancelled && !this.suppress) entry.text += this.stream.finish();
@@ -642,7 +673,42 @@ export class TuiApp {
       default:
         break;
     }
+    // Kumi takes a waiting message once it's working on the answer: try again as it moves.
+    if ((event.type === "text" || event.type === "tool-start" || event.type === "tool-end" || event.type === "tool-input") && this.held.some((item) => item.when === "now" && !item.taken)) this.steerHeld();
     this.scheduler.request();
+  }
+
+  /** A message typed while Kumi works: into the answer under way at its next step ("now"), or after it ("after"). */
+  private hold(raw: string, when: "now" | "after"): void {
+    this.held.push({ text: raw, when });
+    if (when === "now") this.steerHeld();
+    this.scheduler.request();
+  }
+
+  private steerHeld(): void {
+    const { controller } = this.options;
+    if (!controller.steer) return;
+    for (const item of this.held) if (item.when === "now" && !item.taken) item.taken = controller.steer(item.text);
+  }
+
+  /**
+   * Kumi is free again. Messages still waiting are sent, one an answer; any Kumi took but didn't get to
+   * are sent too. After a stop or a failure they go back into the box instead, to send or not.
+   */
+  private afterBusy(): void {
+    if (!this.held.length || this.closing) return;
+    if (this.lastStop === "cancelled" || this.failed) {
+      const words = this.held.map((item) => item.text);
+      this.held = [];
+      this.editor.set([...words, ...(this.editor.isEmpty ? [] : [this.editor.text])].join("\n"));
+      this.recall = undefined;
+      return;
+    }
+    const next = this.held.shift()!;
+    this.transcript.add({ kind: "user", text: sanitizeText(next.text, this.secrets).trim() });
+    this.lastSent = next.text;
+    this.scroll = 0;
+    void Promise.resolve().then(() => this.send(next.text));
   }
 
   private get busy(): boolean {
@@ -676,6 +742,7 @@ export class TuiApp {
     if (this.panel?.kind === "chatgpt") this.panel.abort.abort();
     if (this.panel?.kind === "key") this.panel.secret = "";
     this.panel = undefined;
+    for (const aside of this.asides) if (aside.state === "asking") aside.abort.abort();
     this.scheduler.dispose();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -742,6 +809,14 @@ export class TuiApp {
       else if (name === "escape" || name === "tab") { this.treeCursor = undefined; return; }
       else this.treeCursor = undefined;
     }
+    // While Kumi works, Tab sends what's typed after the answer under way, rather than into it.
+    if (name === "tab" && !menu.length && !ctrl && !alt && this.busy && !this.editor.isEmpty && !isCommand(this.editor.text.trim())) {
+      const raw = this.editor.text;
+      this.options.history?.add(raw); this.recall = undefined;
+      this.editor.clear();
+      this.hold(raw, "after");
+      return;
+    }
     // Tab, outside the command menu, moves into the tree, at what's selected in Live.
     if (name === "tab" && !menu.length && !ctrl && !alt) {
       const shown = this.tree && this.focus?.trackRef === this.tree.trackRef ? (this.treeCursor = 0, this.treeShown()) : undefined;
@@ -783,6 +858,14 @@ export class TuiApp {
     if (name === "right") { if (alt || ctrl) this.editor.wordRight(); else this.editor.right(); return; }
     if (alt && name === "b") { this.editor.wordLeft(); return; }
     if (alt && name === "f") { this.editor.wordRight(); return; }
+    // Alt+↑ takes back the last message still waiting (one Kumi hasn't taken yet), to change it.
+    if (alt && name === "up" && this.held.some((item) => !item.taken)) {
+      const at = this.held.map((item) => !item.taken).lastIndexOf(true);
+      const [item] = this.held.splice(at, 1);
+      this.editor.set(this.editor.isEmpty ? item!.text : `${item!.text}\n${this.editor.text}`);
+      this.recall = undefined;
+      return;
+    }
     // Up and down move between the box's lines, then (past the first or last) through what was sent before.
     if (name === "up") { if (!this.editor.vertical(width, -1)) this.recallOlder(); return; }
     if (name === "down") { if (!this.editor.vertical(width, 1)) this.recallNewer(); return; }
@@ -805,7 +888,8 @@ export class TuiApp {
     const matches = COMMANDS.filter((command) => command.name.startsWith(text) && (this.options.models || !MODEL_COMMANDS.includes(command.name))
       && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
       && (command.name !== "/conversations" || this.options.controller.conversations !== undefined) && (command.name !== "/reconnect" || this.options.controller.reconnect !== undefined)
-      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined));
+      && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined)
+      && (command.name !== "/btw" || this.options.controller.aside !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -862,13 +946,22 @@ export class TuiApp {
       this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${this.tokensUsed()}`, "info");
       return;
     }
-    // Connecting or reading the Set (not answering): keep the message and send it when Kumi is ready.
-    if (this.busy && !this.current && !this.pendingTurn && !isCommand(command) && this.queued === undefined) {
+    // A side question, any time: answered on its own, without tools, and kept out of the conversation.
+    if ((command === "/btw" || command.startsWith("/btw ")) && controller.aside) {
       this.editor.clear();
-      this.transcript.add({ kind: "user", text: sanitizeText(raw, this.secrets).trim() });
-      this.queued = raw; this.lastSent = raw;
-      this.activity = "getting ready";
+      const question = command.slice(4).trim();
+      if (question) this.ask(question);
+      else if (this.asides.length) this.panel = { kind: "btw", at: this.asides.length - 1, scroll: 0 };
+      else this.notice("Ask on the side with /btw and your question: Kumi answers from the conversation so far, without stopping what it's doing.", "info");
       this.scheduler.request();
+      return;
+    }
+    // While Kumi works, a message goes into the answer under way at its next step; while it connects or
+    // reads the Set, it waits until Kumi's ready.
+    if (this.busy && !isCommand(command)) {
+      this.editor.clear();
+      if (!this.current && !this.pendingTurn) this.activity = "getting ready";
+      this.hold(raw, this.current || this.pendingTurn ? "now" : "after");
       return;
     }
     // /goal stop ends a goal, running or paused; /goal alone shows it (picking a paused one up when Kumi's free).
@@ -878,7 +971,7 @@ export class TuiApp {
       return;
     }
     if (command === "/goal" && this.busy && this.goal) { this.editor.clear(); this.tabs.show("goal"); this.scheduler.request(); return; }
-    if (this.busy) { this.notice("Kumi is still working. Press esc to stop it first.", "info"); return; }
+    if (this.busy) { this.notice(`Kumi is still working: ${command.split(/\s/)[0]} once it's done, or press esc to stop it first.`, "info"); return; }
     if ((command === "/goal" || command.startsWith("/goal ")) && controller.goal) {
       this.editor.clear();
       const text = command.slice(5).trim();
@@ -1051,6 +1144,7 @@ export class TuiApp {
   private closePanel(): void {
     const panel = this.panel;
     if (panel?.kind === "chatgpt") panel.abort.abort();
+    if (panel?.kind === "btw") { const aside = this.asides[panel.at]; if (aside?.state === "asking") aside.abort.abort(); }
     if (panel?.kind === "key") panel.secret = "";
     this.panel = undefined;
     this.scheduler.request();
@@ -1063,6 +1157,7 @@ export class TuiApp {
 
   private panelInput(event: InputEvent): void {
     const panel = this.panel!;
+    if (panel.kind === "btw") { this.asideInput(panel, event); return; }
     if (event.type === "key") {
       const { name, ctrl } = event;
       if (name === "escape" || (ctrl && name === "c")) { this.closePanel(); return; }
@@ -1097,6 +1192,29 @@ export class TuiApp {
     }
     // A key is one word: spaces and line breaks a paste brings along go.
     else if (panel.kind === "key" && !panel.checking) { panel.secret = (panel.secret + event.text.replace(/[\s\x00-\x1f\x7f]/g, "")).slice(0, 4096); delete panel.status; }
+  }
+
+  /**
+   * The btw panel: esc, enter or space closes it (an answer still coming stops), ↑↓ scroll it, ←→ go
+   * through this session's other side questions, c copies the answer.
+   */
+  private asideInput(panel: Extract<Panel, { kind: "btw" }>, event: InputEvent): void {
+    const aside = this.asides[panel.at];
+    if (event.type === "key") {
+      const { name, ctrl } = event;
+      if (name === "escape" || name === "enter" || (ctrl && name === "c")) { this.closePanel(); return; }
+      if (name === "up" || name === "pageup") panel.scroll = Math.max(0, panel.scroll - (name === "up" ? 1 : 5));
+      else if (name === "down" || name === "pagedown") panel.scroll += name === "down" ? 1 : 5;
+      else if (name === "left" && panel.at > 0) { panel.at--; panel.scroll = 0; }
+      else if (name === "right" && panel.at < this.asides.length - 1) { panel.at++; panel.scroll = 0; }
+      return;
+    }
+    if (event.type !== "text") return;
+    if (event.text === " ") { this.closePanel(); return; }
+    if (event.text.toLowerCase() === "c" && aside?.answer.trim()) {
+      this.tty.write(`\u001b]52;c;${Buffer.from(aside.answer.trim(), "utf8").toString("base64")}\u0007`);
+      this.notice("Copied the side answer.", "info");
+    }
   }
 
   /** /model: every provider's models, from their own lists, under whether Kumi is signed in there. */
@@ -1474,6 +1592,19 @@ export class TuiApp {
     if (status && !status.signedIn) this.offerFix("auth", status.id);
   }
 
+  /** Ask a side question: its answer streams into the btw panel, and nothing joins the conversation. */
+  private ask(question: string): void {
+    const aside: Aside = { question: sanitizeText(question, this.secrets), answer: "", state: "asking", abort: new AbortController() };
+    this.asides.push(aside);
+    if (this.asides.length > 20) this.asides.shift();
+    this.panel = { kind: "btw", at: this.asides.length - 1, scroll: 0 };
+    const stream = new StreamingText(this.secrets);
+    void Promise.resolve().then(() => this.options.controller.aside!(question, (text) => { aside.answer += stream.push(text); this.scheduler.request(); }, aside.abort.signal))
+      .then((answer) => { aside.answer += stream.finish(); if (!aside.answer.trim()) aside.answer = sanitizeText(answer, this.secrets); aside.state = "done"; })
+      .catch((error: unknown) => { aside.state = "failed"; if (!aside.abort.signal.aborted) aside.answer = safeError(error, this.secrets); })
+      .finally(() => { if (!this.closing) this.scheduler.request(); });
+  }
+
   /** Start a turn for a message already shown in the conversation. */
   private async send(raw: string): Promise<void> {
     if (this.closing) return;
@@ -1556,14 +1687,18 @@ export class TuiApp {
     const boxHeight = visibleRows + 2;
     const boxTop = rows - 1 - boxHeight;
     const dock = pane ? 0 : 2;
-    // What the producer points at sits just above the input box, taking a line from the conversation.
+    // What the producer points at sits just above the input box, taking a line from the conversation;
+    // messages waiting for Kumi sit above that.
     const chip = this.pinned ? 1 : 0;
-    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3 - chip) };
+    const waiting = Math.min(3, this.held.length);
+    const conversation: Rect = { x: 0, y: 2, width: left, height: Math.max(1, boxTop - dock - 3 - chip - waiting) };
     this.page = Math.max(1, conversation.height - 2);
     this.drawConversation(screen, conversation);
     if (pane) this.drawPane(screen, { x: left, y: 1, width: pane, height: rows - 1 });
     else this.drawDock(screen, { x: 0, y: boxTop - dock - 1, width: columns, height: dock });
     if (chip) this.drawPin(screen, 3, boxTop - dock - 2, left - 6);
+    // A panel or the / menu opens over them.
+    if (waiting && !this.panel && !this.menu().length) this.drawHeld(screen, 3, boxTop - dock - 1 - chip - waiting, left - 6, waiting);
     let cursor: Cursor | undefined = this.drawComposer(screen, { x: 1, y: boxTop, width: left - 2, height: boxHeight }, layout, visibleRows);
     if (this.panel) cursor = this.drawPanel(screen, this.panel, boxTop, left);
     else this.drawMenu(screen, boxTop, left);
@@ -1902,6 +2037,23 @@ export class TuiApp {
     return 4;
   }
 
+  /**
+   * Messages waiting for Kumi, a line each, newest last: "↳ make it darker", and when it goes in: at
+   * Kumi's next step, or after this answer. More than fit fold into "and 2 more".
+   */
+  private drawHeld(screen: Screen, x: number, y: number, width: number, rows: number): void {
+    const shown = this.held.length > rows ? this.held.slice(-(rows - 1)) : this.held;
+    if (this.held.length > rows) screen.put(x, y++, `  and ${this.held.length - shown.length} more waiting · alt+↑ takes the last back`, st.faint);
+    for (const item of shown) {
+      const when = item.when === "now" && (this.current || this.pendingTurn) ? "at the next step" : "after this answer";
+      const words = sanitizeText(item.text, this.secrets).replace(/\s+/g, " ").trim();
+      let column = screen.put(x, y, "↳ ", st.faint);
+      column = screen.put(column, y, truncate(words, Math.max(1, width - textWidth(when) - 4)), st.dim);
+      screen.put(x + width - textWidth(when), y, when, st.faint);
+      y++;
+    }
+  }
+
   /** "▣ Audio Effect Rack › Chain 1 › Saturator  ×": what the next messages mean by "this"; × clears it. */
   private drawPin(screen: Screen, x: number, y: number, width: number): void {
     const pin = this.pinned!;
@@ -2092,14 +2244,16 @@ export class TuiApp {
     const width = Math.max(1, box.width - 4);
     const first = Math.max(0, Math.min(layout.cursorRow - visibleRows + 1, layout.rows.length - visibleRows));
     if (this.editor.isEmpty) {
-      const placeholder = this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything";
+      const placeholder = this.busy && (this.current || this.pendingTurn) ? "Tell Kumi more while it works" : this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything";
       screen.put(x, box.y + 1, truncate(placeholder, width), st.faint);
     } else {
       layout.rows.slice(first, first + visibleRows).forEach((row, index) => screen.put(x, box.y + 1 + index, row, st.bright, box));
     }
-    const hint = this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
+    const hint = this.panel?.kind === "btw" ? "↑↓ to scroll · c copies · esc to close" : this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
       : this.panel?.kind === "chatgpt" ? (this.panel.url ? "c copies the link · esc to cancel" : "esc to cancel")
-      : this.menu().length ? "enter to choose · esc to close" : this.busy ? "esc to stop" : "enter to send";
+      : this.menu().length ? "enter to choose · esc to close"
+      : this.busy && !this.editor.isEmpty && !isCommand(this.editor.text.trim()) ? (this.current || this.pendingTurn ? "enter sends now · tab after · esc stops" : "enter sends when ready")
+      : this.busy ? "esc to stop" : "enter to send";
     if (textWidth(hint) + 2 < width) screen.put(box.x + box.width - 2 - textWidth(hint), box.y + box.height - 1, hint, st.faint);
     return { x: x + layout.cursorColumn, y: box.y + 1 + layout.cursorRow - first };
   }
@@ -2144,6 +2298,25 @@ export class TuiApp {
         lines.push({ text: item.label, style: item.inert ? st.faint : chosen ? st.accent : st.text, indent: 2, band: chosen, labelWidth,
           ...(item.detail ? { detail: { text: item.detail, style: chosen ? st.bright : st.dim } } : {}), ...(right ? { right } : {}) });
       });
+    } else if (panel.kind === "btw") {
+      const aside = this.asides[panel.at];
+      const which = this.asides.length > 1 ? `${panel.at + 1} of ${this.asides.length} · ←→` : undefined;
+      lines.push({ text: `btw · ${aside?.question.replaceAll("\n", " ") ?? ""}`, style: st.title, ...(which ? { right: { text: which, style: st.faint } } : {}) });
+      if (aside && !aside.answer.trim()) {
+        const glyph = activityGlyph("think", performance.now());
+        lines.push({ text: "", style: st.dim, spans: aside.state === "asking" ? [glyph, { text: " thinking it over…", style: st.dim }] : [{ text: "No answer came back.", style: st.faint }] });
+      } else if (aside) {
+        const rows = renderMarkdown(aside.answer.trim(), inner, aside.state === "failed" ? st.warn : st.text);
+        const room = Math.max(3, Math.min(16, space - 4));
+        panel.scroll = Math.max(0, Math.min(panel.scroll, rows.length - room));
+        const shown = rows.slice(panel.scroll, panel.scroll + room);
+        shown.forEach((row, index) => {
+          const more = index === 0 && panel.scroll > 0 ? `↑ ${panel.scroll} more` : index === shown.length - 1 && panel.scroll + room < rows.length ? `↓ ${rows.length - panel.scroll - room} more` : undefined;
+          lines.push({ text: "", style: st.text, spans: row.spans, ...(more ? { right: { text: more, style: st.faint } } : {}) });
+        });
+        if (aside.state === "asking") lines.push({ text: "", style: st.dim, spans: [activityGlyph("think", performance.now())] });
+      }
+      if (aside?.state === "asking") this.scheduler.request();
     } else if (panel.kind === "key") {
       const info = PROVIDER_INFO[panel.provider];
       lines.push({ text: `Sign in to ${info.name}`, style: st.title });
@@ -2177,8 +2350,9 @@ export class TuiApp {
       if (line.band) screen.fill({ x: 1, y, width, height: 1 }, st.selected);
       const start = x + (line.indent ?? 0);
       const end = x + inner - (line.right ? textWidth(line.right.text) + 2 : 0);
-      const label = truncate(line.text, Math.max(1, end - start));
-      let column = screen.put(start, y, label, line.style);
+      let column = start;
+      if (line.spans) for (const span of line.spans) column = screen.put(column, y, span.text, span.style, { x: start, y, width: Math.max(1, end - start), height: 1 });
+      else column = screen.put(start, y, truncate(line.text, Math.max(1, end - start)), line.style);
       if (line.detail) {
         column = Math.max(column, start + (line.labelWidth ?? 0)) + 2;
         if (column < end) screen.put(column, y, truncate(line.detail.text, end - column), line.detail.style);

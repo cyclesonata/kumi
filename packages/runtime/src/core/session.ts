@@ -859,6 +859,19 @@ export function createSession(options: Options): SessionController {
         try { return await runMatch(op, run, result, ask); } finally { matching = undefined; lastRun = run; learnFrom(run, carried); }
       }, undefined, input);
     },
+    steer(text) {
+      // Only an answer the model is working on takes it: it goes in after the step under way.
+      const held = kernel?.value;
+      if (state === "closed" || !active?.isTurn || active.phase !== "inference" || !held?.steer) return false;
+      if (!text.trim() || Buffer.byteLength(text) > 16 * 1024) return false;
+      return held.steer(text);
+    },
+    async aside(question, onText, signal) {
+      if (state === "closed") throw new Error("Session is closed");
+      const held = kernel?.value;
+      if (!held?.aside) throw new KumiError("request", "Kumi isn't ready for a side question yet; ask again in a moment.");
+      return held.aside(question, signal ?? new AbortController().signal, onText);
+    },
     refresh() {
       if (!started) return Promise.reject(new Error("Session is not started"));
       return perform(false, "refresh", async (op) => { await observe(op); return undefined; });

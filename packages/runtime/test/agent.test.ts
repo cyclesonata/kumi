@@ -271,6 +271,31 @@ test("stops at the step bound when the model keeps calling tools", async () => {
   await h.kernel.close();
 });
 
+test("a side question sees the conversation and the turn so far, calls no tools, and leaves no trace", async () => {
+  let kernelRef: ReturnType<typeof harness>["kernel"] | undefined;
+  const heard: string[] = [];
+  let answer: string | undefined;
+  const h = harness((_options, n) => {
+    if (n === 1) return [...text("fine"), finish()];
+    if (n === 2) return [call("look", "{}"), finish("tool-calls")];
+    if (n === 3) return [...text("About 2.4 s."), finish()];
+    return [...text("done"), finish()];
+  }, { tools: [tool("look", async () => { answer = await kernelRef!.aside("how long is the tail?", new AbortController().signal, (words) => heard.push(words)); return { text: "looked" }; })] });
+  kernelRef = h.kernel;
+  await h.kernel.run("one", new AbortController().signal, () => {});
+  await h.kernel.run("two", new AbortController().signal, () => {});
+  assert.equal(answer, "About 2.4 s.");
+  assert.deepEqual(heard, ["About 2.4 s."]);
+  const aside = h.requests[2]!;
+  assert.deepEqual(aside.toolChoice, { type: "none" }, "no tools are called");
+  assert.equal(aside.tools?.[0]?.name, "look", "the conversation's tools are still described");
+  const said = aside.prompt.map((message) => JSON.stringify(message.content));
+  assert.equal(said.length, 4, "the conversation, the turn under way without its call still running, and the question");
+  assert.match(said[2]!, /two/); assert.match(said[3]!, /side question[\s\S]*how long is the tail\?/);
+  assert.doesNotMatch(JSON.stringify(h.kernel.checkpoint()), /tail/, "never kept");
+  await h.kernel.close();
+});
+
 test("steering enters at the next model boundary, even after a final answer", async () => {
   let kernelRef: ReturnType<typeof harness>["kernel"] | undefined;
   const h = harness((_options, n) => n === 1 ? [call("look", "{}"), finish("tool-calls")] : n === 2 ? [...text("first"), finish()] : [...text("steered"), finish()], {

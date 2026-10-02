@@ -478,6 +478,11 @@ export class Transcript {
     return entry;
   }
 
+  remove(entry: Entry): void {
+    const at = this.entries.indexOf(entry);
+    if (at >= 0) this.entries.splice(at, 1);
+  }
+
   /** Call after changing an entry, so its rows are laid out again. */
   touch(entry: Entry): void {
     this.revisions.set(entry, (this.revisions.get(entry) ?? 0) + 1);

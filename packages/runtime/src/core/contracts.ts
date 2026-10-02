@@ -88,6 +88,10 @@ export interface Kernel {
   checkpoint?(): KernelCheckpoint;
   /** The settled conversation's words, for showing a resumed conversation. */
   transcript?(): TranscriptLine[];
+  /** Guidance for the turn under way, entering at its next step; false when no turn can take it. */
+  steer?(text: string): boolean;
+  /** A side question about the conversation so far, answered without tools and never kept in it. */
+  aside?(question: string, signal: AbortSignal, onText: (text: string) => void): Promise<string>;
 }
 
 export interface KernelOptions {
@@ -544,6 +548,16 @@ export interface SessionController {
   start(): Promise<void>;
   /** `pinned`: what the producer points at in Kumi, which "this" means in the message. */
   submit(input: string, extra?: { pinned?: PinnedNode }): Promise<void>;
+  /**
+   * More from the producer for the answer under way: it enters the conversation at the answer's next
+   * step (a "steer" event says when). False when no answer is at a point to take it; send it later.
+   */
+  steer?(text: string): boolean;
+  /**
+   * A side question (/btw) about the conversation so far, answered while Kumi works or not, without
+   * tools; neither the question nor the answer joins the conversation. Its words stream to `onText`.
+   */
+  aside?(question: string, onText: (text: string) => void, signal?: AbortSignal): Promise<string>;
   refresh(): Promise<void>;
   /** Forget this conversation and start afresh; it stays in the Set's kept conversations. */
   newConversation(): Promise<void>;
