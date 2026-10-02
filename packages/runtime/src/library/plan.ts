@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pluginPresetFolders, setFolders, type LearnOptions } from "./learn.js";
 import { librarySources, recentSets, type SourceOptions } from "./sources.js";
 import { readJson } from "./store.js";
@@ -49,10 +49,13 @@ export async function kumiSets(projectsDir: string | undefined): Promise<string[
 export async function planLearning(options: PlanOptions): Promise<Omit<LearnOptions, "signal" | "gate" | "onProgress">> {
   const remembered = await rememberedFolders(options.dir);
   const home = options.sources?.home ?? homedir(); const platform = options.sources?.platform ?? process.platform;
-  const recent = options.findSets === false ? [] : [...new Set([...recentSets(options.sources), ...await kumiSets(options.projectsDir)])];
+  const sources = librarySources({ ...options.sources, folders: [...(options.folders ?? []), ...remembered] });
+  // A pack's demo Set that Live opened isn't the producer's own work.
+  const others = sources.filter((source) => source.kind === "pack" || source.kind === "core" || source.kind === "splice").map((source) => `${source.path}${sep}`);
+  const recent = options.findSets === false ? [] : [...new Set([...recentSets(options.sources), ...await kumiSets(options.projectsDir)])].filter((path) => !others.some((folder) => path.startsWith(folder)));
   return {
     dir: options.dir,
-    sources: librarySources({ ...options.sources, folders: [...(options.folders ?? []), ...remembered] }),
+    sources,
     setFolders: options.findSets === false ? [] : setFolders(recent, home, platform), setFiles: recent,
     pluginPresets: options.findSets === false ? [] : pluginPresetFolders(home, platform).filter((folder) => existsSync(folder)),
     ...(options.workers !== undefined ? { workers: options.workers } : {}),

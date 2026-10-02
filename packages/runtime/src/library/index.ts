@@ -223,6 +223,7 @@ export function createLibrary(options: LibraryOptions): Library {
           }).catch(() => {});
         },
         measure,
+        folders: () => sources().map((source) => source.path),
       };
       return [...libraryTools(access, tools), manualTool({ dir, ...(options.web ? { client: options.web.client, ...(options.web.base ? { base: options.web.base } : {}) } : {}), ...(tools.onEvent ? { onEvent: tools.onEvent } : {}) })];
     },

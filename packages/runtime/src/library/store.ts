@@ -9,6 +9,17 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+/** Put a written file in place; on Windows a reader holding the old one briefly refuses it, so it's tried again. */
+async function replace(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try { await rename(from, to); return; } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt >= 5 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+}
+
 /** Every entry is about one file, as it was when learned. */
 export interface Entry { path: string; size: number; mtime: number; gone?: true }
 interface Header { kumiLibrary: string; version: number; generation: string; created: number }
@@ -60,7 +71,7 @@ export class Log<T extends Entry> {
     const temporary = join(dirname(this.file), `.${this.kind}-${randomUUID()}`);
     try {
       await writeFile(temporary, `${lines.join("\n")}\n`, PRIVATE);
-      await rename(temporary, this.file);
+      await replace(temporary, this.file);
     } catch (error) { await rm(temporary, { force: true }); throw error; }
   }
 }
@@ -134,7 +145,7 @@ export async function readJson<T>(file: string): Promise<T | undefined> {
 export async function writeJson(file: string, value: unknown): Promise<void> {
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(file), `.${randomUUID()}.json`);
-  try { await writeFile(temporary, `${JSON.stringify(value, null, 1)}\n`, PRIVATE); await rename(temporary, file); }
+  try { await writeFile(temporary, `${JSON.stringify(value, null, 1)}\n`, PRIVATE); await replace(temporary, file); }
   catch (error) { await rm(temporary, { force: true }); throw error; }
 }
 

@@ -287,8 +287,9 @@ export class TuiApp {
   private catchUp: CatchUp | undefined;
   /** A newer Kumi's version, once the startup check or /update found one. */
   private newer: string | undefined;
-  /** What Kumi knows of the producer's library, and how learning it is going. */
+  /** What Kumi knows of the producer's library, and how learning it is going; whether its first learning was mentioned. */
   private library: LibraryStatus | undefined;
+  private toldLibrary = false;
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
@@ -448,6 +449,11 @@ export class TuiApp {
         break;
       case "library":
         this.library = event.status;
+        // The first time, the welcome screen says so; when a conversation already fills the screen, a quiet line does.
+        if (!this.toldLibrary && (event.status.state === "learning" || event.status.state === "paused") && !event.status.learnedAt) {
+          this.toldLibrary = true;
+          if (!this.transcript.isEmpty) this.notice("Learning your library in the background…", "info");
+        }
         break;
       case "focus":
         this.touched = touchedNext(this.focus, event.focus, this.touched);

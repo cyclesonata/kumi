@@ -1805,3 +1805,15 @@ test("the welcome screen and /status say how learning the library goes; /memory 
   assert.ok(has(h.screen(), "Forgot, from your Sets: Vocals: EQ Eight → Compressor → Reverb"));
   await h.app.close();
 });
+
+test("when a conversation already fills the screen, learning the library the first time is one quiet line", async () => {
+  const h = harness(160, 36);
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "notice", message: "Continuing your conversation from 2 hours ago. /new starts fresh." });
+  h.emit({ type: "library", status: { state: "learning", sounds: 0, presets: 0, sets: 0, todo: 10, done: 0 } });
+  h.emit({ type: "library", status: { state: "learning", sounds: 1, presets: 0, sets: 0, todo: 10, done: 1 } });
+  assert.equal(h.screen().filter((line) => line.includes("Learning your library in the background…")).length, 1);
+  await h.app.close();
+});

@@ -3,7 +3,7 @@
  * answers), find_presets and my_sets. Each says why a result matched, and while Kumi is still
  * learning the library, how far it's got.
  */
-import { basename, sep } from "node:path";
+import { basename } from "node:path";
 import type { JsonObject, KernelTool, SessionEvent } from "../core/contracts.js";
 import { audioPath } from "../audio/index.js";
 import { defaultSampleFolders, findSamples, folderPath } from "../integrations/ableton/samples.js";
@@ -27,6 +27,8 @@ export interface LibraryAccess {
   learning(): LearningState;
   /** Folders the producer named that the library doesn't cover yet: learned next. */
   remember(folders: readonly string[]): void;
+  /** Where the library looks: what a search by names walks while it's still learning. */
+  folders(): string[];
   /** Measure one file the library doesn't know (a reference, a render), off Kumi's main thread. */
   measure(path: string, options: { start?: number; seconds?: number; signal: AbortSignal }): Promise<SoundEntry>;
 }
@@ -101,10 +103,12 @@ function learningNote(state: LearningState): JsonObject {
 
 export function libraryTools(library: LibraryAccess, options: { resolve?: (named: string, signal: AbortSignal) => Promise<string | undefined>; onEvent?: (event: SessionEvent) => void }): KernelTool[] {
   const tell = (text: string) => { try { options.onEvent?.({ type: "doing", text }); } catch { /* the app's trouble isn't the search's */ } };
+  /** The library's folders, or where Live keeps samples when it knows none. */
+  const everywhere = () => { const known = library.folders(); return known.length ? known : defaultSampleFolders(); };
 
   /** The old search: walking folders by names, for folders the library hasn't learned yet. */
   async function scan(folders: readonly string[], words: string[], limit: number, random: boolean, signal: AbortSignal, note: JsonObject): Promise<{ text: string; isError?: boolean }> {
-    const found = await findSamples({ folders: folders.length ? folders : defaultSampleFolders(), words, limit, random, signal });
+    const found = await findSamples({ folders: folders.length ? folders : everywhere(), words, limit, random, signal });
     return { text: JSON.stringify({ sounds: found.samples.map((sample) => ({ name: sample.name, path: sample.path, ...(sample.seconds !== undefined ? { seconds: sample.seconds } : {}) })),
       matched: found.matched, looked: found.scanned, ...(found.partial ? { partial: true } : {}), ...(found.missing.length ? { missing: found.missing } : {}), ...note }) };
   }
@@ -149,14 +153,15 @@ export function libraryTools(library: LibraryAccess, options: { resolve?: (named
       const rows = result.hits.map(soundRow);
       // Learning for the first time: names it hasn't reached yet are searched as before, after what it knows.
       if (state.first && state.learning && !like && words.length && rows.length < limit && !kind && !cls && tempo === undefined && !input.key) {
-        const named = await findSamples({ folders: folders.length ? folders : defaultSampleFolders(), words, limit, random, signal }).catch(() => undefined);
+        const named = await findSamples({ folders: folders.length ? folders : everywhere(), words, limit, random, signal }).catch(() => undefined);
         for (const sample of named?.samples ?? []) {
           if (rows.length >= limit || rows.some((row) => row.path === sample.path)) continue;
           rows.push({ name: sample.name, path: sample.path, ...(sample.seconds !== undefined ? { seconds: sample.seconds } : {}), why: "found by its name; not learned yet" });
         }
       }
       return { text: JSON.stringify({ sounds: rows, matched: Math.max(result.matched, rows.length), ...(like ? { like: like.name } : {}),
-        library: `${grouped(index.size)} sounds`, ...learningNote(state) }) };
+        library: `${grouped(index.size)} sounds`, ...(uncovered.length ? { note: `Kumi hasn't learned ${uncovered.length === 1 ? "that folder" : "those folders"} yet; it's learning ${uncovered.length === 1 ? "it" : "them"} now, so ask again in a while.` } : {}),
+        ...learningNote(state) }) };
     } };
 
   const findPresets: KernelTool = { name: FIND_PRESETS_TOOL, description: FIND_PRESETS_DESCRIPTION, inputSchema: FIND_PRESETS_SCHEMA,
@@ -195,6 +200,3 @@ export function libraryTools(library: LibraryAccess, options: { resolve?: (named
     } };
   return [findSounds, findPresets, mySets];
 }
-
-/** Whether a path is in one of `folders`. */
-export const inFolders = (path: string, folders: readonly string[]) => folders.some((folder) => path === folder || path.startsWith(`${folder}${sep}`));

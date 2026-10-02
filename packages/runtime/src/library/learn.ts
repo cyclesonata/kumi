@@ -137,7 +137,7 @@ const backupSet = (path: string) => /\.backup-|\[\d{4}-\d{2}-\d{2} \d{6}\]\.als$
 const MAX_DEPTH = 16;
 
 /** Every sound, preset and Set under a folder (links aren't followed: they could lead out, or round). */
-async function walk(source: Source, kinds: { sounds: boolean; presets: boolean; sets: boolean }, found: Finds, signal: AbortSignal, depthLimit = MAX_DEPTH): Promise<boolean> {
+async function walk(source: Source, kinds: { sounds: boolean; presets: boolean; sets: boolean }, found: Finds, signal: AbortSignal, depthLimit = MAX_DEPTH, skip: ReadonlySet<string> = new Set()): Promise<boolean> {
   const queue: { path: string; depth: number }[] = [{ path: source.path, depth: 0 }];
   let complete = true;
   while (queue.length) {
@@ -151,7 +151,7 @@ async function walk(source: Source, kinds: { sounds: boolean; presets: boolean; 
       const full = join(path, entry.name);
       const lower = entry.name.toLowerCase();
       if (entry.isDirectory()) {
-        if (SKIP.has(lower) || lower === "backup" || lower.endsWith(".app") || (parent === "samples" && PROJECT_COPIES.has(lower))) continue;
+        if (SKIP.has(lower) || lower === "backup" || lower.endsWith(".app") || (parent === "samples" && PROJECT_COPIES.has(lower)) || skip.has(full)) continue;
         if (depth + 1 > depthLimit) { complete = false; continue; }
         queue.push({ path: full, depth: depth + 1 });
         continue;
@@ -219,10 +219,13 @@ class Pool {
 }
 const failed = (file: Found, why: string): SoundEntry => ({ path: file.path, size: file.size, mtime: file.mtime, error: why.slice(0, 160) });
 
-/** Appends go one at a time, in batches, so a log's lines never interleave. */
+/**
+ * Appends go one at a time, in batches, so a log's lines never interleave. One that fails (a full
+ * disk) loses only its batch: those files aren't in the log, so the next run learns them again.
+ */
 function writer<T extends Entry>(log: Log<T>) {
   let batch: (T | Entry)[] = []; let last = Date.now(); let chain: Promise<void> = Promise.resolve();
-  const flush = () => { const lines = batch; batch = []; last = Date.now(); chain = chain.then(() => log.append(lines)); return chain; };
+  const flush = () => { const lines = batch; batch = []; last = Date.now(); chain = chain.then(() => log.append(lines).catch(() => {})); return chain; };
   return {
     add(entry: T | Entry) { batch.push(entry); if (batch.length >= 100 || Date.now() - last > 2_000) void flush(); },
     flush,
@@ -253,16 +256,19 @@ export async function learn(options: LearnOptions): Promise<LearnProgress> {
   tell(true);
   // Look: every source once, for everything in it; Sets also where the producer keeps them.
   const found: Finds = { sounds: [], presets: [], sets: [], seen: new Set() };
-  const walked: string[] = [];
+  // Folders looked through whole, for each kind: only there can a file Kumi knew be gone.
+  const walked = { sounds: [] as string[], presets: [] as string[], sets: [] as string[] };
   const sources = [...options.sources].sort((a, b) => ORDER[a.kind] - ORDER[b.kind]);
   for (const source of sources) {
     progress.at = source.label; tell();
     const own = source.kind === "user-library" || source.kind === "place" || source.kind === "folder";
-    if (await walk(source, { sounds: true, presets: true, sets: own }, found, signal)) walked.push(source.path);
+    if (await walk(source, { sounds: true, presets: true, sets: own }, found, signal)) { walked.sounds.push(source.path); walked.presets.push(source.path); if (own) walked.sets.push(source.path); }
   }
   const setsOnly: Source[] = (options.setFolders ?? []).filter((folder) => !sources.some((source) => folder === source.path || folder.startsWith(`${source.path}${sep}`)))
     .map((path) => ({ path, label: basename(path), kind: "folder" as const }));
-  for (const source of setsOnly) if (await walk(source, { sounds: false, presets: false, sets: true }, found, signal, 6)) walked.push(source.path);
+  // Looking for more Sets around the library (~/Music holds it), the library's own folders are left out: walked already, or packs.
+  const sourcePaths = new Set(sources.map((source) => source.path));
+  for (const source of setsOnly) if (await walk(source, { sounds: false, presets: false, sets: true }, found, signal, 6, sourcePaths)) walked.sets.push(source.path);
   for (const path of options.setFiles ?? []) {
     if (found.seen.has(path) || backupSet(basename(path))) continue;
     try { const info = await stat(path); found.seen.add(path); found.sets.push({ path, size: info.size, mtime: Math.round(info.mtimeMs), source: { path: dirname(path), label: basename(dirname(path)), kind: "folder" }, relative: basename(path) }); }
@@ -270,19 +276,19 @@ export async function learn(options: LearnOptions): Promise<LearnProgress> {
   }
   for (const folder of options.pluginPresets ?? []) {
     const source: Source = { path: folder, label: "Plug-in presets", kind: "folder" };
-    if (await walk(source, { sounds: false, presets: true, sets: false }, found, signal, 6)) walked.push(folder);
+    if (await walk(source, { sounds: false, presets: true, sets: false }, found, signal, 6)) walked.presets.push(folder);
   }
   // What's gone: known files in folders looked through whole that weren't found (a drive that isn't there keeps its files).
-  const within = (path: string) => walked.some((root) => path.startsWith(`${root}${sep}`));
+  const within = (roots: readonly string[], path: string) => roots.some((root) => path.startsWith(`${root}${sep}`));
   // A Set known by path alone is gone when its file is and its folder's still there.
   const vanished = (path: string) => !existsSync(path) && existsSync(dirname(dirname(path)));
-  const gone = <T extends Entry>(known: Map<T["path"], T>, seen: Found[], log: Log<T>, outside = false) => {
+  const gone = <T extends Entry>(known: Map<T["path"], T>, seen: Found[], log: Log<T>, roots: readonly string[], outside = false) => {
     const present = new Set(seen.map((file) => file.path));
-    const lost = [...known.keys()].filter((path) => !present.has(path) && (within(path) || (outside && (vanished(path) || backupSet(path)))));
+    const lost = [...known.keys()].filter((path) => !present.has(path) && (within(roots, path) || (outside && (vanished(path) || backupSet(path)))));
     for (const path of lost) known.delete(path);
     return lost.length ? log.append(lost.map((path) => ({ path, size: 0, mtime: 0, gone: true as const }))) : Promise.resolve();
   };
-  await gone(sounds, found.sounds, logs.sounds); await gone(presets, found.presets, logs.presets); await gone(sets, found.sets, logs.sets, true);
+  await gone(sounds, found.sounds, logs.sounds, walked.sounds); await gone(presets, found.presets, logs.presets, walked.presets); await gone(sets, found.sets, logs.sets, walked.sets, true);
   const todo = {
     sounds: found.sounds.filter((file) => { const known = sounds.get(file.path); return changed(known, file) || (known!.vector !== undefined && known!.features !== FEATURES_VERSION); }),
     presets: found.presets.filter((file) => changed(presets.get(file.path), file)),
