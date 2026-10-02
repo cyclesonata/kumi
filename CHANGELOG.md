@@ -3,6 +3,23 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## Unreleased
+
+On Windows, the bridge installs when Live's User Library is outside your user folder, and Kumi can
+start it. Ships with bridge 1.0.71.
+
+### Bridge 1.0.71
+
+- On Windows, `kumi bridge` installs into a User Library outside your user folder (another folder
+  on C:, another drive). It stopped there with "could not establish an owner-only Windows ACL":
+  making a file yours alone also set its owner, which Windows lets an ordinary account do only
+  where it has full control.
+- On Windows, the bridge runs PowerShell by its full path. Kumi starts the bridge with a PATH that
+  holds only Node's folder, so the bridge couldn't check its secret's permissions and refused to
+  start, leaving Kumi without Live.
+- On Windows, the Remote Script's owner check no longer needs `ctypes`, which Live's own Python
+  comes without, and its permission checks no longer open console windows.
+
 ## 1.5.0 — 2026-10-02
 
 With the optional Willington provider installed, Kumi edits Session clip Follow Actions, rack macro
