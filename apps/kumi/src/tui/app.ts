@@ -1842,7 +1842,7 @@ export class TuiApp {
       } else {
         const ms = now - live.since;
         column = screen.put(column, y, "│ ", { fg: palette.rule }, clip);
-        const glyph = activityGlyph(live.activity, ms);
+        const glyph = activityGlyph(live.activity, ms, this.icons === "badges");
         column = screen.put(column, y, glyph.text, glyph.style, clip);
         column = screen.put(column, y, " ", st.dim, clip);
         for (const span of shimmer(live.label, ms)) column = screen.put(column, y, span.text, span.style, clip);
@@ -2287,7 +2287,7 @@ export class TuiApp {
         this.hits.push({ x: at, y: area.y + 1, width: textWidth(hint), action: () => { void this.undo(last.id); } });
       } else if (now.activity) {
         // Narrow: the step's own glyph, then its words.
-        const glyph = activityGlyph(now.activity.kind, performance.now() - now.activity.since);
+        const glyph = activityGlyph(now.activity.kind, performance.now() - now.activity.since, this.icons === "badges");
         screen.put(2, area.y + 1, glyph.text, glyph.style);
         screen.put(4, area.y + 1, truncate(now.detail, area.width - 6), now.detailStyle);
       } else screen.put(2, area.y + 1, truncate(now.detail, area.width - 4), now.detailStyle);

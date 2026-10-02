@@ -52,11 +52,18 @@ const GLYPHS: Record<Activity, readonly string[]> = {
   code: ["▖", "▘", "▝", "▗"],
 };
 
+/** The same, in characters every console font has (the old Windows console, where Kumi's icons are badges too). */
+const PLAIN: Record<Activity, readonly string[]> = {
+  think: ["|", "/", "-", "\\"], search: [".", "o", "O", "o"], read: ["-", "=", "-", " "], look: ["<", "^", ">", "v"],
+  build: [".", ":", "|", "#", " "], change: ["-", "=", "+", "="], listen: [".", ":", "|", ":"], watch: ["o", "O"],
+  play: [">", " "], record: ["*", " "], code: ["_", " "],
+};
+
 const FRAME_MS = 100;
 
-/** The glyph for `kind` at `ms` into it, and its style (recording's in red). */
-export function activityGlyph(kind: Activity, ms: number): Span {
-  const frames = GLYPHS[kind];
+/** The glyph for `kind` at `ms` into it, and its style (recording's in red); `plain` for consoles without the glyphs. */
+export function activityGlyph(kind: Activity, ms: number, plain = false): Span {
+  const frames = (plain ? PLAIN : GLYPHS)[kind];
   return { text: frames[Math.floor(Math.max(0, ms) / FRAME_MS) % frames.length]!, style: { fg: kind === "record" ? palette.error : palette.accent } };
 }
 

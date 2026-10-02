@@ -17,7 +17,10 @@ test("each kind of task has its own animation: a glyph a cell wide, and a scene 
   assert.equal(activityOf(undefined), "think");
   const scenes = new Set<string>();
   for (const kind of KINDS) {
-    for (const ms of [0, 130, 777, 2_400, 9_999]) assert.equal(textWidth(activityGlyph(kind, ms).text), 1, `${kind} glyph at ${ms}`);
+    for (const ms of [0, 130, 777, 2_400, 9_999]) {
+      assert.equal(textWidth(activityGlyph(kind, ms).text), 1, `${kind} glyph at ${ms}`);
+      assert.match(activityGlyph(kind, ms, true).text, /^[\x20-\x7e]$/, `${kind}'s plain glyph is ASCII`);
+    }
     const scene = (ms: number) => activityScene(kind, ms, 20);
     for (const ms of [0, 250, 500, 900, 1_300]) assert.equal(textWidth(text(scene(ms))), 20, `${kind} scene is 20 cells: “${text(scene(ms))}”`);
     // What moves may be the light on it rather than its characters (a page's words, read one by one).
