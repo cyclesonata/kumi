@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -86,4 +88,66 @@ test("with KUMI_MODEL set, a model chosen in Kumi lasts until it closes; a key i
   } finally { f.done(); }
   const none = fixture();
   try { await assert.rejects(none.control.binding(), /Choose a model to talk to: type \/model/); } finally { none.done(); }
+});
+
+/** Ollama on this computer for one test: two models, one that can use tools (and is loaded), one that can't. */
+async function ollama() {
+  const models: Record<string, string[]> = { "qwen3:8b": ["completion", "tools"], "gemma3:4b": ["completion", "vision"] };
+  const server = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += String(chunk);
+    const send = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); };
+    if (request.url === "/api/version") return send({ version: "0.12.6" });
+    if (request.url === "/api/tags") return send({ models: Object.keys(models).map((name) => ({ name, model: name, details: { parameter_size: "8B", quantization_level: "Q4_K_M" } })) });
+    if (request.url === "/api/ps") return send({ models: [{ name: "qwen3:8b", model: "qwen3:8b" }] });
+    const capabilities = request.url === "/api/show" ? models[(JSON.parse(raw) as { model: string }).model] : undefined;
+    return capabilities ? send({ capabilities, model_info: {} }) : send({ error: "not found" }, 404);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+}
+/** This computer's fetch, with nothing at LM Studio's address (whatever runs on the machine testing). */
+const noLmStudio: typeof fetch = (input, init) => (String(input).startsWith("http://127.0.0.1:1234/")
+  ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1234"), { code: "ECONNREFUSED" }) }))
+  : fetch(input, init));
+
+test("models on this computer need no sign-in: Kumi finds the servers, starts with one that can change the Set, and says once when one can't", async () => {
+  const server = await ollama();
+  const dir = mkdtempSync(join(tmpdir(), "kumi-models-local-"));
+  const settingsFile = join(dir, "settings.json");
+  const servers = [{ name: "llama.cpp", baseURL: "http://127.0.0.1:9/v1" }];
+  writeFileSync(settingsFile, JSON.stringify({ modelServers: servers }));
+  const said: string[] = [];
+  const control = createModelControl({ store: openCredentialStore(join(dir, "auth.json")), settingsFile, env: { OLLAMA_HOST: server.url }, fetch: noLmStudio,
+    changed: async () => {}, say: (message) => said.push(message), installed: () => false });
+  try {
+    // LM Studio isn't installed here, so it isn't shown; the server named in settings.json is, with how to start it.
+    assert.deepEqual(await control.local(), [{ id: "ollama", name: "Ollama", where: "on this computer", running: true },
+      { id: "llama-cpp", name: "llama.cpp", where: "on this computer", running: false, start: "Start it, or check its address (http://127.0.0.1:9/v1) in ~/.kumi/settings.json" }]);
+    assert.deepEqual((await control.models("ollama")).map((model) => [model.id, model.description]),
+      [["ollama/qwen3:8b", "8B · Q4_K_M · loaded"], ["ollama/gemma3:4b", "8B · Q4_K_M · can't change the Set"]]);
+    const chosen = await control.chooseDefault();
+    assert.equal(chosen?.id, "ollama/qwen3:8b", "signed in nowhere: a model on this computer that can change the Set");
+    assert.equal(chosen?.note, undefined);
+    assert.deepEqual({ ...control.current(), efforts: undefined }, { model: "ollama/qwen3:8b", provider: "ollama", name: "qwen3:8b", efforts: undefined, pinned: false, where: "on this computer" });
+    assert.deepEqual(JSON.parse(readFileSync(settingsFile, "utf8")), { model: "ollama/qwen3:8b", modelServers: servers }, "the servers named are kept");
+    assert.equal(await control.choose("ollama/gemma3:4b"), "gemma3:4b can't use tools, so Kumi can talk with it about your Set but can't change anything. qwen3:8b on Ollama can: /model chooses it.");
+    assert.equal(await control.choose("ollama/gemma3:4b"), undefined, "said once");
+    assert.equal((await control.binding()).id, "ollama/gemma3:4b");
+    assert.equal(said.length, 0, "nothing said twice");
+    assert.equal(control.providerName("ollama"), "Ollama"); assert.equal(control.providerName("llama-cpp"), "llama.cpp"); assert.equal(control.providerName("anthropic"), "Anthropic");
+    // A first message sent while the default is still being chosen waits for it, rather than failing.
+    const racing = createModelControl({ store: openCredentialStore(join(dir, "fresh-auth.json")), settingsFile: join(dir, "fresh-settings.json"), env: { OLLAMA_HOST: server.url }, fetch: noLmStudio,
+      changed: async () => {}, installed: () => false });
+    const [announced, bound] = await Promise.all([racing.chooseDefault(), racing.binding()]);
+    assert.equal(announced?.id, "ollama/qwen3:8b", "the app still hears which, to say so");
+    assert.equal(bound.id, "ollama/qwen3:8b");
+    // Kumi opened on a model that can't change the Set says so as its first answer is readied.
+    const later = createModelControl({ store: openCredentialStore(join(dir, "auth.json")), settingsFile, env: { OLLAMA_HOST: server.url }, fetch: noLmStudio,
+      changed: async () => {}, say: (message) => said.push(message), installed: () => false });
+    // Kumi doesn't wait for it: it's said once the server has answered.
+    await (await later.binding() as { asked?: Promise<void> }).asked;
+    assert.equal(said.length, 1);
+    assert.match(said[0]!, /^gemma3:4b can't use tools/);
+  } finally { await server.close(); rmSync(dir, { recursive: true, force: true }); }
 });

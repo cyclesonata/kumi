@@ -43,7 +43,7 @@ ${helpRows([
   [sub("login"), "Sign in: asks whether with ChatGPT or an API key"],
   [sub("login <provider>"), "Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"],
   [sub("logout <provider>"), "Remove Kumi's sign-in for that provider"],
-  [sub("model [<provider>/<model>]"), "Show or choose the model"],
+  [sub("model [<provider>/<model>]"), "Show or choose the model; ollama/<model> or lmstudio/<model> for one on this computer"],
   [sub("auth"), "Show which providers are usable (no secrets)"],
   [sub("doctor"), "Check sign-in, the bridge, Live and the terminal"],
   [sub("library"), "What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"],
@@ -56,6 +56,8 @@ ${helpRows([
 
 Providers: openai-codex (ChatGPT), anthropic, openai, opencode and opencode-go (OpenCode Zen and Go share
 a key). An API key in ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENCODE_API_KEY is used when set.
+Models on this computer need no sign-in: Ollama and LM Studio are found while they run, and other
+OpenAI-compatible servers (llama.cpp, vLLM, Jan) can be named in ~/.kumi/settings.json as modelServers.
 KUMI_MODEL overrides the chosen model.
 Kumi reads the open Live Set and makes the changes you ask for; each change can be undone. It plays, records
 and bounces when you ask, listens to audio (a reference, a sample, a recording) and compares it, keeps short notes
@@ -65,8 +67,10 @@ In a session: /help /status /model /effort /login /logout /memory /recipes /conv
 KUMI_TRACE=1 prints MCP dispatch names only.
 `;
 const BRIDGE_MISSING = `The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: ${KUMI} bridge`;
-const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY]
+const secrets = [process.env.AI_GATEWAY_API_KEY, process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY, process.env.OPENCODE_API_KEY, process.env.LM_API_TOKEN]
   .filter((value): value is string => Boolean(value));
+// The keys of model servers named in settings.json are kept out of what Kumi shows, as any key is.
+try { for (const server of readSettings(loadSettingsFile()).modelServers ?? []) if (server.apiKey) secrets.push(server.apiKey); } catch { /* an invalid settings path is reported below */ }
 
 /**
  * A kernel for when the model can't be reached yet (none chosen, not signed in): Kumi still starts
@@ -193,7 +197,9 @@ try {
     // The producer's sounds, presets and Sets, learned in the background (held while Live plays).
     const library = createLibrary({ dir: loadLibraryDir(), folders: readSettings(loadSettingsFile()).libraryFolders ?? [], projectsDir: loadProjectsDir() });
     // A missing sign-in or model isn't a reason not to start: the app offers /login and /model.
-    const models = createModelControl({ store, settingsFile: loadSettingsFile(), env: process.env, changed: async () => { await controller.reconfigure?.(); } });
+    const models = createModelControl({ store, settingsFile: loadSettingsFile(), env: process.env, changed: async () => { await controller.reconfigure?.(); },
+      // What Kumi learns about a model as it's used (it can't change the Set) is said once, as a note.
+      say: (message) => terminal?.handleEvent({ type: "notice", message }) });
     const controller = createSession({
       kernelFactory: async (options) => {
         try { return createAgentKernel({ ...options, binding: await models.binding() }); }

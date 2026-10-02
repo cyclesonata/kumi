@@ -294,16 +294,18 @@ export function createTerminal(options: Options): Terminal {
     if (!argument) {
       const current = models.current();
       const signedIn = (await models.providers()).filter((provider) => provider.signedIn).map((provider) => provider.id);
-      notice(`[model] ${current.model ?? "none chosen"}${current.effort ? `, effort ${current.effort}` : ""}. List a provider's with /model <provider> (${signedIn.join(", ") || "sign in first"}); choose with /model <provider>/<model>.`);
+      const running = (await models.local()).filter((server) => server.running).map((server) => server.id);
+      notice(`[model] ${current.model ?? "none chosen"}${current.effort ? `, effort ${current.effort}` : ""}. List a provider's with /model <provider> (${[...signedIn, ...running].join(", ") || "sign in first, or open Ollama or LM Studio"}); choose with /model <provider>/<model>.`);
       return;
     }
-    if ((PROVIDERS as readonly string[]).includes(argument)) {
-      const listed = await models.models(argument as ProviderId);
+    // A provider's or a server's name lists its models; a model id (with its slash) chooses one.
+    if (!argument.includes("/") && ((PROVIDERS as readonly string[]).includes(argument) || (await models.local()).some((server) => server.id === argument))) {
+      const listed = await models.models(argument);
       notice(`[model] ${argument}: ${listed.map((model) => model.model).join(", ") || "no models listed"}`);
       return;
     }
-    await models.choose(argument);
-    notice(`[model] ${argument} from the next answer on.`);
+    const note = await models.choose(argument);
+    notice(`[model] ${argument} from the next answer on.${note ? ` ${note}` : ""}`);
   }
   function handleEvent(event: SessionEvent) {
     if (closing) return;
@@ -409,7 +411,9 @@ export function createTerminal(options: Options): Terminal {
       // No model yet: the first one a signed-in provider lists.
       if (!options.models.current().model) {
         void options.models.chooseDefault().then((chosen) => {
-          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model.`);
+          if (!closing) notice(!chosen ? `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model; or open Ollama or LM Studio.`
+            : chosen.where ? `[model] ${chosen.id}, in ${options.models.providerName(chosen.provider)} ${chosen.where}. /model changes it.${chosen.note ? ` ${chosen.note}` : ""}`
+            : `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.`);
         }, () => undefined);
       }
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {

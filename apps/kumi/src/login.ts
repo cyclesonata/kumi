@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { Writable } from "node:stream";
 import {
-  apiKeyFor, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, openCredentialStore, PROVIDER_INFO, readPiCodexLogin, validApiKey, type OAuthCredential,
+  apiKeyFor, localServers, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, openCredentialStore, probeLocal, PROVIDER_INFO, readPiCodexLogin, validApiKey, type OAuthCredential,
 } from "@kumi/runtime";
 import { readSettings, type AppConfig } from "./config.js";
 import { createModelControl, OFFER_ORDER } from "./models.js";
@@ -80,6 +80,10 @@ export async function authStatus(config: Extract<AppConfig, { mode: "auth" }>, i
     lines.push(`${provider.padEnd(13)} ${status}`);
   }
   const settings = readSettings(config.settingsFile);
+  // Model servers need no sign-in: the ones running are usable now.
+  for (const server of localServers(settings.modelServers, io.env)) {
+    if (await probeLocal(server)) lines.push(`${server.id.padEnd(13)} running ${server.where}; no sign-in needed`);
+  }
   const model = io.env.KUMI_MODEL ? `${io.env.KUMI_MODEL} (from KUMI_MODEL)` : settings.model ?? "not chosen yet (Kumi starts with a signed-in provider's first model)";
   io.out.write(`${lines.join("\n")}\nModel: ${model}${settings.effort ? `, effort ${settings.effort}` : ""}\nCredential file: ${config.authFile}\n`);
 }

@@ -18,6 +18,19 @@ export interface ContextBudget {
 /** Roughly 50k and 130k tokens, leaving room for instructions and tools in every supported model's window. */
 export const DEFAULT_BUDGET: ContextBudget = { clearAt: 160 * 1024, limit: 400 * 1024 };
 
+/** Bytes a token stands for, as the budget counts them: JSON runs about 3, words more, so this errs toward room. */
+export const BYTES_PER_TOKEN = 3;
+
+/**
+ * The budget for a model that reads `window` tokens at once: what's left once the instructions and
+ * tools (`fixed` bytes) and the answer (`answer` tokens) have their room, cleared from 40% of it as
+ * the default budget is. Never less than a few exchanges, nor more than the default.
+ */
+export function budgetFor(window: number, fixed: number, answer: number): ContextBudget {
+  const limit = Math.min(DEFAULT_BUDGET.limit, Math.max(16 * 1024, (window - answer) * BYTES_PER_TOKEN - fixed));
+  return { clearAt: Math.floor(limit * 0.4), limit };
+}
+
 /** How the session attaches each turn's Live observation to the producer's words. */
 export const OBSERVATION_MARKER = "\n\n<current_observation_untrusted>";
 /** Starts the first kept message once the earliest exchanges are gone. */

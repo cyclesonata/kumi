@@ -8,7 +8,7 @@ import {
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
-import type { ModelControl } from "../models.js";
+import type { LocalStatus, ModelControl } from "../models.js";
 import { libraryLine, sanitizeText, StreamingText, webWords } from "../text.js";
 import type { UpdateControl } from "../update.js";
 import { Editor, type EditorLayout } from "./editor.js";
@@ -1175,7 +1175,7 @@ export class TuiApp {
    */
   private tokensUsed(): string {
     const provider = this.options.models?.current().provider;
-    if (!provider || PROVIDER_INFO[provider].signIn !== "api-key" || !this.used.answers) return "";
+    if (!provider || !(provider in PROVIDER_INFO) || PROVIDER_INFO[provider as ProviderId].signIn !== "api-key" || !this.used.answers) return "";
     const count = (n: number) => (n < 1_000 ? `${n}` : n < 1_000_000 ? `${(n / 1_000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`);
     return ` · this session: ${count(this.used.input)} tokens in${this.used.cached ? ` (${count(this.used.cached)} cached)` : ""}, ${count(this.used.output)} out`;
   }
@@ -1264,20 +1264,28 @@ export class TuiApp {
     }
   }
 
-  /** /model: every provider's models, from their own lists, under whether Kumi is signed in there. */
+  /**
+   * /model: every provider's models, from their own lists, under whether Kumi is signed in there;
+   * then the model servers on this computer (and any named in settings.json), from the servers.
+   */
   private async openModels(): Promise<void> {
     const models = this.options.models;
     if (!models) return;
     const picker = new Picker("Choose a model", [{ label: "Reading your sign-ins…", inert: true }], { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => this.chooseModelItem(item) };
     this.scheduler.request();
+    // Asked at once: a server that isn't running refuses straight away.
+    const servers = models.local().catch((): LocalStatus[] => []);
     const statuses = await this.options.models!.providers();
-    const lists = new Map<ProviderId, ModelInfo[] | "refused" | "unreadable">();
+    const lists = new Map<string, ModelInfo[] | "refused" | "unreadable">();
+    let local: LocalStatus[] | undefined;
     const current = models.current().model;
     const signInItem = (provider: typeof statuses[number], again = false): PickerItem => ({
       label: `Sign in to ${provider.name}${again ? " again" : ""}`, detail: provider.signIn === "chatgpt" ? "with your ChatGPT plan" : "with an API key",
       value: `signin:${provider.id}`, note: "sign in", noteTone: "accent" });
-    const build = (): PickerItem[] => statuses.flatMap((provider): PickerItem[] => {
+    const modelItem = (model: ModelInfo): PickerItem => ({ label: model.name, ...(model.description ? { detail: model.description } : {}), value: model.id,
+      ...(model.id === current ? { note: "current", noteTone: "accent" as const } : {}) });
+    const cloud = (): PickerItem[] => statuses.flatMap((provider): PickerItem[] => {
       const listed = lists.get(provider.id);
       const heading: PickerItem = { heading: true, label: provider.name, noteTone: listed === "refused" ? "warn" : "faint",
         note: listed === "refused" ? provider.via === "environment" ? `${provider.keyEnv} not accepted` : "sign-in not accepted"
@@ -1287,36 +1295,53 @@ export class TuiApp {
       if (listed === "refused") return [heading, signInItem(provider, true)];
       if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
       if (!listed.length) return [heading, { label: "It lists no models for this sign-in.", inert: true }];
-      return [heading, ...listed.map((model): PickerItem => ({ label: model.name, ...(model.description ? { detail: model.description } : {}), value: model.id,
-        ...(model.id === current ? { note: "current", noteTone: "accent" as const } : {}) }))];
+      return [heading, ...listed.map(modelItem)];
     });
+    // Servers need no sign-in: a running one lists its models, a closed one says how to start it.
+    const onThisComputer = (): PickerItem[] => {
+      if (!local) return [];
+      if (!local.length) return [{ heading: true, label: "On this computer" }, { label: "Open Ollama or LM Studio, and its models show here.", inert: true }];
+      return local.flatMap((server): PickerItem[] => {
+        const heading: PickerItem = { heading: true, label: `${server.name} · ${server.where}`, note: server.running ? "running" : "not running", noteTone: server.running ? "faint" : "warn" };
+        if (!server.running) return [heading, { label: server.start ?? "Start it, then /model again.", inert: true }];
+        const listed = lists.get(server.id);
+        if (listed === undefined) return [heading, { label: "Reading its models…", inert: true }];
+        if (listed === "refused") return [heading, { label: server.id === "lmstudio" ? "It wants an API token: set LM_API_TOKEN to one from its server settings." : "It didn't accept Kumi's key for it (apiKey in ~/.kumi/settings.json).", inert: true }];
+        if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
+        if (!listed.length) return [heading, { label: server.id === "ollama" ? "No models yet: pull one that can use tools (ollama pull <model>)." : "No models yet: get one, then /model again.", inert: true }];
+        return [heading, ...listed.map(modelItem)];
+      });
+    };
     const update = () => {
       if (this.panel?.kind !== "pick" || this.panel.picker !== picker) return;
-      picker.setItems(build()); picker.select(current); this.scheduler.request();
+      picker.setItems([...cloud(), ...onThisComputer()]); picker.select(current); this.scheduler.request();
+    };
+    const read = async (id: string) => {
+      try { lists.set(id, await models.models(id)); }
+      catch (error) { lists.set(id, error instanceof KumiError && error.kind === "auth" ? "refused" : "unreadable"); }
+      update();
     };
     update();
-    await Promise.all(statuses.filter((provider) => provider.signedIn).map(async (provider) => {
-      try { lists.set(provider.id, await models.models(provider.id)); }
-      catch (error) { lists.set(provider.id, error instanceof KumiError && error.kind === "auth" ? "refused" : "unreadable"); }
-      update();
-    }));
+    await Promise.all([...statuses.filter((provider) => provider.signedIn).map((provider) => read(provider.id)),
+      servers.then(async (found) => { local = found; update(); await Promise.all(found.filter((server) => server.running).map((server) => read(server.id))); })]);
   }
 
   private async chooseModelItem(item: PickerItem): Promise<void> {
     const models = this.options.models!;
     const value = item.value!;
     if (value.startsWith("signin:")) { this.signIn(value.slice("signin:".length) as ProviderId, () => this.openModels()); return; }
+    let note: string | undefined;
     try {
-      await models.choose(value);
+      note = await models.choose(value);
     } catch (error) {
       // Its provider isn't signed in: sign in there first, then use it.
-      if (error instanceof KumiError && error.kind === "auth" && error.provider) { this.signIn(error.provider as ProviderId, () => this.chooseModelItem(item)); return; }
+      if (error instanceof KumiError && error.kind === "auth" && error.provider && error.provider in PROVIDER_INFO) { this.signIn(error.provider as ProviderId, () => this.chooseModelItem(item)); return; }
       throw error;
     }
     this.closePanel();
     const current = models.current();
     const effort = current.effort ? `, at ${current.effort} effort` : current.defaultEffort ? `, at its usual ${current.defaultEffort} effort` : "";
-    this.notice(`Kumi talks to ${current.name ?? value} from your next message${effort}.${current.pinned ? " KUMI_MODEL is set, so this lasts until Kumi closes." : ""}`, "info");
+    this.notice(`Kumi talks to ${current.name ?? value} from your next message${effort}.${current.pinned ? " KUMI_MODEL is set, so this lasts until Kumi closes." : ""}${note ? ` ${note}` : ""}`, "info");
   }
 
   /** /effort: the levels the current model takes, with its own default first. */
@@ -1591,11 +1616,26 @@ export class TuiApp {
     this.scheduler.request();
   }
 
-  /** After a failed answer, the fix for what failed: sign in there, or another model. */
+  /** After a failed answer, the fix for what failed: sign in there, another model, or sending again once a server's back. */
   private offerFix(kind: string, provider: string | undefined): void {
     const models = this.options.models;
     if (!models || this.panel) return;
     if (kind === "config" && !models.current().model) { void this.openModels().catch((error: unknown) => this.panelFailed(error)); return; }
+    // A server on this computer that isn't answering: the message says how to start it; then it's one enter away.
+    if (kind === "network" && provider && !(provider in PROVIDER_INFO)) {
+      const name = models.providerName(provider);
+      this.panel = { kind: "pick", picker: new Picker("Send your message again?", [
+        { label: "Send it again", detail: `once ${name} is running`, value: "again" },
+        { label: "Choose another model", value: "model" },
+        { label: "Not now", value: "later" },
+      ]), choose: (item) => {
+        this.closePanel();
+        if (item.value === "again") this.resend();
+        else if (item.value === "model") return this.openModels();
+      } };
+      this.scheduler.request();
+      return;
+    }
     if (kind === "model" || kind === "config") {
       this.panel = { kind: "pick", picker: new Picker("Choose another model?", [{ label: "Choose a model", value: "model" }, { label: "Not now", value: "later" }]),
         choose: (item) => { this.closePanel(); if (item.value === "model") return this.openModels(); } };
@@ -1634,13 +1674,23 @@ export class TuiApp {
     if (!current.model) {
       const chosen = await models.chooseDefault();
       if (this.closing) return;
-      if (chosen) { this.notice(`Kumi talks to ${chosen.name}, ${PROVIDER_INFO[chosen.provider].name}'s first choice. /model changes it.`, "info"); return; }
-      this.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key.", "info");
+      if (chosen) {
+        const name = models.providerName(chosen.provider);
+        this.notice(chosen.where ? `Kumi talks to ${chosen.name}, in ${name} ${chosen.where}. /model changes it.${chosen.note ? ` ${chosen.note}` : ""}`
+          : `Kumi talks to ${chosen.name}, ${name}'s first choice. /model changes it.`, "info");
+        return;
+      }
+      this.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key. Or open Ollama or LM Studio to use models on this computer.", "info");
       if (!this.panel) await this.openModels();
       return;
     }
     const status = (await models.providers()).find((provider) => provider.id === current.provider);
     if (status && !status.signedIn) this.offerFix("auth", status.id);
+    // A model on a server that's closed: said now, before a message waits on it.
+    const server = status ? undefined : (await models.local()).find((item) => item.id === current.provider);
+    if (server && !server.running && !this.closing) {
+      this.notice(`${server.name} isn't running, so ${current.name ?? current.model!.slice(current.model!.indexOf("/") + 1)} can't answer yet. ${server.start ?? "Start it"}.`, "info");
+    }
   }
 
   /** Ask a side question: its answer streams into the btw panel, and nothing joins the conversation. */

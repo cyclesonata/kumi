@@ -59,6 +59,11 @@ function providerDetail(error: APICallError): string {
       if (typeof candidate === "string") detail = candidate;
     } catch { /* keep the status text */ }
   }
+  return cleanDetail(detail);
+}
+
+/** A server's own words, safe to show: one line, no tokens or anything that looks like one, bounded. */
+export function cleanDetail(detail: string): string {
   return detail.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/[A-Za-z0-9._~+/=-]{32,}/g, "[redacted]").trim().slice(0, 300);
 }

@@ -37,12 +37,15 @@ every state below.
 - **The model is the producer's choice, made in place.** `/model`, `/effort`,
   `/login` and `/logout` open a panel above the input box, drawn like the `/`
   menu: providers as headings with whether Kumi is signed in there, their models
-  read from the providers themselves (Kumi keeps no list), typing to filter. The
+  read from the providers themselves (Kumi keeps no list), then the model servers
+  on this computer ("Ollama · on this computer", a closed one with how to start
+  it), typing to filter. The
   header names the model and its effort. A key is typed or pasted into a box that
   shows only dots and its length, and is checked before it's kept. A failure that
   has a fix offers it: a missing or refused sign-in asks "Sign in to Anthropic?"
   and resends the message after; a model the provider doesn't offer opens the
-  list. Changes apply from the next message, so they're allowed mid-answer.
+  list; a server that stops answering offers to send the message again. Changes
+  apply from the next message, so they're allowed mid-answer.
 - **Memory is quiet.** Kumi keeps notes on its own as it answers; each shows as
   one faint line in the conversation, never a step, a prompt or a graph.
   `/memory` lists the notes (about you, about this Set) in a panel like

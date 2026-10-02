@@ -7,7 +7,10 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, canBuildHands, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, openHands, parseModelId, PROVIDER_INFO, readLibraryState, since, whisperHint, type ProviderId } from "@kumi/runtime";
+import {
+  apiKeyFor, canBuildHands, ffmpegHint, findFfmpeg, findWhisper, listLocalModels, localInstalled, localServers, OPENAI_CODEX, openCredentialStore, openHands, parseLocalModelId, parseModelId, probeLocal, PROVIDER_INFO,
+  readLibraryState, since, startHint, whisperHint, type LocalServer, type ModelInfo, type ProviderId,
+} from "@kumi/runtime";
 import { findBridgeConfig, loadAuthFile, loadLibraryDir, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
@@ -47,7 +50,12 @@ export interface DoctorIo {
   videoPrograms?: () => Promise<{ ffmpeg?: string | undefined; whisper?: string | undefined }>;
   /** Whether Kumi can use Live's own menus here; asked of the helper (nothing built) when left out. */
   hands?: () => Promise<Check | undefined>;
+  /** The model servers worth a line (running, installed, or named in settings.json) and their models; each asked when left out. */
+  modelServers?: () => Promise<ServerFinding[]>;
 }
+
+/** A model server the doctor looked for: running (with its models, when it listed them), or the producer's but not running. */
+export interface ServerFinding { server: LocalServer; running: boolean; models?: ModelInfo[] }
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 const major = (version: string) => Number(version.replace(/^v/, "").split(".")[0]);
@@ -66,19 +74,33 @@ function nodeCheck(version: string): Check {
       next: INSTALLED ? `Run ${KUMI_REPAIR}, which brings Kumi's own Node back` : `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
 }
 
-async function signInCheck(env: Env): Promise<Check> {
+async function signInCheck(env: Env, servers: readonly ServerFinding[]): Promise<Check> {
   const store = openCredentialStore(loadAuthFile(env));
   const signedIn = async (provider: ProviderId) => PROVIDER_INFO[provider].signIn === "chatgpt"
     ? (await store.get(OPENAI_CODEX).catch(() => undefined))?.type === "oauth"
     : Boolean(await apiKeyFor(provider, store, env).catch(() => undefined));
-  const model = env.KUMI_MODEL ?? readSettings(loadSettingsFile(env)).model;
+  const settings = readSettings(loadSettingsFile(env));
+  const model = env.KUMI_MODEL ?? settings.model;
   if (!model) {
     for (const provider of OFFER_ORDER) {
       if (await signedIn(provider)) return { status: "ok", text: `Signed in to ${PROVIDER_INFO[provider].name} · Kumi starts with its first model (/model changes it)` };
     }
-    return { status: "fix", text: "Not signed in to a provider", next: `${KUMI} login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key` };
+    const serving = servers.find((found) => found.running && found.models?.length);
+    if (serving) return { status: "ok", text: `Kumi starts with a model in ${serving.server.name}, ${serving.server.where}; no sign-in needed (/model changes it)` };
+    return { status: "fix", text: "Not signed in to a provider", next: `${KUMI} login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key; or open Ollama or LM Studio` };
   }
   const parsed = parseModelId(model);
+  const onServer = parsed ? undefined : parseLocalModelId(model, localServers(settings.modelServers, env));
+  if (onServer) {
+    const { server } = onServer;
+    const found = servers.find((item) => item.server.id === server.id);
+    if (!found?.running) return { status: "fix", text: `${server.name} isn't running (model ${model})`, next: startHint(server) };
+    // A server named in settings.json may serve any name it's given; Ollama and LM Studio list all they have.
+    if (found.models && server.kind !== "openai-compatible" && !found.models.some((item) => item.model === onServer.model)) {
+      return { status: "fix", text: `${server.name} doesn't have ${onServer.model} (model ${model})`, next: server.kind === "ollama" ? `Run: ollama pull ${onServer.model}` : "Download it in LM Studio, or choose another model with /model in Kumi" };
+    }
+    return { status: "ok", text: `${server.name} ${server.where} · model ${model}` };
+  }
   if (!parsed) return { status: "fix", text: `The model "${model.slice(0, 80)}" isn't one Kumi knows`, next: "Choose one with /model in Kumi" };
   const info = PROVIDER_INFO[parsed.provider];
   if (!(await signedIn(parsed.provider))) return { status: "fix", text: `Not signed in to ${info.name} (model ${model})`, next: `${KUMI} login ${parsed.provider}` };
@@ -152,10 +174,51 @@ async function libraryCheck(env: Env, now = Date.now()): Promise<Check | undefin
   return { status: "note", text: "Kumi hasn't learned your library yet", next: `It learns by itself while Kumi runs; ${KUMI} library shows where it's at` };
 }
 
+/** The model servers worth a line, each asked whether it's running and what it has. */
+async function findServers(env: Env): Promise<ServerFinding[]> {
+  const servers = localServers(readSettings(loadSettingsFile(env)).modelServers, env);
+  const found = await Promise.all(servers.map(async (server): Promise<ServerFinding | undefined> => {
+    const running = await probeLocal(server);
+    const theirs = server.kind === "openai-compatible" || (server.kind === "ollama" && Boolean(env.OLLAMA_HOST)) || localInstalled(server.kind, env);
+    if (!running) return theirs ? { server, running } : undefined;
+    const models = await listLocalModels(server).catch(() => undefined);
+    return { server, running, ...(models ? { models } : {}) };
+  }));
+  return found.filter((item): item is ServerFinding => Boolean(item));
+}
+
+/**
+ * Which model servers are running, with what (and which can change the Set); one that's the
+ * producer's but closed, with how to start it (unless the model check already said so).
+ */
+function serverChecks(servers: readonly ServerFinding[], env: Env, said?: string): Check[] {
+  const checks: Check[] = [];
+  const running = servers.filter((found) => found.running);
+  if (running.length) {
+    const named = running.map(({ server, models }) => {
+      const able = models?.filter((model) => model.tools !== false).length;
+      const what = !models ? "its models unread" : `${models.length} ${models.length === 1 ? "model" : "models"}${able !== models.length ? `, ${able} can change the Set` : ""}`;
+      return `${server.name} ${server.where} (${what})`;
+    });
+    checks.push({ status: "ok", text: `Model servers: ${named.join("; ")}` });
+  }
+  for (const { server, running: up } of servers) {
+    if (up || server.id === said) continue;
+    const text = server.kind === "openai-compatible" ? `${server.name}, from settings.json, isn't answering at ${server.baseURL}`
+      : server.kind === "ollama" && env.OLLAMA_HOST ? `Ollama isn't answering at ${server.baseURL} (OLLAMA_HOST)` : `${server.name} is installed but not running`;
+    checks.push({ status: "note", text, next: startHint(server) });
+  }
+  return checks;
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
-  const checks: Check[] = [node, await signInCheck(env)];
+  const servers = await (io.modelServers ?? (() => findServers(env)))().catch((): ServerFinding[] => []);
+  const signIn = await signInCheck(env, servers);
+  // The model's server, when the model check is about it already.
+  const said = servers.find(({ server }) => signIn.text.startsWith(`${server.name} isn't running`))?.server.id;
+  const checks: Check[] = [node, signIn, ...serverChecks(servers, env, said)];
   const configPath = findBridgeConfig(env);
   if (!configPath) {
     checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: `Quit Live, then run: ${KUMI} bridge` });
