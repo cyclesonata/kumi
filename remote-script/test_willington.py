@@ -1,6 +1,6 @@
 import hashlib
 import unittest
-from test_remote_script import FakeSong, FakeClip
+from test_remote_script import FakeSong, FakeClip, _protect_windows_owner_only
 from ableton_mcp_remote_script import LiveObjectMapper, validate_operation_payload
 
 class FollowClip(FakeClip):
@@ -278,7 +278,7 @@ class ProviderTests(unittest.TestCase):
         import AbletonMcpBridge as wrapper
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'willington.json'
-            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True, 'enableWrites': True})); path.chmod(0o600)
+            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True, 'enableWrites': True})); path.chmod(0o600); _protect_windows_owner_only(path)
             mapper = types.SimpleNamespace(); live = types.SimpleNamespace(); logs = []; calls = []
             follow = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(('follow', value)))
             devices = types.SimpleNamespace(enable=lambda value: calls.append(('devices', value)), uninstall=lambda: None)
@@ -296,7 +296,7 @@ class ProviderTests(unittest.TestCase):
         from unittest.mock import patch
         import AbletonMcpBridge as wrapper
         with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'willington.json';path.write_text(json.dumps({'version':1,'followActions':False,'deviceTools':True,'enableWrites':True}));path.chmod(0o600)
+            path=Path(folder)/'willington.json';path.write_text(json.dumps({'version':1,'followActions':False,'deviceTools':True,'enableWrites':True}));path.chmod(0o600);_protect_windows_owner_only(path)
             calls=[];native=types.SimpleNamespace(enable=lambda enabled:calls.append(enabled),uninstall=lambda:calls.append('uninstall'))
             live=types.SimpleNamespace();mapper=types.SimpleNamespace()
             with patch.object(wrapper,'__file__',str(path.with_name('__init__.py'))),patch.dict('sys.modules',{'Live':live,'WillingtonDeviceTools':types.ModuleType('WillingtonDeviceTools'),'WillingtonDeviceTools.api':types.SimpleNamespace(install=lambda:native)}):
@@ -391,7 +391,7 @@ class ReviewRegressions(unittest.TestCase):
         import AbletonMcpBridge as wrapper
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'willington.json'
-            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': False, 'enableWrites': False})); path.chmod(0o600)
+            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': False, 'enableWrites': False})); path.chmod(0o600); _protect_windows_owner_only(path)
             calls = []; live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
             native = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(value))
             with patch.object(wrapper, '__file__', str(path.with_name('__init__.py'))), patch.dict('sys.modules', {'Live': live, 'WillingtonBindings': types.SimpleNamespace(install=lambda: (calls.append('install'), native)[1])}):
