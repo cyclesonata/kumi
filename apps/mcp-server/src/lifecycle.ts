@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, chmodSync } from "node:fs";
+import { constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { platform } from "node:process";
@@ -281,6 +281,21 @@ function tryRemove(path: string, recursive = false): boolean {
 const OWNER_ONLY_REMOTE_FILES = ["bridge-reference.json", "willington.json"];
 
 /**
+ * A folder copied file by file, never over a file; with `missingOnly`, into a folder already there, only
+ * what it lacks (putting a half-removed original back: what's left of it is the original). Not fs.cpSync:
+ * Node 22's aborts the whole process on Windows for some non-ASCII paths, which a User Library's can have.
+ */
+function copyFolder(from: string, to: string, missingOnly: boolean): void {
+  mkdirSync(to, { recursive: missingOnly });
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const source = join(from, entry.name); const target = join(to, entry.name);
+    if (entry.isDirectory()) copyFolder(source, target, missingOnly);
+    else if (entry.isFile()) { if (!missingOnly || !existsSync(target)) copyFileSync(source, target, fsConstants.COPYFILE_EXCL); }
+    else throw new Error(`managed tree contains an unsupported entry: ${source}`);
+  }
+}
+
+/**
  * Moves the Remote Script's folder: a rename, or, where it and the owner state are on different drives
  * (Live's User Library on another drive or volume: rename refuses with EXDEV), a copy and then the
  * original's removal. A copy takes the destination's permissions, so the files the Remote Script needs
@@ -288,8 +303,8 @@ const OWNER_ONLY_REMOTE_FILES = ["bridge-reference.json", "willington.json"];
  */
 function moveRemoteFolder(from: string, to: string): void {
   try { renameSync(from, to); return; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error; }
-  const copy = (source: string, target: string, force: boolean) => {
-    cpSync(source, target, { recursive: true, force, errorOnExist: !force, preserveTimestamps: true });
+  const copy = (source: string, target: string, restoring: boolean) => {
+    copyFolder(source, target, restoring);
     for (const name of OWNER_ONLY_REMOTE_FILES) if (existsSync(join(target, name))) secureWindowsFile(join(target, name));
   };
   try { copy(from, to, false); } catch (error) { rmSync(to, { recursive: true, force: true }); throw error; }
