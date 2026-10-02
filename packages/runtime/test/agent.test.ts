@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { APICallError, type LanguageModelV4, type LanguageModelV4CallOptions, type LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { KernelEvent, KernelTool } from "../src/core/contracts.js";
 import { KumiError } from "../src/core/errors.js";
-import { createAgentKernel, STOPPED_NOTE, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
+import { createAgentKernel, plainWords, STOPPED_NOTE, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
 
 type Script = (options: LanguageModelV4CallOptions, call: number) => LanguageModelV4StreamPart[] | ReadableStream<LanguageModelV4StreamPart> | Promise<never>;
 const usage = (input = 3, output = 2) => ({
@@ -287,13 +287,24 @@ test("a side question sees the conversation and the turn so far, calls no tools,
   assert.equal(answer, "About 2.4 s.");
   assert.deepEqual(heard, ["About 2.4 s."]);
   const aside = h.requests[2]!;
-  assert.deepEqual(aside.toolChoice, { type: "none" }, "no tools are called");
-  assert.equal(aside.tools?.[0]?.name, "look", "the conversation's tools are still described");
-  const said = aside.prompt.map((message) => JSON.stringify(message.content));
+  assert.equal(aside.tools, undefined, "no tools offered");
+  const said = aside.prompt.map((message) => `${message.role}: ${JSON.stringify(message.content)}`);
   assert.equal(said.length, 4, "the conversation, the turn under way without its call still running, and the question");
-  assert.match(said[2]!, /two/); assert.match(said[3]!, /side question[\s\S]*how long is the tail\?/);
+  assert.match(said[2]!, /^user: .*two/); assert.match(said[3]!, /^user: .*side question[\s\S]*how long is the tail\?/);
+  assert.ok(aside.prompt.every((message) => (message.content as { type: string }[]).every((part) => part.type === "text")), "words only");
   assert.doesNotMatch(JSON.stringify(h.kernel.checkpoint()), /tail/, "never kept");
   await h.kernel.close();
+});
+
+test("a side question's copy of the conversation writes calls and results out as words", () => {
+  const words = plainWords([
+    { role: "user", content: [{ type: "text", text: "tempo?" }] },
+    { role: "assistant", content: [{ type: "reasoning", text: "hmm" }, { type: "text", text: "Looking." }, { type: "tool-call", toolCallId: "c1", toolName: "look", input: { what: "tempo" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "look", output: { type: "text", value: '{"tempo":124}' } }] },
+    { role: "assistant", content: [{ type: "text", text: "124 BPM." }] },
+  ]);
+  assert.deepEqual(words.map((message) => [message.role, (message.content as { text: string }[])[0]!.text]), [
+    ["user", "tempo?"], ["assistant", 'Looking.\n[called look {"what":"tempo"}]'], ["user", '[look returned: {"tempo":124}]'], ["assistant", "124 BPM."]]);
 });
 
 test("steering enters at the next model boundary, even after a final answer", async () => {

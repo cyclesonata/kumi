@@ -284,9 +284,10 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       if (!words || Buffer.byteLength(words) > MAX_STEER) throw new KumiError("request", "Ask a side question of at most 16 KiB.");
       const context = running?.context?.() ?? history;
       const fitted = fit(context, [user(`${ASIDE_NOTE}\n\n${words}`)], budget);
-      const messages = fitted.history === context ? [...context, ...fitted.turn] : [...withoutReasoning(fitted.history), ...fitted.turn];
-      // The same instructions and tools as the conversation (some providers need the tools its calls name), none to call.
-      const request = { ...binding.prepare({ instructions, messages, tools: specs, sessionId }), toolChoice: { type: "none" as const } };
+      // The conversation in plain words, its calls and their results written out: then no tools are
+      // offered at all, which every provider takes (some can't be told "none" with calls in the conversation).
+      const messages = plainWords([...fitted.history, ...fitted.turn]);
+      const request = binding.prepare({ instructions, messages, tools: [], sessionId });
       const abort = AbortSignal.any([signal, lifetime.signal]);
       for (let attempt = 0; ; attempt++) {
         let delivered = false;
@@ -310,6 +311,36 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       return closing ??= (async () => { lifetime.abort(); await active?.catch(() => {}); })();
     },
   };
+}
+
+/** Longest a call's input or result runs in a side question's plain-words copy of the conversation. */
+const PLAIN_PART = 4 * 1024;
+
+/**
+ * The conversation as words only, for a side question: what was said, each tool call as "[called
+ * name {input}]", each result as "[name returned: …]" (from the producer's side), reasoning and
+ * replay metadata left out.
+ */
+export function plainWords(messages: readonly LanguageModelV4Message[]): LanguageModelV4Message[] {
+  const clip = (text: string) => (text.length > PLAIN_PART ? `${text.slice(0, PLAIN_PART)}…` : text);
+  const said = (role: "user" | "assistant", text: string): LanguageModelV4Message[] => (text.trim() ? [{ role, content: [{ type: "text", text }] }] : []);
+  return messages.flatMap((message): LanguageModelV4Message[] => {
+    if (message.role === "system") return [];
+    if (message.role === "tool") {
+      return said("user", message.content.map((part) => (part.type === "tool-result" ? `[${part.toolName} returned: ${clip(outputWords(part.output))}]` : "")).filter(Boolean).join("\n"));
+    }
+    if (message.role === "assistant") {
+      return said("assistant", message.content.map((part) => (part.type === "text" ? part.text : part.type === "tool-call" ? `[called ${part.toolName} ${clip(JSON.stringify(part.input))}]` : "")).filter(Boolean).join("\n"));
+    }
+    return said("user", message.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
+  });
+}
+
+function outputWords(output: LanguageModelV4ToolResultOutput): string {
+  if (output.type === "text" || output.type === "error-text") return output.value;
+  if (output.type === "json" || output.type === "error-json") return JSON.stringify(output.value);
+  if (output.type === "content") return output.value.map((item) => (item.type === "text" ? item.text : "")).filter(Boolean).join("\n");
+  return "";
 }
 
 /** Assemble one streamed response into replayable assistant content, preserving provider metadata. */

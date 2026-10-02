@@ -706,8 +706,11 @@ export class TuiApp {
    * are sent too. After a stop or a failure they go back into the box instead, to send or not.
    */
   private afterBusy(): void {
+    // How the last work ended counts once: a message held during later work is sent as usual.
+    const back = this.lastStop === "cancelled" || this.failed;
+    this.lastStop = undefined; this.failed = false;
     if (!this.held.length || this.closing) return;
-    if (this.lastStop === "cancelled" || this.failed) {
+    if (back) {
       const words = this.held.map((item) => item.text);
       this.held = [];
       this.editor.set([...words, ...(this.editor.isEmpty ? [] : [this.editor.text])].join("\n"));

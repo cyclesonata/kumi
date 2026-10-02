@@ -64,7 +64,7 @@ Something off? `kumi doctor` checks everything and says what to run. `kumi repor
 
 Kumi tells you when there's a newer version as it starts. `/update` inside Kumi, or `kumi update` in a terminal, gets it and brings the bridge along; `kumi update --check` only asks, and `kumi update --rollback` goes back. To stop the check, put `"updateCheck": false` in `~/.kumi/settings.json`.
 
-Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live.
+Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live. While Kumi works, Enter tells it more (it reads it after the step under way), Tab sends a message for after, and `/btw` asks something on the side.
 
 [Full guide](docs/en/KUMI_POC.md) · [Commands and screens](docs/en/KUMI_TUI.md) · [Changelog](CHANGELOG.md)
 

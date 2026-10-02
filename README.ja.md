@@ -64,7 +64,7 @@ kumi            # Set の横で Kumi を開く
 
 新しいバージョンが出ると、Kumi は起動時に知らせます。Kumi の中で `/update`、またはターミナルで `kumi update` を実行すると更新され、ブリッジも一緒に更新されます。`kumi update --check` は確認だけ、`kumi update --rollback` は一つ前に戻します。確認を止めるには、`~/.kumi/settings.json` に `"updateCheck": false` を加えます。
 
-Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。
+Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。Kumi が作業中でも、Enter で追加の指示を送れます（今のステップの後に読まれます）。Tab は作業が終わった後に送るメッセージ、`/btw` は作業を止めずにちょっとした質問をします。
 
 [ガイド（英語）](docs/en/KUMI_POC.md) · [コマンドと画面（英語）](docs/en/KUMI_TUI.md) · [変更履歴（英語）](CHANGELOG.md)
 

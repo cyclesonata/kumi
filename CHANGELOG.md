@@ -3,6 +3,24 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## Unreleased
+
+### Seeing and talking to Kumi while it works
+
+- Each step has its own animation while it runs (searching, reading a page, looking at the Set,
+  building a device, changing, listening, watching, playing, recording, code), its words shimmer
+  and its time counts up; NOW plays a wider version of it.
+- The same step done several times in a row folds into one line ("read a page ×3") 3 s after the
+  last, with a short fold.
+- Enter while Kumi works sends a message it reads after the step under way; Tab sends one for after
+  the answer. Waiting messages show above the box; Alt-↑ takes the last one back, and stopping
+  Kumi puts them back in the box.
+- `/btw` asks something on the side, any time: answered from the conversation so far, without
+  tools, in a panel; neither the question nor the answer joins the conversation.
+- While Live plays, a yellow light in the header blinks on its beat beside the tempo.
+- Nothing is cut from the conversation: answers keep their steps, a conversation brought back comes
+  back whole with its steps, and long titles wrap. Ctrl-Home and Ctrl-End go to the start and back.
+
 ## 1.3.0 — 2026-10-01
 
 Kumi does what you ask and finds a way when no tool fits; the bridge refuses only what Live can't
