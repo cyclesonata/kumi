@@ -1,7 +1,7 @@
 /** A bridge in memory, shaped like the real one's responses, for the Ableton integration's tests. */
 import assert from "node:assert/strict";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTool, LiveFocus, PinnedNode } from "../../src/core/contracts.js";
+import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTool, LiveFocus, LiveTransport, PinnedNode } from "../../src/core/contracts.js";
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
 import { lowDisk } from "../../src/core/disk.js";
@@ -28,6 +28,7 @@ type Options = { padBatches?: boolean; parameters?: boolean; /** 150 parameters,
   /** The tools of bridge 1.0.58: explicit deletions, Live's undo steps, and Kumi's Live extension (offline render, Arrangement MIDI clips). */ fullControl?: boolean;
   /** The JSON reply to Python execution inside Live (bridge 1.0.68). */ python?: (args: JsonObject) => JsonObject;
   /** What's selected in Live, as the focus feed reports it. */ onFocus?: (focus: LiveFocus | null) => void;
+  /** Live's transport, for the beat light. */ onTransport?: (transport: LiveTransport | null) => void;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
   /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
 export function bridge(options: Options = {}) {
@@ -348,7 +349,7 @@ export function bridge(options: Options = {}) {
   const auditions: AuditionEvent[] = [];
   const integration = createAbletonIntegration({ connect: async () => endpoint, onConnection: (state) => { states.push(state); options.onConnection?.(state); }, onChange: (change) => records.push(change),
     onAction: (action) => actions.push(action), changeTimeoutMs: 2_000, reconnectIntervalMs: 10, onAudition: (event) => { auditions.push(event); options.onAudition?.(event); },
-    onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}),
+    onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}), ...(options.onTransport ? { onTransport: options.onTransport } : {}),
     // Never the producer's own ~/.kumi: each bridge its own file.
     restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
     lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
@@ -357,6 +358,8 @@ export function bridge(options: Options = {}) {
     /** Live sends an event (notifications/live_event). */
     liveEvent: (event: JsonObject) => { for (const listener of [...liveEventListeners]) listener(event); },
     main, get position() { return now(); }, trackNames: () => tracks.map((track) => track.name),
+    /** Live starts playing from `beat` (with space, say: Kumi isn't asked). */
+    startPlayback: (beat: number) => play(beat),
     /** A track's devices as they are now (knobs moved by the search included). */
     devicesOf: (name: string) => tracks.find((track) => track.name === name)?.devices,
     /** The next request of this name (or play action) is refused, as Live refuses one. */

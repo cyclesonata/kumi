@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { APICallError, type LanguageModelV4, type LanguageModelV4CallOptions, type LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { KernelEvent, KernelTool } from "../src/core/contracts.js";
 import { KumiError } from "../src/core/errors.js";
-import { createAgentKernel, STOPPED_NOTE, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
+import { createAgentKernel, plainWords, STOPPED_NOTE, type AgentKernelOptions, type ModelBinding } from "../src/kernel/agent.js";
 
 type Script = (options: LanguageModelV4CallOptions, call: number) => LanguageModelV4StreamPart[] | ReadableStream<LanguageModelV4StreamPart> | Promise<never>;
 const usage = (input = 3, output = 2) => ({
@@ -271,6 +271,42 @@ test("stops at the step bound when the model keeps calling tools", async () => {
   await h.kernel.close();
 });
 
+test("a side question sees the conversation and the turn so far, calls no tools, and leaves no trace", async () => {
+  let kernelRef: ReturnType<typeof harness>["kernel"] | undefined;
+  const heard: string[] = [];
+  let answer: string | undefined;
+  const h = harness((_options, n) => {
+    if (n === 1) return [...text("fine"), finish()];
+    if (n === 2) return [call("look", "{}"), finish("tool-calls")];
+    if (n === 3) return [...text("About 2.4 s."), finish()];
+    return [...text("done"), finish()];
+  }, { tools: [tool("look", async () => { answer = await kernelRef!.aside("how long is the tail?", new AbortController().signal, (words) => heard.push(words)); return { text: "looked" }; })] });
+  kernelRef = h.kernel;
+  await h.kernel.run("one", new AbortController().signal, () => {});
+  await h.kernel.run("two", new AbortController().signal, () => {});
+  assert.equal(answer, "About 2.4 s.");
+  assert.deepEqual(heard, ["About 2.4 s."]);
+  const aside = h.requests[2]!;
+  assert.equal(aside.tools, undefined, "no tools offered");
+  const said = aside.prompt.map((message) => `${message.role}: ${JSON.stringify(message.content)}`);
+  assert.equal(said.length, 4, "the conversation, the turn under way without its call still running, and the question");
+  assert.match(said[2]!, /^user: .*two/); assert.match(said[3]!, /^user: .*side question[\s\S]*how long is the tail\?/);
+  assert.ok(aside.prompt.every((message) => (message.content as { type: string }[]).every((part) => part.type === "text")), "words only");
+  assert.doesNotMatch(JSON.stringify(h.kernel.checkpoint()), /tail/, "never kept");
+  await h.kernel.close();
+});
+
+test("a side question's copy of the conversation writes calls and results out as words", () => {
+  const words = plainWords([
+    { role: "user", content: [{ type: "text", text: "tempo?" }] },
+    { role: "assistant", content: [{ type: "reasoning", text: "hmm" }, { type: "text", text: "Looking." }, { type: "tool-call", toolCallId: "c1", toolName: "look", input: { what: "tempo" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "look", output: { type: "text", value: '{"tempo":124}' } }] },
+    { role: "assistant", content: [{ type: "text", text: "124 BPM." }] },
+  ]);
+  assert.deepEqual(words.map((message) => [message.role, (message.content as { text: string }[])[0]!.text]), [
+    ["user", "tempo?"], ["assistant", 'Looking.\n[called look {"what":"tempo"}]'], ["user", '[look returned: {"tempo":124}]'], ["assistant", "124 BPM."]]);
+});
+
 test("steering enters at the next model boundary, even after a final answer", async () => {
   let kernelRef: ReturnType<typeof harness>["kernel"] | undefined;
   const h = harness((_options, n) => n === 1 ? [call("look", "{}"), finish("tool-calls")] : n === 2 ? [...text("first"), finish()] : [...text("steered"), finish()], {
@@ -365,7 +401,8 @@ test("long conversations stay in budget: earlier reads are cleared in requests a
   assert.equal(output(prompt[6]), output({ role: "tool", content: [{ type: "tool-result", toolCallId: "c3", toolName: "read", output: { type: "text", value: big } }] }));
   assert.match(output(prompt[4]), /current_observation_untrusted/);
   assert.match(output(h.kernel.checkpoint().messages[2]), /Kumi cleared the rest/);
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "answer 1", "two", "answer 2", "three", "answer 3"]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["one", "answer 1", "two", "answer 2", "three", "answer 3"]);
+  assert.deepEqual(h.kernel.transcript().flatMap((line) => line.tools ?? []), ["read", "read", "read"], "each answer's steps come back with it");
   await h.kernel.close();
 });
 
@@ -380,14 +417,14 @@ test("a stopped turn keeps the steps it finished, with a note; the step in progr
   await h.kernel.run("one", new AbortController().signal, () => {});
   mode = "fail";
   await assert.rejects(h.kernel.run("two", new AbortController().signal, () => {}));
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["one", "fine", "two", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["one", "fine", "two", STOPPED_NOTE]);
   assert.deepEqual(h.kernel.checkpoint().messages.slice(3).map((message) => (message as { role: string }).role), ["assistant", "tool", "assistant"], "the read and its result stay; the failed step goes");
   mode = "hang";
   const controller = new AbortController();
   const stopped = h.kernel.run("three", controller.signal, () => {});
   await delay(20); controller.abort();
   assert.equal((await stopped).stopReason, "cancelled");
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text).slice(-2), ["three", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text).slice(-2), ["three", STOPPED_NOTE]);
   const settled = h.kernel.checkpoint().messages;
   mode = "hang-first";
   const early = new AbortController();
@@ -424,7 +461,7 @@ test("when a stopped turn's steps are kept, so is the budget's trimming for them
   mode = "fail";
   await assert.rejects(h.kernel.run("four", new AbortController().signal, () => {}));
   assert.match(JSON.stringify(h.kernel.checkpoint().messages[0]), /Kumi removed the earlier part/, "the model is told the start is gone");
-  assert.deepEqual(h.kernel.transcript().map((line) => line.text), ["four", STOPPED_NOTE]);
+  assert.deepEqual(h.kernel.transcript().filter((line) => line.text).map((line) => line.text), ["four", STOPPED_NOTE]);
   await h.kernel.close();
 });
 

@@ -114,7 +114,7 @@ test("typing and sending, then streaming text and steps in plain words, then the
   let lines = h.screen();
   assert.ok(has(lines, "The kick and bass are fighting around 200 Hz, [redacted]."), "secrets never reach the screen");
   assert.ok(!lines.join("\n").includes("private-token"));
-  assert.ok(has(lines, "│ … looked at your Set"));
+  assert.ok(lines.some((line) => /│ \S looking at your Set/.test(line)), "a step at work says what it's doing, in its own animation");
   assert.ok(has(lines, "working") && has(lines, "esc to stop"));
   h.emit({ type: "tool-end", id: "t1", name: "live_discover", isError: false, elapsedMs: 300 });
   lines = h.screen();
@@ -122,7 +122,8 @@ test("typing and sending, then streaming text and steps in plain words, then the
   h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 3100 });
   h.emit({ type: "state", state: "idle" });
   lines = h.screen();
-  assert.ok(has(lines, "▸ 1 step · 3.1s"));
+  assert.ok(has(lines, "▾ 1 step · 3.1s"));
+  assert.ok(has(lines, "│ ✓ looked at your Set"), "a finished answer keeps its steps");
   assert.ok(has(lines, "Ready"));
   assert.ok(!has(lines, "live_discover"), "tool names stay out of sight");
   await h.app.close();
@@ -1605,4 +1606,171 @@ test("right-clicking in Live (Ask Kumi about this) pins it above the input box, 
   await h.type("double it\r");
   await delay(5);
   assert.deepEqual(sent.at(-1), { text: "double it", pinned: pin });
+});
+
+test("while Kumi works, enter sends a message into the answer at its next step and tab one for after; both wait above the box", async () => {
+  const steered: string[] = []; let taking = false;
+  const h = harness(120, 36, undefined, { steer(text) { if (!taking) return false; steered.push(text); return true; } });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("build me a reverb\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "t1", name: "search_web" });
+  let lines = h.screen();
+  assert.ok(has(lines, "Tell Kumi more while it works"));
+  await h.type("make it darker");
+  assert.ok(has(h.screen(), "enter sends now · tab after · esc stops"));
+  // Kumi isn't at a point to take it yet: it waits, and goes in once Kumi moves.
+  await h.type("\r");
+  lines = h.screen();
+  assert.ok(lines.some((line) => line.includes("↳ make it darker") && line.includes("at the next step")));
+  assert.deepEqual(steered, []);
+  taking = true;
+  h.emit({ type: "tool-end", id: "t1", name: "search_web", isError: false, elapsedMs: 400 });
+  assert.deepEqual(steered, ["make it darker"]);
+  await h.type("and save it as a preset\t");
+  lines = h.screen();
+  assert.ok(lines.some((line) => line.includes("↳ and save it as a preset") && line.includes("after this answer")));
+  // Kumi reads it: the answer so far stays, the message shows where it went in, and the answer carries on under it.
+  h.emit({ type: "steer", text: "make it darker" });
+  h.emit({ type: "text", text: "Darker it is." });
+  lines = h.screen();
+  assert.ok(!has(lines, "↳ make it darker"));
+  const at = (text: string) => lines.findIndex((line) => line.includes(text));
+  assert.ok(at("searched the web") < at("make it darker") && at("make it darker") < at("Darker it is."), lines.join("\n"));
+  // Done: the one for after is sent as the next message.
+  h.emit({ type: "turn-complete", result: { stopReason: "completed" }, elapsedMs: 2000 });
+  h.emit({ type: "state", state: "idle" });
+  await delay(5);
+  assert.ok(h.calls.includes("submit:and save it as a preset"));
+  assert.ok(has(h.screen(), "and save it as a preset"));
+  await h.app.close();
+});
+
+test("a message still waiting can be taken back with alt+↑, and stopping Kumi puts what's waiting back in the box", async () => {
+  const h = harness(120, 36, undefined, { steer: () => false });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("go\r");
+  h.emit({ type: "state", state: "running" });
+  await h.type("first\r");
+  await h.type("second\t");
+  await h.type("\u001b[1;3A");
+  assert.ok(has(h.screen(), "second") && !h.screen().some((line) => line.includes("↳ second")), "taken back to change");
+  await h.type("\u0015");
+  h.emit({ type: "turn-complete", result: { stopReason: "cancelled" }, elapsedMs: 900 });
+  h.emit({ type: "state", state: "idle" });
+  const lines = h.screen();
+  assert.ok(!lines.some((line) => line.includes("↳ first")) && has(lines, "first"), "back in the box after a stop");
+  assert.ok(!h.calls.includes("submit:first"));
+  await h.app.close();
+});
+
+test("/btw asks on the side: the answer streams into a panel while Kumi keeps working, and stays out of the conversation", async () => {
+  const asked: string[] = [];
+  let release!: () => void;
+  const h = harness(120, 36, undefined, {
+    async aside(question, onText, signal) {
+      asked.push(question);
+      onText("Erbe-Verb's tail runs **up to a minute**.");
+      await new Promise<void>((resolve) => { release = resolve; signal?.addEventListener("abort", () => resolve()); });
+      return "Erbe-Verb's tail runs up to a minute.";
+    },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("build me a reverb\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "t1", name: "make_device" });
+  await h.type("/btw how long can its tail be?\r");
+  assert.deepEqual(asked, ["how long can its tail be?"]);
+  let lines = h.screen();
+  assert.ok(has(lines, "btw · how long can its tail be?") && has(lines, "Erbe-Verb's tail runs up to a minute."), lines.join("\n"));
+  assert.ok(has(lines, "making a device"), "Kumi keeps working beneath it");
+  release();
+  await delay(5);
+  await h.type("\u001b");
+  await delay(30);
+  lines = h.screen();
+  assert.ok(!has(lines, "btw ·") && !has(lines, "up to a minute"), "closed, and not part of the conversation");
+  assert.ok(!h.calls.some((call) => call.includes("tail")), "never sent as a message");
+  await h.type("/btw\r");
+  assert.ok(has(h.screen(), "up to a minute"), "/btw alone shows the last side answer again");
+  await h.app.close();
+});
+
+test("while Live plays, a yellow light blinks on its beat in the header, with the tempo; it goes when Live stops", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  assert.ok(!has(h.screen(), "BPM"));
+  // On the beat: lit, brightest on a bar's first beat.
+  h.emit({ type: "transport", transport: { playing: true, tempo: 120, beat: 8, at: performance.now(), beatsPerBar: 4 } });
+  let lines = h.screen();
+  assert.match(lines[0]!, /● 120 BPM {3}● Live {2}$/);
+  const light = () => /38;2;(\d+;\d+;\d+);48;2;14;15;18m●[^●]*BPM/.exec(h.written.slice(h.written.lastIndexOf("BPM") - 120))?.[1];
+  assert.equal(light(), "255;225;77", "lit, the downbeat's yellow");
+  // Between beats: dark.
+  const sofar = h.written.length;
+  h.emit({ type: "transport", transport: { playing: true, tempo: 120, beat: 8.5, at: performance.now(), beatsPerBar: 4 } });
+  h.screen();
+  assert.match(h.written.slice(sofar), /38;2;77;68;32;48;2;14;15;18m●/, "dark between beats");
+  // The tempo changed in Live: the light follows.
+  h.emit({ type: "transport", transport: { playing: true, tempo: 123.5, beat: 9, at: performance.now() } });
+  assert.match(h.screen()[0]!, /● 123\.5 BPM/);
+  h.emit({ type: "transport", transport: { playing: false, tempo: 123.5, beat: 9.2, at: performance.now() } });
+  lines = h.screen();
+  assert.ok(!has(lines, "BPM"), "stopped: no light");
+  await h.app.close();
+});
+
+test("a step left running when the answer stops ends there, and what a step is doing shows in its row", async () => {
+  const h = harness();
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  await h.type("listen to the bass\r");
+  h.emit({ type: "state", state: "running" });
+  h.emit({ type: "tool-start", id: "t1", name: "listen" });
+  h.screen();
+  h.emit({ type: "doing", text: "hearing bar 17" });
+  assert.ok(h.screen().some((line) => line.includes("listening · hearing bar 17")));
+  h.emit({ type: "turn-complete", result: { stopReason: "cancelled" }, elapsedMs: 900 });
+  h.emit({ type: "state", state: "idle" });
+  const lines = h.screen();
+  assert.ok(has(lines, "│ × listened") && !has(lines, "listening"), lines.join("\n"));
+  await h.app.close();
+});
+
+test("a message held while Kumi reads the Set goes back in the box when that's stopped, and one refused when sent comes back too", async () => {
+  let refuse = false;
+  const h = harness(120, 36, undefined, {
+    async submit(text) { if (refuse) throw new Error("Enter a nonempty prompt of at most 16 KiB"); h.calls.push(`submit:${text}`); },
+    // As the session does: idle is said before the stop resolves.
+    async cancel() { h.calls.push("cancel"); h.emit({ type: "state", state: "idle" }); },
+  });
+  void h.app.run();
+  await delay(5);
+  connect(h);
+  h.emit({ type: "state", state: "running" });
+  await h.type("make the bass louder\r");
+  assert.ok(has(h.screen(), "↳ make the bass louder"));
+  await h.type("\u001b");
+  await delay(30);
+  assert.ok(h.calls.includes("cancel"));
+  assert.ok(!h.calls.some((call) => call.startsWith("submit:")), "not sent after a stop");
+  assert.ok(has(h.screen(), "make the bass louder") && !has(h.screen(), "↳ make the bass louder"));
+  await h.type("\u0015");
+  h.emit({ type: "state", state: "running" });
+  await h.type("too long, say\r");
+  refuse = true;
+  h.emit({ type: "state", state: "idle" });
+  await delay(10);
+  const lines = h.screen();
+  assert.ok(has(lines, "at most 16 KiB") && has(lines, "too long, say") && !has(lines, "↳ too long, say"), lines.join("\n"));
+  await h.app.close();
 });

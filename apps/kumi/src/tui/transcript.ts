@@ -1,4 +1,5 @@
 /** The conversation as entries, and how each entry becomes rows at a given width. */
+import { activityOf, blend, type Activity } from "./activity.js";
 import { palette, type Rgb, type Style } from "./style.js";
 import { textWidth } from "./width.js";
 import { renderMarkdown } from "./markdown.js";
@@ -13,6 +14,11 @@ export interface Step {
   ms?: number;
   /** What it's doing now, when the tool says ("looking at 2:05"). */
   doing?: string;
+  /** When it started and ended (performance.now()); unknown for a conversation brought back. */
+  startedAt?: number;
+  endedAt?: number;
+  /** When it began folding into the same step just above it (see foldSteps). */
+  folded?: number;
 }
 
 /** What Kumi keeps: notes (✎), techniques (◆) and recipes (↻). */
@@ -24,7 +30,7 @@ export interface Picture { width: number; height: number; rgb: Uint8Array }
 
 export type Entry =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string; steps: Step[]; status: "running" | "done" | "stopped" | "failed"; elapsedMs?: number }
+  | { kind: "assistant"; text: string; steps: Step[]; status: "running" | "done" | "stopped" | "failed"; elapsedMs?: number; startedAt?: number }
   | { kind: "notice"; text: string; tone: "info" | "warn" }
   /** A line across the conversation: what's above it is a conversation Kumi no longer uses, say. */
   | { kind: "divider"; text: string }
@@ -53,6 +59,11 @@ export interface Row {
   band?: { bg: Rgb; width: number };
   /** Text right-aligned at the end of the row, such as a step's duration. */
   trailing?: Span;
+  /**
+   * Drawn afresh each frame: a step at work (its kind's glyph, its words shimmering, its time going
+   * up), or the answer's "working" line (shimmering, with the time so far).
+   */
+  live?: { kind: "step"; activity: Activity; since: number; label: string; doing?: string } | { kind: "header"; label: string; since?: number };
 }
 
 const S = {
@@ -184,8 +195,102 @@ export function stepLabel(tool: string): string {
 
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 
-/** Rows for one entry, `width` cells of text wide. A user message's band adds a cell either side. */
-function entryRows(entry: Entry, width: number): Row[] {
+/** How long the same step done several times in a row stays listed, each time, before they fold into one line. */
+export const FOLD_AFTER_MS = 3_000;
+/** The fold: the extra lines fade, then go one by one from the bottom, the count on the first going up. */
+const FOLD_FADE_MS = 220;
+const FOLD_STEP_MS = 70;
+const foldSpan = (extra: number) => FOLD_FADE_MS + extra * Math.min(FOLD_STEP_MS, 380 / Math.max(1, extra));
+
+/** Steps done one after another that read the same: the same words, both finished the same way. */
+const alike = (a: Step, b: Step) => a.label === b.label && a.state === b.state && a.state !== "running";
+
+/**
+ * Runs of the same step (three "read a page" in a row, say) fold into their first line once the
+ * last of them has been done for FOLD_AFTER_MS; one that joins later folds in the same way. A step
+ * brought back with a conversation folds at once. Marks when each began folding; true when one did.
+ */
+export function foldSteps(steps: Step[], now: number): boolean {
+  let changed = false;
+  for (let start = 0; start < steps.length;) {
+    let end = start + 1;
+    while (end < steps.length && alike(steps[start]!, steps[end]!)) end++;
+    const waiting = steps.slice(start + 1, end).filter((step) => step.folded === undefined);
+    if (waiting.length) {
+      const due = Math.max(...[steps[start]!, ...waiting].map((step) => step.endedAt ?? Number.NEGATIVE_INFINITY)) + FOLD_AFTER_MS;
+      if (now >= due) { for (const step of waiting) step.folded = Number.isFinite(due) ? due : now - foldSpan(waiting.length) - 1; changed = true; }
+    }
+    start = end;
+  }
+  return changed;
+}
+
+/** When the steps next look different without anything new happening: a fold due, or one under way (now). */
+export function stepsChangeAt(steps: readonly Step[], now: number): number | undefined {
+  let soonest: number | undefined;
+  const consider = (at: number) => { soonest = soonest === undefined ? at : Math.min(soonest, at); };
+  for (let start = 0; start < steps.length;) {
+    let end = start + 1;
+    while (end < steps.length && alike(steps[start]!, steps[end]!)) end++;
+    const members = steps.slice(start + 1, end);
+    const waiting = members.filter((step) => step.folded === undefined);
+    if (waiting.length) consider(Math.max(now, Math.max(...[steps[start]!, ...waiting].map((step) => step.endedAt ?? 0)) + FOLD_AFTER_MS));
+    for (const step of members) if (step.folded !== undefined && now < step.folded + foldSpan(members.length) + 1) consider(now);
+    start = end;
+  }
+  return soonest;
+}
+
+/**
+ * A step's line: its glyph (✓, ×, or its kind's animation while it runs), its words and its time.
+ * A run folded into its first line says how many times ("×3") and their time together; lines on
+ * their way into it fade, then go, the last first.
+ */
+function stepRows(steps: readonly Step[], now: number): Row[] {
+  const rows: Row[] = [];
+  for (let start = 0; start < steps.length;) {
+    const first = steps[start]!;
+    if (first.state === "running") {
+      const label = doingLabel(first.tool, first.label);
+      rows.push({ spans: [{ text: "│ ", style: S.rule }, { text: " ", style: S.accent }, { text: ` ${label}`, style: S.dim }],
+        live: { kind: "step", activity: activityOf(first.tool), since: first.startedAt ?? now, label, ...(first.doing ? { doing: first.doing } : {}) } });
+      start++;
+      continue;
+    }
+    let end = start + 1;
+    while (end < steps.length && alike(first, steps[end]!)) end++;
+    const members = steps.slice(start + 1, end);
+    const span = foldSpan(members.length);
+    // Each member's place in the fold: listed (not folding), fading, or gone into the first line.
+    const fading: { step: Step; fade: number }[] = [];
+    let gone = 0; let goneMs = 0;
+    members.forEach((step, index) => {
+      if (step.folded === undefined) { fading.push({ step, fade: 0 }); return; }
+      const into = now - step.folded;
+      // The last goes first: its turn comes after the fade.
+      const leaves = FOLD_FADE_MS + (members.length - 1 - index) * ((span - FOLD_FADE_MS) / Math.max(1, members.length));
+      if (into >= leaves) { gone++; goneMs += step.ms ?? 0; } else fading.push({ step, fade: Math.max(0, Math.min(1, into / FOLD_FADE_MS)) });
+    });
+    rows.push(stepRow(first, 0, gone ? { count: gone + 1, ms: (first.ms ?? 0) + goneMs } : undefined));
+    for (const { step, fade } of fading) rows.push(stepRow(step, fade));
+    start = end;
+  }
+  return rows;
+}
+
+function stepRow(step: Step, fade: number, folded?: { count: number; ms: number }): Row {
+  const glyph = step.state === "error" ? { text: "×", style: S.error } : { text: "✓", style: S.accent };
+  const fadeStyle = (style: Style): Style => (fade > 0 && style.fg ? { fg: blend(style.fg, palette.ground, fade, 5) } : style);
+  const ms = step.ms === undefined ? undefined : folded ? folded.ms : step.ms;
+  return {
+    spans: [{ text: "│ ", style: S.rule }, { text: glyph.text, style: fadeStyle(glyph.style) }, { text: ` ${step.label}`, style: fadeStyle(S.dim) },
+      ...(folded ? [{ text: ` ×${folded.count}`, style: S.faint }] : [])],
+    ...(ms !== undefined ? { trailing: { text: seconds(ms), style: fadeStyle(S.faint) } } : {}),
+  };
+}
+
+/** Rows for one entry, `width` cells of text wide, at `now` (steps fold over time). A user message's band adds a cell either side. */
+function entryRows(entry: Entry, width: number, now = 0): Row[] {
   const inner = Math.max(1, width);
   if (entry.kind === "user") {
     const lines = wrap([{ text: entry.text, style: S.bright }], inner);
@@ -208,7 +313,7 @@ function entryRows(entry: Entry, width: number): Row[] {
   if (entry.kind === "auditioned") return auditionedRows(entry, inner);
   if (entry.kind === "watched") return watchedRows(entry, inner);
   if (entry.kind === "web") return entry.lines.flatMap((line) => wrap([{ text: `${line.lead} `, style: S.dim },
-    { text: line.title, style: S.text }, ...(line.detail ? [{ text: ` · ${line.detail}`, style: S.faint }] : [])], inner).slice(0, 2).map((spans) => ({ spans })));
+    { text: line.title, style: S.text }, ...(line.detail ? [{ text: ` · ${line.detail}`, style: S.faint }] : [])], inner).map((spans) => ({ spans })));
   const rows: Row[] = [];
   if (entry.text) {
     for (const row of renderMarkdown(entry.text.replace(/\n+$/, ""), inner, S.text)) {
@@ -218,22 +323,17 @@ function entryRows(entry: Entry, width: number): Row[] {
   if (entry.steps.length) {
     if (rows.length) rows.push({ spans: [] });
     if (entry.status === "running") {
-      rows.push({ spans: [{ text: "▾ ", style: S.faint }, { text: "working", style: S.dim }] });
-      for (const step of entry.steps) {
-        const glyph = step.state === "running" ? { text: "…", style: S.accent } : step.state === "error" ? { text: "×", style: S.error } : { text: "✓", style: S.accent };
-        rows.push({
-          spans: [{ text: "│ ", style: S.rule }, glyph, { text: ` ${step.label}`, style: S.dim }],
-          ...(step.ms !== undefined ? { trailing: { text: seconds(step.ms), style: S.faint } } : {}),
-        });
-      }
+      rows.push({ spans: [{ text: "▾ ", style: S.faint }, { text: "working", style: S.dim }], live: { kind: "header", label: "working", ...(entry.startedAt !== undefined ? { since: entry.startedAt } : {}) } });
     } else {
+      // A finished answer keeps its steps on screen, under what they came to.
       const count = entry.steps.length;
       rows.push({ spans: [
-        { text: "▸ ", style: S.faint },
+        { text: "▾ ", style: S.faint },
         { text: `${count} ${count === 1 ? "step" : "steps"}`, style: S.dim },
         ...(entry.elapsedMs !== undefined ? [{ text: ` · ${seconds(entry.elapsedMs)}`, style: S.faint }] : []),
       ] });
     }
+    rows.push(...stepRows(entry.steps, now));
   }
   if (entry.status === "stopped") rows.push({ spans: [{ text: "stopped", style: S.faint }] });
   if (entry.status === "failed" && !entry.text) rows.push({ spans: [{ text: "Kumi couldn't answer that; see the note below.", style: S.faint }] });
@@ -332,7 +432,7 @@ function watchedRows(entry: Extract<Entry, { kind: "watched" }>, width: number):
     { text: `${entry.channel ? ` · ${entry.channel}` : ""}${entry.duration ? ` · ${clock(entry.duration)}` : ""}`, style: S.dim }], width).map((spans) => ({ spans }));
   const watched = entry.duration && entry.from <= 0 && entry.to >= entry.duration - 1 ? "the whole video" : `${clock(entry.from)}–${clock(entry.to)}`;
   rows.push(...wrap([{ text: `${watched} · ${entry.words}${entry.sound ? ` · kept its sound at ${clock(entry.sound.from)}–${clock(entry.sound.to)}` : ""}`, style: S.faint }], width).map((spans) => ({ spans })));
-  if (entry.chapters.length) rows.push(...wrap([{ text: `chapters: ${entry.chapters.join(" · ")}`, style: S.faint }], width).slice(0, 2).map((spans) => ({ spans })));
+  if (entry.chapters.length) rows.push(...wrap([{ text: `chapters: ${entry.chapters.join(" · ")}`, style: S.faint }], width).map((spans) => ({ spans })));
   const times = (frame: Extract<Entry, { kind: "watched" }>["frames"][number]) => `${clock(frame.at)}${frame.zoom ? ` ${frame.zoom}` : ""}`;
   if (entry.frames.length && entry.pictures && width >= 24) {
     // About four across, each a 16:9 picture as wide as fits.
@@ -352,7 +452,7 @@ function watchedRows(entry: Extract<Entry, { kind: "watched" }>, width: number):
   } else if (entry.frames.length) {
     rows.push(...wrap([{ text: `looked at ${entry.frames.map(times).join(", ")}`, style: S.faint }], width).map((spans) => ({ spans })));
   }
-  for (const note of entry.notes.slice(0, 3)) rows.push(...wrap([{ text: note, style: S.faint }], width).map((spans) => ({ spans })));
+  for (const note of entry.notes) rows.push(...wrap([{ text: note, style: S.faint }], width).map((spans) => ({ spans })));
   return rows;
 }
 
@@ -360,7 +460,7 @@ function watchedRows(entry: Extract<Entry, { kind: "watched" }>, width: number):
 export class Transcript {
   readonly entries: Entry[] = [];
   private readonly revisions = new WeakMap<Entry, number>();
-  private readonly cache = new WeakMap<Entry, { width: number; revision: number; rows: Row[] }>();
+  private readonly cache = new WeakMap<Entry, { width: number; revision: number; rows: Row[]; moving: boolean }>();
 
   get isEmpty(): boolean {
     return this.entries.length === 0;
@@ -378,6 +478,11 @@ export class Transcript {
     return entry;
   }
 
+  remove(entry: Entry): void {
+    const at = this.entries.indexOf(entry);
+    if (at >= 0) this.entries.splice(at, 1);
+  }
+
   /** Call after changing an entry, so its rows are laid out again. */
   touch(entry: Entry): void {
     this.revisions.set(entry, (this.revisions.get(entry) ?? 0) + 1);
@@ -390,14 +495,31 @@ export class Transcript {
   /** Entries laid out afresh rather than taken from the cache: a frame's real work. */
   laidOut = 0;
 
-  rows(width: number): Row[] {
+  /** When the rows next change by themselves (a fold of repeated steps due, or under way), if they will. */
+  changeAt(now: number): number | undefined {
+    let soonest: number | undefined;
+    for (const entry of this.entries) {
+      if (entry.kind !== "assistant" || entry.steps.length < 2) continue;
+      const at = stepsChangeAt(entry.steps, now);
+      if (at !== undefined) soonest = soonest === undefined ? at : Math.min(soonest, at);
+    }
+    return soonest;
+  }
+
+  rows(width: number, now = performance.now()): Row[] {
     const all: Row[] = [];
     for (const entry of this.entries) {
+      // Repeated steps fold as time passes; while they're folding, the entry is laid out each frame.
+      let moving = false;
+      if (entry.kind === "assistant" && entry.steps.length > 1) {
+        if (foldSteps(entry.steps, now)) this.touch(entry);
+        moving = stepsChangeAt(entry.steps, now) === now;
+      }
       const revision = this.revisions.get(entry) ?? 0;
       let cached = this.cache.get(entry);
-      if (!cached || cached.width !== width || cached.revision !== revision) {
+      if (!cached || cached.width !== width || cached.revision !== revision || moving || cached.moving) {
         this.laidOut++;
-        cached = { width, revision, rows: entryRows(entry, width) };
+        cached = { width, revision, rows: entryRows(entry, width, now), moving };
         this.cache.set(entry, cached);
       }
       if (all.length) all.push({ spans: [] });

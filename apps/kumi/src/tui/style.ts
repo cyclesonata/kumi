@@ -35,6 +35,9 @@ export const palette = {
   accent: hex("#86e3b5"),
   pulse: hex("#2f5a47"),
   warn: hex("#e7b45f"),
+  /** The beat light: Live's transport playing, lit on each beat (brightest on a bar's first), dark between. */
+  beat: hex("#ffe14d"),
+  offbeat: hex("#4d4420"),
   error: hex("#ee8479"),
   /** What Kumi keeps, by kind: notes, techniques, recipes, and its own lessons from matching. */
   note: hex("#8cc8ff"),

@@ -32,10 +32,14 @@ export function transcriptOf(messages: readonly unknown[]): TranscriptLine[] {
   return messages.flatMap((raw): TranscriptLine[] => {
     const message = raw as { role?: unknown; content?: unknown };
     if (message?.role !== "user" && message?.role !== "assistant") return [];
+    const parts = Array.isArray(message.content) ? message.content as { type?: unknown; text?: unknown; toolName?: unknown }[] : [];
     const text = typeof message.content === "string" ? message.content
-      : Array.isArray(message.content) ? message.content.map((part: { type?: unknown; text?: unknown }) => (part?.type === "text" && typeof part.text === "string" ? part.text : "")).join("") : "";
+      : parts.map((part) => (part?.type === "text" && typeof part.text === "string" ? part.text : "")).join("");
     const words = message.role === "user" ? text.split(OBSERVATION_MARKER)[0]!.replace(SHORTENED, "") : text;
-    return words.trim() ? [{ role: message.role, text: words.trim() }] : [];
+    // An answer's steps come back too: the tools it called, in order.
+    const tools = message.role === "assistant" ? parts.flatMap((part) => (part?.type === "tool-call" && typeof part.toolName === "string" ? [part.toolName] : [])) : [];
+    if (!words.trim() && !tools.length) return [];
+    return [{ role: message.role, text: words.trim(), ...(tools.length ? { tools } : {}) }];
   });
 }
 const CLEARED = " … [Kumi cleared the rest of this earlier result to save room; read Live again if you need it.]";
