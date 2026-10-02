@@ -375,6 +375,31 @@ folds into one line ("read a page ×3") 3 seconds after the last. While Live
 plays, a yellow light blinks on its beat in the header, beside the tempo. The
 terminal is restored on exit, on crashes and on signals.
 
+## Arrangements
+
+Ask Kumi to turn a loop into a track: "arrange this", "make a 3-minute arrangement from these
+scenes", or "arrange it like this reference" with a file.
+
+- **Your material.** Session scenes (a section plays a scene's clips, or chosen clips per
+  track), a track's clips, or bars already in the Arrangement (their MIDI clips).
+- **The form.** Named sections with their lengths in bars. Without one from you, Kumi picks one
+  that suits the genre and tempo. With a reference, it hears the reference's form (its sections
+  in bars, their energy, which ones come back) and mirrors it.
+- **Variation.** Tracks come in and go out section by section. Transitions are a gap before a
+  drop (tracks stop for the last beat or bar), a track's fill clip at a section's end, and a
+  riser or crash clip from an effects track ending where the next section starts. Kumi writes
+  no new parts unless you ask.
+- **In Live.** Your clips are copied into the Arrangement after what's there already (or where
+  you say), each section gets a locator, and the playhead goes to the start. Kumi then says in
+  a few lines what it built.
+- **Undo.** The whole arrangement is one line in HISTORY with one undo, and one Cmd-Z in Live.
+- **Limits.** Live's scripting can't draw automation in the Arrangement, so filter sweeps and
+  volume rides are yours to draw. Audio clips already in the Arrangement can't be copied there:
+  drag them into Session slots first. Bars from the Arrangement need Kumi's Live extension
+  (Live 12.4). While Live plays, the locators wait.
+
+See [how arranging works](KUMI_CHANGES.md#arrangements).
+
 ## Watching video tutorials
 
 Give Kumi a video and ask it to build what the video shows. The video can be a

@@ -54,6 +54,7 @@ to be dependable.
 | `replace_sample` ¹ | Another sample in a Simpler | `live_simpler_*` |
 | `set_device_details` ¹, `use_looper` ¹ | A device's settings beyond its parameters; operating a Looper | `live_device_specialized_*`, `live_looper_*` |
 | `make_changes` | Several of these changes, and actions and waits, in one call, in order (see [Plans](#plans-in-one-reply)) | the tools above |
+| `arrange` | A whole arrangement from the producer's clips: sections with locators, loops copied through them, gaps, fills and risers, as one change (see [Arrangements](#arrangements)) | `live_clip_duplicate_*`, `live_clip_properties_*`, `live_audio_clip_*`, `live_arrangement_section_*`, `live_transport_*`, `live_arrangement_midi_clip_*` ³ |
 | `undo_change` | Undo one of these changes, or the latest | `live_undo` |
 
 ¹ Needs bridge 1.0.34 or later ([bridge versions](#bridge-versions)).
@@ -150,6 +151,43 @@ Resampling is a plan of these, because Live gives scripts no bounce. The plan:
 5. Stop recording and disarm the track.
 
 The recording is an ordinary audio clip that `listen` can hear by its clipRef.
+
+## Arrangements
+
+`arrange` lays out a track in the Arrangement from the producer's own clips, in one call. The model
+gives the form; Kumi works out every copy.
+
+- **Input.** `sections` in order: `name`, `bars`, the `scene` it plays (or `tracks`, each a name or
+  ref, or `{track, scene}` for another clip), and optionally `gap` (tracks stop some beats before
+  the end), `fill` (a track's other clip at the end) and `riser` (a clip ending where the section
+  ends). Also `scene` (the default), `loop` (`from_bar`, `bars`: arrange from bars already in the
+  Arrangement), `start_bar` and `final`.
+- **Without sections** nothing changes: it returns the material, each scene's clips by track
+  with their lengths, where the Arrangement's clips end, and its locators.
+- **What it compiles to.** A `duplicate_clip` per whole copy. A part (a loop cut short by a
+  section's end, a gap or a fill) is a Session copy in an empty slot of its track (or of a scene
+  added for it), its loop shortened with `set_clip` or `set_audio_clip`, copied to each place it
+  goes, then taken back. `set_locators` in pairs, names made new (Live refuses a name or a place
+  twice). `set_transport` puts the playhead at the start. From an Arrangement loop, its MIDI
+  clips are written with their notes by `write_arrangement_clip`, 32 clips a change.
+- **Checks first.** Every track found and unambiguous, nothing in the Arrangement where a clip
+  would go, one clip at a time on a track. A refusal changes nothing.
+- **Undo.** One line in HISTORY; the copies are quiet parts of it, and its undo takes each back
+  with its own guarded undo, latest first. One undo step in Live holds it all, so one Cmd-Z;
+  the extension's writes keep steps of their own. The playhead's move isn't undone.
+- **Speed.** The reads go to Live together (four rounds). Then one change per whole copy, two
+  per distinct part (plus one per place and two undos), one per pair of locators: four tracks
+  of 4-bar loops through a 96-bar form is about 70 changes.
+- **What Live doesn't allow.** Automation in the Arrangement: neither the Remote Script nor the
+  Extensions SDK (1.0.0-beta.1) can write a track's automation lanes or an Arrangement clip's
+  envelopes, so filter sweeps and volume rides are the producer's. Copying audio within the
+  Arrangement: the bridge doesn't take an Arrangement clip as a copy's source, so a loop's audio
+  clips there are left out and said. While Live plays, the locators and the playhead wait.
+
+`listen` with `form: true` gives a reference's sections in bars (counted at its own tempo, in
+the Set's octave), each one's energy, density and low end, which ones are alike and its part
+(intro, build, peak, break, outro), from novelty along a bar-by-bar self-similarity matrix of
+chroma, timbre and level. The model mirrors it with `arrange`.
 
 ## Watching the producer work
 
