@@ -6,7 +6,7 @@ import { safeError } from "./config.js";
 import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
-import { sanitizeText, StreamingText, webWords } from "./text.js";
+import { libraryLine, sanitizeText, StreamingText, webWords } from "./text.js";
 import type { UpdateControl } from "./update.js";
 import { KUMI } from "@kumi/runtime";
 
@@ -126,6 +126,9 @@ export function createTerminal(options: Options): Terminal {
   let cancelling = false;
   /** A newer Kumi's version, once the startup check or /update found one. */
   let newer: string | undefined;
+  /** /memory's lines from the producer's Sets, for /forget u<n>; and whether learning the library was mentioned. */
+  let tasteLines: { id: string; line: string }[] = [];
+  let toldLibrary = false;
   let suppressOutput = false;
   let displayedBytes = 0;
   let startedAt = performance.now();
@@ -200,7 +203,8 @@ export function createTerminal(options: Options): Terminal {
     }
     if (command === "/status") {
       const status = controller.status();
-      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}`);
+      const library = libraryLine(controller.library?.());
+      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}${library ? `; ${library}` : ""}`);
       return;
     }
     // Connecting or reading the Set, not answering: keep the message and send it when Kumi is ready.
@@ -224,6 +228,10 @@ export function createTerminal(options: Options): Terminal {
           const techniques = await controller.techniques();
           notice(`[memory] Techniques: ${techniques.map((technique) => `${technique.id} ${technique.name} (for ${technique.fits})`).join(" · ") || "none yet"}`);
         }
+        if (controller.taste) {
+          tasteLines = await controller.taste();
+          notice(`[memory] From your Sets: ${tasteLines.map((line, index) => `u${index + 1} ${line.line}`).join(" · ") || "nothing yet"}`);
+        }
         return;
       }
       if (verb === "/recipes") {
@@ -246,6 +254,15 @@ export function createTerminal(options: Options): Terminal {
         return;
       }
       if (verb === "/forget") {
+        // A line from the producer's Sets is u and its place in /memory's list.
+        if (argument?.startsWith("u") && controller.forgetTaste) {
+          // The ids are places in /memory's list: read it when it hasn't been shown yet.
+          if (!tasteLines.length) tasteLines = await controller.taste?.() ?? [];
+          const line = tasteLines[Number(argument.slice(1)) - 1];
+          if (!line || !await controller.forgetTaste(line.id)) notice("[memory] Use: /forget <id>, with an id from /memory.");
+          else notice(`[memory] Forgot, from your Sets: ${line.line}`);
+          return;
+        }
         // A technique's id starts with t; a note's with p or s.
         if (argument?.startsWith("t") && controller.forgetTechnique) {
           if (!await controller.forgetTechnique(argument)) notice("[memory] Use: /forget <id>, with an id from /memory.");
@@ -298,6 +315,10 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
+      case "library":
+        // The first time, one quiet line; after that /status says how it's going.
+        if (!toldLibrary && (event.status.state === "learning" || event.status.state === "paused") && !event.status.learnedAt) { toldLibrary = true; notice("Learning your library in the background…"); }
+        break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());
         notice(event.chosen ? `── Back to your conversation from ${when} ──` : event.unreadable ? `[resumed] Your conversation from ${when}, which this model can't continue:`

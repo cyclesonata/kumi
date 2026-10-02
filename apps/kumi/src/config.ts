@@ -30,6 +30,7 @@ export type AppConfig =
   | { mode: "report" }
   | { mode: "update"; rollback: boolean; check: boolean }
   | { mode: "uninstall"; all: boolean; yes: boolean }
+  | { mode: "library"; rebuild: boolean }
   | { mode: "login-choose"; authFile: string; piAuthFile: string; settingsFile: string }
   | (InferenceConfig & { mode: "inference-only"; bridgeMissing?: true })
   | (InferenceConfig & { mode: "live"; bridgeConfig: string });
@@ -64,28 +65,34 @@ export const loadToolsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_
 export const loadInputHistoryFile = (env: Env = process.env) => absoluteFile(env, "KUMI_INPUT_HISTORY_FILE", join(kumiDir(env), "input-history"));
 /** Where Kumi keeps each saved Set's last-seen state, for catching up next time. */
 export const loadProjectsDir = (env: Env = process.env) => absoluteFile(env, "KUMI_PROJECTS_DIR", join(kumiDir(env), "projects"));
+/** What Kumi learned of the producer's library: their sounds, presets and Sets. */
+export const loadLibraryDir = (env: Env = process.env) => absoluteFile(env, "KUMI_LIBRARY_DIR", join(kumiDir(env), "library"));
 
 /** Non-secret preferences: the chosen model and how hard it thinks. */
 export interface Settings { model?: string; effort?: Effort; /** The tab the right pane's lower half showed last. */ panelTab?: string;
-  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false }
+  /** false: Kumi doesn't look for a newer version when it starts (`kumi update --check` and /update still do). */ updateCheck?: false;
+  /** More folders for Kumi to learn sounds, presets and Sets from (full paths or ~/…), besides Live's own. */ libraryFolders?: string[] }
 
 /** The settings file; a missing or unreadable file, or an unknown value, means none. */
 export function readSettings(file: string): Settings {
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown };
+    const value = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effort?: unknown; panelTab?: unknown; updateCheck?: unknown; libraryFolders?: unknown };
+    const folders = Array.isArray(value.libraryFolders) ? value.libraryFolders.filter((folder): folder is string => typeof folder === "string" && folder.length > 0 && folder.length <= 1024).slice(0, 64) : [];
     return { ...(typeof value.model === "string" && validModel(value.model) ? { model: value.model } : {}),
       ...((EFFORTS as readonly unknown[]).includes(value.effort) ? { effort: value.effort as Effort } : {}),
       ...(typeof value.panelTab === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.panelTab) ? { panelTab: value.panelTab } : {}),
-      ...(value.updateCheck === false ? { updateCheck: false as const } : {}) };
+      ...(value.updateCheck === false ? { updateCheck: false as const } : {}), ...(folders.length ? { libraryFolders: folders } : {}) };
   } catch { return {}; }
 }
 
 export function writeSettings(file: string, next: Settings): void {
-  // The pane's tab and the update check are kept when a caller (choosing a model) doesn't say.
+  // The pane's tab, the update check and the library's folders are kept when a caller (choosing a model) doesn't say.
   const before = readSettings(file);
   const panelTab = "panelTab" in next ? next.panelTab : before.panelTab;
   const updateCheck = "updateCheck" in next ? next.updateCheck : before.updateCheck;
-  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}) };
+  const libraryFolders = "libraryFolders" in next ? next.libraryFolders : before.libraryFolders;
+  const settings = { ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}), ...(panelTab ? { panelTab } : {}), ...(updateCheck === false ? { updateCheck } : {}),
+    ...(libraryFolders?.length ? { libraryFolders } : {}) };
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -154,6 +161,10 @@ export function loadConfig(args: readonly string[], env: Env = process.env): App
   if (args.length === 1 && args[0] === "auth") return { mode: "auth", authFile: loadAuthFile(env), settingsFile: loadSettingsFile(env) };
   if (args.length === 1 && args[0] === "doctor") return { mode: "doctor" };
   if (args.length === 1 && args[0] === "report") return { mode: "report" };
+  if (args[0] === "library") {
+    if (args.length > 2 || (args[1] !== undefined && args[1] !== "--rebuild")) throw new Error("Use: library [--rebuild].");
+    return { mode: "library", rebuild: args[1] === "--rebuild" };
+  }
   if (args[0] === "update") {
     if (args.length > 2 || (args[1] !== undefined && args[1] !== "--rollback" && args[1] !== "--check")) throw new Error("Use: update [--check | --rollback].");
     return { mode: "update", rollback: args[1] === "--rollback", check: args[1] === "--check" };

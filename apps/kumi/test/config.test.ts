@@ -165,3 +165,17 @@ test("Live's Remote Scripts folder is in the User Library Live's own preferences
     assert.equal(liveUserLibrary(env), join(literal, "User Library"));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("settings keep the library's folders whoever writes them; `library` shows the library and `library --rebuild` learns it again", () => {
+  const root = mkdtempSync(join(tmpdir(), "kumi-library-settings-"));
+  try {
+    const file = join(root, "settings.json");
+    writeFileSync(file, JSON.stringify({ model: "anthropic/claude-sonnet-5", libraryFolders: ["~/Samples", 7, "", "/Volumes/Drive/Loops"] }));
+    assert.deepEqual(readSettings(file), { model: "anthropic/claude-sonnet-5", libraryFolders: ["~/Samples", "/Volumes/Drive/Loops"] }, "only folder names are kept");
+    writeSettings(file, { model: "openai/gpt-fixture" });
+    assert.deepEqual(readSettings(file).libraryFolders, ["~/Samples", "/Volumes/Drive/Loops"], "choosing a model keeps them");
+    assert.deepEqual(loadConfig(["library"]), { mode: "library", rebuild: false });
+    assert.deepEqual(loadConfig(["library", "--rebuild"]), { mode: "library", rebuild: true });
+    assert.throws(() => loadConfig(["library", "--everything"]), /Use: library \[--rebuild\]/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

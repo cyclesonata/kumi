@@ -7,6 +7,8 @@ export { LISTEN_TOOL, listeningTools } from "./audio/tools.js";
 export { videoTools, WATCH_VIDEO_TOOL } from "./video/tool.js";
 export { READ_WEB_TOOL, SEARCH_WEB_TOOL, webTools } from "./web/tool.js";
 export { createWebClient, type WebClient } from "./web/net.js";
+export type { LibraryEvent, LibraryStatus } from "./core/contracts.js";
+export { createLibrary, FIND_PRESETS_TOOL, FIND_SOUNDS_TOOL, libraryLogs, librarySources, MANUAL_TOOL, MY_SETS_TOOL, readState as readLibraryState, type LearnProgress, type Library, type LibraryOptions, type LibraryState, type Source as LibrarySource, type TasteLine } from "./library/index.js";
 export { findFfmpeg, findWhisper, findYtDlp, watchVideo, youtubeId, type Watched, type WatchRequest } from "./video/index.js";
 export { configurePrograms, ffmpegHint, whisperHint } from "./video/programs.js";
 export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools, RUN_RECIPE_TOOL, SAVE_RECIPE_TOOL, slug, type Recipe, type RecipeStore } from "./core/recipes.js";

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import { doctorChecks, runDoctor, type DoctorIo } from "../src/doctor.js";
+import { KUMI } from "@kumi/runtime";
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "kumi-doctor-"));
@@ -118,5 +119,20 @@ test("the doctor says whether Kumi can use Live's own menus, and what to turn on
     const checks = await doctorChecks(io(s.env, { hands: async () => off }));
     assert.deepEqual(checks.find((check) => /own menus/.test(check.text)), off);
     assert.equal((await doctorChecks(io(s.env))).some((check) => /own menus/.test(check.text)), false, "nothing said where there are no hands");
+  } finally { s.cleanup(); }
+});
+
+test("the doctor says what Kumi knows of the library, or that it's still learning it", async () => {
+  const s = setup();
+  try {
+    const library = join(s.root, "library");
+    const env = { ...s.env, KUMI_LIBRARY_DIR: library };
+    const line = async () => (await doctorChecks(io(env))).find((check) => /library/.test(check.text));
+    assert.deepEqual(await line(), { status: "note", text: "Kumi hasn't learned your library yet", next: `It learns by itself while Kumi runs; ${KUMI} library shows where it's at` });
+    mkdirSync(library, { recursive: true });
+    writeFileSync(join(library, "state.json"), JSON.stringify({ version: 1, last: { startedAt: Date.now() - 3_600_000, finishedAt: Date.now() - 3_000_000, sounds: 48210, presets: 3140, sets: 37, failed: 2 } }));
+    assert.deepEqual(await line(), { status: "ok", text: "Knows your library: 48,210 sounds, 3,140 presets, 37 Sets (learned 50 minutes ago)" });
+    writeFileSync(join(library, "state.json"), JSON.stringify({ version: 1, learning: { pid: process.pid, startedAt: Date.now(), phase: "sounds", sounds: { known: 1204, todo: 8311, done: 1204 }, presets: { known: 0, todo: 0, done: 0 }, sets: { known: 0, todo: 0, done: 0 }, updatedAt: Date.now() } }));
+    assert.deepEqual(await line(), { status: "ok", text: "Learning your library in the background: 1,204 of 8,311 new sounds" });
   } finally { s.cleanup(); }
 });

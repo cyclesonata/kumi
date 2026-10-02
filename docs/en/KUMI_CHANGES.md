@@ -21,7 +21,7 @@ to be dependable.
 | `set_device_parameter` | One device parameter, or several of one device at once (`values`), by reference or by name (`parameter: "Drive"`, found on the device when the step runs, so a plan or recipe can set a device an earlier step loaded) | `live_device_parameter_*` |
 | `set_locators` | Two named Arrangement locators marking a section | `live_arrangement_section_*` |
 | `set_track_color` | A track's colour from Live's palette | `live_track_properties_*` |
-| `load_sample` | A sample in a new Simpler on an empty MIDI track: one `find_samples` returned, or one Kumi picks | `live_device_*` (insert with a sample) |
+| `load_sample` | A sample in a new Simpler on an empty MIDI track: one `find_sounds` returned, or one Kumi picks | `live_device_*` (insert with a sample) |
 | `load_sample_to_pad` | A sample on an empty pad of a Drum Rack; undo clears the pad | `live_drum_pad_*` (load-sample, load-samples) |
 | `set_transport` ¹ | The loop, metronome, punch in and out, and the playhead position | `live_transport_*` |
 | `set_song` ¹ | Time signature, swing, launch quantization and MIDI record quantization | `live_song_settings_*` |
@@ -36,7 +36,7 @@ to be dependable.
 | `duplicate_clip` | Copy a clip to a Session slot or into the Arrangement (how MIDI reaches the Arrangement) | `live_clip_duplicate_*` |
 | `move_clip` ¹ | Move an Arrangement clip, or a Session clip to another slot | `live_clip_move_*` |
 | `add_arrangement_clip` | An empty MIDI clip in the Arrangement | `live_arrangement_clip_*` |
-| `import_audio` | An audio file (one `find_samples` returned) into a Session slot or a take lane | `live_audio_import_*` |
+| `import_audio` | An audio file (one `find_sounds` returned) into a Session slot or a take lane | `live_audio_import_*` |
 | `set_warp_markers` ¹ | Add, move or delete a warp marker | `live_warp_marker_*` |
 | `change_notes` ¹, `delete_notes`, `edit_notes` ¹ | Notes by id: pitch, timing, velocity, probability; delete; quantize, one pitch, duplicate | `live_note_update_*`, `live_note_delete_*`, `live_note_edit_*` |
 | `transform_midi` ¹ | 23 transforms and generators: transpose, scale-constrain, swing, humanize, arpeggiate, euclidean, chord progressions, drum patterns, basslines… | `live_midi_transform_*` |
@@ -71,11 +71,13 @@ the mix before Main's fader, so the render is as silent as a track's.
 
 Reads for planning a change: `live_discover`, `live_snapshot`,
 `live_browser_search`, `live_note_read`, `live_status`, `server_status`, and
-Kumi's own `find_samples`. It finds samples on disk by words in their names and
+Kumi's own `find_sounds`. It finds sounds on disk by words in their names and
 folders, or at random, in the folders the producer names or where Live keeps
-samples (User Library, Core Library, Factory Packs).
+samples (User Library, Core Library, Factory Packs); once Kumi has learned the
+library, also by what they are and how they sound (see "Your library" in
+KUMI_POC.md).
 
-`load_sample` loads only a sample `find_samples` returned, with the folder it
+`load_sample` loads a sample `find_sounds` returned, with the folder it
 searched as the file's allowed root. The bridge verifies the file and gives Live
 a copy kept under the original file's name. The new Simpler arrives with its
 sample in one step, so undo takes both away. For "make me a drum kit with random

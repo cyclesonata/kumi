@@ -93,23 +93,23 @@ test("a colour change shows the old and new colours; later changes, and its undo
   } finally { await b.integration.close(); }
 });
 
-test("find_samples is offered alongside Live's reads and finds samples in the folders named", async () => {
+test("find_sounds is offered alongside Live's reads and finds samples in the folders named", async () => {
   const b = await opened();
   const folder = mkdtempSync(join(tmpdir(), "kumi-find-"));
   try {
     mkdirSync(join(folder, "Kicks")); writeFileSync(join(folder, "Kicks", "Kick Deep.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
     writeFileSync(join(folder, "Snare Tight.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
-    const result = await tool(b.tools, "find_samples").execute({ folders: [folder], words: ["kick"] }, signal());
+    const result = await tool(b.tools, "find_sounds").execute({ folders: [folder], words: ["kick"] }, signal());
     assert.equal(result.isError, false, result.text);
     const body = JSON.parse(result.text) as { samples: { name: string; path: string }[]; matched: number };
     assert.deepEqual(body.samples.map((sample) => sample.name), ["Kick Deep"]); assert.equal(body.matched, 1);
     assert.equal(body.samples[0]!.path, join(folder, "Kicks", "Kick Deep.wav"));
-    const relative = await tool(b.tools, "find_samples").execute({ folders: ["Samples"] }, signal());
+    const relative = await tool(b.tools, "find_sounds").execute({ folders: ["Samples"] }, signal());
     assert.equal(relative.isError, true); assert.match(relative.text, /full path/);
   } finally { rmSync(folder, { recursive: true, force: true }); await b.integration.close(); }
 });
 
-test("load_sample puts a sample (one find_samples returned, or any audio file by its path) into a new Simpler, as one change with its undo", async () => {
+test("load_sample puts a sample (one find_sounds returned, or any audio file by its path) into a new Simpler, as one change with its undo", async () => {
   const b = await opened();
   const folder = mkdtempSync(join(tmpdir(), "kumi-load-"));
   try {
@@ -118,7 +118,7 @@ test("load_sample puts a sample (one find_samples returned, or any audio file by
     const missing = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(folder, "Missing.wav") }, signal());
     assert.equal(missing.isError, true); assert.match(missing.text, /path of an audio file/);
     assert(!b.requests.some((request) => request.name === "live_device_preview"), "a file that isn't there goes nowhere");
-    await tool(b.tools, "find_samples").execute({ folders: [folder], words: ["kick"] }, signal());
+    await tool(b.tools, "find_sounds").execute({ folders: [folder], words: ["kick"] }, signal());
     const result = await tool(b.tools, "load_sample").execute({ trackRef: "7:track:0", sample: join(folder, "Kick Deep.wav") }, signal());
     assert.equal(result.isError, false, result.text);
     const preview = b.requests.find((request) => request.name === "live_device_preview")!;
@@ -144,7 +144,7 @@ test("load_sample_to_pad is offered before the Set has a Drum Rack, says what to
   try {
     writeFileSync(join(folder, "Kick Deep.wav"), Buffer.from("RIFF\u0000\u0000\u0000\u0000WAVE"));
     assert.ok(b.tools.some((item) => item.name === "load_sample_to_pad"), "offered although the bridge doesn't advertise pads yet");
-    await tool(b.tools, "find_samples").execute({ folders: [folder] }, signal());
+    await tool(b.tools, "find_sounds").execute({ folders: [folder] }, signal());
     await tool(b.tools, "live_discover").execute({ kind: "track" }, signal());
     const early = await tool(b.tools, "load_sample_to_pad").execute({ deviceRef: "7:track:0", note: 36, sample: join(folder, "Kick Deep.wav") }, signal());
     assert.equal(early.isError, true); assert.match(early.text, /load one with load_device first/);

@@ -9,6 +9,7 @@ import { listeningTools } from "../audio/tools.js";
 import { videoTools } from "../video/tool.js";
 import type { WebClient } from "../web/net.js";
 import { webTools } from "../web/tool.js";
+import { FIND_SOUNDS_TOOL, type Library } from "../library/index.js";
 import { asksForTechnique, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE, TECHNIQUE_NUDGE, techniqueInstructions, techniqueTools, type TechniqueStore } from "./techniques.js";
 import { GAP_GUIDANCE, gapTools } from "./gaps.js";
 import { OBSERVATION_MARKER, transcriptOf } from "../kernel/budget.js";
@@ -61,6 +62,8 @@ interface Options {
   goalRandom?: () => number;
   /** Match runs' budget (generous by default); false leaves matching to the model alone. */
   match?: Partial<MatchBudget> | false;
+  /** The producer's library (sounds, presets, Sets, Live's manual) and what Kumi learned from their Sets; without it, find_sounds searches names only. */
+  library?: Library;
 }
 interface Operation {
   id: number;
@@ -206,6 +209,10 @@ export function createSession(options: Options): SessionController {
     hear: (request, signal) => integration?.hear?.(request, signal) ?? Promise.resolve("Kumi isn't connected to Live, so it can't hear the Set.") }) : [];
   const watching = options.watch ? videoTools({ ...options.watch, onEvent: (event) => emit(event) }) : [];
   const browsing = options.web ? webTools({ onEvent: (event) => emit(event), ...(typeof options.web === "object" ? { client: options.web.client } : {}) }) : [];
+  // The library's searches replace the integration's own find_sounds (names only); a clip in the Set is found by its file.
+  const shelf = options.library ? options.library.tools({ onEvent: (event) => emit(event),
+    resolve: (named, signal) => integration?.audioFile?.(named, signal) ?? Promise.resolve(undefined) }) : [];
+  const unlistenLibrary = options.library?.onStatus((status) => emit({ type: "library", status }));
   // Techniques are drafted by the model and kept by what the producer does next.
   const learned = options.techniques ? techniqueTools({ store: options.techniques, onEvent: (event) => emit(event), ...(options.techniqueSettleMs !== undefined ? { settleMs: options.techniqueSettleMs } : {}) }) : undefined;
   const gaps = options.gaps ? gapTools({ file: options.gaps }) : [];
@@ -361,10 +368,14 @@ export function createSession(options: Options): SessionController {
           // Techniques by name and what each fits; the model reads one whole when a request fits it.
           const known = learned ? await learned.list().catch(() => []) : [];
           assertCurrent(op);
-          const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", recipeInstructions(saved),
+          // The producer's habits from their own Sets, like the notes: built once, so they stay cached.
+          const habits = options.library ? await options.library.instructions().catch(() => "") : "";
+          assertCurrent(op);
+          const extra = [remembered ? memoryInstructions(remembered, observation.project?.name) : "", habits, recipeInstructions(saved),
             learned ? TECHNIQUE_GUIDANCE : "", techniqueInstructions(known), gaps.length ? GAP_GUIDANCE : ""].filter(Boolean).join("\n\n");
           const value = await options.kernelFactory({ instructions: extra ? `${observation.instructions}\n\n${extra}` : observation.instructions,
-            tools: [...observation.tools.map(withTechnique), ...(notes?.tools ?? []), ...listening, ...watching, ...browsing, ...recipes, ...(learned?.tools ?? []), ...gaps], signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
+            tools: [...observation.tools.filter((tool) => !(shelf.length && tool.name === FIND_SOUNDS_TOOL)).map(withTechnique), ...(notes?.tools ?? []), ...listening, ...watching, ...browsing, ...shelf, ...recipes, ...(learned?.tools ?? []), ...gaps],
+            signal: lifetime.signal, ...(checkpoint ? { checkpoint } : {}) });
           if (!current(op)) { lifetime.abort(); await boundedClose(value.close()); throw new Error("Operation cancelled"); }
           return { value, lifetime };
         } catch (error) { lifetime.abort(); throw error; }
@@ -953,6 +964,8 @@ export function createSession(options: Options): SessionController {
       return { ...memory, ...(currentSetName ? { setName: currentSetName } : {}), saved: currentProject !== undefined };
     },
     async forget(id) { return notes?.forget(id); },
+    // Only with a library: without one there's nothing learned from the producer's Sets to show.
+    ...(options.library ? { library: () => options.library!.status(), taste: () => options.library!.taste(), forgetTaste: (id: string) => options.library!.forgetTaste(id) } : {}),
     async recipes() {
       if (!options.recipes) return [];
       return (await options.recipes.list()).map((recipe) => ({ name: recipe.name, about: recipe.about, params: recipe.params, steps: recipe.steps.length, used: recipe.used, created: recipe.created,
@@ -1051,6 +1064,7 @@ export function createSession(options: Options): SessionController {
       state = "closed"; options.onEvent({ type: "state", state });
       op?.controller.abort();
       clearTimeout(missing);
+      unlistenLibrary?.();
       closing = (async () => {
         try { if (op) await boundedClose(op.done).catch(() => {}); }
         finally {

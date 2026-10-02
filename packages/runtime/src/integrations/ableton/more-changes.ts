@@ -410,7 +410,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "replace_sample", since: FIXED_BRIDGE, preview: "live_simpler_preview", apply: "live_simpler_apply", family: "device",
-    description: "Swap the sample in a Simpler for another: deviceRef (the Simpler), and sample, the path of an audio file (one find_samples returned, or any on this computer).",
+    description: "Swap the sample in a Simpler for another: deviceRef (the Simpler), and sample, the path of an audio file (one find_sounds returned, or any on this computer).",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "sample"], properties: { deviceRef: REF, sample: { type: "string", minLength: 1, maxLength: 1024 } } },
     prepare(input, context) {
       const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
@@ -425,7 +425,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "import_audio", preview: "live_audio_import_preview", apply: "live_audio_import_apply", family: "clip",
-    description: "Put an audio file into the Set as a clip: into an empty Session slot (trackRef, an audio track, and sceneIndex) or into an Arrangement take lane (takeLaneRef, position in beats). sample is the path of an audio file on this computer (one find_samples returned, a recording, the producer's own).",
+    description: "Put an audio file into the Set as a clip: into an empty Session slot (trackRef, an audio track, and sceneIndex) or into an Arrangement take lane (takeLaneRef, position in beats). sample is the path of an audio file on this computer (one find_sounds returned, a recording, the producer's own).",
     inputSchema: { type: "object", additionalProperties: false, required: ["sample"], properties: {
       sample: { type: "string", minLength: 1, maxLength: 1024 }, trackRef: REF, sceneIndex: { type: "integer", minimum: 0, maximum: 10000 },
       takeLaneRef: REF, position: { type: "number", minimum: 0 }, name: { type: "string", maxLength: 256 } } },

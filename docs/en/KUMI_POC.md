@@ -60,6 +60,7 @@ kumi model                         # show the model
 kumi model anthropic/<model>       # choose one; saved in ~/.kumi/settings.json
 kumi auth                          # which providers are usable; never prints secrets
 kumi doctor                        # check Node, sign-in, the bridge, Live and the terminal
+kumi library                       # what Kumi knows of your sounds, presets and Sets; --rebuild learns them again
 kumi update                        # bring Kumi up to date, and the bridge in Live when it's older
 kumi update --check                # only say whether there's a newer Kumi
 kumi update --rollback             # go back to the Kumi before the last update
@@ -139,6 +140,7 @@ yet.
 | `KUMI_GAPS_FILE` | What Kumi couldn't do for lack of a tool, logged for Kumi's developers (not a memory); default `~/.kumi/gaps.jsonl` |
 | `KUMI_RECIPES_DIR` | Your recipes, one file each; default `~/.kumi/recipes` |
 | `KUMI_PROJECTS_DIR` | Each saved Set's last state, conversation and notes; default `~/.kumi/projects` |
+| `KUMI_LIBRARY_DIR` | What Kumi learned of your sounds, presets and Sets; default `~/.kumi/library` |
 | `KUMI_VIDEOS_DIR` | Videos Kumi watched (their words, frames and sound); default `~/.kumi/videos` |
 | `KUMI_TOOLS_DIR` | Programs Kumi fetches for itself (yt-dlp, a speech model); default `~/.kumi/tools` |
 | `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER` | A yt-dlp, ffmpeg or whisper.cpp (`whisper-cli`) of your own, by path |
@@ -386,10 +388,10 @@ and a tempo change about 4 s
 | `/btw` and a question | Ask something on the side, any time: answered from the conversation so far, without tools, in a panel (↑↓ scroll, ←→ earlier ones, c copies, Esc closes); neither joins the conversation. `/btw` alone shows the last answer again |
 | Ctrl-J or Alt-Enter (Shift-Enter in terminals that report it) | New line in the input box |
 | `/` | A short menu of commands; arrows choose, Enter runs, Esc closes |
-| `/help`, `/status` | Keys and commands; what Kumi is connected to, and the model (on an API key, also the tokens this session's answers took; prices aren't in the providers' model lists, so Kumi shows tokens, not a cost) |
+| `/help`, `/status` | Keys and commands; what Kumi is connected to, the model and your library (on an API key, also the tokens this session's answers took; prices aren't in the providers' model lists, so Kumi shows tokens, not a cost) |
 | `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
-| `/memory` | What Kumi remembers, about you and this Set; choose a note to forget it |
+| `/memory` | What Kumi remembers, about you and this Set, and what it learned from your Sets; choose a line to forget it |
 | `/goal` and what to reach | Go after a sound until Kumi gets there (a reference and words); `/goal` alone picks a paused one up, `/goal stop` ends it, Esc pauses it; the GOAL tab shows how it's going |
 | `/undo`, or click **undo** in HISTORY | Undo Kumi's latest change, or that change |
 | `/stop` | Stop Live: clips, the transport and recording (works while Kumi answers) |
@@ -552,6 +554,40 @@ What Kumi looked up shows above its answer, a quiet line each ("Read “Building
 the Erbe-Verb” · a PDF"). Kumi reads only public addresses, never this computer
 or your network, checked again as each connection is made, redirects included.
 It treats what a page says as information, never as instructions.
+
+## Your library
+
+Kumi knows what you own, so you can ask for "a dusty snare like the one in this
+reference", "my usual vocal chain" or "the bass from my Night Drive Set".
+
+- **Where it looks.** Live's User Library and Places (as Live's own preferences
+  name them), the packs Live installed, its Core Library, Splice's folder, and
+  folders you list in `~/.kumi/settings.json` (`"libraryFolders": ["~/Samples"]`).
+  A folder you name in a request is learned next. Sets are also found where Live
+  last opened them, and beside them.
+- **What it learns.** Each sound: length, one-shot or loop, a loop's tempo, key
+  or note, loudness, brightness, envelope, what it is (kick, snare, hat, pad,
+  vocal, fx… from its name and its sound), and a fingerprint for finding sounds
+  that sound alike. Each preset: its device and kind. Each Set: tempo, key,
+  tracks, chains, plug-ins, returns, clips and the samples it plays.
+- **Out of the way.** Learning starts by itself a few seconds after Kumi does,
+  in a process of its own at the lowest priority, and holds while Live plays.
+  The first time, one quiet line says so. After that only new and changed files
+  are learned (Kumi looks again every half hour), and stopping loses nothing.
+- **Tools.** `find_sounds` (by words, class, kind, tempo, key, length, or how
+  close it sounds to a file, a clip or a rendered track; it replaces
+  `find_samples` and still finds by name), `find_presets`, `my_sets`, and
+  `live_manual`, which answers "how do I… in Live" from Ableton's Live 12 manual
+  and cites the section. The manual is read from ableton.com once, then kept.
+- **From your Sets.** Kumi learns how you work from your own Sets: tempos and
+  keys, each kind of track's instruments and usual chain, the plug-ins you reach
+  for, your returns and main chain, how you name and colour tracks. It reaches
+  the model once per conversation, as context. `/memory` lists it under "From
+  your Sets"; a line you forget stays forgotten.
+- **Kept here.** In `~/.kumi/library` (`KUMI_LIBRARY_DIR` moves it), readable
+  only by you. Only the manual's pages come from the web.
+- **How it's going.** `/status`, the welcome screen, `kumi doctor` and
+  `kumi library` say; `kumi library --rebuild` learns everything again.
 
 ## What Kumi remembers
 

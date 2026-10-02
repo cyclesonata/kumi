@@ -7,7 +7,7 @@ import { hearForm } from "./structure.js";
 export const LISTEN_TOOL = "listen";
 
 const DESCRIPTION = [
-  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_samples finds audio files by words in folders the producer names, such as ~/Downloads) or, for an audio clip in the Set, its clipRef.",
+  "Hear audio the producer points you to: a reference track, a sample, a bounce or a recording, by its file path (find_sounds finds audio files by words in folders the producer names, such as ~/Downloads) or, for an audio clip in the Set, its clipRef.",
   "Hear the Set itself with track (or tracks, to hear several together and what clashes between them) or mix: true. Kumi listens in Live directly, after each track's devices: while Live plays, to what's playing now (seconds, 8 by default); while it's stopped, quietly, to the loop or from the playhead (or from_beat and beats). No recording or bouncing first.",
   "Measures loudness (integrated LUFS, true peak, loudness range), tonal balance in named bands, stereo width per band, dynamics, tempo, key and the energy over time as a small text spectrogram;",
   "for a single sound (a note, a hit, a short sample), also its pitch, harmonics (which waveform it's like), envelope and movement (filter opening or closing, wobble or tremolo rate, at the tempo when known).",

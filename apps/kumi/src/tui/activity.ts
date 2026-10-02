@@ -9,8 +9,8 @@ import type { Span } from "./wrap.js";
 export type Activity = "think" | "search" | "read" | "look" | "build" | "change" | "listen" | "watch" | "play" | "record" | "code";
 
 const KINDS: Record<string, Activity> = {
-  search_web: "search", live_browser_search: "search", find_samples: "search", live_browser_roots: "search", live_browser_inspect: "search",
-  read_web: "read",
+  search_web: "search", live_browser_search: "search", find_sounds: "search", find_presets: "search", my_sets: "search", live_browser_roots: "search", live_browser_inspect: "search",
+  read_web: "read", live_manual: "read",
   server_status: "look", live_status: "look", live_discover: "look", live_snapshot: "look", live_note_read: "look", live_song_state: "look",
   live_performance_read: "look", live_key_estimate: "look", live_take_lane_read: "look", live_warp_marker_read: "look",
   live_arrangement_automation_read: "look", watch_me: "look", select: "look", show: "look",
