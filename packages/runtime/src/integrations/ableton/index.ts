@@ -34,6 +34,9 @@ import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.
 import { HandsError, openHands, type Hands, type MenuItem } from "../../hands/index.js";
 import { COMMANDS, findItem, LIVE_COMMAND_DESCRIPTION, LIVE_COMMAND_SCHEMA, LIVE_COMMAND_TOOL, shortcut } from "./live-command.js";
 import { DISPLAY_MAP_SCRIPT, valueForDisplay, type DisplayMap } from "./display.js";
+import { PLUGIN_DESCRIPTION, PLUGIN_SCHEMA, PLUGIN_TOOL } from "./plugin-tool.js";
+import { adapterFor, folderFor, pluginGuide } from "../../plugins/registry.js";
+import { buildWavetable, writeWavetable, type Keyframe } from "../../audio/wavetable.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -2694,6 +2697,55 @@ export function createAbletonIntegration(options: Options): Integration {
       return { text: error instanceof HandsError || error instanceof ObservationError ? error.message : `Kumi couldn't use Live's menus: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
     }
   }
+  /** The plugin tool: a plug-in's guide (Kumi's knowledge, set against its real parameters), or a wavetable for it. */
+  async function pluginTool(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    if (!available || lost || !tools || currentEpoch === undefined) return { text: NO_CURRENT_LIVE, isError: true };
+    if (typeof input.device !== "string") return { text: "Give the plug-in device (its deviceRef from this turn).", isError: true };
+    const long = String(lengthen(input.device, "deviceRef"));
+    try { requireFreshReferences({ deviceRef: long }); } catch (error) { return { text: error instanceof Error ? error.message : "deviceRef must come from discovery in this turn", isError: true }; }
+    try {
+      // Its name, as Live shows it, from its track's devices.
+      const track = /^(\d+):device:(\d+):/.exec(long);
+      let name = "";
+      if (track) {
+        const devices = await tools.call("live_discover", { kind: "device", parent: `${track[1]}:track:${track[2]}`, fields: ["name", "className"], limit: pageLimit(), budget: wholeBudget() }, signal, { host: true });
+        const row = devices.isError ? undefined : ((payload(devices).items as JsonObject[] | undefined) ?? []).map((item) => object(item)).find((item) => item.ref === long);
+        name = typeof row?.name === "string" ? row.name : "";
+      }
+      const adapter = adapterFor(name);
+      if (input.action === "wavetable") {
+        const spec = object(input.wavetable ?? {});
+        const label = typeof spec.name === "string" && spec.name.trim() ? spec.name.trim().replace(/[\\/:*?"<>|]+/g, " ").slice(0, 48) : "Kumi Wavetable";
+        const fromAudio = spec.from_audio && typeof spec.from_audio === "object" ? object(spec.from_audio) : undefined;
+        const frames = await buildWavetable({
+          ...(Array.isArray(spec.keyframes) ? { keyframes: spec.keyframes as Keyframe[] } : {}),
+          ...(typeof spec.count === "number" ? { count: spec.count } : {}),
+          ...(fromAudio && typeof fromAudio.file === "string" ? { fromAudio: { file: audioPath(fromAudio.file), ...(typeof fromAudio.start === "number" ? { start: fromAudio.start } : {}), ...(typeof fromAudio.seconds === "number" ? { seconds: fromAudio.seconds } : {}) } } : {}) });
+        const folder = folderFor(adapter?.folders?.wavetables) ?? join(options.userLibrary ?? userLibrary(), "Kumi", "Wavetables");
+        await mkdir(folder, { recursive: true });
+        let file = join(folder, `${label}.wav`);
+        for (let index = 2; existsSync(file) && index < 1000; index++) file = join(folder, `${label} ${index}.wav`);
+        await writeWavetable(file, frames);
+        try { options.onAction?.({ title: `Made the wavetable ${basename(file, ".wav")} (${frames.length} frames)` }); } catch { /* a listener failure must not affect Live */ }
+        return { text: JSON.stringify({ made: basename(file, ".wav"), file, frames: frames.length,
+          next: adapter ? `It's in ${adapter.name}'s wavetable folder: in its window (set_device_details isEditorOpen opens it), the oscillator's wavetable menu lists it. Picking it there is a click for the producer; say where.`
+            : "Load it in the synth's oscillator from that file (most read 2048-sample frames)." }), isError: false };
+      }
+      // Every name the plug-in has, and the ones Live lets Kumi turn.
+      const read = await tools.call("live_device_read", { deviceRef: long, what: "parameter-names" }, signal, { host: true });
+      if (read.isError) return { text: /only a plug-in/.test(resultText(read)) ? "That isn't a plug-in: its parameters are all in discovery (kind parameter)." : `Live didn't list that plug-in's parameters: ${resultText(read).slice(0, 200)}`, isError: true };
+      const names = ((payload(read).names as unknown[] | undefined) ?? []).filter((item): item is string => typeof item === "string");
+      const exposed = (await deviceParameters(long, ["ref", "name", "displayValue"], signal))
+        .filter((row) => typeof row.name === "string" && row.name !== "Device On").map((row) => ({ name: String(row.name), ref: String(row.ref), ...(typeof row.displayValue === "string" ? { display: row.displayValue } : {}) }));
+      const guide = pluginGuide(name || "this plug-in", adapter, names, exposed);
+      const text = JSON.stringify(guide);
+      return { text: Buffer.byteLength(text) <= 48 * 1024 ? text : JSON.stringify({ ...guide, parameters: { ...(guide.parameters as JsonObject), groups: "too many to list" } }), isError: false };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { text: error instanceof ObservationError ? error.message : `Kumi couldn't read that plug-in: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
+    }
+  }
   /**
    * An audition cut off by a crash left Main silent: with that Set open again, Main goes back to where
    * it was, and the producer is told (with any scratch tracks to delete). What was said, or nothing.
@@ -2862,7 +2914,9 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     // Live's own menus and keys, where Kumi has hands (macOS, Windows) and the bridge can select things first.
     const commands: KernelTool[] = options.hands !== false && (options.hands || process.platform === "darwin" || process.platform === "win32") && tools!.has("live_selection_preview")
       ? [{ name: LIVE_COMMAND_TOOL, description: LIVE_COMMAND_DESCRIPTION, inputSchema: LIVE_COMMAND_SCHEMA, execute: (input, signal) => liveCommand(input, signal) }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands];
+    // Plug-ins: Kumi's knowledge of them, set against their real parameters, and wavetables for their oscillators.
+    const plugins: KernelTool[] = tools!.has("live_device_read") ? [{ name: PLUGIN_TOOL, description: PLUGIN_DESCRIPTION, inputSchema: PLUGIN_SCHEMA, execute: (input, signal) => pluginTool(input, signal) }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands, ...plugins];
   }
   return {
     async start(signal) {

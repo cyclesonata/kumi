@@ -362,7 +362,9 @@ export function bridge(options: Options = {}) {
     onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}), ...(options.onTransport ? { onTransport: options.onTransport } : {}),
     // Never the producer's own ~/.kumi: each bridge its own file.
     restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
-    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false, hands: options.hands ?? false });
+    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false, hands: options.hands ?? false,
+    // Never the producer's own User Library: wavetables and devices go in a throwaway one.
+    userLibrary: mkdtempSync(join(tmpdir(), "kumi-user-library-")) });
   return {
     integration, requests, records, states, actions, auditions, released, pins, get tempo() { return tempo; },
     /** Live sends an event (notifications/live_event). */
