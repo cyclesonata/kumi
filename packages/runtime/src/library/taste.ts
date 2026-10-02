@@ -66,7 +66,12 @@ export interface TasteLine {
 export interface Taste { sets: number; lines: TasteLine[]; at: number }
 
 const count = <T>(items: Iterable<T>) => { const counts = new Map<T, number>(); for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1); return counts; };
-const top = <T>(counts: Map<T, number>, limit: number) => [...counts].sort((a, b) => b[1] - a[1]).slice(0, limit);
+/**
+ * The most used first; ties as first met, or `byName` (where first met is only the order the Sets were read in,
+ * which differs between computers).
+ */
+const top = <T>(counts: Map<T, number>, limit: number, byName = false) =>
+  [...counts].sort((a, b) => b[1] - a[1] || (byName ? String(a[0]).localeCompare(String(b[0])) : 0)).slice(0, limit);
 const plural = (value: number, one: string, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
 /** A name from the producer's files, fit to quote: short, and never one that reads as orders or holds a secret. */
 const quotable = (name: string) => { const clean = name.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 32); return clean && !suspectNote(clean) ? clean : undefined; };
@@ -120,9 +125,9 @@ export function buildTaste(sets: readonly SetSummary[], now = Date.now()): Taste
     const range = tempos.length > 3 && (tempos[0] !== low || tempos.at(-1) !== high) ? `; ${round(tempos[0]!)}–${round(tempos.at(-1)!)} in all` : "";
     add("tempo", low === high ? `Tempo: usually ${low} BPM (${plural(tempos.length, "Set")})${range}` : `Tempo: usually ${low}–${high} BPM (the middle half of ${plural(tempos.length, "Set")})${range}`);
   }
-  const keys = top(count(sets.map((set) => set.key).filter((key): key is string => Boolean(key))), 4);
+  const keys = top(count(sets.map((set) => set.key).filter((key): key is string => Boolean(key))), 4, true);
   if (keys.length) add("keys", `Keys: ${keys.map(([key, uses]) => `${key}${keys.length > 1 || uses > 1 ? ` (${uses})` : ""}`).join(", ")}`);
-  const signatures = top(count(sets.map((set) => set.signature).filter((signature): signature is string => Boolean(signature))), 3);
+  const signatures = top(count(sets.map((set) => set.signature).filter((signature): signature is string => Boolean(signature))), 3, true);
   if (signatures.length > 1 || (signatures[0] && signatures[0][0] !== "4/4")) add("signature", `Time signatures: ${signatures.map(([signature, uses]) => `${signature} (${uses})`).join(", ")}`);
   // Each kind of track: its instruments and its usual chain.
   const tracks = sets.flatMap((set) => set.tracks.filter((track) => track.kind !== "group"));
