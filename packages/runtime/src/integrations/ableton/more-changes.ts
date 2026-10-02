@@ -184,6 +184,11 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "duplicate_clip", preview: "live_clip_duplicate_preview", apply: "live_clip_duplicate_apply", family: "clip",
+    // The copy, usable at once: a later step can change it (an arrangement shortens a Session copy's loop).
+    produces(applied) {
+      const created = record(applied.created);
+      return typeof created.ref === "string" ? { ref: created.ref, kind: /:arrangement_clip:/.test(created.ref) ? "arrangement-clip" : "session-clip" } : undefined;
+    },
     description: "Copy a clip: into a Session slot (targetTrackRef and targetSceneIndex, 0 is the first scene; the same track when targetTrackRef is left out) or into the Arrangement at arrangementPosition (beats; a 4/4 bar is 4 beats). This is also how MIDI reaches the Arrangement: write the clip in Session view, then duplicate it there.",
     summarize(preview, input, track) {
       const destination = record(preview.destination);

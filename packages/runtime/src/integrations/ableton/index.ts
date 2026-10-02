@@ -16,7 +16,8 @@ import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, Observat
 import { foldTracks } from "./fold.js";
 import { defaultSampleFolders, findSamples, folderPath, SAMPLE_EXTENSIONS, userLibrary, type Sample } from "./samples.js";
 import { deviceTool } from "../../devices/tool.js";
-import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, nextChangeId, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { arrange, ARRANGE_DESCRIPTION, ARRANGE_SCHEMA, ARRANGE_TOOL, type ArrangeHost } from "./arrange.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { bars, setMeter } from "./more-changes.js";
 import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
@@ -153,6 +154,10 @@ interface Applied {
   record: ChangeRecord; transactionId: string; undoKey?: string; restore?: { ref: string; field: "name" | "color"; value?: string };
   /** Kept from the start: only Live's own undo can take it back, so Kumi's isn't tried. */
   permanent?: true;
+  /** Several changes as one line in HISTORY (an arrangement): their ids, undone together, latest first. */
+  members?: string[];
+  /** The line this change is part of: it isn't one of its own. */
+  within?: string;
 }
 
 const resultText = (result: CallToolResult) => result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
@@ -1488,7 +1493,7 @@ export function createAbletonIntegration(options: Options): Integration {
 
   /** Undo one change through the bridge's guarded undo. Refusals keep the change and say why. */
   async function undoChange(target: string, signal: AbortSignal, discard = false): Promise<{ record?: ChangeRecord; text: string; isError: boolean }> {
-    const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied") : changes.get(target);
+    const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied" && !item.within) : changes.get(target);
     if (!entry) return { text: target === "last" ? "There's no change of Kumi's left to undo." : `There's no change ${target.slice(0, 32)} in this session.`, isError: true };
     if (entry.record.state === "undone") return { record: entry.record, text: JSON.stringify({ undone: entry.record.title, change: entry.record.id, already: true }), isError: false };
     if (entry.record.state === "expired") return { record: entry.record, text: entry.record.note ?? "Kumi can't undo this anymore.", isError: true };
@@ -1506,6 +1511,15 @@ export function createAbletonIntegration(options: Options): Integration {
       emitChange(entry.record);
       return entry.record;
     };
+    if (entry.members) {
+      // Several changes as one: each taken back by its own undo, latest first, and HISTORY keeps the one line.
+      const members = entry.members;
+      await quietly([], async () => { for (const id of [...members].reverse()) if (changes.get(id)?.record.state !== "undone") await undoChange(id, signal).catch(() => undefined); });
+      const left = members.filter((id) => changes.get(id)?.record.state !== "undone").length;
+      if (!left) return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
+      const note = `Kumi took back ${members.length - left} of its ${members.length} changes; the rest changed in Live since, so Kumi left them.`;
+      return { record: update({ state: "kept", note }), text: note, isError: true };
+    }
     let result: CallToolResult;
     try {
       result = await tools.call("live_undo", { transactionId: entry.transactionId, confirmation: "undo", idempotencyKey: entry.undoKey, ...(discard ? { discard: true } : {}) }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
@@ -2795,6 +2809,54 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
     return clip.filePath;
   }
+  /**
+   * One HISTORY line for changes made quietly (an arrangement): its undo takes them back, latest first. Those
+   * `apart` aren't undone with it (the playhead's move); they, and working steps already taken back, go. Its id.
+   */
+  function grouped(title: string, ids: readonly string[], apart: readonly string[] = []): string | undefined {
+    const members = ids.filter((id) => !apart.includes(id) && ["applied", "unsure", "kept"].includes(changes.get(id)?.record.state ?? ""));
+    const gone = ids.filter((id) => !members.includes(id));
+    release(gone.flatMap((id) => (changes.get(id)?.record.state === "applied" ? [changes.get(id)!.transactionId] : [])));
+    for (const id of gone) changes.delete(id);
+    if (!members.length) return undefined;
+    const record: ChangeRecord = { id: nextChangeId(), family: "clip", title: title.slice(0, 160), state: "applied", at: now().getTime() };
+    for (const id of members) changes.get(id)!.within = record.id;
+    changes.set(record.id, { record, transactionId: "", members });
+    emitChange(record); scheduleSave(20_000);
+    return record.id;
+  }
+  /** What arranging needs of Live: Kumi's reads and changes, quietly, with one line in HISTORY and one undo step in Live. */
+  function arrangeHost(): ArrangeHost {
+    // The first change checks that Live is still the Set Kumi read; the rest follow on from it.
+    let confirmed = false;
+    // Opening and closing Live's undo step aren't the answer's to cancel, as in a plan.
+    const lasting = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(10_000)]);
+    return {
+      tempo: () => currentTempo, beatsPerBar: () => beatsPerBar,
+      read: (kind, extra, signal) => rows(kind, extra, signal),
+      offers: (tool) => { const kind = CHANGES.find((candidate) => candidate.tool === tool); return Boolean(kind && supported(kind) && tools?.has(kind.preview) && tools.has(kind.apply)); },
+      async change(tool, input, signal) {
+        const outcome = await change(CHANGES.find((candidate) => candidate.tool === tool)!, input, signal, confirmed);
+        let reply: JsonObject = {};
+        try { reply = JSON.parse(outcome.text) as JsonObject; } catch { /* a refusal in words */ }
+        if (outcome.isError || typeof reply.change !== "string") throw new ObservationError(`${typeof reply.changed === "string" ? `${reply.changed}: ` : ""}${outcome.text.slice(0, 400)}`);
+        confirmed = true;
+        return { id: reply.change, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}) };
+      },
+      undo: async (id, signal) => !(await undoChange(id, signal)).isError,
+      async quietly(work) { const ids: string[] = []; const value = await quietly(ids, work); return { value, ids }; },
+      record: (title, ids, apart) => grouped(title, ids, apart),
+      async undoStep() {
+        if (!tools?.has("live_undo_step_begin") || !tools.has("live_undo_step_end")) return { opened: false, close: async () => {} };
+        let stepId: string | undefined;
+        try { const opened = payload(await tools.call("live_undo_step_begin", { label: "Kumi", timeoutMs: 600_000 }, lasting(), { host: true })); if (typeof opened.stepId === "string") stepId = opened.stepId; }
+        catch { /* Live's undo then has a step for each change */ }
+        return { opened: stepId !== undefined, close: async () => { if (stepId) await tools!.call("live_undo_step_end", { stepId }, lasting(), { host: true }).catch(() => undefined); } };
+      },
+      keepCopy: (signal) => keepCopy(signal),
+      tell: (title) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } },
+    };
+  }
   function definitions(): KernelTool[] {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
       execute: (input, signal) => invoke(tool.name, input, signal) }));
@@ -2911,12 +2973,15 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         register(done.result);
         return { text: JSON.stringify(shorten(done)), isError: done.ok !== true };
       } }] : [];
+    // An arrangement from the producer's clips, as one change: offered where clips can be copied into the Arrangement.
+    const arranging: KernelTool[] = tools!.has("live_undo") && tools!.has("live_clip_duplicate_preview") && tools!.has("live_clip_duplicate_apply") ? [{ name: ARRANGE_TOOL, description: ARRANGE_DESCRIPTION, inputSchema: ARRANGE_SCHEMA,
+      execute: (input, signal) => arrange(input, arrangeHost(), AbortSignal.any([signal, lifetime.signal])) }] : [];
     // Live's own menus and keys, where Kumi has hands (macOS, Windows) and the bridge can select things first.
     const commands: KernelTool[] = options.hands !== false && (options.hands || process.platform === "darwin" || process.platform === "win32") && tools!.has("live_selection_preview")
       ? [{ name: LIVE_COMMAND_TOOL, description: LIVE_COMMAND_DESCRIPTION, inputSchema: LIVE_COMMAND_SCHEMA, execute: (input, signal) => liveCommand(input, signal) }] : [];
     // Plug-ins: Kumi's knowledge of them, set against their real parameters, and wavetables for their oscillators.
     const plugins: KernelTool[] = tools!.has("live_device_read") ? [{ name: PLUGIN_TOOL, description: PLUGIN_DESCRIPTION, inputSchema: PLUGIN_SCHEMA, execute: (input, signal) => pluginTool(input, signal) }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands, ...plugins];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...arranging, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands, ...plugins];
   }
   return {
     async start(signal) {
@@ -3173,7 +3238,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
             // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
             ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
-            ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
+            ...(changes.size ? { kumiChanges: [...changes.values()].filter((entry) => !entry.within).slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
             truncated: page.truncated, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
             coverage: "Current open Set only. Bounded discovery; details and track counts require fresh paged reads. Names/paths are not durable identity.",
           }),

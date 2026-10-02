@@ -1940,7 +1940,7 @@ export class TuiApp {
       const label = goal ? `goal · ${goal.best ? `${goal.best.score}% · ` : ""}gen ${goal.generation} · ${clockOf(performance.now() - goal.since)}` : this.match ? `matching · ${this.match.best ? `${this.match.first !== undefined && this.match.first !== this.match.best.score ? `${this.match.first}→` : ""}${this.match.best.score}% · ` : ""}${clockOf(performance.now() - this.match.since)}`
         : this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
-      if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
+      if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || running.tool === "arrange" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
       if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim, activity: { kind: activityOf(running.tool), since: running.startedAt ?? performance.now() } };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim, activity: { kind: "code", since: this.planningSince } };

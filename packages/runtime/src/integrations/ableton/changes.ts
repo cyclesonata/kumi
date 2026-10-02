@@ -81,7 +81,7 @@ export interface ChangeKind {
   /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
   explain?(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
-  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "session-clip" } | undefined;
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "session-clip" | "arrangement-clip" } | undefined;
   /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
   permanent?(input: JsonObject): string | undefined;
   /**

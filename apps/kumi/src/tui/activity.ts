@@ -14,7 +14,7 @@ const KINDS: Record<string, Activity> = {
   server_status: "look", live_status: "look", live_discover: "look", live_snapshot: "look", live_note_read: "look", live_song_state: "look",
   live_performance_read: "look", live_key_estimate: "look", live_take_lane_read: "look", live_warp_marker_read: "look",
   live_arrangement_automation_read: "look", watch_me: "look", select: "look", show: "look",
-  make_device: "build",
+  make_device: "build", arrange: "build",
   listen: "listen", audition: "listen",
   watch_video: "watch",
   play: "play", fire_scene: "play", launch_clip: "play", jump_to_locator: "play",
