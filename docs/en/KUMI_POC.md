@@ -321,6 +321,33 @@ clashes with the kick?") and Kumi hears it in Live directly, with nothing to set
 - Auditions and goals hear their candidates the same way: no scratch tracks, no
   arming. Without Max for Live, Kumi records to listen instead, as before.
 
+## Live's own commands
+
+Some things Live's scripting doesn't offer at all. For those, Kumi uses Live's own
+menus, as you would:
+
+- grouping and ungrouping tracks
+- freezing, unfreezing and flattening
+- **bouncing without playing** (Bounce to New Track, Bounce Track in Place)
+- consolidating
+- converting audio to MIDI (melody, harmony, drums)
+- separating stems
+- slicing to a MIDI track
+- saving the Set, or collecting all and saving
+- exporting audio or a MIDI clip
+
+How it works:
+
+- Kumi selects what the command works on, presses the command, and says what changed.
+  When Live opens a dialog (Export, say), Kumi reads it and answers it.
+- Live comes to the front for a moment and the front goes back after. Each command
+  takes milliseconds.
+- HISTORY lists each command. Live's own undo (Cmd-Z) takes it back.
+- **On a Mac:** this uses Accessibility. The first time, macOS asks: turn on the app
+  Kumi runs in (your terminal) in System Settings › Privacy & Security › Accessibility.
+  `kumi doctor` says whether it's on.
+- **On Windows:** this uses UI Automation and needs nothing set up.
+
 ## Recipes and watching you work
 
 Kumi saves ways of working as recipes you can replay any time, in any Set: a
@@ -591,11 +618,10 @@ sending, when you choose.
   Kumi's changes (HISTORY) are kept with each conversation and come back without
   undo. A kept conversation the chosen model can't continue is shown, and a fresh
   one starts.
-- **What Live's scripting can't do:** save the Set, export or freeze, map a macro
-  or modulator to a parameter, set a macro's range, write notes into an
-  Arrangement clip (Kumi writes the clip in Session view and copies it there),
-  delete clips or scenes, or show Kumi the Arrangement's automation lanes for
-  editing. Kumi says so and suggests the way round.
+- **What Live's scripting can't do:** map a macro or modulator to a parameter, set a
+  macro's range, or show Kumi the Arrangement's automation lanes for editing. Kumi
+  says so and suggests the way round. Saving, grouping, freezing, bouncing and
+  exporting go through Live's own menus (below).
 - **Deleting:** Kumi deletes a device or a return track only when you ask, and
   can't bring it back (Live's own undo can). Everything else it removes by undoing
   its own change.

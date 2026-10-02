@@ -7,7 +7,7 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
+import { apiKeyFor, canBuildHands, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, openHands, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
 import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
@@ -45,6 +45,8 @@ export interface DoctorIo {
   bundledBridgeVersion?: string;
   /** Where ffmpeg and whisper.cpp are, for watching videos; looked up (nothing fetched) when left out. */
   videoPrograms?: () => Promise<{ ffmpeg?: string | undefined; whisper?: string | undefined }>;
+  /** Whether Kumi can use Live's own menus here; asked of the helper (nothing built) when left out. */
+  hands?: () => Promise<Check | undefined>;
 }
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
@@ -123,6 +125,19 @@ async function extensionCheck(env: Env, configPath: string, server: BridgeServer
   return { status: "ok", text: `Kumi's extension ${installed.version} is in Live; it starts with Live` };
 }
 
+/** Whether Kumi can use Live's own menus here: the helper, and (on a Mac) Accessibility for the terminal Kumi runs in. */
+async function handsCheck(): Promise<Check | undefined> {
+  if (process.platform === "win32") return { status: "ok", text: "Uses Live's own menus for what Live's scripting can't do (grouping, freezing, bouncing, saving)" };
+  if (process.platform !== "darwin") return undefined;
+  const hands = await openHands({ build: false, timeoutMs: 3_000 }).catch(() => undefined);
+  if (!hands) return canBuildHands() ? { status: "ok", text: "Uses Live's own menus (Kumi builds its helper the first time it needs it)" }
+    : { status: "note", text: "Kumi can't use Live's own menus here yet (grouping, freezing, bouncing, saving)", next: "Install Xcode's command line tools (xcode-select --install), or update Kumi" };
+  try {
+    return await hands.trusted() ? { status: "ok", text: "Uses Live's own menus (Accessibility is on for this terminal)" }
+      : { status: "fix", text: "Kumi can't use Live's own menus until Accessibility is on for this terminal", next: "System Settings › Privacy & Security › Accessibility: turn on the app Kumi runs in" };
+  } catch { return undefined; } finally { hands.close(); }
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
@@ -185,6 +200,9 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });
   else if (!programs.whisper) checks.push({ status: "note", text: "Watches videos; one without captions needs whisper.cpp for its words", next: `Install it: ${whisperHint()}` });
   else checks.push({ status: "ok", text: "Watches videos: frames with ffmpeg, speech with whisper.cpp" });
+  // Live's own menus (grouping, freezing, bouncing, saving…): the helper, and on a Mac, Accessibility for this terminal.
+  const hands = await (io.hands ?? handsCheck)();
+  if (hands) checks.push(hands);
   const terminal = io.terminal ?? { isTTY: Boolean(process.stdout.isTTY), ...(process.stdout.columns ? { columns: process.stdout.columns } : {}), ...(process.stdout.rows ? { rows: process.stdout.rows } : {}) };
   if (!terminal.isTTY) checks.push({ status: "note", text: "Not a terminal window here, so Kumi uses plain lines" });
   else {

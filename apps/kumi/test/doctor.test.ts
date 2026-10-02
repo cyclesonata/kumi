@@ -21,7 +21,7 @@ function setup() {
 }
 const io = (env: DoctorIo["env"], extra: Partial<DoctorIo> = {}): DoctorIo => ({ out: new Writable({ write(_c, _e, done) { done(); } }), env, nodeVersion: "v24.21.0",
   terminal: { isTTY: true, columns: 120, rows: 36 }, probeLive: async () => ({ started: true, connected: true, set: "Night Drive", realLive: true }), nodeVersionOf: async () => "v24.1.0",
-  videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli" }), ...extra });
+  videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli" }), hands: async () => undefined, ...extra });
 
 test("the doctor says what's fine and exactly what to fix, without printing secrets", async () => {
   const s = setup();
@@ -109,4 +109,14 @@ test("the doctor says whether Kumi's extension is in Live, the bridge's own, run
     assert.deepEqual(await line(), { status: "fix", text: "Kumi's extension in Live is from another bridge", next: "Run: npm run kumi -- bridge, then restart Live" });
     assert.match((await line({ liveVersion: "12.3.2" }))!.text, /Live 12\.3\.2 runs no extensions \(12\.4 and later do\)/);
   } finally { server.close(); s.cleanup(); }
+});
+
+test("the doctor says whether Kumi can use Live's own menus, and what to turn on when it can't", async () => {
+  const s = setup();
+  try {
+    const off = { status: "fix" as const, text: "Kumi can't use Live's own menus until Accessibility is on for this terminal", next: "System Settings › Privacy & Security › Accessibility: turn on the app Kumi runs in" };
+    const checks = await doctorChecks(io(s.env, { hands: async () => off }));
+    assert.deepEqual(checks.find((check) => /own menus/.test(check.text)), off);
+    assert.equal((await doctorChecks(io(s.env))).some((check) => /own menus/.test(check.text)), false, "nothing said where there are no hands");
+  } finally { s.cleanup(); }
 });

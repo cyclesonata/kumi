@@ -22,6 +22,7 @@ export { openCredentialStore, validApiKey, type ApiKeyCredential, type Credentia
 export { DEVICE_VERIFICATION_URL, LOGIN_HINT, loginCodexBrowser, loginCodexDevice, OPENAI_CODEX, readPiCodexLogin } from "./auth/openai-codex.js";
 export { BRIDGE_TOOLS, createAbletonIntegration, createInferenceOnlyIntegration } from "./integrations/ableton/index.js";
 export { EARS_NAME, installEars } from "./ears/device.js";
+export { canBuildHands, openHands, type Hands } from "./hands/index.js";
 export { withFallback } from "./integrations/fallback.js";
 export { parseFocus } from "./integrations/ableton/focus.js";
 export { createConversationStore, createProjectStore, since, type ProjectStore } from "./integrations/ableton/project.js";

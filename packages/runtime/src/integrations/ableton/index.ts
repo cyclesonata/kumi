@@ -31,6 +31,8 @@ import { KUMI } from "../../command.js";
 import { EARS_ITEM, installEars } from "../../ears/device.js";
 import { openEarsLink, type EarsLink, type Tap } from "../../ears/link.js";
 import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.js";
+import { HandsError, openHands, type Hands, type MenuItem } from "../../hands/index.js";
+import { COMMANDS, findItem, LIVE_COMMAND_DESCRIPTION, LIVE_COMMAND_SCHEMA, LIVE_COMMAND_TOOL, shortcut } from "./live-command.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -138,6 +140,8 @@ interface Options {
    * Tests give their own link (and skip writing the device into a User Library).
    */
   ears?: false | { open: () => Promise<EarsLink> };
+  /** Kumi's hands (Live's own menus and keys): on where the OS has them, false for none; tests give their own. */
+  hands?: false | { open: () => Promise<Hands | undefined> };
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
@@ -2526,6 +2530,149 @@ export function createAbletonIntegration(options: Options): Integration {
       void pruneEars();
     }
   }
+  /** Kumi's hands, started once (a Mac builds its helper the first time); undefined where there are none. */
+  let handsSetup: Promise<Hands | undefined> | undefined;
+  async function handsReady(): Promise<Hands | undefined> {
+    if (options.hands === false) return undefined;
+    const tell = (title: string) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } };
+    handsSetup ??= (options.hands ? options.hands.open() : openHands({ onBuild: tell })).catch(() => undefined);
+    const hands = await handsSetup;
+    if (!hands) handsSetup = undefined;
+    return hands;
+  }
+  /** Live's menus as last read (read again when an item isn't found: they change with the selection and the view). */
+  let menuItems: MenuItem[] | undefined;
+  /** The Set's tracks by name, in order: what a command changed is told from them. */
+  async function trackNames(signal: AbortSignal): Promise<string[]> {
+    const rows_ = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+    return rows_.map((row) => (typeof row.name === "string" ? row.name : ""));
+  }
+  /** A track the model names, by its reference from this turn or by its name; its reference. */
+  async function trackRefOf(named: string, signal: AbortSignal): Promise<string> {
+    const tracks = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+    const found = tracks.find((track) => track.ref === named) ?? tracks.find((track) => track.name === named);
+    if (!found || typeof found.ref !== "string") throw new ObservationError(`${named} isn't a track in this turn's discovery; discover it again.`);
+    return found.ref;
+  }
+  /**
+   * live_command: select what the command works on, press it in Live's menus (or the keys given), and
+   * say what changed. Changes Live makes this way are undone with Live's own undo, so HISTORY keeps them
+   * with that said.
+   */
+  async function liveCommand(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    if (!available || lost || !tools || currentEpoch === undefined) return { text: NO_CURRENT_LIVE, isError: true };
+    const hands = await handsReady();
+    if (!hands) return { text: process.platform === "darwin" ? "Kumi can't use Live's menus on this Mac yet: its helper is built with Xcode's command line tools (run xcode-select --install), or comes with Kumi's next update." : "Kumi can't use Live's menus on this computer.", isError: true };
+    const tell = (title: string) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } };
+    try {
+      if (!await hands.trusted()) {
+        // macOS shows its own request once; the producer turns Kumi's terminal on, then asks again.
+        await hands.trusted(true).catch(() => false);
+        return { text: "Kumi needs Accessibility access to use Live's menus. macOS just asked for it: in System Settings › Privacy & Security › Accessibility, turn on the app Kumi runs in (your terminal), then ask again. Tell the producer exactly that.", isError: true };
+      }
+      // Live's dialog first, when that's what's asked.
+      if (typeof input.answer === "string") {
+        const reply = await hands.answer(input.answer, signal);
+        if (!reply.ok) {
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const }));
+          return { text: open.open ? `Live's dialog has no "${input.answer}" button; its buttons: ${(open as { buttons?: string[] }).buttons?.join(", ") || "none Kumi can see"}.` : "Live has no dialog open.", isError: true };
+        }
+        tell(`Pressed ${input.answer} in Live's dialog`);
+        await delay(200, undefined, { signal });
+        const next = await hands.dialog(signal).catch(() => ({ open: false as const }));
+        return { text: JSON.stringify({ pressed: input.answer, ...(next.open ? { dialog: next } : {}) }), isError: false };
+      }
+      const command = typeof input.command === "string" ? COMMANDS[input.command] : undefined;
+      if (typeof input.command === "string" && !command) return { text: `Kumi doesn't know the command ${input.command}; name the menu item instead (menu).`, isError: true };
+      const menu = Array.isArray(input.menu) ? input.menu.filter((part): part is string => typeof part === "string") : undefined;
+      const keys = Array.isArray(input.keys) ? input.keys.filter((part): part is string => typeof part === "string") : undefined;
+      if (!command && !menu?.length && !keys?.length) return { text: "Give a command, a menu item (menu) or keys.", isError: true };
+      // What it works on, selected in Live first, the way the producer would before pressing the command.
+      const named = { track: typeof input.track === "string" ? input.track : undefined, tracks: Array.isArray(input.tracks) ? input.tracks.filter((item): item is string => typeof item === "string") : [],
+        clip: typeof input.clip === "string" ? input.clip : undefined };
+      const target = command?.target ?? "none";
+      if ((target === "track" || target === "track-or-clip") && !named.track && !named.clip && !named.tracks.length) return { text: `${input.command} works on a track: give track.`, isError: true };
+      if (target === "tracks" && named.tracks.length < 2 && !named.track) return { text: "Give the tracks to group, side by side, first to last (tracks).", isError: true };
+      if (target === "clip" && !named.clip) return { text: `${input.command} works on a clip: give clip (its clipRef from this turn).`, isError: true };
+      const before = await trackNames(signal);
+      const savedBefore = project?.path && existsSync(project.path) ? statSync(project.path).mtimeMs : undefined;
+      let what = "";
+      if (named.clip && (target === "clip" || target === "track-or-clip" || target === "none")) {
+        const long = String(lengthen(named.clip, "clipRef"));
+        const session = /^(\d+):clip:(\d+):(\d+)$/.exec(long);
+        // The clip's slot, so Live's selection is on it (Session view), and the clip in the Clip view.
+        const slot = session ? `${session[1]}:clip_slot:${session[2]}:${session[3]}` : undefined;
+        if (slot && !refs.has(slot)) refs.set(slot, "clip-slot");
+        const selected = slot ? await act(ACTIONS.find((kind) => kind.tool === "select")!, { slotRef: slot, detailClipRef: named.clip }, signal)
+          : await act(ACTIONS.find((kind) => kind.tool === "select")!, { detailClipRef: named.clip }, signal);
+        if (selected.isError) return { text: `Kumi couldn't select that clip in Live: ${selected.text.slice(0, 300)}`, isError: true };
+        what = " the clip";
+      } else if (named.track || named.tracks.length) {
+        const list = named.tracks.length ? named.tracks : [named.track!];
+        const first = await trackRefOf(list[0]!, signal);
+        // Several side by side: the first selected, then Live's own selection stretched over the rest.
+        if (list.length > 1) await act(ACTIONS.find((kind) => kind.tool === "show")!, { action: "focus-view", view: "Session" }, signal);
+        const selected = await act(ACTIONS.find((kind) => kind.tool === "select")!, { trackRef: first }, signal);
+        if (selected.isError) return { text: `Kumi couldn't select ${list[0]} in Live: ${selected.text.slice(0, 300)}`, isError: true };
+        if (list.length > 1) {
+          const extended = await hands.keys(Array.from({ length: list.length - 1 }, () => "shift+right"), { signal });
+          if (!extended.ok) return { text: `Kumi couldn't select the other tracks in Live (${String(extended.error)}).`, isError: true };
+        }
+        what = list.length > 1 ? ` ${list.length} tracks` : ` ${knownTrack(first)?.name ?? list[0]}`;
+      }
+      // Press it: the command's menu item (wherever Live keeps it), the item named, or the keys.
+      let pressed: string;
+      let key: string | undefined;
+      if (command || menu?.length) {
+        const look = (items: readonly MenuItem[]) => (command ? findItem(items, command.titles) : items.find((item) => item.path.length === menu!.length && item.path.every((part, index) => part.toLowerCase() === menu![index]!.toLowerCase()))
+          ?? findItem(items, [menu!.at(-1)!]));
+        menuItems ??= await hands.menus(signal);
+        let item = look(menuItems);
+        if (!item) { menuItems = await hands.menus(signal); item = look(menuItems); }
+        if (!item) return { text: `Live's menus don't have ${command ? `“${command.titles[0]}”` : `“${menu!.join(" › ")}”`} here: it may need a newer Live, Live Suite, or something selected first.`, isError: true };
+        const reply = await hands.menu(item.path, { signal });
+        if (!reply.ok) {
+          return { text: reply.error === "disabled" ? `Live has “${item.path.join(" › ")}” greyed out right now: it needs the right thing selected (and some commands need the Arrangement or Session view in front).`
+            : `Live didn't take “${item.path.join(" › ")}” (${String(reply.error)}).`, isError: true };
+        }
+        pressed = item.path.join(" › "); key = shortcut(item);
+      } else {
+        const reply = await hands.keys(keys!, { signal });
+        if (!reply.ok) return { text: `Live didn't take those keys (${String(reply.error)}).`, isError: true };
+        pressed = keys!.join(", ");
+      }
+      tell(command ? `${command.done}${what}` : `Pressed ${pressed} in Live`);
+      // Live does it on its own time: a bounce or a freeze renders first.
+      const dialog = await (async () => {
+        for (let check = 0; check < (command?.dialog ? 6 : 2); check++) {
+          await delay(command?.dialog ? 250 : 150, undefined, { signal });
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const }));
+          if (open.open) return open;
+        }
+        return undefined;
+      })();
+      // Live's structure may have changed under every reference: read it all again.
+      refs.clear(); known.clear(); cursors.clear(); shortRefs.clear(); longRefs.clear(); observationGeneration++;
+      let after = await trackNames(signal);
+      for (let wait = 0; wait < 20 && !dialog && command && command.target !== "none" && after.length === before.length && /Bounce|Convert|Separate|Slice|Group/.test(command.titles[0]!); wait++) {
+        await delay(500, undefined, { signal }); after = await trackNames(signal);
+      }
+      const added = after.filter((name) => !before.includes(name) || after.filter((other) => other === name).length > before.filter((other) => other === name).length);
+      const removed = before.filter((name) => !after.includes(name));
+      const saved = savedBefore !== undefined && project?.path && existsSync(project.path) && statSync(project.path).mtimeMs > savedBefore;
+      if (command || added.length || removed.length) {
+        emitChange({ id: `l${randomUUID().slice(0, 8)}`, family: "structure", title: command ? `${command.done}${what}` : `Pressed ${pressed} in Live`, state: "kept",
+          note: "Done with Live's own command: Live's undo (Cmd-Z) takes it back.", at: now().getTime() });
+      }
+      return { text: JSON.stringify({ pressed, ...(key ? { liveShortcut: key } : {}), ...(added.length ? { newTracks: added } : {}), ...(removed.length ? { goneTracks: removed } : {}),
+        ...(saved ? { saved: true } : {}), ...(dialog ? { dialog, next: "Answer it with answer (the button's title), or tell the producer what it asks." } : {}),
+        note: "References from before are gone: discover again before using any." }), isError: false };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { text: error instanceof HandsError || error instanceof ObservationError ? error.message : `Kumi couldn't use Live's menus: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
+    }
+  }
   /**
    * An audition cut off by a crash left Main silent: with that Set open again, Main goes back to where
    * it was, and the producer is told (with any scratch tracks to delete). What was said, or nothing.
@@ -2691,7 +2838,10 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         register(done.result);
         return { text: JSON.stringify(shorten(done)), isError: done.ok !== true };
       } }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python];
+    // Live's own menus and keys, where Kumi has hands (macOS, Windows) and the bridge can select things first.
+    const commands: KernelTool[] = options.hands !== false && (options.hands || process.platform === "darwin" || process.platform === "win32") && tools!.has("live_selection_preview")
+      ? [{ name: LIVE_COMMAND_TOOL, description: LIVE_COMMAND_DESCRIPTION, inputSchema: LIVE_COMMAND_SCHEMA, execute: (input, signal) => liveCommand(input, signal) }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands];
   }
   return {
     async start(signal) {

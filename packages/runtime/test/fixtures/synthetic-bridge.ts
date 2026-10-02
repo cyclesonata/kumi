@@ -5,6 +5,7 @@ import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTo
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
 import type { EarsLink } from "../../src/ears/link.js";
+import type { Hands } from "../../src/hands/index.js";
 import { lowDisk } from "../../src/core/disk.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,7 +34,8 @@ type Options = {
   /** Live's transport, for the beat light. */ onTransport?: (transport: LiveTransport | null) => void;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
   /** Where the audition keeps Main's level while it renders. */ restoreFile?: string;
-  /** Kumi's listening devices: a fake link, and the Browser listing the device (live_browser_inspect). Off when left out. */ ears?: { open: () => Promise<EarsLink> } };
+  /** Kumi's listening devices: a fake link, and the Browser listing the device (live_browser_inspect). Off when left out. */ ears?: { open: () => Promise<EarsLink> };
+  /** Kumi's hands (Live's menus): fake ones, with selecting and showing in Live. Off when left out. */ hands?: { open: () => Promise<Hands | undefined> } };
 export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
@@ -78,7 +80,8 @@ export function bridge(options: Options = {}) {
     ...(options.fullControl ? ["live_clip_delete_preview", "live_clip_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_undo_step_begin", "live_undo_step_end", "live_render_offline",
       "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_subscribe",
       "live_device_edit_preview", "live_device_edit_apply", "live_song_undo", "live_song_redo", "live_device_read"] : []),
-    ...(options.python ? ["live_run_python"] : [])];
+    ...(options.python ? ["live_run_python"] : []),
+    ...(options.hands ? ["live_selection_preview", "live_selection_apply", "live_view_preview", "live_view_apply"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
   const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
@@ -359,7 +362,7 @@ export function bridge(options: Options = {}) {
     onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}), ...(options.onTransport ? { onTransport: options.onTransport } : {}),
     // Never the producer's own ~/.kumi: each bridge its own file.
     restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
-    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false });
+    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false, hands: options.hands ?? false });
   return {
     integration, requests, records, states, actions, auditions, released, pins, get tempo() { return tempo; },
     /** Live sends an event (notifications/live_event). */
@@ -388,6 +391,8 @@ export function bridge(options: Options = {}) {
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
     addDrumRack: () => { drumRack = true; for (const listener of catalogListeners) listener(); },
     deleteLastTrack: () => { tracks = tracks.slice(0, -1); },
+    /** Live makes a track itself (a bounce, a group), as a command of its own would. */
+    addTrack: (name: string) => { tracks = [...tracks, { name, color: 0x808080 }]; },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     /** The next request to this tool waits, after it's sent, until released. */
     hold: (name: string) => {

@@ -18,8 +18,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  hands:
+    # Kumi's Mac helper for Live's menus, built universal and signed ad hoc, for the bundle to carry.
+    name: Build Kumi's Mac helper
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/mcp-server/package-lock.json
+      - run: npm ci
+      - run: npm run build --workspace @kumi/runtime
+      - run: node scripts/build-hands.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: kumi-hands
+          path: packages/runtime/hands/
+          if-no-files-found: error
+          retention-days: 7
+
   bundle:
     name: Build the release bundle
+    needs: hands
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -32,6 +57,10 @@ jobs:
             package-lock.json
             apps/mcp-server/package-lock.json
       - run: npm run setup
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: kumi-hands
+          path: packages/runtime/hands
       - run: node scripts/build-release.mjs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
         with:

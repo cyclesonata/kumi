@@ -11,7 +11,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,6 +39,13 @@ say(`Kumi ${version}, bridge ${bridgeVersion}, Node ${process.versions.node}`);
 for (const file of ["package.json", "package-lock.json", "LICENSE.md", "README.md", "CHANGELOG.md"]) copy(file);
 copy("apps/kumi/package.json"); copy("apps/kumi/bin"); copy("apps/kumi/dist", "apps/kumi/dist", noTests);
 copy("packages/runtime/package.json"); copy("packages/runtime/dist", "packages/runtime/dist", noTests);
+// Kumi's Mac helper for Live's menus, built by scripts/build-hands.mjs on a Mac (the Installer workflow does).
+if (existsSync(join(root, "packages", "runtime", "hands"))) {
+  copy("packages/runtime/hands");
+  // Artifacts lose the executable bit on their way between jobs; the tarball keeps it for the installer.
+  for (const name of readdirSync(join(stage, "packages", "runtime", "hands"))) chmodSync(join(stage, "packages", "runtime", "hands", name), 0o755);
+}
+else say("No Mac helper built (scripts/build-hands.mjs): Kumi builds it on first use where Xcode's tools are.");
 copy("apps/mcp-server/package.json"); copy("apps/mcp-server/package-lock.json"); copy("apps/mcp-server/dist", "apps/mcp-server/dist", noTests);
 // The bridge Kumi runs from its own tree reads Live's operations from protocol/, with the app as its working folder.
 copy("protocol");
