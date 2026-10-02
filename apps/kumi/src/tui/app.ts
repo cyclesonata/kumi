@@ -1293,7 +1293,7 @@ export class TuiApp {
         if (!server.running) return [heading, { label: server.start ?? "Start it, then /model again.", inert: true }];
         const listed = lists.get(server.id);
         if (listed === undefined) return [heading, { label: "Reading its models…", inert: true }];
-        if (listed === "refused") return [heading, { label: "It didn't accept the key Kumi has for it (apiKey in ~/.kumi/settings.json).", inert: true }];
+        if (listed === "refused") return [heading, { label: server.id === "lmstudio" ? "It wants an API token: set LM_API_TOKEN to one from its server settings." : "It didn't accept Kumi's key for it (apiKey in ~/.kumi/settings.json).", inert: true }];
         if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
         if (!listed.length) return [heading, { label: server.id === "ollama" ? "No models yet: pull one that can use tools (ollama pull <model>)." : "No models yet: get one, then /model again.", inert: true }];
         return [heading, ...listed.map(modelItem)];

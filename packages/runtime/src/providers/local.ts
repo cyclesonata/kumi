@@ -570,7 +570,8 @@ function failure(server: LocalServer, error: unknown, phase: "request" | "answer
   const said = serverWords(error);
   const detail = said ? ` (${said})` : "";
   if (status === 401 || status === 403) {
-    return new KumiError("auth", `${name} didn't accept ${server.apiKey ? "the key Kumi has for it" : "a request without a key"} (HTTP ${status}): set its apiKey in ~/.kumi/settings.json.`, server.id);
+    const fix = server.kind === "lmstudio" ? "set LM_API_TOKEN to a token from LM Studio's server settings" : server.kind === "ollama" ? "check that OLLAMA_HOST is where Ollama runs" : "set its apiKey in ~/.kumi/settings.json";
+    return new KumiError("auth", `${name} didn't accept ${server.apiKey ? "the key Kumi has for it" : "a request without a key"} (HTTP ${status}): ${fix}.`, server.id);
   }
   if (/memory|\boom\b|cudamalloc|unable to allocate|failed to allocate|signal: killed/i.test(said)) {
     const room = about.window ? ` with the room Kumi needs (${tokens(about.window)} tokens)` : "";

@@ -383,3 +383,15 @@ test("a mended stream gives each call one id, its arguments as text, and a finis
   const plain = [delta({ content: "Hi." }), delta({}, "stop")].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
   assert.deepEqual(await mend(plain), [delta({ content: "Hi." }), delta({}, "stop")]);
 });
+
+test("a server that wants a key says where Kumi's key for it goes", async () => {
+  const fake = await serve((_request, response) => send(response, { error: { message: "Unauthorized" } }, 401));
+  try {
+    const custom = localServers([{ name: "Studio PC", baseURL: fake.url }], {})[2]!;
+    assert.equal(await probeLocal(custom), true, "it's running, it just wants a key");
+    await assert.rejects(listLocalModels(custom), (error: unknown) => error instanceof KumiError && error.kind === "auth"
+      && error.message === "Studio PC didn't accept a request without a key (HTTP 401): set its apiKey in ~/.kumi/settings.json.");
+    await assert.rejects(listLocalModels(lmStudioAt(fake.url)), (error: unknown) => error instanceof KumiError
+      && error.message === "LM Studio didn't accept a request without a key (HTTP 401): set LM_API_TOKEN to a token from LM Studio's server settings.");
+  } finally { await fake.close(); }
+});
