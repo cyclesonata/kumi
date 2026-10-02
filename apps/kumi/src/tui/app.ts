@@ -858,9 +858,9 @@ export class TuiApp {
 
   private key(event: Extract<InputEvent, { type: "key" }>): void {
     const { name, ctrl, alt, shift } = event;
-    // Listening or writing down: esc and ctrl+c drop it, and enter stops and sends (a command in the box runs as usual).
-    if (this.voice?.active && (name === "escape" || (ctrl && name === "c"))) { this.voice.cancel(); return; }
-    if (name === "enter" && !alt && !shift && !isCommand(this.editor.text.trim()) && this.voice?.enter()) return;
+    // Listening or writing down: esc and ctrl+c drop it, and enter stops and sends (the / menu, or a command in the box, as usual).
+    if (this.voice?.active && ((name === "escape" && !this.menu().length) || (ctrl && name === "c"))) { this.voice.cancel(); return; }
+    if (name === "enter" && !alt && !shift && this.voice?.active && !this.menu().length && !isCommand(this.editor.text.trim()) && this.voice.enter()) return;
     const menu = this.menu();
     const width = this.inputWidth();
     // Shift+Tab moves into the tabbed area (again, to its next tab); there, arrows and pages move, Enter

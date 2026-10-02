@@ -100,8 +100,8 @@ export class VoiceInput {
     if (repeat) { if (this.listening) this.held = "release"; return; }
     if (now < this.quietUntil) { this.quietUntil = now + LET_GO_MS; return; }
     if (this.phase === "idle") { this.start(true); return; }
-    // Writing down: the next take waits for it.
-    if (!this.listening) return;
+    // Writing down, or fetching what listening needs (the first time, off a Mac): the press waits; esc drops it.
+    if (!this.listening || (this.phase === "starting" && this.progress)) return;
     if (this.held === "repeat" || (!this.releases && this.keyed && now - this.pressedAt < REPEAT_MS)) { this.held = "repeat"; this.lastPress = now; this.extend(); return; }
     this.quietUntil = now + LET_GO_MS;
     this.stop();
