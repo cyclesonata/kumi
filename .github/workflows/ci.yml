@@ -112,13 +112,15 @@ jobs:
       fail-fast: false
       matrix:
         # tests: run the functional tests (a shard of them where given); verify: install and exercise the
-        # exact candidate. Windows runs the two halves of its tests and its verification side by side.
+        # exact candidate. Windows runs its tests as four shards (balanced by cost) and its verification side by side.
         include:
           - { os: ubuntu-24.04, node: 22, tests: true, verify: true }
           - { os: ubuntu-24.04, node: 24, tests: true, verify: true }
           - { os: macos-15, node: 24, tests: true, verify: true }
-          - { os: windows-2025, node: 24, tests: true, shard: "1/2", part: "tests 1/2" }
-          - { os: windows-2025, node: 24, tests: true, shard: "2/2", part: "tests 2/2" }
+          - { os: windows-2025, node: 24, tests: true, shard: "1/4", part: "tests 1/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "2/4", part: "tests 2/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "3/4", part: "tests 3/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "4/4", part: "tests 4/4" }
           - { os: windows-2025, node: 24, verify: true, part: "candidate" }
     defaults:
       run:

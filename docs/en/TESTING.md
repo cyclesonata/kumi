@@ -113,8 +113,9 @@ from a fresh detached local clone plus fresh `npm ci` and compares bytes, record
 the exact Git SHA and tarball SHA-256, then installs that same artifact on
 Ubuntu 24.04 (Node 22/24), macOS 15 and Windows Server 2025 (Node 24). Coverage (the
 functional test run), benchmarks, the FFmpeg oracle and `package:verify` run in a
-Linux job beside the candidate, and Windows runs its tests as two shards beside
-its candidate checks (`TEST_SHARD=1/2` picks a shard). Each candidate job verifies strict
+Linux job beside the candidate, and Windows runs its tests as four shards, balanced
+by what each file costs there, beside its candidate checks (`TEST_SHARD=1/4` picks a
+shard). Each candidate job verifies strict
 inventory/hashes and exercises lifecycle plan/install, unavailable activation,
 idempotent repair, unowned rollback refusal, and uninstall; Windows additionally
 tests native ACL repair, junction refusal, held-file recovery, and shipped
