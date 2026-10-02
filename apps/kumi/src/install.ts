@@ -14,7 +14,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { KUMI, KUMI_VERSION } from "@kumi/runtime";
+import { KUMI, KUMI_VERSION, systemProgram } from "@kumi/runtime";
 import { isLiveRunning, runProgram, type Ran } from "./bridge-setup.js";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
@@ -174,7 +174,8 @@ export async function updateInstalled(io: InstalledIo): Promise<number> {
     await download(`${releaseBase(io.env)}/${manifest.bundle}`, bundle, fetcher);
     if (sha256(bundle) !== manifest.sha256) { say("The download didn't match its checksum, so nothing was changed. Try again in a moment."); return 1; }
     rmSync(fresh, { recursive: true, force: true }); await mkdir(fresh, { recursive: true });
-    const unpacked = await run("tar", ["-xzf", bundle, "-C", fresh]);
+    // Windows' own tar, as the installer uses: a PATH from Git Bash puts GNU tar first, which reads "C:\…" as a remote host.
+    const unpacked = await run(systemProgram("tar"), ["-xzf", bundle, "-C", fresh]);
     if (unpacked.code !== 0) { say(`Unpacking it failed: ${(unpacked.stderr || unpacked.stdout).trim().split("\n").at(-1) ?? "tar failed"}`); return 1; }
     // The new Kumi has to start before it replaces this one.
     const probe = await run(process.execPath, [join(fresh, "apps", "kumi", "bin", "kumi.mjs"), "--version"]);
@@ -252,7 +253,7 @@ async function removeWindowsPath(run: Run, home: string): Promise<void> {
     "  }",
     "}",
   ].join("\n");
-  await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]).catch(() => undefined);
+  await run(systemProgram("powershell"), ["-NoProfile", "-NonInteractive", "-Command", script]).catch(() => undefined);
 }
 
 /** The bridge's own uninstall, from the package Live uses, when Live is closed: whether it left Live ("none" when there's no bridge there). */

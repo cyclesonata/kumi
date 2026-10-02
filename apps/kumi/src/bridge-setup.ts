@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
 import { extensionSource, installExtension, liveExtensionsDir } from "./live-extension.js";
-import { KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
+import { KUMI, KUMI_REPAIR, KUMI_START, systemProgram } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 export interface Ran { code: number; stdout: string; stderr: string }
@@ -75,7 +75,7 @@ export function runProgram(command: string, args: readonly string[], cwd?: strin
 /** Whether Live is running: on macOS its process is "Live"; on Windows, "Ableton Live … .exe". */
 export async function isLiveRunning(run: NonNullable<BridgeSetupIo["run"]>): Promise<boolean> {
   if (process.platform === "darwin") return (await run("pgrep", ["-x", "Live"])).code === 0;
-  if (process.platform === "win32") return /Ableton Live/i.test((await run("tasklist", ["/FI", "IMAGENAME eq Ableton Live*", "/NH"])).stdout);
+  if (process.platform === "win32") return /Ableton Live/i.test((await run(systemProgram("tasklist"), ["/FI", "IMAGENAME eq Ableton Live*", "/NH"])).stdout);
   return false;
 }
 

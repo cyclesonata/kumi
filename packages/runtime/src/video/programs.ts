@@ -14,6 +14,7 @@ import { delimiter, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { lowDisk, MB } from "../core/disk.js";
+import { systemProgram } from "../system.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -113,7 +114,7 @@ export async function findYtDlp(options: ProgramOptions): Promise<string> {
       if (!expected || (await downloadTo(`${RELEASES}/${asset}`, fetched, options)) !== expected.toLowerCase()) throw new VideoError("The yt-dlp Kumi downloaded didn't match its release's checksum, so it wasn't kept.");
       await mkdir(unpacked, { recursive: true, mode: 0o700 });
       // tar reads zip archives too (Windows has had it since 2018).
-      if (asset.endsWith(".zip")) await run("tar", ["-xf", fetched, "-C", unpacked], { timeoutMs: 120_000, ...(options.signal ? { signal: options.signal } : {}) });
+      if (asset.endsWith(".zip")) await run(systemProgram("tar"), ["-xf", fetched, "-C", unpacked], { timeoutMs: 120_000, ...(options.signal ? { signal: options.signal } : {}) });
       else await rename(fetched, join(unpacked, process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"));
       const program = await ownYtDlp(unpacked);
       if (!program) throw new VideoError("The yt-dlp Kumi downloaded had no program in it.");
@@ -220,7 +221,7 @@ export async function findFfmpeg(options: FfmpegOptions = {}): Promise<string | 
     }
     await mkdir(unpacked, { recursive: true, mode: 0o700 });
     // tar reads zip archives too (Windows has had it since 2018), and xz ones.
-    await run("tar", ["-xf", archive, "-C", unpacked], { timeoutMs: 300_000, ...(options.signal ? { signal: options.signal } : {}) });
+    await run(systemProgram("tar"), ["-xf", archive, "-C", unpacked], { timeoutMs: 300_000, ...(options.signal ? { signal: options.signal } : {}) });
     const inside = (await readdir(unpacked, { recursive: true })).map(String).find((name) => { const parts = name.split(/[\\/]/); return parts.at(-1) === program && parts.at(-2) === "bin"; });
     if (!inside) return undefined;
     // Only the program: the build is static, and the rest (ffprobe, ffplay, docs) isn't needed.
@@ -309,7 +310,7 @@ export async function findWhisper(options: ProgramOptions): Promise<string | und
     if ((await downloadTo(published.browser_download_url!, archive, options)) !== expected.toLowerCase()) throw new VideoError("The whisper.cpp Kumi downloaded didn't match its release's checksum, so it wasn't kept.");
     await mkdir(unpacked, { recursive: true, mode: 0o700 });
     // tar reads zip archives too (Windows has had it since 2018).
-    await run("tar", ["-xf", archive, "-C", unpacked], { timeoutMs: 120_000, ...(options.signal ? { signal: options.signal } : {}) });
+    await run(systemProgram("tar"), ["-xf", archive, "-C", unpacked], { timeoutMs: 120_000, ...(options.signal ? { signal: options.signal } : {}) });
     const inside = (await readdir(unpacked, { recursive: true })).map(String).find((name) => name.split(/[\\/]/).at(-1) === program);
     if (!inside) return undefined;
     // The program and its libraries, as they came.

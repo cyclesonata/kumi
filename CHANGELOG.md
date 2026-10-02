@@ -3,6 +3,19 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## Unreleased
+
+On Windows, `kumi update` unpacks the new Kumi whatever tar comes first on your PATH.
+
+- `kumi update` stopped at "Unpacking it failed: tar: Error is not recoverable: exiting now" in a
+  PowerShell started from Git Bash: Git's GNU tar came first on PATH, and it reads "C:\…" as a
+  remote host. Kumi now runs Windows' own tar, as its installer always has, and so does fetching
+  yt-dlp, ffmpeg and whisper.cpp for videos (GNU tar opens no zip either). PowerShell and tasklist
+  are run by their full path too.
+- From 1.6.0 or earlier in such a window, run the installer line once, or put Windows' own folder
+  first in that window and update:
+  `$env:Path = "$env:SystemRoot\System32;$env:Path"; kumi update`
+
 ## 1.6.0 — 2026-10-02
 
 Kumi works with Live on Windows: the bridge installs when Live's User Library is outside your user
