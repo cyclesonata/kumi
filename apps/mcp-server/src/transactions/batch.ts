@@ -169,6 +169,18 @@ export function parameterTarget(snapshot: LiveSnapshot, deviceRef: string, param
 
 export function parameterRevision(parameter: Row): number { return typeof parameter.revision === "number" ? parameter.revision : 1; }
 
+/** Native rack macros alias parameter rows. Keep each ref/identity pair once, in order. */
+export function uniqueParameterRows<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+  const seen = new Map<unknown, Set<unknown>>();
+  return rows.filter(row => {
+    const identities = seen.get(row.ref) ?? new Set<unknown>();
+    if (identities.has(row.objectIdentity)) return false;
+    identities.add(row.objectIdentity);
+    seen.set(row.ref, identities);
+    return true;
+  });
+}
+
 export function parameterAuthority(snapshot: LiveSnapshot, parameterRef: string): Row {
   for (const track of snapshot.tracks as unknown as Row[]) {
     const trackRef = typeof track.ref === "string" ? track.ref : undefined;
@@ -180,7 +192,7 @@ export function parameterAuthority(snapshot: LiveSnapshot, parameterRef: string)
         const deviceIdentity = typeof device.objectIdentity === "string" ? device.objectIdentity : undefined;
         const parameters = (Array.isArray(device.parameters) ? device.parameters : []) as unknown[];
         const macros = (Array.isArray(device.macros) ? device.macros : []) as unknown[];
-        const rows = [...parameters, ...macros].filter(isObject);
+        const rows = uniqueParameterRows([...parameters, ...macros].filter(isObject));
         const siblings = rows.map((row) => typeof row.ref === "string" && typeof row.objectIdentity === "string" ? { ref: row.ref, objectIdentity: row.objectIdentity } : undefined);
         if (trackRef && trackIdentity && deviceRef && deviceIdentity && siblings.every((row) => row !== undefined)) {
           const found = rows.find((row) => row.ref === parameterRef);
@@ -325,7 +337,7 @@ function batchTargetKey(operation: BatchOperation): string | undefined {
 }
 
 export class BatchTransactionManager {
-  private static readonly MAX_RECORDS = 64;
+  private static readonly MAX_RECORDS = 512;
   private readonly records = new Map<string, BatchRecord>();
   private readonly idempotency = new Map<string, { transactionId: string; result: unknown }>();
   private readonly views: LiveViews;
@@ -337,7 +349,8 @@ export class BatchTransactionManager {
     for (const [id, candidate] of this.records) if (candidate.expiresAt <= now && !protectedStates.has(candidate.state)) this.records.delete(id);
     for (const [key, candidate] of this.idempotency) if (!this.records.has(candidate.transactionId)) this.idempotency.delete(key);
     while (this.records.size >= BatchTransactionManager.MAX_RECORDS) {
-      const oldest = [...this.records].find(([, candidate]) => !protectedStates.has(candidate.state));
+      // Past capacity, the oldest applied change gives up its undo before new work is refused.
+      const oldest = [...this.records].find(([, candidate]) => !protectedStates.has(candidate.state)) ?? [...this.records].find(([, candidate]) => candidate.state === "applied");
       if (!oldest) throw new Error("transaction batch capacity is exhausted by recovery-protected work");
       this.records.delete(oldest[0]);
     }

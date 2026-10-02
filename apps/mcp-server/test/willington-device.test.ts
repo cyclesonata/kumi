@@ -6,13 +6,14 @@ import { DeterministicLiveSimulator, type LiveStatus, type LiveInvocation, type 
 class DeviceSimulator extends DeterministicLiveSimulator {
   names = { 'macro-name':'Macro 1', 'variation-name':'Variation 1' };
   mapping: unknown = null;
+  async refreshStatusAsync(): Promise<LiveStatus> { return this.status(); }
   override status(): LiveStatus { const s = super.status(); return {...s, operations:[...s.operations!, 'willington.device.read','willington.device.set']}; }
   override invoke(invocation: LiveInvocation): unknown {
     if (!invocation.operation.startsWith('willington.device.')) return super.invoke(invocation);
     const args = invocation.args as any; const kind = args.kind as keyof typeof this.names;
     const read = () => { const state = kind === ('macro-mapping' as any) ? {mapping:JSON.stringify(this.mapping),parameterValue:0.5,parameterMin:0,parameterMax:1,macroValues:'[0]',targetIdentity:'target',deviceIdentity:'rack'} : {name:this.names[kind],deviceIdentity:'rack'}; return {state,stateRevision:createHash('sha256').update(JSON.stringify(state)).digest('hex')}; };
     if (invocation.operation === 'willington.device.read') return read();
-    assert.equal(args.expectedStateRevision,read().stateRevision);
+    if (args.expectedStateRevision !== read().stateRevision) throw new Error('Willington target changed since preview or after apply; undo refused');
     if (kind === ('macro-mapping' as any)) this.mapping=args.next.mapping;
     else this.names[kind] = args.next.name;
     return {changed:true,revision:1,...read()};
@@ -34,7 +35,7 @@ class ZoneSimulator extends DeviceSimulator {
       upperBound:127, deviceIdentity:'rack', targetIdentity:'chain', rackClass:'InstrumentGroupDevice'};
       return {state,stateRevision:createHash('sha256').update(JSON.stringify(state)).digest('hex')}; };
     if (invocation.operation==='willington.device.read') return read();
-    assert.equal(args.expectedStateRevision,read().stateRevision);
+    if (args.expectedStateRevision !== read().stateRevision) throw new Error('Willington target changed since preview or after apply; undo refused');
     this.zone={...args.next};
     return {changed:true,revision:1,...read()};
   }
@@ -137,13 +138,13 @@ test("willington-device undo retries after a connection failure before the resto
 });
 
 
-test("willington-device undo retries after a read failure before the restore was recorded", async () => {
+test("willington-device undo retries after a failure before restore dispatch", async () => {
   const { host, adapter, call } = fixture();
   const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
   await call("live_willington_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "early-apply" });
   let fail = true;
   const original = adapter.invokeAsync.bind(adapter);
-    adapter.invokeAsync = async (invocation) => { if (fail && invocation.operation === "willington.device.read") { fail = false; throw new Error("injected read failure"); } return original(invocation); };
+    adapter.invokeAsync = async (invocation) => { if (fail && invocation.operation === "willington.device.set") { fail = false; throw new Error("injected read failure"); } return original(invocation); };
   const undo = { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "early-undo" };
   await assert.rejects(call("live_undo", undo), /injected/);
   await call("live_undo", undo);
@@ -158,4 +159,38 @@ test("Willington preview reports playback and mapping validation errors without 
   await assert.rejects(call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" }), /Willington edits require stopped playback/);
   (adapter as any).state.playback.transport.playing = false;
   await assert.rejects(call("live_willington_device_preview", { ref: "rack", kind: "macro-mapping", targetRef: "target", mappingIndex: 0, minimum: 3, maximum: 1, mappingKind: "continuous" }), /Mapping endpoints are outside parameter bounds/);
+});
+
+test("Willington apply retries after a status failure before dispatch", async () => {
+  const { adapter, call } = fixture();
+  const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
+  const refresh = adapter.status.bind(adapter);
+  let fail = true;
+  adapter.refreshStatusAsync = async () => { if (fail) { fail = false; throw new Error("injected status failure"); } return refresh(); };
+  const apply = { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "retry-status" };
+  await assert.rejects(call("live_willington_device_apply", apply), /injected/);
+  assert.equal(adapter.names["macro-name"], "Macro 1");
+  await call("live_willington_device_apply", apply);
+  assert.equal(adapter.names["macro-name"], "New");
+});
+
+test("Willington apply and undo use the fenced set readback without redundant reads", async () => {
+  const { adapter, call } = fixture();
+  const preview = await call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" });
+  const invoke = adapter.invokeAsync.bind(adapter);
+  const operations: string[] = [];
+  adapter.invokeAsync = async (invocation) => { operations.push(invocation.operation); return invoke(invocation); };
+  await call("live_willington_device_apply", { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "minimal-apply" });
+  await call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "minimal-undo" });
+  assert.deepEqual(operations.filter(operation => operation.startsWith("willington.device.")), ["willington.device.set", "willington.device.set"]);
+  assert.equal(adapter.names["macro-name"], "Macro 1");
+});
+
+test("common validation prefixes do not bypass path and stack filtering", async () => {
+  for (const message of ["Mapping failure in /private/native/library", "Boolean failure in C:\\native\\library", "Enum failure at native_call (library)"]) {
+    const { adapter, call } = fixture();
+    const invoke = adapter.invokeAsync.bind(adapter);
+    adapter.invokeAsync = async invocation => { if (invocation.operation === "willington.device.read") throw new Error(message); return invoke(invocation); };
+    await assert.rejects(call("live_willington_device_preview", { ref: "rack", kind: "macro-name", macroIndex: 0, name: "New" }), /adapter request failed/);
+  }
 });

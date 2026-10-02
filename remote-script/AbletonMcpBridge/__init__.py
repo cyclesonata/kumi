@@ -339,15 +339,18 @@ class _WillingtonProvider:
                 # Follow bindings require evidence for this exact compiled library,
                 # matching the standalone adapter's operator enablement contract.
                 if self.follow is not None:
-                    import hashlib
-                    import WillingtonBindings
-                    folder = Path(WillingtonBindings.__file__).parent
-                    evidence = json.loads((folder / "self-test.json").read_text())
-                    digest = hashlib.sha256((folder / "libwillington.dylib").read_bytes()).hexdigest()
-                    if evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
-                        raise ValueError("current-library Follow Action self-test is required")
-                    self.follow.willington_enable_writes(True)
-                    self.mapper.willington_follow_writes = True
+                    try:
+                        import hashlib
+                        import WillingtonBindings
+                        folder = Path(WillingtonBindings.__file__).parent
+                        evidence = json.loads((folder / "self-test.json").read_text())
+                        digest = hashlib.sha256((folder / "libwillington.dylib").read_bytes()).hexdigest()
+                        if evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
+                            raise ValueError("current-library Follow Action self-test is required")
+                        self.follow.willington_enable_writes(True)
+                        self.mapper.willington_follow_writes = True
+                    except Exception as error:
+                        if callable(log): log("Willington Follow Action writes unavailable: " + str(error))
                 if self.devices is not None:
                     self.devices.enable(True)
                     self.mapper.willington_device_writes = True
@@ -355,10 +358,10 @@ class _WillingtonProvider:
                     self.zones.enable(True)
                     self.mapper.willington_zone_writes = True
             if callable(log): log("Willington extensions initialized; writes " + ("enabled" if config["enableWrites"] else "disabled"))
-        except Exception:
+        except Exception as error:
             try: self.close()
             except Exception: pass  # Capability flags are cleared even if native teardown fails.
-            if callable(log): log("Willington extensions unavailable; ordinary bridge remains active")
+            if callable(log): log("Willington extensions unavailable: " + str(error) + "; ordinary bridge remains active")
 
     def close(self):
         self.mapper.willington_follow_writes = False

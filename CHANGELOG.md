@@ -3,6 +3,43 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.3.0 — 2026-10-01
+
+Kumi does what you ask and finds a way when no tool fits; the bridge refuses only what Live can't
+do or what would act on the wrong thing. Ships with bridge 1.0.68.
+
+### Doing what's asked
+
+- Kumi acts without asking first, picks the likeliest reading of a vague request, and says
+  afterwards what it chose. When no tool does exactly what's asked it takes another route (a plan
+  of several, a recording, a render, a device it makes) and says it couldn't only after trying.
+- It plays, launches, selects and shows things whenever that helps, and deletes what a request
+  implies (replacing, cleaning up, starting over).
+- Any audio file on your computer loads by its path, not only one Kumi found.
+- Max for Live devices get as many knobs as they need (up to 128, in rows past eight), longer
+  menus, up to 32 voices, longer code, feedback that sustains or self-oscillates, and MIDI
+  effects that run on their own (LFOs, clocks, generators).
+- Longer answers: up to 200 steps, 60 minutes, 10 minutes of quiet thinking, 5,000 changes, waits
+  of 30 minutes; three retries when a provider is busy. Matching only starts when there's
+  something to match.
+- Kumi runs on Node 25 and newer, not only 22 and 24. Notes past the 24 kept forget the oldest.
+
+### Bridge 1.0.68
+
+- `run_python` runs Python inside Live for APIs the typed tools do not cover: eval returns an
+  expression; exec returns `result`. It captures stdout and error details, returns usable Live
+  object refs, and checks a timeout. Each run uses one Live undo step and clears cached Set reads;
+  scripts have no HISTORY entry. MCP clients can call `live_run_python`.
+- Refusals say why, with Live's own reason, instead of "requires fresh authoritative state".
+- Undo takes back the change on the same object however it changed since: a renamed track, a
+  device with clips added, a knob or fader moved again.
+- A clip launches while the Set plays; recording starts with other tracks armed too, or already
+  on; output-safety evidence is optional.
+- Tracks and scenes may share names; random MIDI transforms pick a repeatable seed themselves;
+  a value past a parameter's range or between its steps goes to the nearest it takes; a
+  switched-off device's knobs can be set.
+- Long sessions never run out of room for new changes: the oldest applied one gives up its undo.
+
 ## 1.2.0 — 2026-10-01
 
 Kumi takes full control of Live and stays quick on big Sets. It deletes what you ask for, writes MIDI

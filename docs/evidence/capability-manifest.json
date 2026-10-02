@@ -1,7 +1,7 @@
 {
   "schema": "ableton-mcp-capability-manifest/v1",
-  "registryHash": "b9b6cc44d11336b3f1bbd21a289fa501ab6b44801efc3d2b28a195a7ccbe3653",
-  "operationCount": 194,
+  "registryHash": "ec05dd401ec098adb77da1c185aff1857be2bd87859afe9dda4bfeb14e04aa57",
+  "operationCount": 195,
   "coverageRules": [
     "Covered means reachable end to end from MCP through the negotiated bridge with a verified response.",
     "Read, write, call, and observe access are tracked separately per family notes.",
@@ -1434,6 +1434,20 @@
         }
       ],
       "firstTested": "pending exact candidate (Live 12.4.15b5, SDK 1.0.0-beta.1)"
+    },
+    {
+      "family": "python",
+      "surface": "Python inside Live: eval/exec with stdout, JSON results and Live object refs; one Live undo step and a tracing deadline",
+      "operations": [
+        {
+          "id": "python.run",
+          "status": "executable-negotiated",
+          "access": [
+            "call"
+          ]
+        }
+      ],
+      "firstTested": "fake-Live contract and host wire tests; exact real-Live candidate pending"
     },
     {
       "family": "developer",

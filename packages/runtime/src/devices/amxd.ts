@@ -35,6 +35,18 @@ export function decodeAmxd(bytes: Buffer): { type: DeviceType; patcher: { patche
   return undefined;
 }
 
+/** Live shows a device 169 pixels tall: room for three rows of dials. */
+const FACE_ROWS = 3;
+
+/**
+ * Where each of a device's `count` controls sits on its face: in one row up to eight, as Live's own
+ * devices have them, then in up to three rows, as wide as it takes.
+ */
+export function faceLayout(count: number): { columns: number; at(index: number): { x: number; y: number } } {
+  const columns = count <= 8 ? Math.max(1, count) : Math.ceil(count / FACE_ROWS);
+  return { columns, at: (index) => ({ x: 8.0 + (index % columns) * 52.0, y: Math.floor(index / columns) * 52.0 }) };
+}
+
 export interface Box { box: Record<string, unknown> }
 export interface Line { patchline: { source: [string, number]; destination: [string, number] } }
 

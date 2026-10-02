@@ -144,3 +144,14 @@ test("supports the asynchronous guarded Session MIDI lifecycle and async paginat
   const undone = await manager.undoAsync(preview.transactionId, "undo", "async-undo") as any;
   assert.equal(undone.state, "undone"); assert.equal((await manager.undoAsync(preview.transactionId, "undo", "async-undo") as any).idempotent, true);
 });
+
+test("past capacity, the oldest applied MIDI change gives up its undo instead of the next change being refused", () => {
+  const manager = new SessionMidiTransactionManager(new DeterministicLiveSimulator()) as any;
+  for (let index = 0; index < 512; index++) manager.records.set(`applied-${index}`, { transactionId: `applied-${index}`, state: "applied", expiresAt: 0 });
+  manager.retain({ transactionId: "next", state: "previewed", expiresAt: Date.now() + 60_000 });
+  assert.equal(manager.records.size, 512);
+  assert.equal(manager.records.has("applied-0"), false, "the oldest went");
+  assert.equal(manager.records.has("next"), true);
+  for (const [key] of manager.records) manager.records.set(key, { transactionId: key, state: "applying", expiresAt: 0 });
+  assert.throws(() => manager.retain({ transactionId: "another", state: "previewed", expiresAt: Date.now() + 60_000 }), /capacity is exhausted/, "only changes still in progress hold it");
+});

@@ -110,7 +110,7 @@ test("a spec says what's wrong with it, each so it can be fixed", () => {
     { name: "Level", type: "integer", min: 0, max: 10, default: 2.5 }, { name: "Rate", type: "number", min: 0, max: 1, default: 0.5, unit: "furlongs" }], code: "send(1)", tests: [{ name: "x", input: "no" }] });
   assert.ok("problems" in checked);
   const text = checked.problems.join("\n");
-  for (const expected of [/^name:/m, /^about:/m, /min is below max/, /used twice/, /2–16 options/, /whole-number/, /unit is one of/, /define function midi/, /^tests\[0\]/m]) assert.match(text, expected);
+  for (const expected of [/^name:/m, /^about:/m, /min is below max/, /used twice/, /2–128 options/, /whole-number/, /unit is one of/, /define function midi/, /^tests\[0\]/m]) assert.match(text, expected);
 });
 
 test("Kumi runs the device's tests and its own checks: a working device passes, a broken one is told what went wrong", () => {
@@ -271,7 +271,8 @@ test("Kumi's checks for an audio effect or an instrument say what's wrong, each 
   const problems = (input: Record<string, unknown>) => { const checked = checkSpec(input); return "problems" in checked ? checked.problems.join("\n") : ""; };
   assert.match(problems({ ...GRIT, controls: [{ name: "Mix", type: "number", min: 0, max: 1, default: 1 }] }), /Kumi adds Mix/);
   assert.match(problems({ ...GRIT, controls: [{ name: "Delay", type: "number", min: 0, max: 1, default: 1 }] }), /Param delay, a name gen~ or Kumi already uses; call it something else/);
-  assert.match(problems({ ...GRIT, controls: Array.from({ length: 7 }, (_, index) => ({ name: `Knob ${index + 1}`, type: "number", min: 0, max: 1, default: 0 })) }), /at most 6.*Kumi adds Mix and Output/);
+  assert.match(problems({ ...GRIT, controls: Array.from({ length: 129 }, (_, index) => ({ name: `Knob ${index + 1}`, type: "number", min: 0, max: 1, default: 0 })) }), /controls: at most 128\./);
+  assert.match(problems({ ...GRIT, controls: [{ name: "Pre-Delay", type: "number", min: 0, max: 1, default: 0 }, { name: "Pre Delay", type: "number", min: 0, max: 1, default: 0 }] }), /"Pre Delay" and "Pre-Delay" would both be the Param pre_delay/);
   assert.match(problems({ ...GRIT, code: "out1 = in1;" }), /assign out1 \(left\) and out2 \(right\)/);
   assert.match(problems({ ...GRIT, code: "out1 = in3; out2 = in1;" }), /two inputs/);
   assert.match(problems({ ...GRIT, code: "out1 = cycle(440); out2 = out1;" }), /reads its input/);
@@ -279,11 +280,45 @@ test("Kumi's checks for an audio effect or an instrument say what's wrong, each 
   assert.match(problems({ ...GRIT, code: "out1 = tanh(in1; out2 = in2;" }), /don't pair up/);
   assert.match(problems({ ...PLUCK, code: "out1 = in1; out2 = in2;" }), /no audio input/);
   assert.match(problems({ ...PLUCK, code: "out1 = cycle(440); out2 = out1;" }), /plays the note it's given/);
-  assert.match(problems({ ...PLUCK, voices: 9 }), /1 \(mono\) to 8/);
+  assert.match(problems({ ...PLUCK, voices: 33 }), /1 \(mono\) to 32/);
   assert.match(problems({ ...PLUCK, code: "Param note(60);\nout1 = cycle(mtof(note)); out2 = out1;" }), /Kumi's; use them without declaring/);
   // A control's Param declared by the model too (as gen~ code usually is) would be declared twice.
   assert.match(problems({ ...GRIT, code: "Param drive(1, min=1, max=20);\nout1 = tanh(in1 * drive); out2 = tanh(in2 * drive);" }), /drive is the Drive control's Param, which Kumi declares/);
   assert.equal(problems({ ...GRIT, tests: [{ name: "ignored", input: [], expect: [] }] }), "", "an audio effect isn't tested with MIDI; its tests are left out");
+});
+
+test("a device gets what it needs: many controls in rows on the face, names with punctuation, long menus, more voices", () => {
+  const knobs = Array.from({ length: 20 }, (_, index) => ({ name: `Size/Decay-${index + 1}`, type: "number", min: 0, max: 1, default: 0.5 }));
+  const checked = checkSpec({ ...GRIT, controls: knobs });
+  assert.ok("spec" in checked && checked.spec.controls.length === 20, JSON.stringify(checked));
+  const patcher = audioEffectPatcher(checked.spec as never) as { patcher: { devicewidth: number; boxes: { box: Record<string, unknown> }[] } };
+  const faces = patcher.patcher.boxes.filter((item) => item.box.parameter_enable === 1).map((item) => item.box.presentation_rect as number[]);
+  assert.equal(faces.length, 22, "20 of the model's, Mix and Output");
+  // 22 controls: three rows of 8, all inside Live's 169-pixel device view, and the face as wide as its rows.
+  assert.deepEqual([...new Set(faces.map((rect) => rect[1]))], [8, 60, 112]);
+  assert.ok(faces.every((rect) => rect[1]! + rect[3]! <= 169));
+  assert.equal(patcher.patcher.devicewidth, 16 + 8 * 52);
+  // Up to eight stay in one row, as before.
+  const midi = midiDevicePatcher(spec()) as { patcher: { devicewidth: number } };
+  assert.equal(midi.patcher.devicewidth, 120);
+  const menu = checkSpec({ ...LOWEST, controls: [{ name: "Scale", type: "choice", options: Array.from({ length: 40 }, (_, index) => `Mode ${index + 1}`), default: "Mode 1" }] });
+  assert.ok("spec" in menu, JSON.stringify(menu));
+  const wide = checkSpec({ ...PLUCK, voices: 16 });
+  assert.ok("spec" in wide && wide.spec.type === "instrument" && wide.spec.voices === 16);
+  assert.equal(inner(instrumentPatcher(wide.spec as never), "obj-poly").text, "poly 16 1");
+});
+
+test("a MIDI effect that runs free (an LFO, a clock) passes with runs_free; without it, Kumi asks for it or for its timers to stop", async () => {
+  const lfo = { ...LOWEST, name: "CC LFO", controls: [{ name: "Rate", type: "number", min: 10, max: 1000, default: 50, unit: "ms" }], tests: [],
+    code: "let phase = 0;\nfunction tick() { phase = (phase + 1) % 32; send({ type: 'cc', controller: 74, value: Math.abs(16 - phase) * 8 }); after(params.Rate, tick); }\ntick();\nfunction midi(event) { pass(event); }\nfunction reset() { tick(); }" };
+  assert.match(checkMidiDevice(spec(lfo)).problems.join(" "), /timers keep running[\s\S]*runs_free: true/);
+  const free = checkSpec({ ...lfo, runs_free: true });
+  assert.ok("spec" in free && free.spec.type === "midi_effect" && free.spec.runsFree === true, JSON.stringify(free));
+  assert.deepEqual(await checkMidiDeviceIsolated(free.spec as MidiSpec), { passed: 0, of: 0, problems: [] });
+  // Running free isn't sending without end.
+  const flood = checkMidiDevice({ ...(free.spec as MidiSpec), code: "function tick() { for (let i = 0; i < 50; i++) send({ type: 'cc', controller: 1, value: i }); after(1, tick); }\ntick();\nfunction midi(event) { pass(event); }" });
+  assert.match(flood.problems.join(" "), /something sends without end/);
+  assert.match((checkSpec({ ...lfo, runs_free: "yes" }) as { problems: string[] }).problems.join(" "), /runs_free: true for a MIDI effect/);
 });
 
 test("make_device makes an audio effect and an instrument, with Kumi's own knobs, and says to hear them", async () => {

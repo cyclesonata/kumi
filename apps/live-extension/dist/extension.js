@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../../vendor/ableton-extensions-sdk-1.0.0-beta.1/package 3/dist/index.cjs
+// ../../../Users/user1303836/Development/kumi/vendor/ableton-extensions-sdk-1.0.0-beta.1/package 3/dist/index.cjs
 var require_dist = __commonJS({
-  "../../vendor/ableton-extensions-sdk-1.0.0-beta.1/package 3/dist/index.cjs"(exports2) {
+  "../../../Users/user1303836/Development/kumi/vendor/ableton-extensions-sdk-1.0.0-beta.1/package 3/dist/index.cjs"(exports2) {
     Object.defineProperty(exports2, Symbol.toStringTag, { value: "Module" });
     var DataModelObject3 = class DataModelObject4 {
       /** @internal */
@@ -971,7 +971,7 @@ var require_dist = __commonJS({
   }
 });
 
-// src/extension.ts
+// apps/live-extension/src/extension.ts
 var extension_exports = {};
 __export(extension_exports, {
   activate: () => activate,
@@ -983,12 +983,12 @@ var import_node_os = require("node:os");
 var import_node_path2 = require("node:path");
 var import_sdk4 = __toESM(require_dist());
 
-// src/operations.ts
+// apps/live-extension/src/operations.ts
 var import_node_fs2 = require("node:fs");
 var import_node_path = require("node:path");
 var import_sdk2 = __toESM(require_dist());
 
-// src/audio-info.ts
+// apps/live-extension/src/audio-info.ts
 var import_node_fs = require("node:fs");
 function head(path, length) {
   const fd = (0, import_node_fs.openSync)(path, "r");
@@ -1050,7 +1050,7 @@ function audioInfo(path) {
   throw new Error("the render is neither WAV nor AIFF");
 }
 
-// src/refs.ts
+// apps/live-extension/src/refs.ts
 var import_sdk = __toESM(require_dist());
 function parseRef(reference) {
   const parts = reference.split(":");
@@ -1131,7 +1131,7 @@ function locate(context, target) {
   return void 0;
 }
 
-// src/wire.ts
+// apps/live-extension/src/wire.ts
 var import_node_crypto = require("node:crypto");
 var LOOPBACK_PROTOCOL = "ableton-loopback/v1";
 var LIVE_PROTOCOL = "ableton-live/v1";
@@ -1187,7 +1187,7 @@ function token(bytes = 18) {
   return (0, import_node_crypto.randomBytes)(bytes).toString("base64url");
 }
 
-// src/operations.ts
+// apps/live-extension/src/operations.ts
 var str = (value) => typeof value === "string" ? value : void 0;
 var expected = (args) => {
   const name = str(args.expectedName);
@@ -1360,10 +1360,10 @@ function transactionGroup(validate2) {
   };
 }
 
-// src/registry.ts
+// apps/live-extension/src/registry.ts
 var import_node_crypto2 = require("node:crypto");
 
-// ../../protocol/ableton-live-v1.operations.json
+// protocol/ableton-live-v1.operations.json
 var ableton_live_v1_operations_default = {
   version: 1,
   protocol: "ableton-live/v1",
@@ -11102,6 +11102,87 @@ var ableton_live_v1_operations_default = {
       }
     },
     {
+      id: "python.run",
+      method: "invoke",
+      request: {
+        type: "object",
+        properties: {
+          code: {
+            type: "string",
+            minLength: 1,
+            maxLength: 65536
+          },
+          mode: {
+            type: "string",
+            enum: [
+              "eval",
+              "exec"
+            ]
+          },
+          ref: {
+            type: "string",
+            minLength: 1,
+            maxLength: 256
+          },
+          timeoutMs: {
+            type: "integer",
+            minimum: 1,
+            maximum: 3e4
+          }
+        },
+        required: [
+          "code"
+        ],
+        additionalProperties: false
+      },
+      result: {
+        type: "object",
+        properties: {
+          ok: {
+            type: "boolean"
+          },
+          stdout: {
+            type: "string",
+            maxLength: 1048576
+          },
+          error: {
+            type: [
+              "object",
+              "null"
+            ],
+            properties: {
+              type: {
+                type: "string",
+                maxLength: 128
+              },
+              message: {
+                type: "string",
+                maxLength: 1048576
+              },
+              traceback: {
+                type: "string",
+                maxLength: 1048576
+              }
+            },
+            required: [
+              "type",
+              "message",
+              "traceback"
+            ],
+            additionalProperties: false
+          }
+        },
+        required: [
+          "ok",
+          "result",
+          "stdout",
+          "error"
+        ],
+        additionalProperties: true,
+        maxProperties: 4
+      }
+    },
+    {
       id: "rack.action",
       method: "invoke",
       request: {
@@ -17341,7 +17422,7 @@ var ableton_live_v1_operations_default = {
   ]
 };
 
-// src/registry.ts
+// apps/live-extension/src/registry.ts
 var registry = ableton_live_v1_operations_default;
 var byId = new Map(registry.operations.map((operation) => [operation.id, operation]));
 function canonicalRegistry(value) {
@@ -17401,7 +17482,7 @@ function validateResult(id, value) {
   validate(operation.result, value, `${id}.result`);
 }
 
-// src/pointing.ts
+// apps/live-extension/src/pointing.ts
 var import_sdk3 = __toESM(require_dist());
 var OBJECT_SCOPES = ["AudioClip", "MidiClip", "AudioTrack", "MidiTrack", "ClipSlot", "Scene", "Simpler", "Sample", "DrumRack"];
 var SELECTION_SCOPES = ["ClipSlotSelection", "AudioTrack.ArrangementSelection", "MidiTrack.ArrangementSelection"];
@@ -17449,7 +17530,7 @@ async function registerPointing(context, onPointed, log2 = () => void 0) {
   for (const scope of SELECTION_SCOPES) await context.ui.registerContextMenuAction(scope, "Ask Kumi about this selection", POINT_SELECTION);
 }
 
-// src/server.ts
+// apps/live-extension/src/server.ts
 var import_node_net = require("node:net");
 var REQUIRED = ["version", "id", "method", "nonce", "sequence", "bridgeEpoch", "connectionChallenge", "deadlineMs", "mac"];
 var OPTIONAL = ["operation", "args", "ref", "transactionId", "idempotencyKey", "stateDigest", "ownershipToken"];
@@ -17578,7 +17659,7 @@ var ExtensionServer = class {
   }
 };
 
-// src/extension.ts
+// apps/live-extension/src/extension.ts
 var VERSION = true ? "1.0.0" : "0.0.0";
 var OPERATION_IDS = ["status", ...Object.keys(OPERATIONS), "transaction.group"];
 function log(line) {

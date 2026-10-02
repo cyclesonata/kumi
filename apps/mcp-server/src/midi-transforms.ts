@@ -111,9 +111,17 @@ function stringParam(params: Readonly<Record<string, unknown>>, name: string, al
   return value;
 }
 
+/**
+ * The seed a stochastic transform uses: the one given, or one drawn from the request itself when none
+ * is, so a preview and its apply agree. Another seed gives another variation.
+ */
 function seedParam(params: Readonly<Record<string, unknown>>): string {
   const value = params.seed;
-  if (typeof value !== "string" || value.length < 1 || value.length > 128) throw new RangeError("an explicit seed string (1-128 chars) is required for stochastic transforms");
+  if (value === undefined) {
+    const request = Object.fromEntries(Object.entries(params).filter(([key]) => key !== "seed").sort(([a], [b]) => a.localeCompare(b)));
+    return `auto-${createHash("sha256").update(JSON.stringify(request)).digest("hex").slice(0, 16)}`;
+  }
+  if (typeof value !== "string" || value.length < 1 || value.length > 128) throw new RangeError("seed is a string of 1-128 characters");
   return value;
 }
 
@@ -311,7 +319,7 @@ function ratchet(notes: readonly Note[], params: Readonly<Record<string, unknown
       result.push(copy);
     }
   }
-  return { notes: result, generative: true, seed, assumptions: [`each note is subdivided into ${subdivisions} ratchets kept at probability ${probability} under the explicit seed; original notes are replaced`] };
+  return { notes: result, generative: true, seed, assumptions: [`each note is subdivided into ${subdivisions} ratchets kept at probability ${probability} under its seed; original notes are replaced`] };
 }
 
 function chordVoicing(notes: readonly Note[], params: Readonly<Record<string, unknown>>): MidiTransformOutcome {
@@ -717,8 +725,7 @@ function drumPattern(_notes: readonly Note[], params: Readonly<Record<string, un
   const gridResolution = integerParam(params, "gridResolution", 8, 32, 16);
   if (![8, 16, 32].includes(gridResolution)) throw new RangeError("gridResolution must be 8, 16, or 32 steps per bar");
   const density = finiteParam(params, "density", 0, 1, 1);
-  const seed = params.seed === undefined ? undefined : seedParam(params);
-  if (density < 1 && seed === undefined) throw new RangeError("density below 1 requires an explicit seed");
+  const seed = params.seed === undefined && density >= 1 ? undefined : seedParam(params);
   const barLength = finiteParam(params, "barLength", 1, 64, 4);
   const mapping = mappingParam(params, "mapping", DRUM_ROLES);
   const random = seed !== undefined ? seededRandom(seed) : undefined;
@@ -740,7 +747,7 @@ function drumPattern(_notes: readonly Note[], params: Readonly<Record<string, un
   }
   const assumptions = [`${style} template over ${bars} bar(s) at ${gridResolution} steps/bar (${stepBeats} beats/step); input notes are replaced`];
   if (droppedCoarse > 0) assumptions.push(`${droppedCoarse} hit(s) dropped because they fall between ${gridResolution}-step grid positions`);
-  if (gatedOut > 0) assumptions.push(`${gatedOut} optional hit(s) gated out at density ${density} under the explicit seed`);
+  if (gatedOut > 0) assumptions.push(`${gatedOut} optional hit(s) gated out at density ${density} under its seed`);
   if (missing.size > 0) assumptions.push(`no pitch mapping for role(s) ${[...missing].sort().join(", ")}; those hits were omitted (kit mapping is never invented)`);
   const outcome: MidiTransformOutcome = { notes: result, generative: true, assumptions };
   return seed !== undefined ? { ...outcome, seed } : outcome;
@@ -785,8 +792,9 @@ function bassline(_notes: readonly Note[], params: Readonly<Record<string, unkno
 /* --------------------------- motif transforms ------------------------------ */
 
 function motifInvert(notes: readonly Note[], params: Readonly<Record<string, unknown>>): MidiTransformOutcome {
-  if (params.axis === undefined) throw new RangeError("an explicit axis pitch is required (no tonal center is assumed)");
-  const axis = integerParam(params, "axis", 0, 127);
+  // Without an axis, the motif turns around its first note.
+  const first = [...notes].sort((a, b) => a.start - b.start || a.pitch - b.pitch)[0];
+  const axis = params.axis === undefined ? (first?.pitch ?? 60) : integerParam(params, "axis", 0, 127);
   let clamped = 0;
   const result = cloneNotes(notes);
   for (const note of result) {

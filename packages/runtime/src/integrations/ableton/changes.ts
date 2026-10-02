@@ -12,7 +12,7 @@ import { MORE_CHANGES, MORE_REFERENCE_FIELDS } from "./more-changes.js";
 /** A track as Kumi last saw it in discovery, for HISTORY's colour chip. */
 export interface KnownTrack { name: string; color?: string }
 
-/** What a change can look up while preparing: a sample find_samples returned, with the folder searched. */
+/** What a change can look up while preparing: a sample by its path (one find_samples returned, or any audio file), with its folder. */
 export interface ChangeContext {
   sample(path: string): { path: string; folder: string } | undefined;
   /** A device's parameters as Live has them now (for a parameter named rather than referenced). */
@@ -24,9 +24,9 @@ export interface ChangeContext {
 }
 export interface SampleSelector { words?: string[]; folders?: string[]; random?: boolean }
 
-/** A `sample` input: a path find_samples returned, or a selector Kumi resolves itself (no search step in between). */
+/** A `sample` input: the path of an audio file (one find_samples returned, or any on this computer), or a selector Kumi resolves itself (no search step in between). */
 export const SAMPLE_INPUT = {
-  description: "A path find_samples returned, or {\"random\": true, \"words\": [\"kick\"]} for Kumi to pick one itself (words and folders optional)",
+  description: "The path of an audio file (one find_samples returned, or any on this computer), or {\"random\": true, \"words\": [\"kick\"]} for Kumi to pick one itself (words and folders optional)",
   anyOf: [
     { type: "string", minLength: 1, maxLength: 1024 },
     { type: "object", additionalProperties: false, properties: {
@@ -37,13 +37,13 @@ export const SAMPLE_INPUT = {
 
 /** A sample for a change: found earlier, or picked now. A string is a refusal. */
 async function sampleFor(input: unknown, context: ChangeContext): Promise<{ path: string; folder: string } | string> {
-  if (typeof input === "string") return context.sample(input) ?? "Load a sample find_samples returned in this conversation, or give {\"random\": true, \"words\": [...]} for Kumi to pick one.";
+  if (typeof input === "string") return context.sample(input) ?? "Give the path of an audio file on this computer (one find_samples returned, a recording, the producer's own), or {\"random\": true, \"words\": [...]} for Kumi to pick one.";
   if (input && typeof input === "object" && !Array.isArray(input)) {
     const selector = input as JsonObject;
     const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
     return await context.pick({ words: strings(selector.words), folders: strings(selector.folders), random: selector.random === true }) ?? "No sample matches that; try other words or folders.";
   }
-  return "Give the sample as a path find_samples returned, or {\"random\": true, \"words\": [...]}.";
+  return "Give the sample as the path of an audio file (one find_samples returned, or any on this computer), or {\"random\": true, \"words\": [...]}.";
 }
 
 export interface ChangeSummary {
@@ -72,6 +72,8 @@ export interface ChangeKind {
   schema?(schema: JsonObject): JsonObject;
   /** The model's input, when Kumi's tool asks for something other than the bridge's preview does. */
   inputSchema?: JsonObject;
+  /** Prefer the advertised preview schema, retaining inputSchema for unavailable tools. */
+  fallbackSchema?: boolean;
   /** Turn the model's input into the preview's; a string refuses, in words for the model. */
   prepare?(input: JsonObject, context: ChangeContext): JsonObject | string | Promise<JsonObject | string>;
   /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
@@ -303,7 +305,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "load_sample", preview: "live_device_preview", apply: "live_device_apply", family: "device",
-    description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is a path find_samples returned; trackRef comes from discovery in this turn or the track just added.",
+    description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is the path of an audio file (one find_samples returned, or any on this computer); trackRef comes from discovery in this turn or the track just added.",
     inputSchema: { type: "object", additionalProperties: false, required: ["trackRef", "sample"], properties: {
       trackRef: { type: "string", minLength: 1, maxLength: 256 }, sample: SAMPLE_INPUT } },
     async prepare(input, context) {
@@ -324,7 +326,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "load_sample_to_pad", preview: "live_drum_pad_preview", apply: "live_drum_pad_apply", family: "device", always: true,
     unavailable: "There's no Drum Rack in the Set yet: load one with load_device first (search the Browser for \"Drum Rack\"), then its pads can take samples.",
-    description: "Load a sample onto an empty pad of a Drum Rack, in a new Simpler on that pad, or in Live 12's Drum Sampler with instrument \"Drum Sampler\"; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is a path find_samples returned.",
+    description: "Load a sample onto an empty pad of a Drum Rack, in a new Simpler on that pad, or in Live 12's Drum Sampler with instrument \"Drum Sampler\"; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is the path of an audio file (one find_samples returned, or any on this computer).",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "note", "sample"], properties: {
       deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127, description: "The pad: 36 is C1, the first pad" },
       sample: SAMPLE_INPUT, instrument: PAD_INSTRUMENT } },

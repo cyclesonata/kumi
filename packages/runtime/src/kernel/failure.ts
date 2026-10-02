@@ -1,15 +1,20 @@
 import { APICallError } from "@ai-sdk/provider";
 import { KumiError } from "../core/errors.js";
 
-const MAX_RETRY_WAIT_MS = 4_000;
+const MAX_RETRY_WAIT_MS = 30_000;
+/** How many times a model call is tried again (a busy or overloaded provider usually answers soon). */
+export const MAX_RETRIES = 3;
 
-/** Delay before the single permitted retry, or undefined when the failure is not worth retrying. */
-export function retryDelayMs(error: unknown): number | undefined {
+/**
+ * Delay before retry number `attempt` (from 0), or undefined when the failure is not worth retrying:
+ * what the provider asks for, up to 30 s, or 0.75 s, 2.25 s, 6.75 s when it doesn't say.
+ */
+export function retryDelayMs(error: unknown, attempt = 0): number | undefined {
   if (!APICallError.isInstance(error) || !error.isRetryable) return undefined;
   const headers = error.responseHeaders ?? {};
   const afterMs = Number(headers["retry-after-ms"]);
   const afterSeconds = Number(headers["retry-after"]);
-  const requested = Number.isFinite(afterMs) && afterMs > 0 ? afterMs : Number.isFinite(afterSeconds) && afterSeconds > 0 ? afterSeconds * 1000 : 750;
+  const requested = Number.isFinite(afterMs) && afterMs > 0 ? afterMs : Number.isFinite(afterSeconds) && afterSeconds > 0 ? afterSeconds * 1000 : 750 * 3 ** attempt;
   return requested <= MAX_RETRY_WAIT_MS ? Math.max(250, requested) : undefined;
 }
 

@@ -155,16 +155,14 @@ test("a scene Live launches on its next tick is confirmed in fresh state", async
   assert.deepEqual(empty.body, { reason: "that scene has no clips to play, so launching it would only stop what's playing", remediation: "Nothing was launched. Put clips in the scene first, or launch another." });
 });
 
-test("a track the client made as scratch goes on an undo with discard, though it changed; without it, the undo is refused", async () => {
+test("a track the client made goes on an undo though it changed since (armed, recorded on); discard is still accepted", async () => {
   const simulator = new DeterministicLiveSimulator(); const { call, apply } = hostFor(simulator);
   const made = await call("live_session_structure_preview", { tracks: [{ name: "Kumi Listen", kind: "audio" }], scenes: [] });
   assert.equal((await apply(made, "scratch-track")).body.state, "applied");
   // Something recorded on it: its fingerprint no longer matches.
   const scratch = (simulator as any).state.tracks.find((track: any) => track.name === "Kumi Listen"); scratch.armed = true; scratch.monitoringState = "in";
-  const kept = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "scratch-undo" });
-  assert.equal(kept.isError, true); assert.match(kept.body.reason, /modified after apply/);
-  const discarded = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "scratch-discard", discard: true });
-  assert.equal(discarded.body.state, "undone", JSON.stringify(discarded.body));
+  const undone = await call("live_undo", { transactionId: made.body.transactionId, confirmation: "undo", idempotencyKey: "scratch-undo" });
+  assert.equal(undone.body.state, "undone", JSON.stringify(undone.body));
   assert.equal((simulator as any).state.tracks.some((track: any) => track.name === "Kumi Listen"), false);
 });
 

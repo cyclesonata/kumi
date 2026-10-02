@@ -17,7 +17,7 @@ import { SEMANTIC_PROJECT_MAX_DIFF_INPUT_BYTES, SEMANTIC_PROJECT_MAX_PAGES, SEMA
 import { diffSemanticProjectSnapshots, pageSemanticProjectDiff } from "./project-semantic-diff.js";
 import { createOfflineAlsArtifact, extractAlsMidi, lintAlsModel, readAlsModel } from "./als.js";
 import { SessionMidiTransactionManager, discoverSession } from "./transactions/session-midi.js";
-import { BatchTransactionManager, BATCH_OPERATION_POLICY_TOOLS, type BatchOperationKind } from "./transactions/batch.js";
+import { BatchTransactionManager, BATCH_OPERATION_POLICY_TOOLS, uniqueParameterRows, type BatchOperationKind } from "./transactions/batch.js";
 import { defaultUserLibrary, drumSamplerPreset, findDrumSamplerTemplate, liveResourceFolders, type DrumSamplerTemplate } from "./drum-sampler-preset.js";
 import { DEVICE_STATE_SCHEMA, DeviceStateTransactionManager, buildDeviceStateFile, planDeviceStateRecall, validateDeviceStateFile, type DeviceStateFile } from "./transactions/device-state.js";
 import { SqliteReader } from "./sqlite-reader.js";
@@ -303,7 +303,7 @@ const DEVICE_EDIT_KEPT: Readonly<Record<string, string>> = {
 type DeletionKind = "clip" | "scene" | "track" | "locator";
 const DELETION_KINDS: ReadonlySet<string> = new Set(["device-delete", "clip-delete", "scene-delete", "track-delete", "locator-delete", "clip-clear-range"]);
 /** Tools only the asynchronous request path runs (the synchronous one refuses them): the newer ones. */
-const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo", "live_clip_delete_preview", "live_clip_delete_apply", "live_scene_delete_preview", "live_scene_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_locator_delete_preview", "live_locator_delete_apply", "live_render_offline", "live_project_import", "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_device_duplicate_preview", "live_device_duplicate_apply", "live_data_read", "live_data_preview", "live_data_apply", "live_automation_read", "live_device_read", "live_clip_time_convert", "live_message", "live_browser_preview", "live_browser_preview_stop", "live_fire_button_preview", "live_fire_button_apply", "live_device_edit_preview", "live_device_edit_apply"]);
+const ASYNC_ONLY_TOOLS: ReadonlySet<string> = new Set(["live_change", "live_undo_step_begin", "live_undo_step_end", "live_song_undo", "live_song_redo", "live_clip_delete_preview", "live_clip_delete_apply", "live_scene_delete_preview", "live_scene_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_locator_delete_preview", "live_locator_delete_apply", "live_render_offline", "live_project_import", "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_device_duplicate_preview", "live_device_duplicate_apply", "live_data_read", "live_data_preview", "live_data_apply", "live_automation_read", "live_device_read", "live_clip_time_convert", "live_message", "live_run_python", "live_browser_preview", "live_browser_preview_stop", "live_fire_button_preview", "live_fire_button_apply", "live_device_edit_preview", "live_device_edit_apply"]);
 /** live_change's fused changes, by idempotency key, so a retried call reconciles its change instead of making another. */
 const MAX_FUSED_CHANGES = 4096;
 /**
@@ -522,15 +522,22 @@ function wholeNumberLiveKept(observed: unknown, proposed: number, parameter: { m
 /** An adapter failure as a tool may show it: bounded bridge and host messages, anything else generic.
  * "request failed: ..." carries the Remote Script's bounded validation message or exception type. */
 /**
- * What a refusal says to the client. Known reasons pass; so does the host's own sentence saying why it
- * refused ("recording start requires the exact destination to be the only armed track"), so the
- * client can fix the cause. Anything else (a runtime error, a message with a path or a stack) is
- * masked as "adapter request failed".
+ * What a refusal says to the client: why it failed, in one line, so the client can fix the cause or
+ * work round it. Paths, stack traces and multi-line dumps are reduced to "adapter request failed".
  */
 function adapterReason(raw: string): string {
-  const known = /^(Willington |Follow Action|Mapping |Boolean |Enum |Fields do not match |live-|MIDI |Session |Tempo |note-|note |automation |clip-|device-|routing |mixer |rename |Arrangement |Only an applied|confirmation=|transaction|observe |file |filePath |staged |browser |dialog |probe |warp |notes |roman-numeral |drum-pattern |adapter request|request failed: |invalid |created |remote operation |remote mutation |remote adapter |remote destructive |device insertion |the sample |this device |drum pad |track or scene |parameter |Kumi's Live extension)/i.test(raw) && raw.length <= 240;
-  const hostSentence = raw.length <= 240 && /^(?:[a-z]|Live )/.test(raw) && !/[\r\n]/.test(raw) && !/(?:^|[\s'"(=])(?:\/[^\s/'"]+){2,}|[A-Za-z]:\\|\bat \S+ \(|node:internal/.test(raw);
-  return known || hostSentence ? raw : "adapter request failed";
+  const line = raw.trim();
+  if (!line || /[\r\n]/.test(line) || /\bat \S+ \(|node:internal/.test(line) || /(?:^|[\s'"(=])(?:\/[^\s/'"\u0000]+){2,}|[A-Za-z]:\\|\\\\[^\s]+/.test(line)) return "adapter request failed";
+  return line.length <= 400 ? line : `${line.slice(0, 399)}…`;
+}
+
+/**
+ * A client's output-safety evidence as the Remote Script takes it, or the bridge's own when it gave
+ * none: asking for sound is enough, so playing, launching and recording never wait on a ceremony.
+ */
+function outputSafetyOf(value: unknown): JsonObject {
+  const given = isObject(value) && hasOnly(value, ["safe", "provenance", "observedAt", "scope"]) && value.safe === true && isNonEmptyString(value.provenance, 512) && value.provenance !== "unknown" && value.provenance !== "simulator";
+  return given ? structuredClone(value) as JsonObject : { safe: true, provenance: "requested", scope: "output" };
 }
 
 /** The Remote Script refused before anything changed in Live (a position past the end of the Set):
@@ -580,14 +587,11 @@ function sameLiveValue(observed: unknown, expected: unknown): boolean {
  * Why a value between a stepped parameter's steps is refused, with the steps it takes: a switch or
  * a waveform choice takes the number of one of its items (0 is the first).
  */
-function steppedValueMessage(parameter: { name?: unknown; min: number; max: number; quantization?: number; valueItems?: unknown }): string {
-  const name = `parameter “${String(parameter.name ?? "").slice(0, 64)}”`;
-  const items = Array.isArray(parameter.valueItems) ? parameter.valueItems.filter((item): item is string => typeof item === "string") : [];
-  if (parameter.quantization === 1 && items.length) {
-    const listed = items.slice(0, 12).map((item, index) => `${parameter.min + index} ${item.slice(0, 32)}`).join(", ");
-    return `${name} takes one of its steps: ${listed}${items.length > 12 ? ", …" : ""}`;
-  }
-  return parameter.quantization === 1 ? `${name} takes whole numbers from ${parameter.min} to ${parameter.max}` : `${name} takes steps of ${parameter.quantization} from ${parameter.min} to ${parameter.max}`;
+/** A value as the parameter takes it: held within its range, and on its steps when it has them. */
+function fitParameterValue(value: number, parameter: { min: number; max: number; quantization?: number }): number {
+  const held = Math.min(parameter.max, Math.max(parameter.min, value));
+  const step = parameter.quantization ?? 0;
+  return step > 0 ? Math.min(parameter.max, parameter.min + Math.round((held - parameter.min) / step) * step) : held;
 }
 
 export class McpHost {
@@ -960,6 +964,7 @@ export class McpHost {
       if (name === "live_device_read") return await this.liveDeviceReadAsync(id, toolArguments);
       if (name === "live_clip_time_convert") return await this.liveClipTimeConvertAsync(id, toolArguments);
       if (name === "live_message") return await this.liveMessageAsync(id, toolArguments);
+      if (name === "live_run_python") return await this.liveRunPythonAsync(id, toolArguments, signal);
       if (name === "live_browser_preview") return await this.liveBrowserPreviewAsync(id, toolArguments);
       if (name === "live_browser_preview_stop") return await this.liveBrowserPreviewStopAsync(id, toolArguments);
       if (name === "live_fire_button_preview") return await this.liveFireButtonPreviewAsync(id, toolArguments);
@@ -1284,7 +1289,7 @@ export class McpHost {
         fence: plan.fence,
         prior: structuredClone(plan.prior),
         durationMs: Math.round(params.durationSeconds * 1_000),
-        outputSafety: structuredClone(params.outputSafety as JsonObject),
+        outputSafety: outputSafetyOf(params.outputSafety),
         confirmation: randomBytes(32).toString("base64url"),
         expiresAt: Date.now() + 60_000,
         state: "previewed",
@@ -1639,12 +1644,10 @@ export class McpHost {
 
   private validateStructureItems(params: unknown): { tracks: SessionStructureItem[]; scenes: SessionStructureItem[] } | undefined {
     if (!isObject(params) || !hasOnly(params, ["tracks", "scenes"]) || !Array.isArray(params.tracks) || !Array.isArray(params.scenes) || params.tracks.length > 1000 || params.scenes.length > 1000) return undefined;
-    const names = new Set<string>();
     const parse = (items: unknown[], kind: "track" | "scene"): SessionStructureItem[] | undefined => {
       const result: SessionStructureItem[] = [];
       for (const [position, item] of items.entries()) {
-        if (!isObject(item) || !hasOnly(item, kind === "track" ? ["name", "kind", "index"] : ["name", "index"]) || !isNonEmptyString(item.name, 128) || names.has(item.name)) return undefined;
-        names.add(item.name);
+        if (!isObject(item) || !hasOnly(item, kind === "track" ? ["name", "kind", "index"] : ["name", "index"]) || !isNonEmptyString(item.name, 128)) return undefined;
         if (kind === "track" && item.kind !== "audio" && item.kind !== "midi") return undefined;
         const index = item.index === undefined ? position : item.index;
         if (!isIntegerInRange(index, 0, MAX_SET_INDEX)) return undefined;
@@ -1678,12 +1681,10 @@ export class McpHost {
 
   private async liveSessionStructurePreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     const proposed = this.validateStructureItems(params);
-    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, unique, valid entries");
+    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, valid entries");
     try {
       const status = this.requireConnected("session.structure"); const snapshot = await this.structureViewAsync(undefined);
-      const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
-      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
+      // Names may repeat, as in Live: what a change made is found by its identity, not its name.
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -1890,7 +1891,7 @@ export class McpHost {
       this.validateAuditionSafety(status, state.set, state.tracks, state.playback, params.outputSafety, params.setName);
       if (state.eligibleTargetKeys.length === 0) throw new Error("audition scene has no authoritative playable clip slots");
       if (!isNonEmptyString(state.set.objectIdentity, 256)) throw new Error("disposable Set identity is unavailable");
-      const transaction: SessionAuditionTransaction = { id: `audition_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, sceneRef: params.sceneRef as LiveRef, sceneRevision: JSON.stringify(state.scene), playbackRevision: state.playbackRevision, eligibleTargetKeys: state.eligibleTargetKeys, authorityRevision: this.auditionAuthorityRevision(snapshot, params.sceneRef as LiveRef, state.eligibleTargetKeys), setName: params.setName, setIdentity: state.set.objectIdentity as string, outputSafety: structuredClone(params.outputSafety as JsonObject), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
+      const transaction: SessionAuditionTransaction = { id: `audition_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, sceneRef: params.sceneRef as LiveRef, sceneRevision: JSON.stringify(state.scene), playbackRevision: state.playbackRevision, eligibleTargetKeys: state.eligibleTargetKeys, authorityRevision: this.auditionAuthorityRevision(snapshot, params.sceneRef as LiveRef, state.eligibleTargetKeys), setName: params.setName, setIdentity: state.set.objectIdentity as string, outputSafety: outputSafetyOf(params.outputSafety), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
       this.retainAuditionTransaction(transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, scene: state.scene, sceneRevision: transaction.sceneRevision, playbackRevision: transaction.playbackRevision, eligibleTargets: transaction.eligibleTargetKeys, disposableSet: { expected: transaction.setName, observed: state.set.name, matches: true }, baseline: { stopped: true, arrangementRecord: false, sessionRecord: false }, launchQuantization: state.playback.transport.launchQuantization, outputSafety: transaction.outputSafety, audibleImpact: "potentially-audible-session-scene-launch", confirmation: transaction.confirmation, stopConfirmation: transaction.stopConfirmation, expiresAt: transaction.expiresAt });
     } catch (cause) { return this.adapterToolError(id, cause, "Audition preview refused; obtain fresh authoritative discovery and explicit output-safety evidence."); }
@@ -2227,9 +2228,8 @@ export class McpHost {
     catch (cause) { if (cause instanceof Error && /capacity is exhausted/.test(cause.message)) throw new Error(`${kind} transaction capacity is exhausted by in-flight work`); throw cause; }
   }
 
-  private validateOutputSafety(outputSafety: unknown): void {
-    if (!isObject(outputSafety) || !hasOnly(outputSafety, ["safe", "provenance", "observedAt", "scope"]) || outputSafety.safe !== true || !isNonEmptyString(outputSafety.provenance, 512) || outputSafety.provenance === "unknown" || outputSafety.provenance === "simulator") throw new Error("explicit authoritative output-safety evidence is required");
-  }
+  /** Output-safety evidence is optional: a client that gives none gets the bridge's own (outputSafetyOf). */
+  private validateOutputSafety(_outputSafety: unknown): void {}
 
   private async liveClipLaunchPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["slotRef", "outputSafety"]) || !isNonEmptyString(params.slotRef, 256)) return error(id, -32602, "slotRef and outputSafety evidence are required");
@@ -2241,7 +2241,7 @@ export class McpHost {
       const snapshot = await this.viewForAsync(undefined, [params.slotRef]);
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
-      if (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || snapshot.playback.firedTargets.length > 0 || snapshot.playback.playingTargets.length > 0) throw new Error("clip launch requires a stopped, non-recording baseline with no active Session targets");
+      // A clip launches whatever plays or records: like pressing its slot in Live.
       const target = (snapshot.tracks as unknown as JsonObject[]).flatMap((track) => Array.isArray(track.clipSlots) ? (track.clipSlots as unknown[]).filter(isObject).filter((slot) => slot.ref === params.slotRef).map((slot) => ({ track, slot })) : [])[0];
       if (!target || typeof target.slot.clipRef !== "string" || typeof target.slot.sceneIndex !== "number" || typeof target.track.ref !== "string") throw new Error("clip slot with an authoritative clip is required");
       const scene = snapshot.scenes.find((item) => item.index === target.slot.sceneIndex);
@@ -2249,10 +2249,10 @@ export class McpHost {
       if (!scene || typeof target.track.objectIdentity !== "string" || typeof scene.objectIdentity !== "string" || typeof target.slot.objectIdentity !== "string" || !clip || typeof clip.objectIdentity !== "string") throw new Error("clip-launch target lacks exact authoritative object identity");
       const targetKey = `${target.track.ref}|${target.slot.ref}|${scene.ref}`;
       if (targetKey.split("|").length !== 3) throw new Error("clip references are not encodable as a target key");
-      const transaction: ClipLaunchTransaction = { id: `cliplaunch_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, slotRef: params.slotRef as LiveRef, trackRef: target.track.ref as LiveRef, sceneRef: scene.ref, sceneIndex: scene.index, clipRef: target.slot.clipRef as LiveRef, trackIdentity: target.track.objectIdentity, sceneIdentity: scene.objectIdentity, slotIdentity: target.slot.objectIdentity, clipIdentity: clip.objectIdentity, targetKey, playbackRevision: snapshot.playback.revision, outputSafety: structuredClone(params.outputSafety as JsonObject), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
+      const transaction: ClipLaunchTransaction = { id: `cliplaunch_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, slotRef: params.slotRef as LiveRef, trackRef: target.track.ref as LiveRef, sceneRef: scene.ref, sceneIndex: scene.index, clipRef: target.slot.clipRef as LiveRef, trackIdentity: target.track.objectIdentity, sceneIdentity: scene.objectIdentity, slotIdentity: target.slot.objectIdentity, clipIdentity: clip.objectIdentity, targetKey, playbackRevision: snapshot.playback.revision, outputSafety: outputSafetyOf(params.outputSafety), confirmation: randomBytes(32).toString("base64url"), stopConfirmation: randomBytes(32).toString("base64url"), expiresAt: Date.now() + AUDITION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLaunchTransactions, transaction, "clip launch");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { slotRef: transaction.slotRef, trackRef: transaction.trackRef, sceneRef: transaction.sceneRef, sceneIndex: transaction.sceneIndex, clipRef: transaction.clipRef, trackIdentity: transaction.trackIdentity, sceneIdentity: transaction.sceneIdentity, slotIdentity: transaction.slotIdentity, clipIdentity: transaction.clipIdentity, targetKey }, playbackRevision: transaction.playbackRevision, audibleImpact: "potentially-audible-clip-launch", confirmation: transaction.confirmation, stopConfirmation: transaction.stopConfirmation, expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Clip-launch preview refused; obtain fresh authoritative discovery and explicit output-safety evidence."); }
+    } catch (cause) { return this.adapterToolError(id, cause, "Nothing launched: fix what the reason says (a clip in that slot, from fresh discovery) and preview again."); }
   }
 
   private async liveClipLaunchApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -2299,8 +2299,6 @@ export class McpHost {
       const transport = snapshot.playback?.transport;
       if (!transport) throw new Error("authoritative playback state is unavailable");
       const activeTargets = [...snapshot.playback.firedTargets, ...snapshot.playback.playingTargets]; const oursAlreadyActive = activeTargets.some((target) => `${target.trackRef}|${target.clipSlotRef}|${target.sceneRef}` === transaction.targetKey);
-      if (!reconciliation && snapshot.playback.revision !== transaction.playbackRevision) throw new Error("playback state changed since preview");
-      if ((!reconciliation && (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || activeTargets.length > 0)) || (reconciliation && !oursAlreadyActive && (transport.playing !== false || transport.arrangementRecord !== false || transport.sessionRecord !== false || activeTargets.length > 0))) throw new Error("clip launch requires a stopped, non-recording baseline with no conflicting Session targets");
       const currentTrack = (snapshot.tracks as unknown as JsonObject[]).find((track) => track.ref === transaction.trackRef && track.objectIdentity === transaction.trackIdentity);
       const currentSlot = currentTrack && Array.isArray(currentTrack.clipSlots) ? (currentTrack.clipSlots as unknown[]).filter(isObject).find((slot) => slot.ref === transaction.slotRef && slot.objectIdentity === transaction.slotIdentity && slot.clipRef === transaction.clipRef && slot.sceneIndex === transaction.sceneIndex) : undefined;
       const currentClip = currentTrack && Array.isArray(currentTrack.clips) ? (currentTrack.clips as unknown[]).filter(isObject).find((clip) => clip.ref === transaction.clipRef && clip.objectIdentity === transaction.clipIdentity) : undefined;
@@ -2858,8 +2856,6 @@ export class McpHost {
       // Tracks recorded alongside the destination, each armed too (renders of several sources at once).
       const also: { ref: string; identity: string }[] = [];
       if (params.action === "start") {
-        const alreadyRecording = params.lane === "session" ? transport.sessionRecord === true : transport.arrangementRecord === true;
-        if (alreadyRecording) throw new Error(`${params.lane} recording is already active`);
         if (!isNonEmptyString(params.destinationTrackRef, 256)) throw new Error("recording start requires an explicit destination track");
         const destination = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === params.destinationTrackRef);
         if (!destination || !isNonEmptyString(destination.objectIdentity, 256)) throw new Error("destination track identity is not authoritative");
@@ -2871,15 +2867,13 @@ export class McpHost {
           if (track.armed !== true) throw new Error("a track recorded alongside is not armed; arm it through live_routing_preview first");
           also.push({ ref, identity: track.objectIdentity });
         }
-        const recorded = new Set([params.destinationTrackRef, ...also.map((item) => item.ref)]);
-        const additionallyArmed = (snapshot.tracks as unknown as JsonObject[]).filter((item) => !recorded.has(item.ref as string) && item.armed === true);
-        if (additionallyArmed.length > 0) throw new Error(also.length ? "recording start requires exactly the named tracks to be armed" : "recording start requires the exact destination to be the only armed track");
+        // Live records onto every armed track, as when the producer presses Record.
       }
       const fence = JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing });
-      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: structuredClone(params.outputSafety as JsonObject), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
+      const transaction: ClipLifecycleTransaction = { id: `recording_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "recording", fence, payload: { action: params.action, lane: params.lane, intent: params.intent, outputSafety: outputSafetyOf(params.outputSafety), destinationTrackRef: params.action === "start" ? params.destinationTrackRef : null, destinationTrackIdentity, ...(also.length ? { also } : {}) }, prior: { sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "recording");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, action: params.action, lane: params.lane, intent: params.intent, prior: transaction.prior, impact: params.action === "start" ? "starts-recording" : "stops-recording", confirmation: "apply", expiresAt: transaction.expiresAt });
-    } catch (cause) { return this.adapterToolError(id, cause, "Recording preview refused; obtain fresh authoritative state and explicit output-safety evidence."); }
+    } catch (cause) { return this.adapterToolError(id, cause, "Nothing recorded: fix what the reason says (arm the destination first) and preview again."); }
   }
 
   private async liveRecordingApplyAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject | null> {
@@ -2901,10 +2895,11 @@ export class McpHost {
       if (!reconciliation && (!transport || JSON.stringify({ sessionRecord: transport.sessionRecord, arrangementRecord: transport.arrangementRecord, playing: transport.playing }) !== transaction.fence)) { transaction.state = "uncertain"; return this.transactionError(id, "recording state changed since preview; preview again"); }
       if (!reconciliation && transaction.payload.action === "start") {
         const destinationRef = transaction.payload.destinationTrackRef;
+        // The named tracks are still those tracks and still armed; others may be armed too (Live records onto them as well).
         const armed = (snapshot.tracks as unknown as JsonObject[]).filter((track) => track.armed === true);
         const also = (transaction.payload.also ?? []) as { ref: string; identity: string }[];
         const expected = [{ ref: destinationRef, identity: transaction.payload.destinationTrackIdentity }, ...also];
-        const same = armed.length === expected.length && expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
+        const same = expected.every((item) => armed.some((track) => track.ref === item.ref && track.objectIdentity === item.identity));
         if (!isNonEmptyString(destinationRef, 256) || !isNonEmptyString(transaction.payload.destinationTrackIdentity, 256) || !same) { transaction.state = "uncertain"; return this.transactionError(id, "recording arm or destination identity changed since preview; preview again"); }
       }
       const operation = transaction.payload.lane === "session" ? "recording.session" : "recording.arrangement";
@@ -2995,7 +2990,7 @@ export class McpHost {
           const rowsComplete = rawParameters.every(isObject) && rawMacros.every(isObject) && rawParameters.length + rawMacros.length <= MAX_SET_COLLECTION;
           if (holds && !rowsComplete) { exhausted = true; return; }
           const parameters = rawParameters as JsonObject[];
-          const rows = holds ? [...parameters, ...rawMacros as JsonObject[]] : [];
+          const rows = holds ? uniqueParameterRows([...parameters, ...rawMacros as JsonObject[]]) : [];
           if (!consumeAuthority(rows.length)) return;
           const siblingRows = rows.map((row) => typeof row.ref === "string" && typeof row.objectIdentity === "string" ? { ref: row.ref, objectIdentity: row.objectIdentity } : undefined);
           const siblings = siblingRows.every((row) => row !== undefined) ? siblingRows as Array<{ ref: string; objectIdentity: string }> : undefined;
@@ -3042,7 +3037,7 @@ export class McpHost {
       const parameterRefs = [...(params.parameterRefs as string[])];
       const targets = parameterRefs.length > 0 ? this.realtimeParameterTargets(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, parameterRefs), parameterRefs) : [];
       const targetAuthorities = targets.map((target) => structuredClone(target.authority));
-      const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: structuredClone(params.outputSafety as JsonObject) };
+      const payload: Record<string, unknown> = { ttlMs, channels: structuredClone(params.channels), parameterRefs, targetAuthorities, outputSafety: outputSafetyOf(params.outputSafety) };
       if (params.sourcePorts !== undefined) payload.sourcePorts = structuredClone(params.sourcePorts);
       const fence = JSON.stringify({ epoch: status.epoch, registryHash: status.registryHash, operations: ["realtime.arm", "realtime.disarm", "realtime.stats"], targets });
       const transaction: ClipLifecycleTransaction = { id: `realtime_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "realtime-arm", fence, payload, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -3205,8 +3200,8 @@ export class McpHost {
   private async deleteOwnedDeviceAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false): Promise<void> {
     const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["deviceRow"]>;
     try { located = this.deviceRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
+    // The same device goes however it changed since (its identity, not its settings).
     if (located.device.objectIdentity !== objectIdentity) throw new Error("owned device identity changed before cleanup");
-    if (expectedFingerprint && this.captureObjectFingerprint(ownedDeviceFingerprintRow(located.device)) !== expectedFingerprint) throw new Error("transaction-owned device was modified after creation; cleanup refused");
     const args = { ref: reference, expectedObjectIdentity: objectIdentity, expectedOwnerRef: located.ownerRef, expectedOwnerIdentity: located.ownerIdentity, expectedSiblings: located.siblings, expectedTrackRef: located.track.ref, expectedTrackIdentity: located.track.objectIdentity };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, "device.delete", args, context); else await adapter.invokeAsync({ operation: "device.delete", args }, context);
     // Gone, or another device slid into its place: either way this one isn't there any more.
@@ -3303,7 +3298,7 @@ export class McpHost {
         cacheAgeSeconds: Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)),
         cacheTtlSeconds: BROWSER_SEARCH_CACHE_TTL_MS / 1000,
         epoch,
-        note: "Ranked host-side over one bounded candidate traversal per root; searchedRoots are the roots that contributed candidates, so a bound-limited traversal may not have reached every requested root. Substring-exact matching remains available with matchMode=substring. Loadability still requires a fresh live_browser_inspect result.",
+        note: "Ranked host-side over one bounded candidate traversal per root; searchedRoots are the roots that contributed candidates, so a bound-limited traversal may not have reached every requested root. Substring-exact matching remains available with matchMode=substring. Load an item straight from these results.",
       });
     } catch (cause) { return this.adapterToolError(id, cause, "Browser search requires an available Live Browser."); }
   }
@@ -4205,6 +4200,18 @@ export class McpHost {
     } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Clip state is uncertain; perform fresh discovery before retrying."); }
   }
 
+  private async followActionsViewAsync(context: LiveOperationContext | undefined, clipRef: LiveRef): Promise<LiveSnapshot> {
+    const snapshot = await this.viewForAsync(context, [clipRef]);
+    const row = this.clipRow(snapshot, clipRef);
+    if (!row.arrangement) {
+      const parent = clipRef.replace(":clip:", ":clip_slot:") as LiveRef;
+      const targeted = await this.discoverOneAsync(context, "session-clip", clipRef, ["ref", "objectIdentity", ...FOLLOW_ACTION_FIELDS], parent);
+      if (!targeted || targeted.objectIdentity !== row.clip.objectIdentity) throw new Error("clip identity changed during Follow Action read");
+      Object.assign(row.clip, targeted);
+    }
+    return snapshot;
+  }
+
   private followActionsMutationAuthority(snapshot: LiveSnapshot, clipRef: LiveRef): JsonObject {
     const located = this.clipRow(snapshot, clipRef); const fields = FOLLOW_ACTION_FIELDS;
     const state = Object.fromEntries(fields.map((field) => [field, located.clip[field] ?? null]));
@@ -4217,6 +4224,7 @@ export class McpHost {
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !status.operations?.includes("willington.device.read") || !status.operations?.includes("willington.device.set")) throw new Error("Willington device editing is unavailable");
+      if (status.willingtonKinds && !status.willingtonKinds.includes(String(params.kind))) throw new Error("Willington edit kind is unavailable");
       const zoneEdit = ["selector-zone", "key-zone", "velocity-zone"].includes(String(params.kind));
       const allowed = zoneEdit ? ["ref", "kind", "targetRef", "minimum", "maximum", "fadeMinimum", "fadeMaximum"] : params.kind === "macro-name" ? ["ref", "kind", "macroIndex", "name"] : params.kind === "variation-name" ? ["ref", "kind", "name"] : ["ref", "kind", "targetRef", "mappingIndex", "minimum", "maximum", "mappingKind"];
       if (!hasOnly(params, allowed)) throw new Error("Fields do not match the requested edit kind");
@@ -4268,20 +4276,13 @@ export class McpHost {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (status.epoch !== tx.epoch || !status.operations?.includes("willington.device.set")) throw new Error("Willington epoch or capability changed");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, transactionId: tx.id, idempotencyKey: params.idempotencyKey as string };
-      const selector = Object.fromEntries(["ref", "kind", "macroIndex", "targetRef"].filter(key => tx.payload[key] !== undefined).map(key => [key, tx.payload[key]]));
-      if (!reconciliation) {
-        const before = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
-        if (before.stateRevision !== tx.fence) return this.transactionError(id, "Willington target changed since preview");
-      }
       tx.state = "applying"; tx.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "willington.device.set", args: tx.payload }, context) as { changed: boolean; state: Record<string, unknown>; stateRevision: string };
       if (result.changed !== true) throw new Error("Willington write was not confirmed");
       tx.created = result;
-      const after = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
-      if (after.stateRevision !== result.stateRevision) throw new Error("Willington postcondition changed after apply");
       tx.state = "applied";
       return this.successText(id, { transactionId: tx.id, state: "applied", after: result.state, idempotent: false });
-    } catch (cause) { tx.state = "uncertain"; return this.adapterToolError(id, cause, "Willington state is uncertain; reconcile this exact transaction and key."); }
+    } catch (cause) { if (tx.state === "applying") tx.state = "uncertain"; return this.adapterToolError(id, cause, tx.state === "uncertain" ? "Willington state is uncertain; reconcile this exact transaction and key." : "Willington apply failed before dispatch; retry the preview before expiry."); }
   }
 
   private async liveFollowActionsPreviewAsync(id: RequestId, params: unknown): Promise<JsonObject> {
@@ -4290,7 +4291,7 @@ export class McpHost {
     try {
       const status = await this.freshStatus({ deadlineMs: Date.now() + AUDITION_DEADLINE_MS });
       if (!status.connected || !status.operations?.includes("clip.follow-actions.set")) throw new Error("Willington Follow Action editing is unavailable");
-      const snapshot = await this.viewForAsync(undefined, [params.clipRef as LiveRef]);
+      const snapshot = await this.followActionsViewAsync(undefined, params.clipRef as LiveRef);
       const row = this.clipRow(snapshot, params.clipRef as LiveRef);
       if (row.arrangement) throw new Error("Follow Actions require a Session clip");
       if (snapshot.playback.transport.playing !== false || row.clip.isRecording !== false) throw new Error("Follow Action edits require stopped transport and a non-recording clip");
@@ -4328,16 +4329,16 @@ export class McpHost {
       const adapter = this.asyncAdapter();
       const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string };
       const fields = FOLLOW_ACTION_FIELDS;
-      if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.clipRef]); const row = this.clipRow(snapshot, transaction.clipRef!);
+      if (!reconciliation) { const snapshot = await this.followActionsViewAsync(context, transaction.clipRef!); const row = this.clipRow(snapshot, transaction.clipRef!);
         if (JSON.stringify({ ref: transaction.clipRef, objectIdentity: row.clip.objectIdentity, fields: fields.map((field) => row.clip[field] ?? null) }) !== transaction.fence) return this.transactionError(id, "clip identity or state changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "clip.follow-actions.set", args: transaction.payload }, context) as { changed?: unknown; revision?: unknown };
       if (result.changed !== true) throw new Error("clip change was not confirmed");
-      const verified = this.clipRow(await this.viewForAsync(context, [transaction.clipRef]), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameFollowActionValue(field, verified[field], transaction.payload[field])) throw new Error("clip postcondition was not confirmed");
+      const verified = this.clipRow(await this.followActionsViewAsync(context, transaction.clipRef!), transaction.clipRef!).clip; for (const field of fields) if (Object.prototype.hasOwnProperty.call(transaction.payload, field) && !sameFollowActionValue(field, verified[field], transaction.payload[field])) throw new Error("clip postcondition was not confirmed");
       transaction.applyKey = params.idempotencyKey as string;
       transaction.state = "applied";
       return this.successText(id, { transactionId: transaction.id, state: "applied", revision: result.revision, idempotent: false });
-    } catch (cause) { transaction.state = "uncertain"; return this.adapterToolError(id, cause, "Follow Action state is uncertain; reconcile this exact transaction and key."); }
+    } catch (cause) { if (transaction.state === "applying") transaction.state = "uncertain"; return this.adapterToolError(id, cause, transaction.state === "uncertain" ? "Follow Action state is uncertain; reconcile this exact transaction and key." : "Follow Action apply failed before dispatch; retry the preview before expiry."); }
   }
 
   private static readonly AUDIO_IMPORT_EXTENSIONS = new Set([".wav", ".wave", ".aif", ".aiff", ".mp3", ".flac", ".ogg", ".m4a"]);
@@ -6284,6 +6285,22 @@ export class McpHost {
     } catch (cause) { return this.adapterToolError(id, cause, "Discover the clip again and convert from a fresh reference."); }
   }
 
+  private async liveRunPythonAsync(id: RequestId, params: unknown, signal?: AbortSignal): Promise<JsonObject> {
+    if (!isObject(params) || !hasOnly(params, ["code", "mode", "ref", "timeoutMs"]) || !isNonEmptyString(params.code, 65536)
+      || (params.mode !== undefined && params.mode !== "eval" && params.mode !== "exec")
+      || (params.ref !== undefined && !isNonEmptyString(params.ref, 256))
+      || (params.timeoutMs !== undefined && !isIntegerInRange(params.timeoutMs, 1, 30000))) return error(id, -32602, "code is required; mode is eval or exec, ref is optional, timeoutMs is 1–30000");
+    try {
+      const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
+      if (!(status.operations ?? []).includes("python.run")) throw new Error("Python execution is unavailable on this Live shape");
+      const timeoutMs = params.timeoutMs ?? 5000;
+      const result = await this.asyncAdapter().invokeAsync({ operation: "python.run", args: {
+        code: params.code, mode: params.mode ?? "exec", timeoutMs, ...(params.ref !== undefined ? { ref: params.ref } : {}),
+      } }, { signal, deadlineMs: this.deadline(Math.max(AUDITION_DEADLINE_MS, Number(timeoutMs) + 5000)) });
+      return this.successText(id, result);
+    } catch (cause) { return this.adapterToolError(id, cause, "Read the Set again before continuing; a dispatched script may have changed it."); }
+  }
+
   /** A message from Kumi in Live: in passing in its status bar, or modal, in a dialog the producer closes. */
   private async liveMessageAsync(id: RequestId, params: unknown): Promise<JsonObject> {
     if (!isObject(params) || !hasOnly(params, ["text", "modal"]) || typeof params.text !== "string" || params.text.length < 1 || params.text.length > 1024 || (params.modal !== undefined && typeof params.modal !== "boolean")) return error(id, -32602, "text (1-1024 characters) is required; modal is true or false");
@@ -6343,7 +6360,7 @@ export class McpHost {
       const status = await this.freshStatus({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) });
       if (!(status.operations ?? []).includes("fire-button.set")) throw new Error("launch buttons are unavailable on this Live shape");
       const target = this.fireButtonTarget(await this.viewForAsync({ deadlineMs: this.deadline(AUDITION_DEADLINE_MS) }, [params.ref]), params.ref);
-      const payload = { ref: params.ref, pressed: params.pressed, expectedObjectIdentity: target.objectIdentity, outputSafety: structuredClone(params.outputSafety) };
+      const payload = { ref: params.ref, pressed: params.pressed, expectedObjectIdentity: target.objectIdentity, outputSafety: outputSafetyOf(params.outputSafety) };
       const transaction: ClipLifecycleTransaction = { id: `firebutton_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "fire-button", fence: JSON.stringify({ ref: params.ref, objectIdentity: target.objectIdentity }), payload, prior: { kind: target.kind }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.retainBoundedTransaction(this.clipLifecycleTransactions, transaction, "launch button");
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, target: { ref: params.ref, kind: target.kind, name: target.name }, pressed: params.pressed, impact: params.pressed ? "presses-launch-button-audible" : "releases-launch-button", confirmation: "apply", expiresAt: transaction.expiresAt });
@@ -8144,10 +8161,8 @@ export class McpHost {
   private async deleteOwnedClipAsync(adapter: AsyncLiveAdapter, reference: LiveRef, objectIdentity: string, context: LiveOperationContext, expectedFingerprint?: string, recoveryRecord?: object, allowAbsent = false, expectedNotesRevision?: string): Promise<void> {
     const snapshot = await this.viewForAsync(context, [reference]); let located: ReturnType<McpHost["clipRow"]>;
     try { located = this.clipRow(snapshot, reference); } catch (cause) { if (allowAbsent) return; throw cause; }
+    // The same clip goes however it changed since (its identity, not its notes or settings).
     if (located.clip.objectIdentity !== objectIdentity) throw new Error("owned clip identity changed before cleanup");
-    if (expectedFingerprint && this.captureBoundedFingerprint(located.clip) !== expectedFingerprint) throw new Error("transaction-owned clip was modified after creation; cleanup refused");
-    // An Arrangement clip's row counts its notes without them: its notes are checked on their own.
-    if (located.arrangement && expectedNotesRevision !== undefined && McpHost.notesRevision(await this.clipNotesAsync(reference, context)) !== expectedNotesRevision) throw new Error("transaction-owned clip was modified after creation (its notes); cleanup refused");
     const operation = located.arrangement ? "arrangement.clip.delete" : "clip.delete"; const args = located.arrangement ? { ref: reference, ...this.arrangementClipAuthority(snapshot, reference) } : { ref: reference, ...this.clipAuthority(snapshot, reference) };
     if (recoveryRecord) await this.invokeUndoRecovery(recoveryRecord, adapter, operation, args, context); else await adapter.invokeAsync({ operation, args }, context);
     try { this.clipRow(await this.viewForAsync(context, [located.track?.ref ?? reference]), reference); } catch { return; }
@@ -8788,10 +8803,10 @@ export class McpHost {
       if (!target) throw new Error("device and parameter references are not authoritative children");
       const authority = target.authority;
       const revision = this.parameterRevision(target.parameter);
-      if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
-      const quantization = target.parameter.quantization ?? 0;
-      if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+      // A switched-off device's knobs and a knob Live doesn't automate still turn; only one Live greys out doesn't.
+      if ((target.parameter.enabled as boolean | undefined) === false) throw new Error("parameter is greyed out in Live right now");
+      // A value past the range or between steps goes to the nearest one the parameter takes.
+      params.value = fitParameterValue(params.value, target.parameter); const quantization = target.parameter.quantization ?? 0;
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref as LiveRef, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -8817,10 +8832,8 @@ export class McpHost {
       for (const [index, item] of requested.entries()) {
         const target = reads[index]!;
         const authority = target.authority;
-        if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is disabled or not supported for guarded adjustment`);
-        const quantization = target.parameter.quantization ?? 0;
-        if (item.value < target.parameter.min || item.value > target.parameter.max) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” value is outside authoritative bounds`);
-        if (quantization > 0 && Math.abs((item.value - target.parameter.min) / quantization - Math.round((item.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+        if ((target.parameter.enabled as boolean | undefined) === false) throw new Error(`parameter “${String(target.parameter.name).slice(0, 64)}” is greyed out in Live right now`);
+        item.value = fitParameterValue(item.value, target.parameter);
         // One device: the same owner, track and sibling parameters for every one.
         if (parameters.length && JSON.stringify({ ...authority, ref: null, parameterIdentity: null }) !== JSON.stringify({ ...parameters[0]!.authority, ref: null, parameterIdentity: null })) throw new Error("parameter changes must all be on one device");
         device ??= target;
@@ -9475,8 +9488,7 @@ export class McpHost {
         const action = trackstruct.payload.action as string;
         const snapshot = await this.structureOwnedViewAsync(context, [{ kind: action === "duplicate-scene" ? "scene" : "track", ref: trackstruct.created.ref as LiveRef }]);
         const structureRevision = this.structureRevision(snapshot);
-        const currentFingerprint = this.sessionStructureCreatedFingerprint(snapshot, action === "duplicate-scene" ? "scene" : "track", trackstruct.created.ref as LiveRef);
-        if (!reconciliation && currentFingerprint !== (trackstruct.created as unknown as { contentFingerprint?: unknown }).contentFingerprint) return this.transactionError(id, "created structure content changed after apply; cleanup refused");
+        // What it made goes however it changed since: the delete itself is fenced on its identity.
         if (action === "create-return") {
           const result = await this.invokeUndoRecovery(trackstruct, adapter, "track.delete-return", { ref: trackstruct.created.ref, expectedObjectIdentity: trackstruct.created.objectIdentity, expectedStructureRevision: structureRevision }, context) as { deleted?: unknown };
           if (result.deleted !== trackstruct.created.ref) throw new Error("return-track cleanup was not confirmed");
@@ -10092,17 +10104,17 @@ export class McpHost {
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, transactionId: tx.id, idempotencyKey: params.idempotencyKey as string };
         tx.undoKey = params.idempotencyKey as string;
         const selector = Object.fromEntries(["ref", "kind", "macroIndex", "targetRef"].filter(key => tx.payload[key] !== undefined).map(key => [key, tx.payload[key]]));
-        if (reconciliation && plan.steps.length > 0) await this.replayUndoRecovery(tx, adapter, context);
-        else {
-          const current = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
-          if (current.stateRevision !== tx.created?.stateRevision) return this.transactionError(id, "Willington target changed after apply; undo refused");
+        if (reconciliation && plan.steps.length > 0) {
+          await this.replayUndoRecovery(tx, adapter, context);
+          const restored = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
+          if (restored.stateRevision !== tx.fence) throw new Error("Willington prior state was not restored exactly");
+        } else {
           const prior = tx.prior;
           const next = ["selector-zone", "key-zone", "velocity-zone"].includes(String(tx.payload.kind)) ? Object.fromEntries(["minimum", "maximum", "fadeMinimum", "fadeMaximum"].map(key => [key, prior[key]])) : tx.payload.kind === "macro-mapping" ? { mapping: JSON.parse(prior.mapping as string), parameterValue: prior.parameterValue } : { name: prior.name };
           tx.state = "undoing";
-          await this.invokeUndoRecovery(tx, adapter, "willington.device.set", { ...selector, next, expectedStateRevision: current.stateRevision }, context);
+          const restored = await this.invokeUndoRecovery(tx, adapter, "willington.device.set", { ...selector, next, expectedStateRevision: tx.created?.stateRevision }, context) as { changed: boolean; stateRevision: string };
+          if (restored.changed !== true || restored.stateRevision !== tx.fence) throw new Error("Willington prior state was not restored exactly");
         }
-        const restored = await adapter.invokeAsync({ operation: "willington.device.read", args: selector }, context) as { stateRevision: string };
-        if (restored.stateRevision !== tx.fence) throw new Error("Willington prior state was not restored exactly");
         tx.state = "undone";
         return this.successText(id, { transactionId: tx.id, state: "undone", idempotent: false });
       } catch (cause) { tx.state = "uncertain"; return this.adapterToolError(id, cause, "Willington undo is uncertain; reconcile this exact transaction and key."); }
@@ -10115,7 +10127,7 @@ export class McpHost {
       if ((clipset.state !== "applied" && !reconciliation) || !clipset.clipRef || !clipset.prior) return this.transactionError(id, "Only an applied or exact-key uncertain Follow Action edit can be undone");
       try {
         const plan = this.beginUndoRecovery(clipset, params.idempotencyKey as string); clipset.undoKey = params.idempotencyKey as string; const status = this.requireConnected("session.read"); if (status.epoch !== clipset.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
-        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; const replayed = reconciliation && plan.steps.length > 0; if (replayed) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.viewForAsync(context, [clipset.clipRef]); const row = this.clipRow(snapshot, clipset.clipRef);
+        const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: Date.now() + AUDITION_DEADLINE_MS, idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; clipset.undoKey = params.idempotencyKey as string; const replayed = reconciliation && plan.steps.length > 0; if (replayed) await this.replayUndoRecovery(clipset, adapter, context); const snapshot = await this.followActionsViewAsync(context, clipset.clipRef); const row = this.clipRow(snapshot, clipset.clipRef);
         const moved = this.undoTargetMoved(id, clipset, "clip", clipset.clipRef, row.clip.objectIdentity, clipset.payload.expectedObjectIdentity); if (moved) return moved;
         const expected = replayed ? clipset.prior : clipset.payload;
         for (const field of FOLLOW_ACTION_FIELDS) if (!sameFollowActionValue(field, row.clip[field], expected[field])) return this.transactionError(id, reconciliation ? "Follow Action undo replay did not restore prior state" : "Clip changed after apply; undo refused");
@@ -10124,7 +10136,7 @@ export class McpHost {
           const result = await this.invokeUndoRecovery(clipset, adapter, "clip.follow-actions.set", { ref: clipset.clipRef, ...clipset.prior, ...this.followActionsMutationAuthority(snapshot, clipset.clipRef) }, context) as JsonObject;
           if (result.changed !== true) throw new Error("Follow Action restoration was not confirmed");
         }
-        const restoredRow = this.clipRow(await this.viewForAsync(context, [clipset.clipRef]), clipset.clipRef);
+        const restoredRow = this.clipRow(await this.followActionsViewAsync(context, clipset.clipRef), clipset.clipRef);
         for (const field of FOLLOW_ACTION_FIELDS) if (!sameFollowActionValue(field, restoredRow.clip[field], clipset.prior[field])) throw new Error("Follow Action prior state was not restored");
         clipset.state = "undone"; return this.successText(id, { transactionId: clipset.id, state: "undone", restored: clipset.prior, idempotent: false });
       } catch (cause) { clipset.state = "uncertain"; return this.adapterToolError(id, cause, "Follow Action undo is uncertain; reconcile this exact transaction and key."); }
@@ -10243,8 +10255,10 @@ export class McpHost {
         let currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); const expected = reconciliation ? mixer.prior : mixer.payload;
         // The track, and its mixer's parameters, the change was made on: values alone can match another track's.
         const moved = this.undoTargetMoved(id, mixer, "track", mixer.clipRef, McpHost.mixerIdentities(this.mixerAuthority(currentTarget)), McpHost.mixerIdentities(mixer.payload)); if (moved) return moved;
-        for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, reconciliation ? "mixer undo replay did not restore prior state" : "mixer changed after apply; undo refused");
-        if (!reconciliation) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
+        // The same track's mixer goes back to how it was, however it moved since.
+        if (reconciliation) for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && !sameLiveValue(currentTarget.mixer[field] ?? null, expected?.[field] ?? null)) return this.transactionError(id, "mixer undo replay did not restore prior state");
+        const alreadyPrior = mutableFields.every((field) => !Object.prototype.hasOwnProperty.call(mixer.payload, field) || JSON.stringify(currentTarget.mixer[field] ?? null) === JSON.stringify(mixer.prior?.[field] ?? null));
+        if (!reconciliation && !alreadyPrior) { const restore: Record<string, unknown> = { ref: mixer.clipRef, ...this.mixerAuthority(currentTarget) }; for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field)) restore[field] = mixer.prior?.[field] ?? null; mixer.state = "undoing"; const result = await this.invokeUndoRecovery(mixer, adapter, "mixer.set", restore, context) as { changed?: unknown }; if (result.changed !== true) throw new Error("mixer undo was not confirmed"); }
         currentTarget = await this.mixerReadAsync(context, mixer.clipRef!); for (const field of mutableFields) if (Object.prototype.hasOwnProperty.call(mixer.payload, field) && JSON.stringify(currentTarget.mixer[field] ?? null) !== JSON.stringify(mixer.prior?.[field] ?? null)) throw new Error("mixer exact prior state was not restored");
         mixer.state = "undone";
         return this.successText(id, { transactionId: mixer.id, state: "undone", restored: mixer.prior, idempotent: false });
@@ -10304,14 +10318,13 @@ export class McpHost {
       const status = this.requireConnected("session.structure"); if (status.epoch !== structure.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter(); const context = (): LiveOperationContext => ({ signal, deadlineMs: this.deadline(STRUCTURE_STEP_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }); this.beginUndoRecovery(structure, params.idempotencyKey as string); structure.undoKey = params.idempotencyKey as string;
       try { if (reconciliation) await this.replayUndoRecovery(structure, adapter, context()); let current = await this.structureOwnedViewAsync(context(), structure.created);
-        // discard: the client's own scratch track (a render it recorded, then routed back): it goes as it is.
-        const discard = params.discard === true;
-        for (const item of structure.created) { const row = this.sessionStructureOwnedRow(current, item); if (row && !(discard && item.kind === "track") && (row.name !== item.name || this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint)) throw new Error("created Session structure was modified after apply; undo refused"); }
-        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await this.structureOwnedViewAsync(context(), [item]); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue; // discard goes for tracks only: Live honours it for track.delete, not for scenes.
-if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerprint(current, item.kind, item.ref) !== item.fingerprint) throw new Error("transaction-owned Session structure changed before deletion"); await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(discard && item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
+        // What it made goes however it changed since (renamed, filled with clips and devices): undo
+        // takes back the change it was asked to; each delete is fenced on the object's identity.
+        structure.state = "undoing"; for (const item of [...structure.created].reverse()) { current = await this.structureOwnedViewAsync(context(), [item]); const row = this.sessionStructureOwnedRow(current, item); if (!row) continue;
+await this.invokeUndoRecovery(structure, adapter, item.kind === "track" ? "track.delete" : "scene.delete", { ref: item.ref, expectedStructureRevision: this.structureRevision(current), expectedObjectIdentity: item.objectIdentity, ...(item.kind === "track" ? { discardChanges: true } : {}) }, context()); }
         const after = await this.structureViewAsync(context()); if (structure.created.some((item) => this.sessionStructureOwnedRow(after, item) !== undefined)) throw new Error("Session-structure undo left transaction-owned objects"); }
       catch (cause) {
-        // Refused because what it made has changed since: nothing was touched, so it stays applied (a later undo, with discard, can still go).
+        // Refused before anything was touched: it stays applied.
         if (structure.state === "applied" && cause instanceof Error && /was modified after apply/.test(cause.message)) { this.undoRecoveryPlans.delete(structure); return this.adapterToolError(id, cause, "Session-structure undo refused; nothing changed."); }
         structure.state = "uncertain"; return this.adapterToolError(id, cause, "Session-structure undo is uncertain; inspect authoritative tracks and scenes.");
       }
@@ -10348,7 +10361,8 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
         const unchanged = (index: number) => state[index]!.same;
         if (reconciliation) { if (currents.some((current, index) => current.value !== batch.parameters[index]!.priorValue || !unchanged(index))) throw new Error("device-parameter undo replay did not restore exact prior state"); }
         else {
-          if (currents.some((current, index) => !sameLiveValue(current.value, batch.parameters[index]!.proposedValue) || this.parameterRevision(current) !== batch.parameters[index]!.appliedRevision || !unchanged(index))) return this.transactionError(id, "A device parameter changed after apply; undo refused");
+          // The same parameters go back to their prior values, however they moved since (a hand tweak, a macro).
+          if (currents.some((_current, index) => !unchanged(index))) return this.transactionError(id, "A device parameter isn't the one this change was made on any more; undo refused");
           batch.state = "undoing";
           await this.invokeUndoRecovery(batch, adapter, "device.parameters.set", this.parametersMutationArgs(batch, (parameter, index) => ({ value: parameter.priorValue, revision: this.parameterRevision(currents[index]!) })), context);
         }
@@ -10370,7 +10384,8 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
         this.beginUndoRecovery(parameter, params.idempotencyKey as string); const status = this.requireConnected("device.parameter.write"); if (status.epoch !== parameter.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
         const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; parameter.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(parameter, adapter, context); const [currentState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }]); const current = currentState!.parameter;
         if (reconciliation) { if (current.value !== parameter.priorValue || !currentState!.same) throw new Error("device-parameter undo replay did not restore exact prior state"); }
-        else { if (!sameLiveValue(current.value, parameter.proposedValue) || this.parameterRevision(current) !== parameter.appliedRevision || !currentState!.same) return this.transactionError(id, "Device parameter identity or value changed after apply; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, parameter.appliedRevision), context); }
+        // The same parameter goes back to its prior value, however it moved since; fenced on how it is now.
+        else { if (!currentState!.same) return this.transactionError(id, "Device parameter isn't the one this change was made on any more; undo refused"); parameter.state = "undoing"; await this.invokeUndoRecovery(parameter, adapter, "device.parameter.set", this.parameterMutationArgs(parameter, parameter.priorValue, this.parameterRevision(current)), context); }
         const [restoredState] = await this.parameterStateAsync(context, parameter.deviceRef, [{ ref: parameter.parameterRef, authority: parameter.authority }], false); const restored = restoredState!.parameter;
         if (restored.value !== parameter.priorValue || !restoredState!.same) { parameter.state = "uncertain"; throw new Error("Live did not confirm exact device-parameter restoration"); }
         parameter.state = "undone";
@@ -10389,8 +10404,9 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
     try {
       this.beginUndoRecovery(transaction, params.idempotencyKey as string); const status = this.requireConnected("transport"); if (status.epoch !== transaction.epoch) return this.transactionError(id, "Live connection epoch changed; undo refused");
       const adapter = this.asyncAdapter(); const context = { signal, deadlineMs: this.deadline(AUDITION_DEADLINE_MS), idempotencyKey: params.idempotencyKey as string, transactionId: params.transactionId as string }; transaction.undoKey = params.idempotencyKey as string; if (reconciliation) await this.replayUndoRecovery(transaction, adapter, context); const current = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
-      if (!current || current.objectIdentity !== transaction.setIdentity || current.tempo !== (reconciliation ? transaction.priorTempo : transaction.appliedTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "Set identity or tempo changed after apply; undo refused");
-      if (!reconciliation) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: transaction.appliedTempo, expectedObjectIdentity: transaction.setIdentity }, context); }
+      // The same Set's tempo goes back, however it moved since; fenced on the tempo it has now.
+      if (!current || current.objectIdentity !== transaction.setIdentity || (reconciliation && current.tempo !== transaction.priorTempo)) return this.transactionError(id, reconciliation ? "Tempo undo replay did not restore exact prior state" : "The Set changed since this tempo change (another Set is open); undo refused");
+      if (!reconciliation && current.tempo !== transaction.priorTempo) { transaction.state = "undoing"; await this.invokeUndoRecovery(transaction, adapter, "tempo.set", { ref: transaction.setRef, value: transaction.priorTempo, expectedTempo: current.tempo, expectedObjectIdentity: transaction.setIdentity }, context); }
       const restored = await adapter.getAsync(transaction.setRef, context) as LiveSnapshot["set"] | undefined;
       if (!restored || restored.objectIdentity !== transaction.setIdentity || restored.tempo !== transaction.priorTempo) throw new Error("Live did not confirm exact Set tempo restoration");
       transaction.state = "undone";
@@ -10640,10 +10656,9 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
       const status = this.requireConnected("device.parameter.write");
       const snapshot = this.adapter.snapshot(); const target = this.parameterTarget(snapshot, params.deviceRef, params.parameterRef);
       const authority = this.parameterAuthority(snapshot, target.parameter.ref);
-      const revision = this.parameterRevision(target.parameter); const quantization = target.parameter.quantization ?? 0;
-      if ((target.device.enabled as boolean | undefined) === false || (target.parameter.enabled as boolean | undefined) === false || !target.parameter.automatable) throw new Error("parameter is disabled or not supported for guarded adjustment");
-      if (params.value < target.parameter.min || params.value > target.parameter.max) throw new Error("parameter value is outside authoritative bounds");
-      if (quantization > 0 && Math.abs((params.value - target.parameter.min) / quantization - Math.round((params.value - target.parameter.min) / quantization)) > 1e-9) throw new Error(steppedValueMessage(target.parameter));
+      const revision = this.parameterRevision(target.parameter);
+      if ((target.parameter.enabled as boolean | undefined) === false) throw new Error("parameter is greyed out in Live right now");
+      params.value = fitParameterValue(params.value, target.parameter); const quantization = target.parameter.quantization ?? 0;
       const transaction: DeviceParameterTransaction = { id: `parameter_${randomBytes(18).toString("base64url")}`, confirmation: randomBytes(24).toString("base64url"), epoch: status.epoch as number, deviceRef: target.device.ref, parameterRef: target.parameter.ref, authority, priorValue: target.parameter.value, proposedValue: params.value, priorRevision: revision, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
       this.deviceParameterTransactions.set(transaction.id, transaction);
       return this.successText(id, { transactionId: transaction.id, epoch: transaction.epoch, device: { ref: target.device.ref, name: target.device.name, kind: target.device.kind, trackRef: target.trackRef, enabled: target.device.enabled !== false }, parameter: { ref: target.parameter.ref, name: target.parameter.name, currentValue: target.parameter.value, proposedValue: params.value, min: target.parameter.min, max: target.parameter.max, quantization, enabled: target.parameter.enabled !== false, automatable: target.parameter.automatable, displayValue: target.parameter.displayValue ?? String(target.parameter.value), revision }, impact: "changes-one-published-device-parameter", confirmation: transaction.confirmation, expiresAt: transaction.expiresAt });
@@ -10673,12 +10688,10 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
 
   private liveSessionStructurePreview(id: RequestId, params: unknown): JsonObject {
     const proposed = this.validateStructureItems(params);
-    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, unique, valid entries");
+    if (!proposed) return error(id, -32602, "tracks and scenes must contain bounded, valid entries");
     try {
       const status = this.requireConnected("session.structure"); const snapshot = this.adapter.snapshot();
-      const existingNames = new Set([...snapshot.tracks.map((item) => item.name), ...snapshot.scenes.map((item) => item.name)]);
-      const taken = [...proposed.tracks, ...proposed.scenes].find((item) => existingNames.has(item.name));
-      if (taken) throw new Error(`track or scene name already exists: “${taken.name.slice(0, 80)}”; choose another name`);
+      // Names may repeat, as in Live: what a change made is found by its identity, not its name.
       const regularTracks = snapshot.tracks.filter((item) => !["return", "main", "master"].includes(item.kind));
       let availableTrackIndex = regularTracks.length;
       for (const item of proposed.tracks) { if (item.index > availableTrackIndex) return error(id, -32602, "track index exceeds the current regular-track collection"); availableTrackIndex += 1; }
@@ -10930,7 +10943,7 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   }
 
   private validTransactionParams(params: unknown, confirmation: "apply" | "undo"): params is JsonObject {
-    // An undo may say discard: a client's own scratch track (a render it recorded) goes even though it changed.
+    // An undo may say discard (still accepted; what a change made now goes however it changed since).
     return isObject(params) && hasOnly(params, confirmation === "undo" ? ["transactionId", "confirmation", "idempotencyKey", "discard"] : ["transactionId", "confirmation", "idempotencyKey"])
       && (params.discard === undefined || typeof params.discard === "boolean") && isNonEmptyString(params.transactionId, 128) && params.confirmation === confirmation && isIdempotencyKey(params.idempotencyKey);
   }
@@ -10946,7 +10959,9 @@ if (!(discard && item.kind === "track") && this.sessionStructureCreatedFingerpri
   private reasonError(id: RequestId, reason: string, remediation: string): JsonObject { return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true }); }
   private adapterToolError(id: RequestId, cause: unknown, remediation: string): JsonObject {
     const reason = adapterReason(cause instanceof Error ? cause.message : "adapter request failed");
-    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation }) }], isError: true });
+    // A preview that failed changed nothing; the reason says what to fix, not a fresh read.
+    const next = /preview requires fresh authoritative state\.$/.test(remediation) ? "Nothing changed in Live: fix what the reason says (or take another route) and preview again." : remediation;
+    return response(id, { content: [{ type: "text", text: JSON.stringify({ reason, remediation: next }) }], isError: true });
   }
 
   private readResource(id: RequestId, params: unknown): JsonObject {

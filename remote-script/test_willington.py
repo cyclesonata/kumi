@@ -117,6 +117,13 @@ class ZoneTests(unittest.TestCase):
         self.selector = {'ref':self.row['ref'], 'kind':'selector-zone',
                          'targetRef':self.row['chains'][0]['ref']}
 
+    def test_audio_racks_refuse_hidden_key_and_velocity_zones(self):
+        self.rack.class_name = 'AudioEffectGroupDevice'
+        for kind in ['key-zone', 'velocity-zone']:
+            with self.assertRaisesRegex(ValueError, 'selector zones only'):
+                self.mapper._willington_device_read({**self.selector, 'kind': kind})
+        self.mapper._willington_device_read(self.selector)
+
     def test_zone_complete_state_and_restore(self):
         before = self.mapper.invoke('willington.device.read', self.selector)
         next_state = {'minimum':16, 'maximum':40, 'fadeMinimum':20, 'fadeMaximum':36}
@@ -237,6 +244,14 @@ class DeviceTests(unittest.TestCase):
         self.song.is_playing = False; self.rack.chains[0].devices = []
         with self.assertRaisesRegex(ValueError,'no longer'): self.apply('macro-mapping',{'mapping':None,'parameterValue':0.5})
 
+    def test_variation_rename_requires_restorable_selected_name(self):
+        for selected, count, name in [(-1, 1, 'Name'), (0, 0, 'Name'), (0, 1, None), (0, 1, '')]:
+            self.rack.selected_variation_index = selected
+            self.rack.variation_count = count
+            self.name = name
+            with self.assertRaisesRegex(ValueError, 'variation must be selected'):
+                self.mapper._willington_device_read({'ref': self.ref, 'kind': 'variation-name'})
+
 class ProviderTests(unittest.TestCase):
     def test_absent_invalid_and_duplicate_owner_fail_closed(self):
         import tempfile, json, types
@@ -256,6 +271,25 @@ class ProviderTests(unittest.TestCase):
                 wrapper._WillingtonProvider(mapper,logs.append)
                 self.assertIs(live._kumi_willington_owner,owner)
                 self.assertEqual(len(logs),2)
+    def test_missing_follow_self_test_preserves_independent_device_writes(self):
+        import tempfile, json, types
+        from pathlib import Path
+        from unittest.mock import patch
+        import AbletonMcpBridge as wrapper
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'willington.json'
+            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True, 'enableWrites': True})); path.chmod(0o600)
+            mapper = types.SimpleNamespace(); live = types.SimpleNamespace(); logs = []; calls = []
+            follow = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(('follow', value)))
+            devices = types.SimpleNamespace(enable=lambda value: calls.append(('devices', value)), uninstall=lambda: None)
+            modules = {'Live': live, 'WillingtonBindings': types.SimpleNamespace(__file__=str(Path(folder)/'bindings.py'), install=lambda: follow), 'WillingtonDeviceTools.api': types.SimpleNamespace(install=lambda: devices)}
+            with patch.object(wrapper, '__file__', str(path.with_name('__init__.py'))), patch.dict('sys.modules', modules):
+                provider = wrapper._WillingtonProvider(mapper, logs.append)
+                self.assertFalse(mapper.willington_follow_writes)
+                self.assertTrue(mapper.willington_device_writes)
+                self.assertTrue(any('self-test.json' in line for line in logs))
+                provider.close()
+
     def test_device_owner_enable_and_teardown(self):
         import tempfile,json,types
         from pathlib import Path
@@ -298,8 +332,12 @@ class ReviewRegressions(unittest.TestCase):
         mapper.willington_follow_writes = True
         with patch.object(mapper, '_follow_action_fields', wraps=mapper._follow_action_fields) as read:
             snapshot = mapper.snapshot()
+            self.assertEqual(read.call_count, 0)
+            self.assertNotIn('followActionA', snapshot['tracks'][0]['clips'][0])
+            row = snapshot['tracks'][0]['clips'][0]
+            page = mapper.discover('session_clip', parent=row['ref'].replace(':clip:', ':clip_slot:'), requested_fields=['ref', 'followActionA'])
+            self.assertEqual(page['items'][0]['followActionA'], 4)
             self.assertEqual(read.call_count, 1)
-            self.assertEqual(snapshot['tracks'][0]['clips'][0]['followActionA'], 4)
             self.assertNotIn('followActionA', snapshot['arrangement']['clips'][0])
 
     def test_macro_refs_are_canonical_and_readable(self):

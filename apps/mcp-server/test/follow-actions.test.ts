@@ -161,3 +161,16 @@ test("Follow timing accepts float32 readback while integral fields remain exact"
   await call("live_undo", { transactionId: preview.transactionId, confirmation: "undo", idempotencyKey: "rounded-time-undo" });
   assert.equal((adapter.get(clipRef) as any).followActionTime, 4);
 });
+
+test("Follow apply retries after a targeted read fails before dispatch", async () => {
+  const { adapter, call, clipRef } = fixture();
+  const preview = await call("live_follow_actions_preview", { clipRef, followActionA: 8 });
+  const discover = adapter.discoverAsync.bind(adapter);
+  let fail = true;
+  adapter.discoverAsync = async (...args) => { if (fail) { fail = false; throw new Error("injected discovery failure"); } return discover(...args); };
+  const apply = { transactionId: preview.transactionId, confirmation: "apply", idempotencyKey: "retry-targeted-read" };
+  await assert.rejects(call("live_follow_actions_apply", apply), /injected/);
+  assert.equal((adapter.get(clipRef) as any).followActionA, 4);
+  await call("live_follow_actions_apply", apply);
+  assert.equal((adapter.get(clipRef) as any).followActionA, 8);
+});

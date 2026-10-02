@@ -8,7 +8,7 @@ import type {
 import type { JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelOptions, KernelTool, StreamingCall, ToolImage, TranscriptLine, TurnResult, Usage } from "../core/contracts.js";
 import { KumiError } from "../core/errors.js";
 import { DEFAULT_BUDGET, fit, putAwayImages, transcriptOf, type ContextBudget } from "./budget.js";
-import { describeFailure, retryDelayMs } from "./failure.js";
+import { describeFailure, MAX_RETRIES, retryDelayMs } from "./failure.js";
 
 export interface ModelRequest {
   instructions: string;
@@ -67,7 +67,7 @@ export const STOPPED_NOTE = "(Stopped before finishing. The steps above happened
 
 export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   const { binding, instructions } = options;
-  const maxSteps = options.maxSteps ?? 48;
+  const maxSteps = options.maxSteps ?? 200;
   const budget = options.budget ?? DEFAULT_BUDGET;
   if (!instructions.trim() || Buffer.byteLength(instructions) > MAX_INSTRUCTIONS) throw new Error("Kernel instructions must be nonempty and at most 64 KiB.");
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new Error("maxSteps must be a positive integer.");
@@ -163,7 +163,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   }
 
   /**
-   * One model call. Retries once, only before any output has escaped this step: text shown, or a
+   * One model call. Retries up to MAX_RETRIES times, only before any output has escaped this step: text shown, or a
    * streaming call's work begun. A reply's first call whose tool can stream starts as it's written.
    */
   async function stream(request: LanguageModelV4CallOptions, abort: AbortSignal, onText: (text: string) => void,
@@ -199,7 +199,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
         return result;
       } catch (error) {
         const escaped = delivered || [...early.values()].some((entry) => entry.call.started);
-        const wait = attempt === 0 && !escaped && !abort.aborted ? retryDelayMs(error) : undefined;
+        const wait = attempt < MAX_RETRIES && !escaped && !abort.aborted ? retryDelayMs(error, attempt) : undefined;
         if (wait === undefined) throw error;
         // Nothing began, so the retry starts clean.
         await Promise.all([...early.values()].map((entry) => entry.call.abandon().catch(() => {})));

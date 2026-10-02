@@ -470,6 +470,13 @@ export function installRemoteScript(sourceFile: string, destinationDirectory: st
     const moduleSource = join(packageSource, REMOTE_SCRIPT_ASSET);
     if (existsSync(moduleSource)) copyFileSync(moduleSource, join(stagedPackage, REMOTE_SCRIPT_ASSET));
     else copyFileSync(sourceFile, join(stagedPackage, REMOTE_SCRIPT_ASSET));
+    const willingtonConfig = join(destinationDirectory, "willington.json");
+    if (existsSync(willingtonConfig)) {
+      const config = lstatSync(willingtonConfig);
+      if (!config.isFile() || config.isSymbolicLink() || config.size > 4096) throw new Error("Willington configuration must be a bounded regular file");
+      copyFileSync(willingtonConfig, join(stagedPackage, "willington.json"));
+      if (platform !== "win32") chmodSync(join(stagedPackage, "willington.json"), config.mode & 0o777);
+    }
     copyOperationRegistry(join(stagedPackage, OPERATION_REGISTRY_ASSET));
     const files = ["__init__.py", REMOTE_SCRIPT_ASSET, OPERATION_REGISTRY_ASSET] as const;
     const hashes = Object.fromEntries(files.map((name) => [name, createHash("sha256").update(readFileSync(join(stagedPackage, name))).digest("hex")]));

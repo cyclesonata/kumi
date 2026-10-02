@@ -120,8 +120,8 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
     },
   },
   {
-    tool: "set_clip", preview: "live_clip_properties_preview", apply: "live_clip_properties_apply", family: "clip",
-    inputSchema: { type: "object", required: ["clipRef"], additionalProperties: false, properties: {
+    tool: "set_clip", fallbackSchema: true, preview: "live_clip_properties_preview", apply: "live_clip_properties_apply", family: "clip",
+    inputSchema: { type: "object", required: ["clipRef"], additionalProperties: false, properties: { grooveRef: { type: ["string", "null"], minLength: 1, maxLength: 256 },
       clipRef: REF, muted: { type: "boolean" }, colorIndex: { type: "integer", minimum: 0, maximum: 69 },
       looping: { type: "boolean" }, loopStart: { type: "number", minimum: 0 }, loopEnd: { type: "number", minimum: 0 },
       launchMode: { type: "integer", minimum: 0, maximum: 3 }, launchQuantization: { type: "integer", minimum: 0, maximum: 14 },
@@ -170,7 +170,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "edit_clip", preview: "live_clip_action_preview", apply: "live_clip_action_apply", family: "clip",
-    description: "Edit a clip's content: crop (to its loop), duplicate-loop (doubles the loop, content and all), duplicate-region (copies regionStart–regionEnd to destination, in beats), or move-playing-position (by offset beats). Live gives Kumi no undo for these; say so before a crop.",
+    description: "Edit a clip's content: crop (to its loop), duplicate-loop (doubles the loop, content and all), duplicate-region (copies regionStart–regionEnd to destination, in beats), or move-playing-position (by offset beats). Live gives Kumi no undo for these (Live's own undo can).",
     permanent: () => "Live gives Kumi no way to take this back; use Live's own undo if you need to.",
     summarize(preview, input, track) {
       const action = label(preview.action ?? input.action) ?? "edit"; const prior = record(preview.prior);
@@ -353,7 +353,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "delete_device", since: FIXED_BRIDGE, preview: "live_device_delete_preview", apply: "live_device_delete_apply", family: "device",
-    description: "Delete a device (ref from discovery). Live gives Kumi no undo for this, so do it only when the producer asks to remove it, and say it's gone for good (Live's own undo can still bring it back).",
+    description: "Delete a device (ref from discovery). Kumi can't bring it back (Live's own undo can).",
     permanent: () => "Live gives Kumi no way to bring a deleted device back; use Live's own undo if you need to.",
     summarize(preview, input, track) {
       const device = record(preview.device); const known = ownerTrack(preview.ref ?? input.ref, track);
@@ -405,11 +405,11 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "replace_sample", since: FIXED_BRIDGE, preview: "live_simpler_preview", apply: "live_simpler_apply", family: "device",
-    description: "Swap the sample in a Simpler for another: deviceRef (the Simpler), and sample, a path find_samples returned.",
+    description: "Swap the sample in a Simpler for another: deviceRef (the Simpler), and sample, the path of an audio file (one find_samples returned, or any on this computer).",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "sample"], properties: { deviceRef: REF, sample: { type: "string", minLength: 1, maxLength: 1024 } } },
     prepare(input, context) {
       const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
-      if (!found) return "Use a sample find_samples returned in this conversation.";
+      if (!found) return "Give the path of an audio file on this computer (absolute, or from ~).";
       return { deviceRef: input.deviceRef ?? null, filePath: found.path, allowedRoot: found.folder };
     },
     summarize(_preview, input, track) {
@@ -420,13 +420,13 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "import_audio", preview: "live_audio_import_preview", apply: "live_audio_import_apply", family: "clip",
-    description: "Put an audio file into the Set as a clip: into an empty Session slot (trackRef, an audio track, and sceneIndex) or into an Arrangement take lane (takeLaneRef, position in beats). sample is a path find_samples returned.",
+    description: "Put an audio file into the Set as a clip: into an empty Session slot (trackRef, an audio track, and sceneIndex) or into an Arrangement take lane (takeLaneRef, position in beats). sample is the path of an audio file on this computer (one find_samples returned, a recording, the producer's own).",
     inputSchema: { type: "object", additionalProperties: false, required: ["sample"], properties: {
       sample: { type: "string", minLength: 1, maxLength: 1024 }, trackRef: REF, sceneIndex: { type: "integer", minimum: 0, maximum: 10000 },
       takeLaneRef: REF, position: { type: "number", minimum: 0 }, name: { type: "string", maxLength: 256 } } },
     prepare(input, context) {
       const found = typeof input.sample === "string" ? context.sample(input.sample) : undefined;
-      if (!found) return "Use an audio file find_samples returned in this conversation.";
+      if (!found) return "Give the path of an audio file on this computer (absolute, or from ~).";
       const { sample: _sample, ...rest } = input;
       return { ...rest, filePath: found.path, allowedRoot: found.folder };
     },
@@ -467,7 +467,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   // Live keeps them in its own undo; Kumi can't bring them back, and says so in HISTORY.
   {
     tool: "delete_clip", since: FULL_CONTROL_BRIDGE, preview: "live_clip_delete_preview", apply: "live_clip_delete_apply", family: "clip",
-    description: "Delete a clip, in the Session or the Arrangement (clipRef from discovery). Only when the producer asks to remove it: Kumi can't bring it back (Live's own undo can), so say so.",
+    description: "Delete a clip, in the Session or the Arrangement (clipRef from discovery). Kumi can't bring it back (Live's own undo can).",
     permanent: () => "Kumi can't bring a deleted clip back; Live's own undo can.",
     summarize(preview, input, track) {
       const clip = record(preview.clip ?? preview.target); const known = ownerTrack(preview.clipRef ?? input.clipRef, track);
@@ -476,7 +476,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "delete_scene", since: FULL_CONTROL_BRIDGE, preview: "live_scene_delete_preview", apply: "live_scene_delete_apply", family: "structure", restructures: true,
-    description: "Delete a Session scene and the clips in its slots (sceneRef from discovery). Only when the producer asks: Kumi can't bring it back (Live's own undo can), so say so. Later scenes move up.",
+    description: "Delete a Session scene and the clips in its slots (sceneRef from discovery). Kumi can't bring it back (Live's own undo can). Later scenes move up.",
     permanent: () => "Kumi can't bring a deleted scene back; Live's own undo can.",
     summarize(preview) {
       const scene = record(preview.scene ?? preview.target);
@@ -485,7 +485,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "delete_track", since: FULL_CONTROL_BRIDGE, preview: "live_track_delete_preview", apply: "live_track_delete_apply", family: "structure", restructures: true,
-    description: "Delete an audio, MIDI or group track with its clips and devices (trackRef from discovery; a group takes the tracks in it). Only when the producer asks: Kumi can't bring it back (Live's own undo can), so say so. Later tracks move up.",
+    description: "Delete an audio, MIDI or group track with its clips and devices (trackRef from discovery; a group takes the tracks in it). Kumi can't bring it back (Live's own undo can). Later tracks move up.",
     permanent: () => "Kumi can't bring a deleted track back; Live's own undo can.",
     summarize(preview, input, track) {
       // The preview names the track it deletes, and with a group the tracks inside it (alsoDeletes).
@@ -495,7 +495,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "delete_locator", since: FULL_CONTROL_BRIDGE, preview: "live_locator_delete_preview", apply: "live_locator_delete_apply", family: "locators",
-    description: "Delete an Arrangement locator (locatorRef from discovery). Only when the producer asks: Kumi can't bring it back (Live's own undo can).",
+    description: "Delete an Arrangement locator (locatorRef from discovery). Kumi can't bring it back (Live's own undo can).",
     permanent: () => "Kumi can't bring a deleted locator back; Live's own undo can.",
     summarize(preview) {
       const locator = record(preview.locator ?? preview.target); const at = number(locator.position ?? locator.time);
@@ -526,7 +526,7 @@ export const MORE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "clear_range", since: FULL_CONTROL_BRIDGE, preview: "live_clip_clear_range_preview", apply: "live_clip_clear_range_apply", family: "clip",
-    description: "Clear a stretch of the Arrangement on one track: the clips inside it go, and clips crossing its edges are cut there (trackRef, fromBeat, toBeat). Kumi can't bring them back (Live's own undo can), so only when the producer asks.",
+    description: "Clear a stretch of the Arrangement on one track: the clips inside it go, and clips crossing its edges are cut there (trackRef, fromBeat, toBeat). Kumi can't bring them back (Live's own undo can).",
     permanent: () => "Kumi can't put back what it cleared; Live's own undo can.",
     summarize(preview, input, track) {
       const known = track(input.trackRef); const from = number(input.fromBeat); const to = number(input.toBeat);

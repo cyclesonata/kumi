@@ -50,9 +50,11 @@ test("a note that's now wrong is replaced in place, forgetting removes one, and 
     assert.deepEqual(await f.forget("s1"), { text: "{\"forgot\":\"s1\"}", reply: "" });
     assert.equal((await f.forget("s1")).isError, true);
     for (let index = 0; index < MAX_NOTES; index++) await f.remember({ note: `preference ${index}`, about: "producer" });
+    // Full: the oldest makes room.
     const full = await f.remember({ note: "one too many", about: "producer" });
-    assert.equal(full.isError, true); assert.match(full.text, /replace the least useful one/);
-    assert.equal((await f.store.load(PROJECT)).producer.length, MAX_NOTES);
+    assert.notEqual(full.isError, true);
+    const kept = (await f.store.load(PROJECT)).producer;
+    assert.equal(kept.length, MAX_NOTES); assert.equal(kept.at(-1)!.text, "one too many"); assert.ok(!kept.some((note) => note.text === "preference 0"));
   } finally { f.done(); }
 });
 

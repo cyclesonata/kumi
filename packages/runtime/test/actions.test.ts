@@ -241,11 +241,11 @@ test("Back to Arrangement is pressed through play, and an older bridge says it n
 });
 
 test("recording on a nearly full disk is refused, in plain words, before anything starts", async () => {
-  const b = await opened({ transport: true, version: FIXED_BRIDGE, freeDisk: 300_000_000 });
+  const b = await opened({ transport: true, version: FIXED_BRIDGE, freeDisk: 60_000_000 });
   try {
     const refused = await tool(b.tools, "record").execute({ action: "start", lane: "arrangement" }, signal());
     assert.equal(refused.isError, true);
-    assert.match(refused.text, /^Only 300 MB is free on the disk Live records to, so it would likely fail partway\. Free some space .* Nothing was recorded\.$/);
+    assert.match(refused.text, /^Only 60 MB is free on the disk Live records to, so it would likely fail partway\. Free some space .* Nothing was recorded\.$/);
     assert.equal(b.requests.some((request) => request.name === "live_recording_preview"), false, "Live wasn't asked");
     const stop = await tool(b.tools, "record").execute({ action: "stop", lane: "arrangement" }, signal());
     assert.doesNotMatch(stop.text, /free on the disk/, "stopping is never held up");
