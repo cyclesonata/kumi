@@ -212,6 +212,8 @@ test("Ollama's failures say what happened and what to do: not running, not pulle
   assert.equal(down.kind, "network");
   assert.equal(down.message, "Ollama isn't running: open it, or run `ollama serve`, then send your message again.");
   assert.equal(down.provider, "ollama");
+  const away = await failed(localServers([], { OLLAMA_HOST: "studio.invalid" })[0]!, "qwen3:8b");
+  assert.equal(away.message, "Kumi can't reach Ollama at http://studio.invalid:11434: check that it's running on studio.invalid, then send your message again.");
   const fake = await serve(ollama({ "qwen3:8b": { capabilities: ["completion", "tools"] }, "qwen3:30b": { capabilities: ["completion", "tools"] }, "qwen3:14b": { capabilities: ["completion", "tools"] } }, (body) => {
     if (body.model === "qwen3:30b") return { status: 500, body: { error: "model requires more system memory (21.5 GiB) than is available (12.1 GiB)" } };
     if (body.model === "qwen3:14b") return [said("Half an answ"), { error: "llama runner process has terminated: exit status 2" }];

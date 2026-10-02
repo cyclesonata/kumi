@@ -134,6 +134,8 @@ export function createModelControl(options: {
     if (parsed?.server) return resolveLocalModel(parsed.server, parsed.model, { ...transport, ...(level ? { effort: level } : {}), onNote: say });
     return resolveModel({ model: id, store, env, ...(level ? { effort: level } : {}), ...transport });
   };
+  /** The default being chosen, shared: the session may ask for the model while the app is choosing it. */
+  let defaulting: Promise<(ModelInfo & { note?: string }) | undefined> | undefined;
   // The choices as they stand; with KUMI_MODEL set, the model chosen in Kumi lasts until it closes.
   const save = () => {
     const saved = settings().model;
@@ -175,19 +177,22 @@ export function createModelControl(options: {
       if ((PROVIDERS as readonly string[]).includes(id)) return PROVIDER_INFO[id as ProviderId].name;
       return servers().find((server) => server.id === id)?.name ?? id;
     },
-    async chooseDefault() {
-      if (model) return undefined;
-      for (const provider of (await control.providers()).filter((status) => status.signedIn)) {
-        const first = (await control.models(provider.id).catch(() => []))[0];
-        if (first) { await control.choose(first.id); return first; }
-      }
-      // Signed in nowhere (or no provider answering): a model on this computer.
-      for (const server of (await control.local()).filter((status) => status.running)) {
-        const listed = await control.models(server.id).catch(() => []);
-        const pick = listed.find((item) => item.tools !== false && item.loaded) ?? listed.find((item) => item.tools !== false) ?? listed[0];
-        if (pick) { const note = await control.choose(pick.id); return { ...pick, ...(note ? { note } : {}) }; }
-      }
-      return undefined;
+    chooseDefault() {
+      if (model) return Promise.resolve(undefined);
+      defaulting ??= (async () => {
+        for (const provider of (await control.providers()).filter((status) => status.signedIn)) {
+          const first = (await control.models(provider.id).catch(() => []))[0];
+          if (first) { await control.choose(first.id); return first; }
+        }
+        // Signed in nowhere (or no provider answering): a model on this computer.
+        for (const server of (await control.local()).filter((status) => status.running)) {
+          const listed = await control.models(server.id).catch(() => []);
+          const pick = listed.find((item) => item.tools !== false && item.loaded) ?? listed.find((item) => item.tools !== false) ?? listed[0];
+          if (pick) { const note = await control.choose(pick.id); return { ...pick, ...(note ? { note } : {}) }; }
+        }
+        return undefined;
+      })().finally(() => { defaulting = undefined; });
+      return defaulting;
     },
     async models(provider, refresh = false) {
       const server = servers().find((item) => item.id === provider);
@@ -251,6 +256,8 @@ export function createModelControl(options: {
       return true;
     },
     async binding() {
+      // Kumi starting with no model yet: the one being chosen for it, rather than an answer saying to choose.
+      if (!model) await control.chooseDefault().catch(() => undefined);
       if (!model) throw new KumiError("config", "Choose a model to talk to: type /model.");
       if (bound && bound.model === model && bound.effort === effort) return bound.binding;
       const binding = await bind(model, effort);

@@ -136,6 +136,12 @@ test("models on this computer need no sign-in: Kumi finds the servers, starts wi
     assert.equal((await control.binding()).id, "ollama/gemma3:4b");
     assert.equal(said.length, 0, "nothing said twice");
     assert.equal(control.providerName("ollama"), "Ollama"); assert.equal(control.providerName("llama-cpp"), "llama.cpp"); assert.equal(control.providerName("anthropic"), "Anthropic");
+    // A first message sent while the default is still being chosen waits for it, rather than failing.
+    const racing = createModelControl({ store: openCredentialStore(join(dir, "fresh-auth.json")), settingsFile: join(dir, "fresh-settings.json"), env: { OLLAMA_HOST: server.url }, fetch: noLmStudio,
+      changed: async () => {}, installed: () => false });
+    const [announced, bound] = await Promise.all([racing.chooseDefault(), racing.binding()]);
+    assert.equal(announced?.id, "ollama/qwen3:8b", "the app still hears which, to say so");
+    assert.equal(bound.id, "ollama/qwen3:8b");
     // Kumi opened on a model that can't change the Set says so as its first answer is readied.
     const later = createModelControl({ store: openCredentialStore(join(dir, "auth.json")), settingsFile, env: { OLLAMA_HOST: server.url }, fetch: noLmStudio,
       changed: async () => {}, say: (message) => said.push(message), installed: () => false });

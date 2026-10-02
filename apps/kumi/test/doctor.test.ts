@@ -127,6 +127,10 @@ test("the doctor names the model servers it found, says how to start one that's 
     assert.deepEqual(missing[1], { status: "fix", text: "Ollama doesn't have llama9:70b (model ollama/llama9:70b)", next: "Run: ollama pull llama9:70b" });
     const closed = await doctorChecks(io({ ...s.env, KUMI_MODEL: "lmstudio/qwen/qwen3-8b" }, { modelServers }));
     assert.deepEqual(closed[1], { status: "fix", text: "LM Studio isn't running (model lmstudio/qwen/qwen3-8b)", next: "Open LM Studio and start its server (Developer tab), or run: lms server start" });
+    assert.equal(closed.filter((check) => /LM Studio/.test(check.text)).length, 1, "said once");
+    const away = await doctorChecks(io({ ...s.env, OLLAMA_HOST: "studio.local" }, { modelServers: async () => [{ server: localServers([], { OLLAMA_HOST: "studio.local" })[0]!, running: false }] }));
+    assert.deepEqual(away.find((check) => /Ollama/.test(check.text)), { status: "note", text: "Ollama isn't answering at http://studio.local:11434 (OLLAMA_HOST)",
+      next: "Check that Ollama is running on studio.local and can be reached from here" });
     // Signed in nowhere, a server with models is all Kumi needs.
     const unsigned = await doctorChecks(io({ ...s.env, KUMI_MODEL: undefined, OPENAI_API_KEY: undefined }, { modelServers }));
     assert.deepEqual(unsigned[1], { status: "ok", text: "Kumi starts with a model in Ollama, on this computer; no sign-in needed (/model changes it)" });

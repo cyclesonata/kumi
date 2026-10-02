@@ -158,8 +158,11 @@ async function findServers(env: Env): Promise<ServerFinding[]> {
   return found.filter((item): item is ServerFinding => Boolean(item));
 }
 
-/** Which model servers are running, with what (and which can change the Set); one that's the producer's but closed, with how to start it. */
-function serverChecks(servers: readonly ServerFinding[]): Check[] {
+/**
+ * Which model servers are running, with what (and which can change the Set); one that's the
+ * producer's but closed, with how to start it (unless the model check already said so).
+ */
+function serverChecks(servers: readonly ServerFinding[], env: Env, said?: string): Check[] {
   const checks: Check[] = [];
   const running = servers.filter((found) => found.running);
   if (running.length) {
@@ -171,7 +174,10 @@ function serverChecks(servers: readonly ServerFinding[]): Check[] {
     checks.push({ status: "ok", text: `Model servers: ${named.join("; ")}` });
   }
   for (const { server, running: up } of servers) {
-    if (!up) checks.push({ status: "note", text: server.kind === "openai-compatible" ? `${server.name}, from settings.json, isn't answering at ${server.baseURL}` : `${server.name} is installed but not running`, next: startHint(server) });
+    if (up || server.id === said) continue;
+    const text = server.kind === "openai-compatible" ? `${server.name}, from settings.json, isn't answering at ${server.baseURL}`
+      : server.kind === "ollama" && env.OLLAMA_HOST ? `Ollama isn't answering at ${server.baseURL} (OLLAMA_HOST)` : `${server.name} is installed but not running`;
+    checks.push({ status: "note", text, next: startHint(server) });
   }
   return checks;
 }
@@ -180,7 +186,10 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
   const servers = await (io.modelServers ?? (() => findServers(env)))().catch((): ServerFinding[] => []);
-  const checks: Check[] = [node, await signInCheck(env, servers), ...serverChecks(servers)];
+  const signIn = await signInCheck(env, servers);
+  // The model's server, when the model check is about it already.
+  const said = servers.find(({ server }) => signIn.text.startsWith(`${server.name} isn't running`))?.server.id;
+  const checks: Check[] = [node, signIn, ...serverChecks(servers, env, said)];
   const configPath = findBridgeConfig(env);
   if (!configPath) {
     checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: `Quit Live, then run: ${KUMI} bridge` });

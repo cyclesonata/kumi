@@ -133,7 +133,7 @@ export function parseLocalModelId(value: string, servers: readonly LocalServer[]
 
 /** How to start a server that isn't answering, said where the producer is. */
 export function startHint(server: LocalServer): string {
-  if (server.where !== HERE) return `Check that ${server.name} is running ${server.where.slice(3)} and can be reached from here`;
+  if (server.where !== HERE) return `Check that ${server.name} is running ${server.where} and can be reached from here`;
   if (server.kind === "ollama") return "Open Ollama, or run: ollama serve";
   if (server.kind === "lmstudio") return "Open LM Studio and start its server (Developer tab), or run: lms server start";
   return `Start it, or check its address (${server.baseURL}) in ~/.kumi/settings.json`;
@@ -561,7 +561,7 @@ function failure(server: LocalServer, error: unknown, phase: "request" | "answer
   const again = server.where === HERE && server.kind !== "openai-compatible" ? "if it closed, open it again, then send your message again" : "send your message again";
   if (unanswered(error)) {
     if (phase === "answer") return new KumiError("network", `${name} stopped answering partway${server.kind === "ollama" ? " (it may have quit, or run out of memory)" : ""}: ${again}.`, server.id);
-    if (server.where !== HERE) return new KumiError("network", `Kumi can't reach ${name} at ${server.baseURL}: check that it's running ${server.where.slice(3)}, then send your message again.`, server.id);
+    if (server.where !== HERE) return new KumiError("network", `Kumi can't reach ${name} at ${server.baseURL}: check that it's running ${server.where}, then send your message again.`, server.id);
     if (server.kind === "ollama") return new KumiError("network", "Ollama isn't running: open it, or run `ollama serve`, then send your message again.", server.id);
     if (server.kind === "lmstudio") return new KumiError("network", "LM Studio's server isn't running: open LM Studio and start it in the Developer tab, or run `lms server start`, then send your message again.", server.id);
     return new KumiError("network", `${name} isn't answering at ${server.baseURL}: start it, then send your message again.`, server.id);
