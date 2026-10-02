@@ -1,8 +1,10 @@
 /**
  * Kumi's hands: what Live's scripting can't do, done the way the producer would, through Live's own
  * menus and keys (group, freeze, flatten, bounce, consolidate, convert to MIDI, separate stems, save,
- * export). A small helper program for each OS stays running beside Kumi and answers in milliseconds:
- * on a Mac a Swift program using Accessibility, on Windows a PowerShell one using UI Automation.
+ * export). Tracks are selected and menu items pressed through the accessibility Live 12 offers screen
+ * readers, so Live stays where it is; only keys bring it forward. A small helper program for each OS
+ * stays running beside Kumi and answers in milliseconds: on a Mac a Swift program using Accessibility,
+ * on Windows a PowerShell one using UI Automation.
  */
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -28,8 +30,10 @@ export interface Hands {
   trusted(prompt?: boolean): Promise<boolean>;
   /** Live's menus as they are now. */
   menus(signal?: AbortSignal): Promise<MenuItem[]>;
-  /** Press a menu item, by its titles ("Edit", "Group Tracks"); `front` brings Live forward for it and gives the front back. */
-  menu(path: readonly string[], options?: { front?: boolean; signal?: AbortSignal }): Promise<HandsReply>;
+  /** Select tracks in Live by name (and which of that name, when several share it), as a screen reader would. */
+  tracks(tracks: readonly { name: string; nth?: number }[], signal?: AbortSignal): Promise<HandsReply>;
+  /** Press a menu item, by its titles ("Edit", "Group Tracks"); `front` brings Live forward for it (it needn't be) and gives the front back. */
+  menu(path: readonly string[], options?: { front?: boolean; signal?: AbortSignal; /** Other titles the item may have now. */ titles?: readonly string[] }): Promise<HandsReply>;
   /** Press keys in Live ("cmd+g", "shift+down"), one combination after another. */
   keys(combos: readonly string[], options?: { signal?: AbortSignal; gapMs?: number }): Promise<HandsReply>;
   /** Live's dialog, if one is up: its words and buttons. */
@@ -143,7 +147,8 @@ function persistent(command: string, args: string[], timeoutMs = 4_000): Hands {
       const reply = checked(await ask("menus", {}, signal));
       return Array.isArray(reply.items) ? (reply.items as MenuItem[]) : [];
     },
-    async menu(path, options = {}) { return checked(await ask("menu", { path, front: options.front ?? true }, options.signal)); },
+    async tracks(tracks, signal) { return checked(await ask("tracks", { tracks }, signal)); },
+    async menu(path, options = {}) { return checked(await ask("menu", { path, front: options.front ?? false, ...(options.titles?.length ? { titles: options.titles } : {}) }, options.signal)); },
     async keys(combos, options = {}) { return checked(await ask("keys", { keys: combos, ...(options.gapMs !== undefined ? { gapMs: options.gapMs } : {}) }, options.signal)); },
     async dialog(signal) {
       const reply = checked(await ask("dialog", {}, signal));

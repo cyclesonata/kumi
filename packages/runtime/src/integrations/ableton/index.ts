@@ -32,7 +32,7 @@ import { KUMI } from "../../command.js";
 import { EARS_ITEM, installEars } from "../../ears/device.js";
 import { openEarsLink, type EarsLink, type Tap } from "../../ears/link.js";
 import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.js";
-import { HandsError, openHands, type Hands, type MenuItem } from "../../hands/index.js";
+import { HandsError, openHands, type Hands, type HandsReply, type MenuItem } from "../../hands/index.js";
 import { COMMANDS, findItem, LIVE_COMMAND_DESCRIPTION, LIVE_COMMAND_SCHEMA, LIVE_COMMAND_TOOL, shortcut } from "./live-command.js";
 import { DISPLAY_MAP_SCRIPT, valueForDisplay, type DisplayMap } from "./display.js";
 import { PLUGIN_DESCRIPTION, PLUGIN_SCHEMA, PLUGIN_TOOL } from "./plugin-tool.js";
@@ -2600,6 +2600,8 @@ export function createAbletonIntegration(options: Options): Integration {
     if (!hands) handsSetup = undefined;
     return hands;
   }
+  /** Live's commands whose menu item toggles (one item, retitled with the selection). */
+  const toggles = new Set(["freeze_track", "unfreeze_track"]);
   /** Live's menus as last read (read again when an item isn't found: they change with the selection and the view). */
   let menuItems: MenuItem[] | undefined;
   /** The Set's tracks by name, in order: what a command changed is told from them. */
@@ -2654,13 +2656,22 @@ export function createAbletonIntegration(options: Options): Integration {
       const target = command?.target ?? "none";
       if ((target === "track" || target === "track-or-clip") && !named.track && !named.clip && !named.tracks.length) return { text: `${input.command} works on a track: give track.`, isError: true };
       if (target === "tracks" && named.tracks.length < 2 && !named.track) return { text: "Give the tracks to group, side by side, first to last (tracks).", isError: true };
-      if (target === "clip" && !named.clip) return { text: `${input.command} works on a clip: give clip (its clipRef from this turn).`, isError: true };
+      if (target === "clip" && !named.clip) return { text: `${input.command} works on a clip: give clip (its clipRef from this turn, or "selected" for the one selected in Live).`, isError: true };
       const before = await trackNames(signal);
       const savedBefore = project?.path && existsSync(project.path) ? statSync(project.path).mtimeMs : undefined;
       let what = "";
-      if (named.clip && (target === "clip" || target === "track-or-clip" || target === "none")) {
+      /** The tracks selected for it, by name (to see a freeze through). */
+      let chosen: string[] = [];
+      if (named.clip === "selected") {
+        // The clip the producer selected in Live: pressed as it is.
+        what = " the selected clip";
+      } else if (named.clip && (target === "clip" || target === "track-or-clip" || target === "none")) {
         const long = String(lengthen(named.clip, "clipRef"));
         const session = /^(\d+):clip:(\d+):(\d+)$/.exec(long);
+        // Live's scripting can't select a clip in the Arrangement, nor can its accessibility.
+        if (!session && target === "clip") return { text: "Kumi can't select a clip in the Arrangement for Live's own commands yet: ask the producer to click it, then use clip: \"selected\" (or work on a Session clip).", isError: true };
+        // Its slot selected with the Session in front: Live's own selection for the Create menu's commands.
+        if (session) await act(ACTIONS.find((kind) => kind.tool === "show")!, { action: "focus-view", view: "Session" }, signal);
         // The clip's slot, so Live's selection is on it (Session view), and the clip in the Clip view.
         const slot = session ? `${session[1]}:clip_slot:${session[2]}:${session[3]}` : undefined;
         if (slot && !refs.has(slot)) refs.set(slot, "clip-slot");
@@ -2670,16 +2681,35 @@ export function createAbletonIntegration(options: Options): Integration {
         what = " the clip";
       } else if (named.track || named.tracks.length) {
         const list = named.tracks.length ? named.tracks : [named.track!];
-        const first = await trackRefOf(list[0]!, signal);
-        // Several side by side: the first selected, then Live's own selection stretched over the rest.
-        if (list.length > 1) await act(ACTIONS.find((kind) => kind.tool === "show")!, { action: "focus-view", view: "Session" }, signal);
-        const selected = await act(ACTIONS.find((kind) => kind.tool === "select")!, { trackRef: first }, signal);
-        if (selected.isError) return { text: `Kumi couldn't select ${list[0]} in Live: ${selected.text.slice(0, 300)}`, isError: true };
-        if (list.length > 1) {
-          const extended = await hands.keys(Array.from({ length: list.length - 1 }, () => "shift+right"), { signal });
-          if (!extended.ok) return { text: `Kumi couldn't select the other tracks in Live (${String(extended.error)}).`, isError: true };
+        // Each by its name in Live's track headers, and which of that name it is (several tracks can share one).
+        const all = [...await rows("track", { fields: ["name", "kind", "isFrozen", "isVisible"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+        const targets: { name: string; nth: number }[] = [];
+        for (const one of list) {
+          const ref = await trackRefOf(one, signal);
+          const index = all.findIndex((track) => track.ref === ref);
+          const row = all[index];
+          const name = typeof row?.name === "string" ? row.name : one;
+          // Live's freeze and group commands toggle: what's already so is said, not pressed (it would undo it).
+          const already = input.command === "freeze_track" && row?.isFrozen === true ? "is frozen already"
+            : (input.command === "unfreeze_track" || input.command === "flatten_track") && row?.isFrozen === false ? `isn't frozen${input.command === "flatten_track" ? " (Flatten works on a frozen track: freeze it first)" : ""}`
+            : input.command === "ungroup_tracks" && row && row.kind !== "group" ? "isn't a group" : undefined;
+          if (already) return { text: `${name} ${already}; nothing pressed.`, isError: true };
+          if (row?.isVisible === false) return { text: `${name} is inside a folded group, so Live's track headers don't show it: unfold the group, then ask again.`, isError: true };
+          targets.push({ name, nth: all.slice(0, Math.max(0, index)).filter((track) => track.name === name).length });
         }
-        what = list.length > 1 ? ` ${list.length} tracks` : ` ${knownTrack(first)?.name ?? list[0]}`;
+        const selected = await hands.tracks(targets, signal).catch((error: unknown) => ({ ok: false, error: error instanceof Error ? error.message : "failed" }) as HandsReply);
+        if (!selected.ok && selected.error === "no-track") {
+          const missing = Array.isArray(selected.missing) ? (selected.missing as string[]).join(", ") : list.join(", ");
+          return { text: `Live's track headers don't show ${missing}: is it inside a folded group? Unfold the group, then ask again.`, isError: true };
+        }
+        if (!selected.ok) {
+          // An older helper, or no track headers to be found: one track can still be selected through Live's scripting.
+          if (list.length > 1) return { text: `Kumi couldn't select several tracks in Live here (${String(selected.error)}); select them in Live, then ask again.`, isError: true };
+          const viaScript = await act(ACTIONS.find((kind) => kind.tool === "select")!, { trackRef: await trackRefOf(list[0]!, signal) }, signal);
+          if (viaScript.isError) return { text: `Kumi couldn't select ${list[0]} in Live: ${viaScript.text.slice(0, 300)}`, isError: true };
+        } else tell(`Selected ${targets.map((target) => target.name).join(", ")}`);
+        chosen = targets.map((target) => target.name);
+        what = list.length > 1 ? ` ${list.length} tracks` : ` ${targets[0]!.name}`;
       }
       // Press it: the command's menu item (wherever Live keeps it), the item named, or the keys.
       let pressed: string;
@@ -2691,16 +2721,39 @@ export function createAbletonIntegration(options: Options): Integration {
         let item = look(menuItems);
         if (!item) { menuItems = await hands.menus(signal); item = look(menuItems); }
         if (!item) return { text: `Live's menus don't have ${command ? `“${command.titles[0]}”` : `“${menu!.join(" › ")}”`} here: it may need a newer Live, Live Suite, or something selected first.`, isError: true };
-        const reply = await hands.menu(item.path, { signal });
+        const reply = await hands.menu(item.path, { signal, ...(command ? { titles: command.titles } : {}) });
         if (!reply.ok) {
           return { text: reply.error === "disabled" ? `Live has “${item.path.join(" › ")}” greyed out right now: it needs the right thing selected (and some commands need the Arrangement or Session view in front).`
             : `Live didn't take “${item.path.join(" › ")}” (${String(reply.error)}).`, isError: true };
         }
-        pressed = item.path.join(" › "); key = shortcut(item);
+        // What Live's menu said as it was pressed (its titles follow the selection: "Group Tracks"); a toggle's
+        // title can lag the selection, so a freeze is said as what it did.
+        const said = toggles.has(String(input.command)) ? command!.titles[0]! : typeof reply.title === "string" && reply.title ? reply.title : item.path.at(-1)!;
+        pressed = [...item.path.slice(0, -1), said].join(" › "); key = shortcut(item);
       } else {
         const reply = await hands.keys(keys!, { signal });
         if (!reply.ok) return { text: `Live didn't take those keys (${String(reply.error)}).`, isError: true };
         pressed = keys!.join(", ");
+      }
+      // A freeze renders first (Live shows its progress): seen through to the end in Live's own track state, so
+      // what's said is what happened, and the next command finds Live's menus caught up.
+      const toggle = input.command === "freeze_track" ? true : input.command === "unfreeze_track" || input.command === "flatten_track" ? false : undefined;
+      if (toggle !== undefined && chosen.length) {
+        tell(`${toggle ? "Freezing" : input.command === "flatten_track" ? "Flattening" : "Unfreezing"}${what}`);
+        for (let wait = 0; wait < 600; wait++) {
+          const rows_ = await rows("track", { fields: ["name", "isFrozen"] }, signal);
+          if (chosen.every((name) => rows_.some((row) => row.name === name && row.isFrozen === toggle))) break;
+          // A dialog with buttons asks something (the progress has none): it's said, not waited out.
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const, buttons: [] as string[] }));
+          if (open.open && (open.buttons?.length ?? 0) > 0) break;
+          await delay(100, undefined, { signal });
+        }
+      }
+      // A bounce or a conversion renders first, Live's progress window up meanwhile: seen through to its end.
+      if (command && /Bounce|Convert|Separate|Slice|Consolidate|Flatten|Paste Bounced/.test(command.titles[0]!)) {
+        const working = async () => { const open = await hands.dialog(signal).catch(() => ({ open: false as const, buttons: [] as string[] })); return open.open && (open.buttons?.length ?? 0) === 0; };
+        await delay(150, undefined, { signal });
+        for (let wait = 0; wait < 1_200 && await working(); wait++) await delay(100, undefined, { signal });
       }
       tell(command ? `${command.done}${what}` : `Pressed ${pressed} in Live`);
       // Live does it on its own time: a bounce or a freeze renders first.
@@ -2708,15 +2761,18 @@ export function createAbletonIntegration(options: Options): Integration {
         for (let check = 0; check < (command?.dialog ? 6 : 2); check++) {
           await delay(command?.dialog ? 250 : 150, undefined, { signal });
           const open = await hands.dialog(signal).catch(() => ({ open: false as const }));
-          if (open.open) return open;
+          // Live's progress (no buttons) isn't a question.
+          if (open.open && (open.buttons?.length ?? 0) > 0) return open;
         }
         return undefined;
       })();
       // Live's structure may have changed under every reference: read it all again.
       refs.clear(); known.clear(); cursors.clear(); shortRefs.clear(); longRefs.clear(); observationGeneration++;
       let after = await trackNames(signal);
-      for (let wait = 0; wait < 20 && !dialog && command && command.target !== "none" && after.length === before.length && /Bounce|Convert|Separate|Slice|Group/.test(command.titles[0]!); wait++) {
-        await delay(500, undefined, { signal }); after = await trackNames(signal);
+      // Tracks it adds or renames show a moment after (in place, a bounce may keep every name: then this ends soon).
+      const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((name, index) => name === b[index]);
+      for (let wait = 0; wait < 8 && !dialog && command && command.target !== "none" && same(after, before) && /Bounce|Convert|Separate|Slice|Group/.test(command.titles[0]!); wait++) {
+        await delay(250, undefined, { signal }); after = await trackNames(signal);
       }
       const added = after.filter((name) => !before.includes(name) || after.filter((other) => other === name).length > before.filter((other) => other === name).length);
       const removed = before.filter((name) => !after.includes(name));

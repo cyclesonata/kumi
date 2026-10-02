@@ -41,7 +41,7 @@ export function bridge(options: Options = {}) {
   const records: ChangeRecord[] = [];
   let tempo = options.tempo ?? 120;
   let live = true; let epoch = 7;
-  let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
+  let tracks: { name: string; color: number; armed?: boolean; frozen?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
     ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) })),
     ...Array.from({ length: options.bigSet ?? 0 }, (_, index) => ({ name: index % 4 === 0 ? `Bus ${index / 4 + 1}` : `Part ${index + 1}`, color: 0x808080,
       devices: ["Operator", "EQ Eight", "Compressor", "Reverb"].map((name) => ({ name, className: name.replace(/ /g, ""), params: [] })) }))];
@@ -137,7 +137,7 @@ export function bridge(options: Options = {}) {
           ? tracks.map((track, index) => {
             // In a big Set, every fourth track (from the third) is a group holding the three after it.
             const big = index - 2; const group = options.bigSet && big >= 0 ? (big % 4 === 0 ? undefined : `7:track:${index - (big % 4)}`) : undefined;
-            return { ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true, ...(options.bigSet && big >= 0 && big % 4 === 0 ? { kind: "group" } : {}), ...(group ? { groupTrackRef: group } : {}) };
+            return { ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true, isFrozen: track.frozen === true, ...(options.bigSet && big >= 0 && big % 4 === 0 ? { kind: "group" } : {}), ...(group ? { groupTrackRef: group } : {}) };
           })
           : args.kind === "selection" ? [{ ref: "7:selection:0", selectedTrackRef: "7:track:0" }]
           : args.kind === "main-track" ? [{ ref: "7:main_track:0", parentRef: set.ref, name: "Main", kind: "main", mixer: { volume: main.volume } }]
@@ -395,6 +395,7 @@ export function bridge(options: Options = {}) {
     deleteLastTrack: () => { tracks = tracks.slice(0, -1); },
     /** Live makes a track itself (a bounce, a group), as a command of its own would. */
     addTrack: (name: string) => { tracks = [...tracks, { name, color: 0x808080 }]; },
+    freeze: (name: string, frozen = true) => { tracks = tracks.map((track) => (track.name === name ? { ...track, frozen } : track)); },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     /** The next request to this tool waits, after it's sent, until released. */
     hold: (name: string) => {

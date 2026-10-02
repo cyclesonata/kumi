@@ -16,12 +16,14 @@ const LIVE_MENUS: MenuItem[] = [
 ];
 
 /** Hands that press nothing real: they say what they were asked, and Live answers as the test says. */
-function fakeHands(options: { trusted?: boolean; onMenu?: (path: readonly string[]) => { ok: boolean; error?: string } | void; dialog?: { open: boolean; title?: string; buttons?: string[] } } = {}) {
-  const pressed: string[][] = []; const keys: string[][] = []; const answered: string[] = []; const prompts: boolean[] = [];
+function fakeHands(options: { trusted?: boolean; onMenu?: (path: readonly string[]) => { ok: boolean; error?: string } | void; dialog?: { open: boolean; title?: string; buttons?: string[] };
+  onTracks?: (tracks: readonly { name: string; nth?: number }[]) => { ok: boolean; error?: string; missing?: string[] } | void } = {}) {
+  const pressed: string[][] = []; const keys: string[][] = []; const answered: string[] = []; const prompts: boolean[] = []; const selected: { name: string; nth?: number }[][] = [];
   let dialog = options.dialog ?? { open: false };
   const hands: Hands = {
     async trusted(prompt = false) { prompts.push(prompt); return options.trusted ?? true; },
     async menus() { return LIVE_MENUS; },
+    async tracks(tracks) { selected.push(tracks.map((track) => ({ ...track }))); return options.onTracks?.(tracks) ?? { ok: true, selected: tracks.map((track) => track.name) }; },
     async menu(path) { pressed.push([...path]); const reply = options.onMenu?.(path); return reply ?? { ok: true }; },
     async keys(combos) { keys.push([...combos]); return { ok: true }; },
     async dialog() { return dialog; },
@@ -29,7 +31,7 @@ function fakeHands(options: { trusted?: boolean; onMenu?: (path: readonly string
     async windows() { return []; },
     close() {},
   };
-  return { open: async () => hands, pressed, keys, answered, prompts, setDialog: (value: typeof dialog) => { dialog = value; } };
+  return { open: async () => hands, pressed, keys, answered, prompts, selected, setDialog: (value: typeof dialog) => { dialog = value; } };
 }
 
 test("a command's menu item is found by its title wherever Live keeps it, and Live's own shortcut is said", () => {
@@ -42,7 +44,7 @@ test("a command's menu item is found by its title wherever Live keeps it, and Li
   assert.equal(shortcut(LIVE_MENUS[1]!), "⇧⌘R");
 });
 
-test("live_command groups tracks side by side: the first selected, the selection stretched, Live's Group Tracks pressed, the new group said", async () => {
+test("live_command groups tracks: selected by name in Live's track headers, Live's Group pressed where Live is, the new group said", async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
   const hands = fakeHands({ onMenu: (path) => { if (path.at(-1) === "Group") b.addTrack("2-Group"); } });
   b = await opened({ version: "1.0.70", hands });
@@ -53,15 +55,70 @@ test("live_command groups tracks side by side: the first selected, the selection
     assert.equal(reply.pressed, "Edit › Group");
     assert.equal(reply.liveShortcut, "⌘G");
     assert.deepEqual(reply.newTracks, ["2-Group"]);
-    // Session view in front, the first track selected through the bridge, the rest by Live's own Shift-→.
-    assert.ok(b.requests.some((request) => request.name === "live_view_preview" && request.args.view === "Session"));
-    assert.ok(b.requests.some((request) => request.name === "live_selection_preview" && request.args.trackRef === "7:track:0"));
-    assert.deepEqual(hands.keys, [["shift+right"]]);
+    // Both selected by name, as a screen reader would: no keys, no view changed, nothing selected through the bridge.
+    assert.deepEqual(hands.selected, [[{ name: "Fixture Bass", nth: 0 }, { name: "Fixture Drums", nth: 0 }]]);
+    assert.deepEqual(hands.keys, []);
+    assert.equal(b.requests.some((request) => request.name === "live_view_preview" || request.name === "live_selection_preview"), false);
     assert.deepEqual(hands.pressed, [["Edit", "Group"]]);
     // HISTORY keeps it, with Live's undo the way back.
     assert.deepEqual(b.records.map((record) => [record.title, record.state]), [["Grouped 2 tracks", "kept"]]);
     assert.match(b.records[0]!.note ?? "", /Live's undo/);
     assert.equal(b.actions.at(-1)?.title, "Grouped 2 tracks");
+  } finally { await b.integration.close(); }
+});
+
+test("a track Live's headers don't show is said (a folded group); an older helper still selects one track through the bridge", async () => {
+  const folded = fakeHands({ onTracks: () => ({ ok: false, error: "no-track", missing: ["Fixture Drums"] }) });
+  let b = await opened({ version: "1.0.70", hands: folded });
+  try {
+    const result = await tool(b.tools, "live_command").execute({ command: "freeze_track", track: "Fixture Drums" }, signal());
+    assert.equal(result.isError, true);
+    assert.match(result.text, /don't show Fixture Drums: is it inside a folded group\?/);
+    assert.equal(folded.pressed.length, 0, "nothing pressed");
+  } finally { await b.integration.close(); }
+  const older = fakeHands({ onTracks: () => ({ ok: false, error: "unknown-op" }) });
+  b = await opened({ version: "1.0.70", hands: older });
+  try {
+    const one = await tool(b.tools, "live_command").execute({ command: "freeze_track", track: "Fixture Bass" }, signal());
+    assert.equal(one.isError, false, one.text);
+    assert.ok(b.requests.some((request) => request.name === "live_selection_preview" && request.args.trackRef === "7:track:0"), "selected through the bridge");
+    const several = await tool(b.tools, "live_command").execute({ command: "group_tracks", tracks: ["Fixture Bass", "Fixture Drums"] }, signal());
+    assert.equal(several.isError, true);
+    assert.match(several.text, /couldn't select several tracks/);
+  } finally { await b.integration.close(); }
+});
+
+test("a freeze is seen through in Live's own track state: Kumi says it's freezing, and says it froze once Live has", async () => {
+  let b!: Awaited<ReturnType<typeof opened>>;
+  // Live freezes on its own time, its progress window up meanwhile.
+  const hands = fakeHands({ onMenu: (path) => { if (/Freeze/.test(path.at(-1)!)) { hands.setDialog({ open: true, title: "Freeze...", buttons: [] }); setTimeout(() => { b.freeze("Fixture Bass"); hands.setDialog({ open: false }); }, 400); } } });
+  b = await opened({ version: "1.0.70", hands });
+  try {
+    const started = Date.now();
+    const result = await tool(b.tools, "live_command").execute({ command: "freeze_track", track: "Fixture Bass" }, signal());
+    assert.equal(result.isError, false, result.text);
+    assert.ok(Date.now() - started >= 400, "it waited for Live");
+    const reply = JSON.parse(result.text) as { pressed: string; dialog?: unknown };
+    assert.equal(reply.dialog, undefined, "the progress window isn't a question");
+    const titles = b.actions.map((action) => action.title);
+    assert.ok(titles.indexOf("Freezing Fixture Bass") >= 0 && titles.indexOf("Freezing Fixture Bass") < titles.indexOf("Froze Fixture Bass"), titles.join(" / "));
+    assert.deepEqual(b.records.map((record) => [record.title, record.state]), [["Froze Fixture Bass", "kept"]]);
+  } finally { await b.integration.close(); }
+});
+
+test("Live's freeze and group commands toggle, so what's already so is said and nothing pressed", async () => {
+  const hands = fakeHands();
+  const b = await opened({ version: "1.0.70", hands });
+  try {
+    b.freeze("Fixture Bass");
+    const frozen = await tool(b.tools, "live_command").execute({ command: "freeze_track", track: "Fixture Bass" }, signal());
+    assert.equal(frozen.isError, true);
+    assert.match(frozen.text, /Fixture Bass is frozen already; nothing pressed/);
+    assert.match((await tool(b.tools, "live_command").execute({ command: "unfreeze_track", track: "Fixture Drums" }, signal())).text, /Fixture Drums isn't frozen/);
+    assert.match((await tool(b.tools, "live_command").execute({ command: "flatten_track", track: "Fixture Drums" }, signal())).text, /freeze it first/);
+    assert.match((await tool(b.tools, "live_command").execute({ command: "ungroup_tracks", track: "Fixture Drums" }, signal())).text, /isn't a group/);
+    assert.deepEqual(hands.pressed, []);
+    assert.deepEqual(hands.selected, [], "nothing selected either");
   } finally { await b.integration.close(); }
 });
 

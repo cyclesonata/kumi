@@ -1,13 +1,14 @@
 /**
  * Kumi's hands on a Mac: a small Swift program that drives Live through macOS Accessibility. It stays
  * running beside Kumi and takes one JSON request a line on stdin, answering one JSON line on stdout, so
- * each command costs milliseconds: press a menu item (found by its title anywhere in Live's menus),
- * press keys, read and answer Live's dialogs, list its windows. It brings Live to the front only when a
- * command needs it and gives the front back after. Kumi compiles it once (the release carries it built).
+ * each command costs milliseconds: select tracks by name (as a screen reader does, through Live 12's own
+ * accessibility), press a menu item (found by its title anywhere in Live's menus), press keys, read and
+ * answer Live's dialogs, list its windows. Only keys need Live in front: it's brought forward for them
+ * and the front given back after. Kumi compiles it once (the release carries it built).
  */
 
 /** Bumped whenever the program changes: Kumi builds (or uses) the matching one. */
-export const HANDS_VERSION = 1;
+export const HANDS_VERSION = 2;
 
 export const MAC_SOURCE = String.raw`// Kumi's hands (made by Kumi). One JSON request a line on stdin, one JSON answer a line on stdout.
 import Cocoa
@@ -34,6 +35,8 @@ func value(_ element: AXUIElement, _ name: String) -> AnyObject? {
 }
 func children(_ element: AXUIElement) -> [AXUIElement] { (value(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? [] }
 func title(_ element: AXUIElement) -> String { (value(element, kAXTitleAttribute as String) as? String) ?? "" }
+/** What a screen reader says for it: its title, else its description. */
+func label(_ element: AXUIElement) -> String { let named = title(element); return named.isEmpty ? ((value(element, kAXDescriptionAttribute as String) as? String) ?? "") : named }
 func role(_ element: AXUIElement) -> String { (value(element, kAXRoleAttribute as String) as? String) ?? "" }
 func enabled(_ element: AXUIElement) -> Bool { (value(element, kAXEnabledAttribute as String) as? Bool) ?? true }
 
@@ -66,13 +69,21 @@ func menuBar(_ app: NSRunningApplication) -> AXUIElement? {
   return (bar as! AXUIElement)
 }
 
+/** A title as Live may say it: "Freeze Track" and "Freeze Tracks" (it changes with the selection) are one. */
+func norm(_ text: String) -> String {
+  var words = text.replacingOccurrences(of: "…", with: "").replacingOccurrences(of: "...", with: "").lowercased().split(separator: " ").map(String.init)
+  words = words.map { ["tracks", "clips", "scenes"].contains($0) ? String($0.dropLast()) : $0 }
+  return words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+}
+
 /** The menu item at a path of titles ("Edit", "Group Tracks"); a title can be its start ("Freeze"). */
 func item(_ bar: AXUIElement, _ path: [String]) -> AXUIElement? {
   var current: AXUIElement = bar
   for (index, name) in path.enumerated() {
     var holder = current
     if index > 0, let submenu = children(current).first(where: { role($0) == (kAXMenuRole as String) }) { holder = submenu }
-    let found = children(holder).first { title($0) == name } ?? children(holder).first { title($0).lowercased().hasPrefix(name.lowercased()) }
+    let wanted = norm(name)
+    let found = children(holder).first { norm(title($0)) == wanted } ?? children(holder).first { norm(title($0)).hasPrefix(wanted) }
     guard let next = found else { return nil }
     current = next
   }
@@ -114,15 +125,56 @@ func activate(_ app: NSRunningApplication) {
   if #available(macOS 14.0, *) { app.activate() } else { app.activate(options: [.activateIgnoringOtherApps]) }
 }
 
+/** The app in front now, from the window server (NSWorkspace's answer goes stale in a program with no run loop). */
+func frontmost() -> NSRunningApplication? {
+  let windows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+  for window in windows where (window[kCGWindowLayer as String] as? Int) == 0 {
+    if let pid = window[kCGWindowOwnerPID as String] as? Int32 { return NSRunningApplication(processIdentifier: pid) }
+  }
+  return nil
+}
+
 /** Bring Live to the front (and say what was in front, to give it back). */
 func front(_ app: NSRunningApplication) -> NSRunningApplication? {
-  let before = NSWorkspace.shared.frontmostApplication
+  let before = frontmost()
   if before?.processIdentifier != app.processIdentifier {
     activate(app)
     let deadline = Date().addingTimeInterval(1.0)
-    while NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier && Date() < deadline { usleep(5_000) }
+    while frontmost()?.processIdentifier != app.processIdentifier && Date() < deadline { usleep(5_000) }
   }
   return before?.processIdentifier == app.processIdentifier ? nil : before
+}
+
+/** Live's track headers in the view it shows (Arrangement or Session): one row a track, return and Main. */
+func trackHeaders(_ app: NSRunningApplication) -> AXUIElement? {
+  func find(_ element: AXUIElement, _ depth: Int) -> AXUIElement? {
+    if role(element) == (kAXOutlineRole as String) && label(element) == "Track Headers" { return element }
+    if depth > 6 { return nil }
+    for child in children(element) { if let found = find(child, depth + 1) { return found } }
+    return nil
+  }
+  let element = AXUIElementCreateApplication(app.processIdentifier)
+  let windows = (value(element, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
+  for window in windows { if let found = find(window, 0) { return found } }
+  return nil
+}
+
+/**
+ * The rows for these tracks: a row reads the track's name, with its state after a comma ("Bass, Frozen").
+ * Each name takes its nth row of that name (several tracks can share one); a whole name first, then one
+ * followed by a state.
+ */
+func rows(_ all: [AXUIElement], _ wanted: [[String: Any]]) -> (picked: [AXUIElement], missing: [String]) {
+  var picked: [AXUIElement] = []; var missing: [String] = []
+  let labels = all.map { label($0) }
+  for entry in wanted {
+    let name = (entry["name"] as? String) ?? ""; let nth = (entry["nth"] as? Int) ?? 0
+    let whole = labels.indices.filter { labels[$0] == name }
+    let stated = labels.indices.filter { labels[$0].hasPrefix(name + ", ") && !whole.contains($0) }
+    let matches = whole.count > nth ? whole : (whole + stated).sorted()
+    if matches.count > nth { picked.append(all[matches[nth]]) } else { missing.append(name) }
+  }
+  return (picked, missing)
 }
 
 /** Live's dialog, if one is up: its words and buttons. */
@@ -176,14 +228,29 @@ while let line = readLine() {
     var items: [[String: Any]] = []
     walk(bar, [], &items, 0)
     done(["ok": true, "items": items])
+  case "tracks":
+    // Selected as a screen reader selects them: the track headers focused, their rows chosen. Live needn't be in front.
+    guard let outline = trackHeaders(app) else { done(["ok": false, "error": "no-track-headers"]); break }
+    let all = (value(outline, kAXRowsAttribute as String) as? [AXUIElement]) ?? []
+    let found = rows(all, (request["tracks"] as? [[String: Any]]) ?? [])
+    if !found.missing.isEmpty || found.picked.isEmpty { done(["ok": false, "error": "no-track", "missing": found.missing]); break }
+    AXUIElementSetAttributeValue(outline, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    let result = AXUIElementSetAttributeValue(outline, kAXSelectedRowsAttribute as CFString, found.picked as CFArray)
+    let now = ((value(outline, kAXSelectedRowsAttribute as String) as? [AXUIElement]) ?? []).map { label($0) }
+    done(result == .success ? ["ok": true, "selected": now] : ["ok": false, "error": "select-failed", "code": result.rawValue])
   case "menu":
     let path = (request["path"] as? [String]) ?? []
-    guard let bar = menuBar(app), let target = item(bar, path) else { done(["ok": false, "error": "no-item"]); break }
-    if !enabled(target) { done(["ok": false, "error": "disabled"]); break }
+    // Other titles the item may have now (Live retitles some with the selection: Freeze Track, Unfreeze Track).
+    let others = ((request["titles"] as? [String]) ?? []).map { Array(path.dropLast()) + [$0] }
+    guard let bar = menuBar(app), var target = ([path] + others).lazy.compactMap({ item(bar, $0) }).first else { done(["ok": false, "error": "no-item"]); break }
+    // Live's menus catch up with a new selection a moment later: a greyed-out item is looked at again before it counts.
+    for _ in 0..<15 where !enabled(target) { usleep(40_000); if let again = item(bar, path) { target = again } }
+    if !enabled(target) { done(["ok": false, "error": "disabled", "title": title(target)]); break }
+    let pressedTitle = title(target)
     let back = (request["front"] as? Bool) == true ? front(app) : nil
     let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
     if let back = back, (request["giveBack"] as? Bool) != false { usleep(UInt32(((request["settleMs"] as? Int) ?? 60) * 1000)); activate(back) }
-    done(result == .success ? ["ok": true] : ["ok": false, "error": "press-failed", "code": result.rawValue])
+    done(result == .success ? ["ok": true, "title": pressedTitle] : ["ok": false, "error": "press-failed", "code": result.rawValue])
   case "keys":
     let combos = (request["keys"] as? [String]) ?? []
     let back = front(app)

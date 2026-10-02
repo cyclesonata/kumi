@@ -1,7 +1,7 @@
 /**
  * Kumi's hands on Windows: a PowerShell program, kept running, that drives Live through UI Automation
- * (its menus and dialogs, which Live exposes for screen readers) and SendInput (keys). Same protocol as
- * the Mac's: one JSON request a line on stdin, one JSON answer a line on stdout.
+ * (its track headers, menus and dialogs, which Live exposes for screen readers) and SendInput (keys).
+ * Same protocol as the Mac's: one JSON request a line on stdin, one JSON answer a line on stdout.
  */
 
 export const WINDOWS_SOURCE = String.raw`# Kumi's hands (made by Kumi). One JSON request a line on stdin, one JSON answer a line on stdout.
@@ -25,7 +25,7 @@ public static class KumiInput {
   }
 }
 "@
-$version = 1
+$version = 2
 $auto = [System.Windows.Automation.AutomationElement]
 $tree = [System.Windows.Automation.TreeScope]
 $types = [System.Windows.Automation.ControlType]
@@ -34,11 +34,14 @@ function Emit($object) { [Console]::Out.WriteLine(($object | ConvertTo-Json -Com
 function LiveProcess { Get-Process | Where-Object { $_.ProcessName -like 'Ableton Live*' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
 function LiveWindow($process) { $auto::FromHandle($process.MainWindowHandle) }
 function Kids($element) { $element.FindAll($tree::Children, [System.Windows.Automation.Condition]::TrueCondition) }
+# A title as Live may say it: "Freeze Track" and "Freeze Tracks" (it changes with the selection) are one.
+function Norm($text) { return (([string]$text) -replace '(\.\.\.|…)$', '' -replace '\b(Track|Clip|Scene)s\b', '$1').Trim().ToLower() }
 function Named($element, $name) {
   $all = @(Kids $element)
-  $exact = $all | Where-Object { $_.Current.Name -eq $name } | Select-Object -First 1
+  $wanted = Norm $name
+  $exact = $all | Where-Object { (Norm $_.Current.Name) -eq $wanted } | Select-Object -First 1
   if ($exact) { return $exact }
-  return $all | Where-Object { $_.Current.Name -like "$name*" } | Select-Object -First 1
+  return $all | Where-Object { (Norm $_.Current.Name).StartsWith($wanted) } | Select-Object -First 1
 }
 function Expand($element) { try { $element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand(); Start-Sleep -Milliseconds 40 } catch {} }
 function Collapse($element) { try { $element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Collapse() } catch {} }
@@ -91,25 +94,56 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
         Done @{ ok = $true; items = $items }
       }
+      'tracks' {
+        # Selected as a screen reader selects them: the track headers focused, their rows chosen.
+        $headers = $window.FindFirst($tree::Descendants, (New-Object System.Windows.Automation.PropertyCondition($auto::NameProperty, 'Track Headers')))
+        if (-not $headers) { Done @{ ok = $false; error = 'no-track-headers' }; break }
+        $rows = @(Kids $headers)
+        $labels = @($rows | ForEach-Object { [string]$_.Current.Name })
+        $picked = @(); $missing = @()
+        foreach ($entry in @($request.tracks)) {
+          $nth = if ($null -ne $entry.nth) { [int]$entry.nth } else { 0 }
+          $whole = @(); $stated = @()
+          for ($i = 0; $i -lt $labels.Count; $i++) {
+            if ($labels[$i] -eq $entry.name) { $whole += $i } elseif ($labels[$i].StartsWith("$($entry.name), ")) { $stated += $i }
+          }
+          $found = if ($whole.Count -gt $nth) { $whole } else { @($whole + $stated | Sort-Object) }
+          if ($found.Count -gt $nth) { $picked += $rows[$found[$nth]] } else { $missing += $entry.name }
+        }
+        if ($missing.Count -gt 0 -or $picked.Count -eq 0) { Done @{ ok = $false; error = 'no-track'; missing = $missing }; break }
+        try { $headers.SetFocus() } catch {}
+        for ($i = 0; $i -lt $picked.Count; $i++) {
+          $pattern = $picked[$i].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+          if ($i -eq 0) { $pattern.Select() } else { $pattern.AddToSelection() }
+        }
+        Done @{ ok = $true; selected = @($picked | ForEach-Object { $_.Current.Name }) }
+      }
       'menu' {
         $bar = MenuBar $window
         $previous = [KumiInput]::GetForegroundWindow()
         [KumiInput]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
         $current = $bar; $found = $true
-        foreach ($name in $request.path) {
+        $last = @($request.path).Count - 1
+        for ($step = 0; $step -le $last; $step++) {
+          $name = @($request.path)[$step]
           if (-not $current) { $found = $false; break }
           Expand $current
           $next = Named $current $name
           if (-not $next) { $next = $current.FindFirst($tree::Descendants, (New-Object System.Windows.Automation.PropertyCondition($auto::NameProperty, $name))) }
+          # Other titles the item may have now (Live retitles some with the selection: Freeze Track, Unfreeze Track).
+          if (-not $next -and $step -eq $last) { foreach ($other in @($request.titles)) { if ($other) { $next = Named $current $other; if ($next) { break } } } }
           if (-not $next) { $found = $false; break }
           $current = $next
         }
         if (-not $found) { Done @{ ok = $false; error = 'no-item' }; break }
-        if (-not $current.Current.IsEnabled) { Done @{ ok = $false; error = 'disabled' }; break }
+        # Live's menus catch up with a new selection a moment later: a greyed-out item is looked at again before it counts.
+        for ($look = 0; $look -lt 15 -and -not $current.Current.IsEnabled; $look++) { Start-Sleep -Milliseconds 40 }
+        if (-not $current.Current.IsEnabled) { Done @{ ok = $false; error = 'disabled'; title = $current.Current.Name }; break }
+        $title = $current.Current.Name
         $pressed = Press $current
         Start-Sleep -Milliseconds 60
         [KumiInput]::SetForegroundWindow($previous) | Out-Null
-        if ($pressed) { Done @{ ok = $true } } else { Done @{ ok = $false; error = 'press-failed' } }
+        if ($pressed) { Done @{ ok = $true; title = $title } } else { Done @{ ok = $false; error = 'press-failed' } }
       }
       'keys' {
         $previous = [KumiInput]::GetForegroundWindow()

@@ -382,8 +382,13 @@ How it works:
 
 - Kumi selects what the command works on, presses the command, and says what changed.
   When Live opens a dialog (Export, say), Kumi reads it and answers it.
-- Live comes to the front for a moment and the front goes back after. Each command
-  takes milliseconds.
+- Tracks are selected by name through the accessibility Live 12 offers screen
+  readers. Live stays where it is: nothing comes to the front, and a command takes
+  well under a second (a bounce or a freeze, as long as Live takes to render).
+- Freeze, unfreeze and group are checked first: a track already frozen isn't
+  pressed again (Live's command would undo it).
+- Clip commands work on a Session clip, or on the clip you've selected in Live.
+  Kumi can't select a clip in the Arrangement yet.
 - HISTORY lists each command. Live's own undo (Cmd-Z) takes it back.
 - **On a Mac:** this uses Accessibility. The first time, macOS asks: turn on the app
   Kumi runs in (your terminal) in System Settings › Privacy & Security › Accessibility.

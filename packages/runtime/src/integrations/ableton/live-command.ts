@@ -29,8 +29,10 @@ export const COMMANDS: Record<string, Command> = {
   // Live 12.4 calls them Edit › Group and Ungroup (they group devices too, when devices are selected).
   group_tracks: { titles: ["Group", "Group Tracks"], target: "tracks", done: "Grouped" },
   ungroup_tracks: { titles: ["Ungroup", "Ungroup Tracks"], target: "track", done: "Ungrouped" },
-  freeze_track: { titles: ["Freeze Track", "Freeze Tracks"], target: "track", done: "Froze" },
-  unfreeze_track: { titles: ["Unfreeze Track", "Unfreeze Tracks"], target: "track", done: "Unfroze" },
+  // One menu item that Live retitles with the selection (its menus catch up a moment later): Kumi checks the
+  // track's state before pressing it, so either title does the one asked for.
+  freeze_track: { titles: ["Freeze Track", "Unfreeze Track"], target: "track", done: "Froze" },
+  unfreeze_track: { titles: ["Unfreeze Track", "Freeze Track"], target: "track", done: "Unfroze" },
   flatten_track: { titles: ["Flatten Track", "Flatten Tracks", "Flatten"], target: "track", done: "Flattened" },
   bounce_to_new_track: { titles: ["Bounce to New Track", "Bounce Track to New Track"], target: "track-or-clip", done: "Bounced to a new track" },
   bounce_track_in_place: { titles: ["Bounce Track in Place", "Bounce Tracks in Place"], target: "track", done: "Bounced in place" },
@@ -59,22 +61,25 @@ export const LIVE_COMMAND_SCHEMA: JsonObject = { type: "object", additionalPrope
   command: { type: "string", enum: Object.keys(COMMANDS), description: "One of Live's commands Kumi knows" },
   track: { ...REF, description: "The track it works on (its reference from this turn, or its name)" },
   tracks: { type: "array", minItems: 2, maxItems: 64, items: REF, description: "Tracks side by side (to group them), first to last" },
-  clip: { ...REF, description: "The clip it works on (its clipRef from this turn)" },
+  clip: { ...REF, description: "The clip it works on: its clipRef from this turn (a Session clip), or \"selected\" for the one the producer selected in Live" },
   menu: { type: "array", minItems: 1, maxItems: 4, items: { type: "string", minLength: 1, maxLength: 80 }, description: "Any of Live's menu items by its titles, [\"Edit\", \"Freeze Track\"]" },
   keys: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 32 }, description: "Keys to press in Live, one combination each: \"cmd+shift+r\", \"down\"" },
   answer: { type: "string", minLength: 1, maxLength: 80, description: "Press this button of the dialog Live has open (OK, Export, Cancel…)" },
 } };
 
+/** A title as Live may say it: "Freeze Track" and "Freeze Tracks" (it changes with the selection) are one. */
+const norm = (title: string) => title.replace(/…$|\.\.\.$/, "").trim().toLowerCase().replace(/\b(track|clip|scene)s\b/g, "$1");
+
 /** The menu item a command presses: the first of its titles found anywhere in Live's menus (whole, then as a start). */
 export function findItem(items: readonly MenuItem[], titles: readonly string[]): MenuItem | undefined {
-  const name = (item: MenuItem) => (item.path.at(-1) ?? "").replace(/…$|\.\.\.$/, "").trim().toLowerCase();
+  const name = (item: MenuItem) => norm(item.path.at(-1) ?? "");
   for (const title of titles) {
-    const wanted = title.toLowerCase();
+    const wanted = norm(title);
     const exact = items.find((item) => name(item) === wanted);
     if (exact) return exact;
   }
   for (const title of titles) {
-    const wanted = title.toLowerCase();
+    const wanted = norm(title);
     const start = items.find((item) => name(item).startsWith(wanted));
     if (start) return start;
   }
