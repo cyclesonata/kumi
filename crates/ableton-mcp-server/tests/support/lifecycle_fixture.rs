@@ -84,11 +84,12 @@ pub fn package(parent: &Path, version: &str, policy: &str) -> (PathBuf, PathBuf,
         "x86_64-unknown-linux-gnu"
     };
     let binary = if cfg!(windows) { "ableton-mcp-server.exe" } else { "ableton-mcp-server" };
+    let worker = if cfg!(windows) { "ableton-mcp-analysis-worker.exe" } else { "ableton-mcp-analysis-worker" };
     let mut metadata = json!({"name":"@ableton-mcp/mcp-server","version":version,"private":true,"license":license,"type":"module"});
     if native {
         metadata["runtime"] = "rust-native".into();
         metadata["target"] = target.into();
-        metadata["bin"] = json!({"ableton-mcp-server":binary});
+        metadata["bin"] = json!({"ableton-mcp-server":binary,"ableton-mcp-analysis-worker":worker});
     } else if !legacy {
         metadata["engines"] = json!({"node":range});
         metadata["abletonMcpSupport"] = json!({"nodeMajors":majors});
@@ -100,6 +101,9 @@ pub fn package(parent: &Path, version: &str, policy: &str) -> (PathBuf, PathBuf,
         if legacy { b"# Legacy private license notice\n".to_vec() } else { include_bytes!("../../../../LICENSE.md").to_vec() },
     );
     files.insert(if native { binary } else { "dist/src/cli.js" }.into(), format!("fixture artifact payload {version}\n").into_bytes());
+    if native {
+        files.insert(worker.into(), format!("fixture worker payload {version}\n").into_bytes());
+    }
     files.insert("remote-script/AbletonMcpBridge/__init__.py".into(), b"def create_instance(c_instance):\n    return None\n".to_vec());
     files.insert(
         "remote-script/AbletonMcpBridge/ableton_mcp_remote_script.py".into(),
@@ -118,7 +122,7 @@ pub fn package(parent: &Path, version: &str, policy: &str) -> (PathBuf, PathBuf,
     } else {
         json!({"runtime":"TypeScript compiled JavaScript","nodeRange":if legacy{">=22 <26"}else{range},"nodeMajors":majors,"recipe":"test fixture","builder":{"node":"fixture","npm":"fixture","typescript":"fixture","packageLockSha256":"a".repeat(64),"workflowSha256":"b".repeat(64)}})
     };
-    let manifest = json!({"schema":if native{"ableton-mcp-native-release/v1"}else if legacy{"ableton-mcp-private-release/v1"}else{"ableton-mcp-release/v2"},"package":{"name":"@ableton-mcp/mcp-server","version":version,"license":license,"private":true},"source":{"commit":&sha(version)[..40],"dirty":true},"build":build,"protocol":{"registryHash":registry_digest()},"distribution":{"channel":if native{"local-native-tarball"}else if legacy{"private-local-npm-tarball"}else{"local-npm-tarball"},"published":false,"signed":false,"notarized":false,"integrityIsIdentityProof":false},"algorithm":"sha256","files":files.iter().map(|(name,bytes)|(name.clone(),json!(sha(bytes)))).collect::<serde_json::Map<_,_>>(),"roles":files.keys().map(|name|(name.clone(),json!(if name=="LICENSE.md"{if legacy{"private-license"}else{"license"}}else if name=="package.json"{"package-metadata"}else if name==binary{"native-runtime"}else if name.starts_with("dist/src/"){"compiled-runtime"}else if name.starts_with("release-docs/"){"documentation"}else{"ableton-remote-script"}))).collect::<serde_json::Map<_,_>>()});
+    let manifest = json!({"schema":if native{"ableton-mcp-native-release/v1"}else if legacy{"ableton-mcp-private-release/v1"}else{"ableton-mcp-release/v2"},"package":{"name":"@ableton-mcp/mcp-server","version":version,"license":license,"private":true},"source":{"commit":&sha(version)[..40],"dirty":true},"build":build,"protocol":{"registryHash":registry_digest()},"distribution":{"channel":if native{"local-native-tarball"}else if legacy{"private-local-npm-tarball"}else{"local-npm-tarball"},"published":false,"signed":false,"notarized":false,"integrityIsIdentityProof":false},"algorithm":"sha256","files":files.iter().map(|(name,bytes)|(name.clone(),json!(sha(bytes)))).collect::<serde_json::Map<_,_>>(),"roles":files.keys().map(|name|(name.clone(),json!(if name=="LICENSE.md"{if legacy{"private-license"}else{"license"}}else if name=="package.json"{"package-metadata"}else if name==binary||native&&name==worker{"native-runtime"}else if name.starts_with("dist/src/"){"compiled-runtime"}else if name.starts_with("release-docs/"){"documentation"}else{"ableton-remote-script"}))).collect::<serde_json::Map<_,_>>()});
     write(root.join("release-manifest.json"), &manifest);
     let (path, hash) = bind(&root);
     (root, path, hash)

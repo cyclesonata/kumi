@@ -38,6 +38,12 @@ async fn native_install_status_activation_and_idempotent_repair_report_truthfull
             assert_eq!(receipt["generation"], 1);
             assert_eq!(receipt["config"]["server"]["command"], json!(native_entrypoint(&f.options.package_root)));
             assert_eq!(receipt["config"]["server"]["args"], json!(["--config", f.options.state_directory.join("bridge-config.json")]));
+            let worker = std::path::Path::new(receipt["config"]["server"]["command"].as_str().unwrap()).with_file_name(if cfg!(windows) {
+                "ableton-mcp-analysis-worker.exe"
+            } else {
+                "ableton-mcp-analysis-worker"
+            });
+            assert_eq!(fs::read_to_string(worker).unwrap(), "fixture worker payload 1.0.0\n");
             assert!(f.remote().join("__pycache__").is_file());
             assert_eq!(secret_permissions(&f.receipt_path()), SecretPermissions::OwnerOnly);
             let status = run_lifecycle(&f.action("status")).await.unwrap();

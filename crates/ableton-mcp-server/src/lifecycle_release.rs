@@ -18,7 +18,10 @@ fn release_role(name: &str, legacy: bool, native: bool) -> Option<&'static str> 
         Some(if legacy { "private-license" } else { "license" })
     } else if name == "package.json" {
         Some("package-metadata")
-    } else if native && ["ableton-mcp-server", "ableton-mcp-server.exe"].contains(&name) {
+    } else if native
+        && ["ableton-mcp-server", "ableton-mcp-server.exe", "ableton-mcp-analysis-worker", "ableton-mcp-analysis-worker.exe"]
+            .contains(&name)
+    {
         Some("native-runtime")
     } else if !native && name.starts_with("dist/src/") && (name.ends_with(".js") || name.ends_with(".d.ts")) {
         Some("compiled-runtime")
@@ -108,12 +111,20 @@ pub fn verify_release_package(package_root: &Path, allow_dirty: bool) -> Result<
     let metadata: Value = serde_json::from_slice(&read(&package_root.join("package.json"))?)?;
     let native_binary =
         if build["target"].as_str().unwrap_or("").contains("windows") { "ableton-mcp-server.exe" } else { "ableton-mcp-server" };
+    let native_worker = if build["target"].as_str().unwrap_or("").contains("windows") {
+        "ableton-mcp-analysis-worker.exe"
+    } else {
+        "ableton-mcp-analysis-worker"
+    };
     let native_metadata_valid = metadata["runtime"] == "rust-native"
         && metadata["target"] == build["target"]
         && metadata["bin"]["ableton-mcp-server"] == native_binary
+        && metadata["bin"]["ableton-mcp-analysis-worker"] == native_worker
         && valid_hash(&files[native_binary])
         && manifest["roles"][native_binary] == "native-runtime"
-        && manifest["roles"].as_object().unwrap().values().filter(|role| *role == "native-runtime").count() == 1;
+        && valid_hash(&files[native_worker])
+        && manifest["roles"][native_worker] == "native-runtime"
+        && manifest["roles"].as_object().unwrap().values().filter(|role| *role == "native-runtime").count() == 2;
     if ["name", "version", "license", "private"].iter().any(|key| metadata[*key] != package[*key])
         || (current
             && (metadata["engines"]["node"] != build["nodeRange"] || metadata["abletonMcpSupport"]["nodeMajors"] != build["nodeMajors"]))

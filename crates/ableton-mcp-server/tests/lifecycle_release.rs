@@ -191,3 +191,32 @@ fn gzip_members_and_zero_padding_match_node_gunzip() {
         .message()
         .contains("not a valid gzip"));
 }
+#[test]
+fn native_release_requires_one_matching_analysis_worker_and_binds_its_bytes() {
+    let folder = tempfile::tempdir().unwrap();
+    let (root, artifact, hash) = package(folder.path(), "1.0.0", "native");
+    let worker = if cfg!(windows) { "ableton-mcp-analysis-worker.exe" } else { "ableton-mcp-analysis-worker" };
+    let alternate = if cfg!(windows) { "ableton-mcp-analysis-worker" } else { "ableton-mcp-analysis-worker.exe" };
+    let manifest_path = root.join("release-manifest.json");
+    let manifest = read(&manifest_path);
+    let payload = fs::read(root.join(worker)).unwrap();
+    let evidence = verify_release_package(&root, true).unwrap();
+    assert_eq!(verify_artifact_binding(Some(&artifact), Some(&hash), &root, &evidence.manifest_sha256).unwrap(), hash);
+    let mut missing = manifest.clone();
+    missing["files"].as_object_mut().unwrap().remove(worker);
+    missing["roles"].as_object_mut().unwrap().remove(worker);
+    write(&manifest_path, &missing);
+    fs::remove_file(root.join(worker)).unwrap();
+    assert!(verify_release_package(&root, true).unwrap_err().message().contains("metadata and release manifest policy disagree"));
+    let mut mismatched = missing.clone();
+    mismatched["files"][alternate] = json!(sha(&payload));
+    mismatched["roles"][alternate] = json!("native-runtime");
+    fs::write(root.join(alternate), &payload).unwrap();
+    write(&manifest_path, &mismatched);
+    assert!(verify_release_package(&root, true).unwrap_err().message().contains("metadata and release manifest policy disagree"));
+    fs::remove_file(root.join(alternate)).unwrap();
+    fs::write(root.join(worker), &payload).unwrap();
+    write(&manifest_path, &manifest);
+    fs::write(root.join(worker), "tampered worker").unwrap();
+    assert!(verify_release_package(&root, true).unwrap_err().message().contains("release payload hash mismatch"));
+}
