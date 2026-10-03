@@ -180,3 +180,5 @@ pub fn compare(mine: &Analysis, reference: &Analysis) -> Comparison {
         key: [mine.key.as_ref().map(|k| k.name.clone()), reference.key.as_ref().map(|k| k.name.clone())],
     }
 }
+
+pub use structure::{hear_form, Form, FormSection};

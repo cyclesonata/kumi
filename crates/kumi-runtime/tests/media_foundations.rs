@@ -1021,3 +1021,140 @@ async fn a_listening_worker_keeps_the_runtime_responsive_and_honors_cancellation
     let result = hear(file.to_str().unwrap(), AnalyzeOptions { seconds: Some(0.2), ..Default::default() }).await.unwrap();
     assert_eq!(result.file, "worker.wav");
 }
+#[tokio::test]
+async fn a_songs_form_sections_where_whats_played_and_how_it_sounds_change_in_bars() {
+    use kumi_runtime::audio::{
+        structure::*,
+        tools::{listening_tools, ListeningOptions},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut song = Vec::new();
+    for (chord, pad, hats, kick, bass) in [
+        (220.0, 0.05, true, false, 0.0),
+        (220.0, 0.05, true, true, 55.0),
+        (174.61, 0.04, false, false, 0.0),
+        (220.0, 0.05, true, true, 55.0),
+    ] {
+        for i in 0..8 * 2 * 48000 {
+            let t = i as f64 / 48000.0;
+            let mut value = pad * (2.0 * std::f64::consts::PI * chord * t).sin();
+            if hats {
+                let since = t % 0.25;
+                value += 0.06 * (-since * 120.0).exp() * (((i as f64 * 1103515245.0 + 12345.0) % 2147483648.0) / 1073741824.0 - 1.0);
+            }
+            if kick {
+                let since = t % 0.5;
+                value += 0.7 * (-since * 18.0).exp() * (2.0 * std::f64::consts::PI * (50.0 + 70.0 * (-since * 30.0).exp()) * since).sin();
+            }
+            if bass != 0.0 {
+                value += 0.2 * (2.0 * std::f64::consts::PI * bass * t).sin() + 0.08 * (4.0 * std::f64::consts::PI * bass * t).sin();
+            }
+            song.push(value as f32);
+        }
+    }
+    let file = root.path().join("form.wav");
+    wav(&file, &[song.clone(), song], 16);
+    let form = hear_form(file.to_str().unwrap(), FormOptions { tempo: Some(120.0), ..Default::default() }).await.unwrap();
+    assert_eq!(form.tempo.from, "file");
+    assert!((form.tempo.bpm - 120.0).abs() < 2.0);
+    assert_eq!(form.bars, 32);
+    assert_eq!(form.sections.iter().map(|s| (s.bar, s.bars)).collect::<Vec<_>>(), vec![(1, 8), (9, 8), (17, 8), (25, 8)]);
+    assert_eq!(form.sections.iter().map(|s| s.like.as_str()).collect::<Vec<_>>(), vec!["A", "B", "C", "B"]);
+    assert_eq!(form.sections.iter().map(|s| s.level.as_str()).collect::<Vec<_>>(), vec!["low", "high", "low", "high"]);
+    assert_eq!(form.sections.iter().map(|s| s.low.as_str()).collect::<Vec<_>>(), vec!["thin", "full", "thin", "full"]);
+    assert_eq!(form.sections.iter().map(|s| s.role.as_str()).collect::<Vec<_>>(), vec!["intro", "peak", "break", "peak"]);
+    assert_eq!(form.sections[2].density, "sparse");
+    assert_eq!(form.sections[0].from, "0:00");
+    assert_eq!(form.sections[1].from, "0:16");
+    assert!(regex::Regex::new(r"^intro 8 · peak 8 · break 8 · peak 8 \(32 bars at 1[0-9][0-9](\.[0-9])? BPM\)$")
+        .unwrap()
+        .is_match(&form.summary));
+    assert_eq!(
+        hear_form(file.to_str().unwrap(), FormOptions { tempo: Some(128.0), ..Default::default() }).await.unwrap().at_set_tempo,
+        Some("1:00 at the Set's 128 BPM".into())
+    );
+    let tool = listening_tools(ListeningOptions::default()).remove(0);
+    let heard = tool
+        .execute(
+            serde_json::json!({"file":file.to_string_lossy(),"form":true,"tempo":120}).as_object().unwrap().clone(),
+            kumi_common::abort::Signal::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!heard.is_error, "{}", heard.text);
+    let heard: serde_json::Value = serde_json::from_str(&heard.text).unwrap();
+    assert_eq!(heard["form"]["summary"], form.summary);
+}
+#[test]
+fn section_edges_come_from_diagonal_novelty_snapped_to_four_bar_phrases_never_closer_than_four_bars() {
+    use kumi_runtime::audio::structure::boundaries;
+    let owner: Vec<_> = [7, 9, 8].iter().enumerate().flat_map(|(i, n)| std::iter::repeat_n(i, *n)).collect();
+    let matrix = owner.iter().map(|a| owner.iter().map(|b| if a == b { 1.0 } else { 0.2 }).collect()).collect::<Vec<_>>();
+    assert_eq!(boundaries(&matrix, owner.len()), vec![8, 16]);
+    assert!(boundaries(&vec![vec![1.0; owner.len()]; owner.len()], owner.len()).is_empty());
+}
+#[test]
+fn transcribed_notes_reach_the_model_as_rows_in_beats_at_the_sets_tempo_as_played() {
+    use kumi_runtime::audio::{analyze::HeardNote, tools::transcription};
+    let rows = transcription(
+        &[
+            HeardNote { time: 0.52, duration: 0.24, midi: Some(60.0), velocity: 100.0, confidence: 0.9 },
+            HeardNote { time: 1.01, duration: 0.1, midi: None, velocity: 80.0, confidence: 0.0 },
+            HeardNote { time: 1.49, duration: 0.5, midi: Some(60.0), velocity: 90.0, confidence: 0.9 },
+        ],
+        Some(120.0),
+    );
+    assert_eq!(kumi_common::js::json::stringify(&rows["rows"]), "[[1.04,60,100,0.48],[2.02,null,80,0.2],[2.98,60,90,1]]");
+    assert_eq!(rows["pitched"], 2);
+    assert_eq!(rows["unpitched"], 1);
+    assert_eq!(kumi_common::js::json::stringify(&rows["mostPlayed"]), "[{\"midi\":60,\"count\":2}]");
+    assert!(rows["unit"].as_str().unwrap().contains("beats at 120 BPM"));
+}
+#[tokio::test]
+async fn the_listen_tool_hears_a_file_or_sets_it_against_a_reference_with_loudness_matched_and_tells_the_app() {
+    use kumi_runtime::audio::tools::*;
+    use std::{cell::RefCell, rc::Rc};
+    let root = tempfile::tempdir().unwrap();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let told = events.clone();
+    let tool = listening_tools(ListeningOptions { on_event: Rc::new(move |e| told.borrow_mut().push(e)), ..Default::default() }).remove(0);
+    let bright: Vec<_> = deterministic_noise(8 * 48000).iter().map(|v| (*v as f64 / 0.3 * 0.25) as f32).collect();
+    let low = tone(8 * 48000, 350.0, 0.3);
+    let mix: Vec<_> = bright.iter().zip(low).map(|(v, l)| ((*v as f64 + l as f64) * 0.25) as f32).collect();
+    let mine = root.path().join("mine.wav");
+    let reference = root.path().join("reference.wav");
+    wav(&mine, &[mix.clone(), mix], 16);
+    wav(&reference, &[bright.clone(), bright.clone()], 16);
+    let call = |v: serde_json::Value| {
+        let tool = tool.clone();
+        async move { tool.execute(v.as_object().unwrap().clone(), kumi_common::abort::Signal::new()).await.unwrap() }
+    };
+    let alone = call(serde_json::json!({"file":mine,"focus":"mix"})).await;
+    assert!(!alone.is_error, "{}", alone.text);
+    let alone: serde_json::Value = serde_json::from_str(&alone.text).unwrap();
+    assert_eq!(alone["kumiAudio"], 1);
+    assert!(alone["loudness"]["integratedLufs"].as_f64().unwrap() < -10.0);
+    let result = call(serde_json::json!({"file":mine,"compare_to":reference,"focus":"mix"})).await;
+    assert!(!result.is_error, "{}", result.text);
+    let body: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+    assert!(
+        body["comparison"]["balance"].as_array().unwrap().iter().find(|b| b["band"] == "low mids").unwrap()["difference"].as_f64().unwrap()
+            > 3.0
+    );
+    let headlines = body["comparison"]["headlines"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+    assert!(regex::Regex::new(r"low mids \(250–500 Hz\) \+[0-9]+\.[0-9] dB over the reference").unwrap().is_match(&headlines));
+    assert!(headlines.contains("LU quieter overall"));
+    let short = root.path().join("short-reference.wav");
+    wav(&short, &[bright[..3 * 48000].to_vec(), bright[..3 * 48000].to_vec()], 16);
+    let later = call(serde_json::json!({"file":mine,"compare_to":short,"focus":"mix","from_seconds":5})).await;
+    assert!(!later.is_error, "{}", later.text);
+    assert!(serde_json::from_str::<serde_json::Value>(&later.text).unwrap().get("comparison").is_some());
+    assert_eq!(events.borrow().len(), 3);
+    let events = events.borrow();
+    let compared = events[1].compared.as_ref().unwrap();
+    assert_eq!(compared.reference, "reference.wav");
+    assert_eq!(compared.differences.len(), 10);
+    drop(events);
+    let missing = call(serde_json::json!({"file":root.path().join("nowhere.wav")})).await;
+    assert!(missing.is_error && missing.text.contains("no file there"));
+}

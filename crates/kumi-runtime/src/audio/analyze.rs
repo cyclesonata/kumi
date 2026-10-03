@@ -595,7 +595,7 @@ fn over_time(squares: &[Vec<f64>], channels: usize, seconds: f64) -> OverTime {
         .collect();
     OverTime { every: format!("{} s", to_string(round(seconds / parts as f64, 1))), lufs }
 }
-fn onset_strength(frames: &[[f64; 3]]) -> Vec<f64> {
+pub(crate) fn onset_strength(frames: &[[f64; 3]]) -> Vec<f64> {
     let mut out = vec![0.0; frames.len()];
     for i in 1..frames.len() {
         for b in 0..3 {
@@ -613,7 +613,7 @@ fn onset_strength(frames: &[[f64; 3]]) -> Vec<f64> {
     }
     smooth
 }
-fn onset_peaks(strength: &[f64]) -> Vec<usize> {
+pub(crate) fn onset_peaks(strength: &[f64]) -> Vec<usize> {
     if strength.len() < 3 {
         return vec![];
     }
