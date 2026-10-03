@@ -352,7 +352,7 @@ pub fn null_or_json<T: Serialize>(value: &Option<T>) -> Value {
 #[derive(Debug, Clone, Default)]
 pub struct LiveOperationContext {
     pub signal: Option<Signal>,
-    pub deadline_ms: f64,
+    pub deadline_ms: Option<f64>,
     /// Stable host transaction authority; the remote adapter derives per-operation replay keys from it.
     pub idempotency_key: Option<String>,
     pub transaction_id: Option<String>,
@@ -360,7 +360,7 @@ pub struct LiveOperationContext {
 
 impl LiveOperationContext {
     pub fn with_deadline(deadline_ms: f64) -> LiveOperationContext {
-        LiveOperationContext { deadline_ms, ..Default::default() }
+        LiveOperationContext { deadline_ms: Some(deadline_ms), ..Default::default() }
     }
 }
 

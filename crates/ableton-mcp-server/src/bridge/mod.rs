@@ -6,3 +6,5 @@ pub mod extension_setup;
 pub mod live_extension_folders;
 pub mod remote_adapter;
 pub mod router;
+
+mod wire;
