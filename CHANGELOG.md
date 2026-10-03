@@ -3,6 +3,14 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.7.3 — 2026-10-03
+
+Kumi says plainly when a device it's working on was deleted in Live. Ships with bridge 1.0.73, as 1.7.0, 1.7.1 and 1.7.2 did.
+
+- A device deleted in Live while Kumi works on it: setting one of its knobs again now says the
+  device isn't in Live any more, instead of Live's own C++ error, and undoing a change on it says
+  the same, instead of that the knob "changed in Live since".
+
 ## 1.7.2 — 2026-10-03
 
 Kumi turns a device's knobs several times faster. Ships with bridge 1.0.73, as 1.7.0 and 1.7.1 did.

@@ -844,7 +844,11 @@ export function createAbletonIntegration(options: Options): Integration {
       for (const [index, step] of unknown.entries()) {
         const row = rows[index] ?? {};
         if (Array.isArray(row.missing)) return { text: `The device has no parameter called ${JSON.stringify(step.name!.slice(0, 64))}; its parameters include ${row.missing.slice(0, 12).join(", ")}.`, isError: true };
-        if (typeof row.error === "string" || typeof row.name !== "string" || typeof row.min !== "number" || typeof row.max !== "number") return { text: `Kumi couldn't read ${step.name ?? "that parameter"} in Live: ${String(row.error ?? "no answer")}. Discover the device again.`, isError: true };
+        if (typeof row.error === "string" || typeof row.name !== "string" || typeof row.min !== "number" || typeof row.max !== "number") {
+          // The script says why in plain words (a device deleted in Live, references gone stale); anything else, as Live said it.
+          const why = String(row.error ?? "Live didn't answer");
+          return { text: `Kumi couldn't read ${step.name ?? "that parameter"}: ${why}${/discover/.test(why) ? "" : "; discover the device again"}.`, isError: true };
+        }
         if (typeof row.index === "number") fastFound.set(key(step), { index: row.index, name: row.name, min: row.min, max: row.max });
         if (Array.isArray(row.grid)) displayMaps.set(mapKey(step, typeof row.index === "number" ? row.index : undefined), { min: row.min, max: row.max,
           items: Array.isArray(row.items) ? row.items.filter((item): item is string => typeof item === "string") : [],
@@ -868,7 +872,7 @@ export function createAbletonIntegration(options: Options): Integration {
     changesThisTurn++;
     const set = await runFast(setScript(targets), AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]));
     if ("error" in set) {
-      if (!set.sent) return { text: `Live didn't change them: ${set.error}`, isError: true };
+      if (!set.sent) return { text: `Live didn't change ${steps.length === 1 ? "it" : "them"}: ${set.error}`, isError: true };
       remember(newRecord(kind, { title: `${steps.length === 1 ? steps[0]!.name ?? "A parameter" : `${steps.length} parameters`} (unconfirmed)` }, "unsure", now().getTime()), "");
       return { text: "Live didn't confirm this change, so it may or may not have happened. Tell the producer to check Live; discover again before more changes.", isError: true };
     }
@@ -883,7 +887,7 @@ export function createAbletonIntegration(options: Options): Integration {
     const record = newRecord(kind, summary, "applied", now().getTime());
     remember(record, "");
     const entry = changes.get(record.id);
-    if (entry) entry.revert = targets.map((target, index) => ({ ...(("ref" in target) ? { ref: target.ref } : { device: target.device, index: target.index, name: target.name }), prior: rows[index]!.prior, applied: rows[index]!.value }));
+    if (entry) entry.revert = targets.map((target, index) => ({ ...(("ref" in target) ? { ref: target.ref } : { device: target.device, index: target.index }), name: rows[index]!.name, prior: rows[index]!.prior, applied: rows[index]!.value }));
     const reply = { changed: record.title, change: record.id, state: record.state, ...(summary.lines?.length ? { lines: summary.lines } : {}),
       live: { parameters: rows.map((row) => ({ name: row.name, value: row.value, displayValue: row.display })) } };
     return { text: JSON.stringify(reply), isError: false };
@@ -1631,9 +1635,15 @@ export function createAbletonIntegration(options: Options): Integration {
       // Only what's still where Kumi left it goes back: what was moved since stays as it is. Nothing put
       // back can be tried again (it may be moved back); part put back can't.
       if (back.back) delete entry.revert;
-      const them = left.length === 1 ? "it" : "them";
-      const note = back.back ? `Kumi put back ${back.back} of its parameters; ${left.join(", ")} changed in Live since, so Kumi left ${them}.`
-        : `${left.join(", ")} changed in Live since Kumi set ${them}, so Kumi left ${them} as ${left.length === 1 ? "it is" : "they are"}.`;
+      // What was turned since and what's gone (its device deleted or changed in Live) are said apart.
+      const them = (names: readonly string[]) => (names.length === 1 ? "it" : "them");
+      const parts = [
+        ...(back.back ? [`Kumi put back ${back.back} of its parameters`] : []),
+        ...(back.moved.length ? [back.back ? `${back.moved.join(", ")} changed in Live since, so Kumi left ${them(back.moved)}`
+          : `${back.moved.join(", ")} changed in Live since Kumi set ${them(back.moved)}, so Kumi left ${them(back.moved)} as ${back.moved.length === 1 ? "it is" : "they are"}`] : []),
+        ...(back.gone.length ? [`${back.gone.join(", ")} ${back.gone.length === 1 ? "isn't" : "aren't"} in Live any more`] : []),
+      ];
+      const note = `${parts.join("; ")}.`;
       return { record: update({ state: "kept", note }), text: note, isError: true };
     }
     if (!available || lost || !tools?.has("live_undo")) return { text: "Kumi can't reach Live right now, so it can't undo.", isError: true };

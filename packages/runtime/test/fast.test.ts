@@ -24,7 +24,10 @@ function fakeLive() {
     { name: "Spread", value: 0, min: 0, max: 1, enabled: false, shows: (value) => `${Math.round(value * 100)} %` },
   ];
   const scripts: string[] = [];
+  /** The producer deleted the device in Live: every use of it is refused, as the scripts say it. */
+  let deleted = false;
   const find = (target: JsonObject): Knob => {
+    if (deleted) throw new Error("that device isn't in Live any more; discover it again");
     if (typeof target.ref === "string") { const index = Number(target.ref.split(":").at(-1)); return knobs[index]!; }
     const knob = knobs[target.index as number];
     if (!knob || knob.name !== target.name) throw new Error(`the device changed: its parameter ${String(target.index)} is now ${knob?.name}`);
@@ -38,6 +41,7 @@ function fakeLive() {
     const given = JSON.parse(JSON.parse(/^ARGS = json\.loads\((.*)\)$/m.exec(code)![1]!) as string) as JsonObject[];
     try {
       if (marker === "fast-find") return { ok: true, stdout: "", error: null, result: given.map((target) => {
+        if (deleted) return { error: "that device isn't in Live any more; discover it again" };
         const index = typeof target.ref === "string" ? undefined : knobs.findIndex((knob) => knob.name.toLowerCase() === String(target.parameter).toLowerCase()) >= 0
           ? knobs.findIndex((knob) => knob.name.toLowerCase() === String(target.parameter).toLowerCase()) : knobs.findIndex((knob) => knob.name.toLowerCase().startsWith(String(target.parameter).toLowerCase()));
         if (index === -1) return { missing: knobs.map((knob) => knob.name) };
@@ -54,16 +58,17 @@ function fakeLive() {
         });
         return { ok: true, stdout: "", error: null, result: { device: "Operator", track: { ref: "7:track:0", type: "Track", name: "Fixture Bass" }, items } };
       }
-      let back = 0; const moved: string[] = [];
+      let back = 0; const moved: string[] = []; const gone: string[] = [];
       for (const target of [...given].reverse()) {
-        const knob = find(target);
+        let knob: Knob;
+        try { knob = find(target); } catch { gone.push(String(target.name ?? "a parameter")); continue; }
         if (Math.abs(knob.value - (target.applied as number)) > 1e-6) { moved.push(knob.name); continue; }
         knob.value = target.prior as number; back++;
       }
-      return { ok: true, stdout: "", error: null, result: { back, moved, gone: [] } };
-    } catch (error) { return { ok: false, result: null, stdout: "", error: { type: "ValueError", message: (error as Error).message, traceback: "" } }; }
+      return { ok: true, stdout: "", error: null, result: { back, moved, gone } };
+    } catch (error) { return { ok: false, result: null, stdout: "", error: { type: "LookupError", message: (error as Error).message, traceback: "" } }; }
   };
-  return { knobs, scripts, python, knob: (name: string) => knobs.find((knob) => knob.name === name)! };
+  return { knobs, scripts, python, knob: (name: string) => knobs.find((knob) => knob.name === name)!, deleteDevice: () => { deleted = true; } };
 }
 
 test("a device's parameters are set in one trip into Live, named and as Live shows them, and HISTORY says it as ever", async () => {
@@ -137,6 +142,25 @@ test("undo leaves a parameter the producer moved since, and says which", async (
   } finally { await b.integration.close(); }
 });
 
+test("a device deleted in Live while Kumi works on it is said to be gone, when setting a knob and when undoing", async () => {
+  const live = fakeLive();
+  const b = await opened({ version: PYTHON_BRIDGE, parameters: true, python: live.python });
+  try {
+    const set = await tool(b.tools, "set_device_parameter").execute({ deviceRef: "device:1", parameter: "Ae Release", value: 0.6 }, signal());
+    assert.equal(set.isError, false, set.text);
+    live.deleteDevice();
+    const again = await tool(b.tools, "set_device_parameter").execute({ deviceRef: "device:1", parameter: "Ae Release", value: 0.3 }, signal());
+    assert.equal(again.isError, true);
+    assert.equal(again.text, "Live didn't change it: that device isn't in Live any more; discover it again");
+    const named = await tool(b.tools, "set_device_parameter").execute({ deviceRef: "device:1", parameter: "Filter Freq", value: "800 Hz" }, signal());
+    assert.equal(named.text, "Kumi couldn't read Filter Freq: that device isn't in Live any more; discover it again.");
+    const undone = await tool(b.tools, "undo_change").execute({ change: b.records[0]!.id }, signal());
+    assert.equal(undone.isError, true);
+    assert.equal(undone.text, "Ae Release isn't in Live any more.", "not \"changed in Live since\"");
+    assert.equal(b.records.at(-1)!.state, "kept");
+  } finally { await b.integration.close(); }
+});
+
 test("a parameter the device doesn't have, or one Live greys out, changes nothing and says why", async () => {
   const live = fakeLive();
   const b = await opened({ version: PYTHON_BRIDGE, parameters: true, python: live.python });
@@ -201,7 +225,10 @@ class Bridge:
     def __init__(self, refs): self.refs = refs
 track = Track('Bass')
 device = Device('Saturator', [Parameter('Drive', 0.75, 0.0, 1.0), Parameter('Type', 0, 0, 3, True, ['Analog', 'Soft', 'Medium', 'Hard']), Parameter('Locked', 0.5, 0.0, 1.0)], track)
-bridge = Bridge(Refs({'7:device:0:0': device, '7:parameter:0:0:1': device.parameters[1]}))
+# A device deleted in Live: its reference still resolves, but Live refuses every use of it in its own C++ words.
+class Deleted:
+    def __getattr__(self, name): raise TypeError('Python argument types in None.None(Device) did not match C++ signature: None(TPyHandle<ADevice>)')
+bridge = Bridge(Refs({'7:device:0:0': device, '7:parameter:0:0:1': device.parameters[1], '7:device:0:1': Deleted(), '7:parameter:0:1:0': Deleted()}))
 def plain(value):
     if isinstance(value, (Track, Device, Parameter)): return {'ref': '?', 'type': type(value).__name__, 'name': value.name}
     raise TypeError(type(value).__name__)
@@ -224,10 +251,15 @@ print(json.dumps(out))
     // A device changed under its place: the name no longer matches.
     setScript([{ device: "7:device:0:0", index: 1, name: "Drive", value: 0.3 }]),
     setScript([{ ref: "8:parameter:0:0:1", value: 1 }]),
+    // Deleted in Live: said plainly, whether reached through the device or by the parameter's reference.
+    findScript([{ device: "7:device:0:1", parameter: "Drive", map: false }]),
+    setScript([{ device: "7:device:0:1", index: 0, name: "Drive", value: 0.5 }]),
+    setScript([{ ref: "7:parameter:0:1:0", value: 0.5 }]),
+    revertScript([{ device: "7:device:0:1", index: 0, name: "Drive", prior: 0, applied: 1 }, { ref: "7:parameter:0:1:0", name: "Input Gain", prior: 0, applied: 1 }]),
   ];
   const run = spawnSync(python!, ["-"], { input: `CODES = ${JSON.stringify(JSON.stringify(codes))}\n${live}`, encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr);
-  const [found, set, reverted, refused, moved, stale] = JSON.parse(run.stdout) as JsonObject[];
+  const [found, set, reverted, refused, moved, stale, deletedFind, deletedSet, deletedRef, deletedRevert] = JSON.parse(run.stdout) as JsonObject[];
   const rows = found!.result as JsonObject[];
   assert.equal(rows[0]!.name, "Drive"); assert.equal(rows[0]!.index, 0); assert.equal((rows[0]!.grid as unknown[]).length, 129);
   assert.deepEqual((rows[0]!.grid as [number, string][])[64], [0.5, "-12.0 dB"]);
@@ -241,5 +273,10 @@ print(json.dumps(out))
   assert.deepEqual(reverted!.result, { back: 2, moved: [], gone: [] }); assert.equal(reverted!.drive, 0.75); assert.equal(reverted!.type, 0);
   assert.equal(refused!.ok, false); assert.equal(refused!.drive, 0.75, "the first went back when the second was refused");
   assert.equal(moved!.ok, false); assert.match(String(moved!.error), /device changed: its parameter 1 is now Type/);
-  assert.equal(stale!.ok, false); assert.match(String(stale!.error), /stale or invalid reference/);
+  assert.equal(stale!.ok, false); assert.equal(stale!.error, "Live's references changed since Kumi read them; discover again");
+  const gone = "that device isn't in Live any more; discover it again";
+  assert.deepEqual(deletedFind!.result, [{ error: gone }]);
+  assert.equal(deletedSet!.ok, false); assert.equal(deletedSet!.error, gone);
+  assert.equal(deletedRef!.ok, false); assert.equal(deletedRef!.error, gone);
+  assert.deepEqual(deletedRevert!.result, { back: 0, moved: [], gone: ["Input Gain", "Drive"] });
 });
