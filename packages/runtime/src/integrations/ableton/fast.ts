@@ -20,19 +20,35 @@ export interface FastFound { index?: number; name: string; min: number; max: num
 /** What the setting trip says of a parameter: where it was and is, with Live's text for both. */
 export interface FastSet { name: string; prior: number; value: number; priorDisplay: string; display: string; min: number; max: number }
 
-/** What putting back needs: the parameter, the value it had, and the value Kumi left it at. */
-export type FastRevert = FastTarget & { prior: number; applied: number };
+/** What putting back needs: the parameter (and its name, to say it), the value it had, and the value Kumi left it at. */
+export type FastRevert = FastTarget & { prior: number; applied: number; name?: string };
 
 /** Arguments go in as a JSON string literal: a JSON string is also a Python string literal. */
 const withArgs = (marker: string, args: unknown, body: readonly string[]) =>
   [`# kumi:${marker}`, "import json", `ARGS = json.loads(${JSON.stringify(JSON.stringify(args))})`, ...body].join("\n");
 
+/**
+ * Why a parameter couldn't be reached, in plain words. A reference from an earlier epoch is a
+ * KeyError; a device deleted in Live leaves an object whose every use Live refuses with its own
+ * C++ text (a Boost.Python ArgumentError, a TypeError), which says nothing to a producer.
+ */
+const WHY = [
+  "def why(error):",
+  "    if isinstance(error, KeyError): return \"Live's references changed since Kumi read them; discover again\"",
+  "    if isinstance(error, (TypeError, RuntimeError)): return \"that device isn't in Live any more; discover it again\"",
+  "    return type(error).__name__ + ': ' + str(error)[:200]",
+];
+
 /** The Python that finds a target's parameter, and checks a name still matches its place. */
 const FIND = [
+  ...WHY,
   "def find(t):",
-  "    if t.get('ref'): return bridge.refs.get(t['ref'])",
-  "    p = list(bridge.refs.get(t['device']).parameters)[t['index']]",
-  "    if str(p.name) != t['name']: raise ValueError('the device changed: its parameter ' + str(t['index']) + ' is now ' + str(p.name))",
+  "    try:",
+  "        p = bridge.refs.get(t['ref']) if t.get('ref') else list(bridge.refs.get(t['device']).parameters)[t['index']]",
+  "        name = str(p.name)",
+  "    except IndexError: raise LookupError('the device changed: it has fewer parameters now')",
+  "    except Exception as error: raise LookupError(why(error))",
+  "    if not t.get('ref') and name != t['name']: raise ValueError('the device changed: its parameter ' + str(t['index']) + ' is now ' + name)",
   "    return p",
 ];
 
@@ -42,6 +58,7 @@ const FIND = [
  */
 export function findScript(items: readonly ({ device: string; parameter: string; map: boolean } | { ref: string; map: boolean })[]): string {
   return withArgs("fast-find", items, [
+    ...WHY,
     "def grid(p):",
     "    lo, hi = float(p.min), float(p.max)",
     "    return [[lo + (hi - lo) * i / 128, str(p.str_for_value(lo + (hi - lo) * i / 128))] for i in range(129)]",
@@ -67,7 +84,7 @@ export function findScript(items: readonly ({ device: string; parameter: string;
     "            row['grid'] = grid(p)",
     "        out.append(row)",
     "    except Exception as error:",
-    "        out.append({'error': type(error).__name__ + ': ' + str(error)[:200]})",
+    "        out.append({'error': why(error)})",
     "result = out",
   ]);
 }
