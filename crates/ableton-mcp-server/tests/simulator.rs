@@ -18,7 +18,8 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
         let _unsubscribe = live.subscribe(Rc::new(move |event| sink.borrow_mut().push(event.clone()))).unwrap();
         for step in scenario["steps"].as_array().unwrap() {
             let reference = LiveRef::from(step["ref"].as_str().unwrap_or(""));
-            let result = match step["method"].as_str().unwrap() {
+            let before = kumi_common::time::now_ms();
+            let mut result = match step["method"].as_str().unwrap() {
                 "invoke" => live.invoke(&serde_json::from_value(step["invocation"].clone()).unwrap()).map(Some),
                 "addNote" => live.add_note(&reference, &serde_json::from_value(step["note"].clone()).unwrap()).map(Some),
                 "external" => {
@@ -33,6 +34,12 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
                 "reconnect" => live.reconnect().map(|status| Some(serde_json::to_value(status).unwrap())),
                 method => panic!("unknown test action {method}"),
             };
+            if step["invocation"]["operation"] == "performance.read" {
+                let sampled = result.as_mut().unwrap().as_mut().unwrap();
+                let timestamp = sampled["sampledAt"].as_i64().unwrap();
+                assert!(timestamp >= before && timestamp <= kumi_common::time::now_ms());
+                sampled["sampledAt"] = step["result"]["sampledAt"].clone();
+            }
             if let Some(error) = step["error"].as_str() {
                 assert_eq!(result.unwrap_err().to_string(), error, "{}", scenario["name"]);
             } else {
@@ -46,7 +53,7 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
             }
         }
         assert_eq!(
-            canonical(serde_json::to_value(live.snapshot().unwrap()).unwrap()),
+            canonical(serde_json::to_value(live.snapshot().unwrap_or_else(|error| panic!("{}: {error}", scenario["name"]))).unwrap()),
             canonical(scenario["snapshot"].clone()),
             "{} state",
             scenario["name"]

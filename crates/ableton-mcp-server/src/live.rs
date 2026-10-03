@@ -4163,6 +4163,33 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "scene.set"
+            | "scene.fire-selected"
+            | "track.view.set"
+            | "track.set"
+            | "track.select-instrument"
+            | "mixer.extended.set"
+            | "selection.set"
+            | "song.view.set"
+            | "clip.view.set"
+            | "device.view.set"
+            | "locator.jump-to"
+            | "application.dialog"
+            | "performance.read" => self.invoke_views(operation, args),
+            "recording.session"
+            | "recording.arrangement"
+            | "arrangement.automation.read"
+            | "audio.comp.read"
+            | "note.read-by-id"
+            | "note.read-selected"
+            | "note.duplicate"
+            | "note.quantize"
+            | "automation.envelope.read"
+            | "automation.envelope.create"
+            | "automation.envelope.delete"
+            | "automation.point.insert"
+            | "automation.point.delete" => self.invoke_automation(operation, args),
+            "device.insert" | "device.delete" | "device.enable" | "device.move" | "browser.load" => self.invoke_devices(operation, args),
             "tuning.read" | "tuning.set" | "groove.read" | "groove.set" | "groove.edit" | "song.read" | "song.set"
             | "song.time-convert" | "transport.action" => self.invoke_set_state(operation, args),
             "undo.step.begin" => {
@@ -5317,3 +5344,12 @@ impl DeterministicLiveSimulator {
         }
     }
 }
+
+#[path = "live_simulator_devices.rs"]
+mod simulator_devices;
+
+#[path = "live_simulator_automation.rs"]
+mod simulator_automation;
+
+#[path = "live_simulator_views.rs"]
+mod simulator_views;
