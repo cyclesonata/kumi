@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 pub const GAP_TOOL: &str = "note_gap";
-pub const GAP_GUIDANCE:&str="When a request needs something Kumi's tools or Live's scripting don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it; then note the gap with note_gap and say in a sentence what you did instead.";
+pub const GAP_GUIDANCE:&str="When a request needs something Kumi's tools or Live's scripting don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it; then note the gap with note_gap, in the same reply as your last plan, and say in a sentence what you did instead.";
 const MAX_BYTES: u64 = 256 * 1024;
 const KEEP_LINES: usize = 500;
 const DESCRIPTION:&str=concat!("When the producer asks for something you can't do because Kumi's tools or Live's API lack it (a device setting scripts can't reach, an operation no tool offers), note it here for Kumi's developers, then tell the producer and offer the way round. ","Not for things you chose not to do, or that failed for another reason. The producer doesn't see this, and it isn't a memory.");
