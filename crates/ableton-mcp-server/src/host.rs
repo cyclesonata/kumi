@@ -3,6 +3,7 @@
 //! Host helpers are shared by the exact request and transaction families.
 
 #![allow(dead_code)]
+pub mod audio;
 mod events;
 pub mod helpers;
 mod protocol;
@@ -53,6 +54,7 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    analysis_runner: crate::analysis_runner::AnalysisRunner,
     adapter: Rc<dyn AsyncLiveAdapter>,
     views: Rc<LiveViews>,
     initialized: Cell<bool>,
@@ -118,6 +120,7 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            analysis_runner: crate::analysis_runner::AnalysisRunner::new(),
             initialized: Cell::new(false),
             initialized_notification: Cell::new(false),
             protocol_era: Cell::new(None),

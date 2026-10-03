@@ -37,6 +37,10 @@ pub enum ConventionalChannelLabel {
     Ls,
     Rs,
     LFE,
+    /// A JSON value whose string coercion names a label, but which is not itself a semantic label.
+    #[doc(hidden)]
+    #[serde(skip)]
+    Invalid,
 }
 
 impl ConventionalChannelLabel {
@@ -51,6 +55,7 @@ impl ConventionalChannelLabel {
             Self::Ls => "Ls",
             Self::Rs => "Rs",
             Self::LFE => "LFE",
+            Self::Invalid => "",
         }
     }
 
@@ -63,7 +68,7 @@ impl ConventionalChannelLabel {
         match self {
             Self::M | Self::L | Self::R | Self::C => 1.0,
             Self::Ls | Self::Rs => 1.41,
-            Self::LFE => 0.0,
+            Self::LFE | Self::Invalid => 0.0,
         }
     }
 }
@@ -280,6 +285,9 @@ fn resolve_layout(input: &StandardsAudioInput, channels: usize) -> Result<Resolv
     };
     if labels.len() != channels {
         return Err("channelLayout must contain exactly one semantic label per channel".to_string());
+    }
+    if labels.contains(&ConventionalChannelLabel::Invalid) {
+        return Err("channelLayout contains a label outside the supported conventional BS.1770 layout".to_string());
     }
     let mut unique = labels.clone();
     unique.sort_by_key(|label| label.as_str());

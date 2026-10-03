@@ -456,6 +456,12 @@ fn finite_difference(left: Option<f64>, right: Option<f64>) -> Option<f64> {
 }
 
 pub fn compare_reference_audio(input: &ReferenceComparisonInput) -> Result<ReferenceComparison, RangeError> {
+    compare_reference_audio_mode(input, true)
+}
+
+/// Non-string modes accepted by the source worker use automatic alignment, but fail its strict
+/// `mode === "auto"` test when deciding whether an unavailable alignment makes a comparison untrusted.
+pub(crate) fn compare_reference_audio_mode(input: &ReferenceComparisonInput, string_mode: bool) -> Result<ReferenceComparison, RangeError> {
     let project_length = input.project.samples.len();
     let reference_length = input.reference.samples.len();
     if project_length == 0 || reference_length == 0 || project_length + reference_length > MAX_COMPARISON_TOTAL_SAMPLES {
@@ -519,7 +525,7 @@ pub fn compare_reference_audio(input: &ReferenceComparisonInput) -> Result<Refer
         }
     }
 
-    let comparison_trusted = alignment_available || mode != AlignmentMode::Auto;
+    let comparison_trusted = alignment_available || !string_mode || mode != AlignmentMode::Auto;
     let lag_frames = number::round(offset_seconds * COMPARISON_ANALYSIS_RATE) as i64;
     let aligned = aligned_slices(&project_resampled, project_source.channels, &reference_resampled, reference_source.channels, lag_frames);
     if comparison_trusted && aligned.frames == 0 {
@@ -581,7 +587,11 @@ pub fn compare_reference_audio(input: &ReferenceComparisonInput) -> Result<Refer
             available: alignment_available,
             reason: alignment_reason,
             mode,
-            reference_offset_seconds: if alignment_available || mode != AlignmentMode::Auto { Some(offset_seconds) } else { None },
+            reference_offset_seconds: if alignment_available || !string_mode || mode != AlignmentMode::Auto {
+                Some(offset_seconds)
+            } else {
+                None
+            },
             correlation,
             confidence,
             ambiguous,

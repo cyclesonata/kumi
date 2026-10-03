@@ -177,6 +177,11 @@ impl AnalysisRunner {
 
     /// `timeoutMs` defaults to [`ANALYSIS_JOB_TIMEOUT_MS`].
     pub async fn run(&self, job: &AnalysisJob, signal: Option<Signal>, timeout_ms: Option<u64>) -> Result<Value, AnalysisJobError> {
+        self.run_value(&serde_json::to_value(job).map_err(|cause| AnalysisJobError(cause.to_string()))?, signal, timeout_ms).await
+    }
+
+    /// The host validates the caller's JSON independently; the worker remains the final job-schema boundary.
+    pub async fn run_value(&self, job: &Value, signal: Option<Signal>, timeout_ms: Option<u64>) -> Result<Value, AnalysisJobError> {
         self.acquire(signal.as_ref()).await?;
         let slot = Slot(self.clone());
         let result = spawn_job(job, signal.as_ref(), timeout_ms.unwrap_or(ANALYSIS_JOB_TIMEOUT_MS)).await;
@@ -230,8 +235,8 @@ async fn cancelled(signal: Option<&Signal>) {
     }
 }
 
-async fn spawn_job(job: &AnalysisJob, signal: Option<&Signal>, timeout_ms: u64) -> Result<Value, AnalysisJobError> {
-    let payload = json::stringify(&serde_json::to_value(job).map_err(|cause| AnalysisJobError(cause.to_string()))?);
+async fn spawn_job(job: &Value, signal: Option<&Signal>, timeout_ms: u64) -> Result<Value, AnalysisJobError> {
+    let payload = json::stringify(job);
     if payload.len() > MAX_ANALYSIS_JOB_REQUEST_BYTES {
         return Err(AnalysisJobError("analysis job request exceeds the worker input limit".to_string()));
     }

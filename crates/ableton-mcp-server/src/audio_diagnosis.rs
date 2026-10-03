@@ -60,6 +60,7 @@ pub struct MixerState {
     pub volume_ref: Option<LiveRef>,
     pub pan_ref: Option<LiveRef>,
     pub cue_ref: Option<LiveRef>,
+    #[serde(default)]
     pub send_refs: Vec<LiveRef>,
 }
 
@@ -505,4 +506,39 @@ pub fn diagnose_audio_with_live_context(
         },
         privacy: DiagnosisPrivacy { raw_audio_retained: false, raw_audio_returned: false },
     })
+}
+
+/// Preserve the complete observed mixer/routing objects at the actual Live boundary.
+/// The compact calculation types above retain the numeric and reference fields used by findings;
+/// the evidence and its digests must include every field the authoritative snapshot supplied.
+pub fn diagnose_audio_with_live_context_value(
+    analysis: &PcmAnalysis,
+    snapshot: &Value,
+    epoch: i64,
+    track_ref: &str,
+    source: &AudioSourceProvenance,
+    captured_at: Option<String>,
+) -> Result<Value, DiagnosisError> {
+    let track = snapshot["tracks"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["ref"] == track_ref))
+        .ok_or_else(|| DiagnosisError("diagnosis trackRef is not present in the authoritative snapshot".into()))?;
+    let selected = json_value!({"set":snapshot["set"],"tracks":[track]});
+    let typed: LiveSnapshot = serde_json::from_value(selected).map_err(|cause| DiagnosisError(cause.to_string()))?;
+    let diagnosis = diagnose_audio_with_live_context(analysis, &typed, epoch, track_ref, source, captured_at)?;
+    let mut result = serde_json::to_value(diagnosis).expect("diagnosis JSON");
+    let payload = json_value!({
+        "epoch":epoch,"set":result["context"]["set"],"track":result["context"]["track"],
+        "mixer":track.get("mixer").unwrap_or(&Value::Null),"routing":track.get("routing").unwrap_or(&Value::Null),
+        "devices":result["context"]["devices"]
+    });
+    let context_revision = sha256_hex(&json::stringify(&payload));
+    result["context"]["mixer"] = payload["mixer"].clone();
+    result["context"]["routing"] = payload["routing"].clone();
+    result["context"]["contextRevision"] = json_value!(context_revision);
+    result["diagnosisId"] = json_value!(sha256_hex(&json::stringify(&json_value!({
+        "source":source,"contextRevision":context_revision,"analysisVersion":analysis.version,
+        "integrated":analysis.standards_audio.loudness.integrated_lufs,"truePeak":analysis.standards_audio.true_peak.aggregate_dbtp
+    }))));
+    Ok(result)
 }
