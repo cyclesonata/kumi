@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute } from "node:path";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { lowDisk, MB } from "../../core/disk.js";
 import { connect as connectSocket } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, LiveTransport, Observation, StreamingCall } from "../../core/contracts.js";
+import type { AuditionEvent, AuditionRequest, AuditionResult, AuditionTake, HeardTake, HearRequest, GoalRig, GoalSlotInfo, CatchUp, ChainNode, ChangeRecord, ConnectionState, DeviceNode, DeviceTree, DisconnectCause, Integration, PinnedNode, JsonObject, KernelTool, LiveFocus, LiveTransport, Observation, StreamingCall } from "../../core/contracts.js";
 import { MIX_CANDIDATE } from "../../core/contracts.js";
 import { KumiError } from "../../core/errors.js";
 import { connectMcp, type McpEndpoint } from "../../mcp/client.js";
@@ -15,10 +16,11 @@ import { discoveryArgs, discoveryPayload, FIELDS, INSTRUCTIONS, object, Observat
 import { foldTracks } from "./fold.js";
 import { defaultSampleFolders, findSamples, folderPath, SAMPLE_EXTENSIONS, userLibrary, type Sample } from "./samples.js";
 import { deviceTool } from "../../devices/tool.js";
-import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { CHANGES, EMERGENCY_STOP, hexColor, HOST_TOOLS, newRecord, nextChangeId, type ChangeContext, type SampleSelector, REFERENCE_FIELDS, UNDO_DESCRIPTION, UNDO_TOOL, undoNote, type ChangeKind, type KnownTrack } from "./changes.js";
+import { arrange, ARRANGE_DESCRIPTION, ARRANGE_SCHEMA, ARRANGE_TOOL, type ArrangeHost } from "./arrange.js";
 import { ACTIONS, type ActionKind } from "./actions.js";
 import { bars, setMeter } from "./more-changes.js";
-import { ARRANGEMENT_BRIDGE, atLeast, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
+import { ARRANGEMENT_BRIDGE, atLeast, EARS_BRIDGE, FULL_CONTROL_BRIDGE, GOAL_BRIDGE, PYTHON_BRIDGE, RENDER_BRIDGE, SCALE_BRIDGE } from "./bridge-version.js";
 import { AUDITION_DESCRIPTION, AUDITION_SCHEMA, AUDITION_TOOL, auditionRequest, RENDER_DESCRIPTION, RENDER_SCHEMA, RENDER_TOOL, renderSpan, restoreStore, silentRender } from "./audition.js";
 import { audioPath, closeness, hear, type Analysis } from "../../audio/index.js";
 import { summary as heardSummary } from "../../audio/tools.js";
@@ -27,6 +29,15 @@ import { startFocusFeed, type FocusFeed } from "./focus.js";
 import { stepScanner } from "./plan-stream.js";
 import { catchUpFrom, describeDiff, describeWatch, projectIdOf, since, type Baseline, type ProjectStore } from "./project.js";
 import { KUMI } from "../../command.js";
+import { EARS_ITEM, installEars } from "../../ears/device.js";
+import { openEarsLink, type EarsLink, type Tap } from "../../ears/link.js";
+import { frameAt, readCapture, runs, writeCaptureWav } from "../../ears/capture.js";
+import { HandsError, openHands, type Hands, type HandsReply, type MenuItem } from "../../hands/index.js";
+import { COMMANDS, findItem, LIVE_COMMAND_DESCRIPTION, LIVE_COMMAND_SCHEMA, LIVE_COMMAND_TOOL, shortcut } from "./live-command.js";
+import { DISPLAY_MAP_SCRIPT, valueForDisplay, type DisplayMap } from "./display.js";
+import { PLUGIN_DESCRIPTION, PLUGIN_SCHEMA, PLUGIN_TOOL } from "./plugin-tool.js";
+import { adapterFor, folderFor, pluginGuide } from "../../plugins/registry.js";
+import { buildWavetable, writeWavetable, type Keyframe } from "../../audio/wavetable.js";
 
 /** Bridge tools Kumi uses to catch up on a Set; never offered to the model. */
 const PROJECT_TOOLS = ["live_project_info", "live_project_snapshot_export", "live_project_snapshot_diff"];
@@ -47,8 +58,8 @@ const WATCH_DESCRIPTION = "Learn a routine the producer does by hand in Live: ac
 /** How many devices added while watching Kumi reads the settings of. */
 const WATCH_DEVICES = 12;
 const MAKE_CHANGES_DESCRIPTION = "Make changes in one call, in order: each step is one of your change tools (or play, record, fire_scene and the like) with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, a loaded device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) lets a recording run, as in bouncing a sound to audio: route and arm a new audio track, record, play, wait, stop. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
-const FIND_SAMPLES = "find_samples";
-const FIND_SAMPLES_DESCRIPTION = "Find audio samples on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
+const FIND_SAMPLES = "find_sounds";
+const FIND_SAMPLES_DESCRIPTION = "Find sounds on this computer by words in their file and folder names (\"kick\", \"808\", \"vinyl\"), or pick some at random. Searches the folders the producer names, as full paths or ~/…, and otherwise where Live keeps samples: the User Library, Live's Core Library and Factory Packs. Returns each sample's name, path and length in seconds (for WAV and AIFF).";
 const FIND_SAMPLES_SCHEMA: JsonObject = { type: "object", additionalProperties: false, properties: {
   folders: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 }, description: "Folders to search, such as ~/Samples; Live's User Library when empty" },
   words: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 64 }, description: "Every word must appear in the file's name or its folders" },
@@ -129,6 +140,13 @@ interface Options {
   restoreFile?: string;
   /** Each audition, for the conversation's round lines. */
   onAudition?: (event: AuditionEvent) => void;
+  /**
+   * Kumi's listening devices (Kumi Ears): on by default, false to always record instead (scratch tracks).
+   * Tests give their own link (and skip writing the device into a User Library).
+   */
+  ears?: false | { open: () => Promise<EarsLink> };
+  /** Kumi's hands (Live's own menus and keys): on where the OS has them, false for none; tests give their own. */
+  hands?: false | { open: () => Promise<Hands | undefined> };
 }
 
 /** `restore` is the name or colour a rename or recolour replaced in Kumi's picture of the track, put back if it's undone. */
@@ -136,6 +154,10 @@ interface Applied {
   record: ChangeRecord; transactionId: string; undoKey?: string; restore?: { ref: string; field: "name" | "color"; value?: string };
   /** Kept from the start: only Live's own undo can take it back, so Kumi's isn't tried. */
   permanent?: true;
+  /** Several changes as one line in HISTORY (an arrangement): their ids, undone together, latest first. */
+  members?: string[];
+  /** The line this change is part of: it isn't one of its own. */
+  within?: string;
 }
 
 const resultText = (result: CallToolResult) => result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
@@ -180,7 +202,7 @@ export function createAbletonIntegration(options: Options): Integration {
   const known = new Map<string, KnownTrack>();
   /** Kumi's changes while this bridge connection lives; its transactions are what undo uses. */
   const changes = new Map<string, Applied>();
-  /** Samples find_samples returned, by path, with the folder searched (any other audio file loads by its path too). */
+  /** Samples find_sounds returned, by path, with the folder searched (any other audio file loads by its path too). */
   const samples = new Map<string, Sample>();
   let changesThisTurn = 0;
   /** Samples Kumi picked itself in this answer, so random picks don't repeat. */
@@ -223,6 +245,8 @@ export function createAbletonIntegration(options: Options): Integration {
   const loseLive = () => {
     if (closed || closingStarted || lost) return;
     lost = true; lostEpoch = lastEpoch; invalidate(); options.onConnection("disconnected", "live");
+    // Live may come back with Max for Live: its listening device is tried again.
+    earsRefused = false;
     clearTimeout(transportTimer); reportTransport(null);
     keepLooking();
   };
@@ -742,6 +766,25 @@ export function createAbletonIntegration(options: Options): Integration {
     return rows;
   }
   /** Preview and apply one change as a single step, then record it for HISTORY. */
+  /** Each parameter's map of Live's own text across its range, read once (by its reference: refs last while Live does). */
+  const displayMaps = new Map<string, DisplayMap>();
+  /** The value that makes a parameter show `text`, from Live's str_for_value across its range (read through Python in Live); or why not. */
+  async function valueForText(parameterRef: string, text: string, signal: AbortSignal): Promise<number | string> {
+    const long = String(lengthen(parameterRef, "parameterRef"));
+    let map = displayMaps.get(long);
+    if (!map) {
+      if (!supported({ since: PYTHON_BRIDGE }) || !tools?.has("live_run_python")) return `Give ${JSON.stringify(text)} as a number in the parameter's range: this bridge can't read the parameter's units (update it with ${KUMI} bridge).`;
+      const read = await tools.call("live_run_python", { code: DISPLAY_MAP_SCRIPT, mode: "exec", ref: long, timeoutMs: 5_000 }, AbortSignal.any([signal, lifetime.signal]), { host: true });
+      const done = read.isError ? undefined : payload(read);
+      const result = done?.ok === true ? object(done.result ?? {}) : undefined;
+      if (!result || typeof result.min !== "number" || typeof result.max !== "number" || !Array.isArray(result.grid)) return `Kumi couldn't read how this parameter shows its values; give a number in its range.`;
+      map = { min: result.min, max: result.max, items: Array.isArray(result.items) ? result.items.filter((item): item is string => typeof item === "string") : [],
+        grid: result.grid.filter((pair): pair is [number, string] => Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "string") };
+      displayMaps.set(long, map);
+      if (displayMaps.size > 4096) displayMaps.delete(displayMaps.keys().next().value!);
+    }
+    return valueForDisplay(map, text);
+  }
   function changeContext(signal: AbortSignal): ChangeContext {
     return {
       sample: (path) => samples.get(path) ?? audioFileAt(path),
@@ -755,6 +798,7 @@ export function createAbletonIntegration(options: Options): Integration {
           .map((row) => ({ ref: row.ref, name: row.name, ...(typeof row.min === "number" ? { min: row.min } : {}), ...(typeof row.max === "number" ? { max: row.max } : {}),
             ...(typeof row.value === "number" ? { value: row.value } : {}), ...(typeof row.displayValue === "string" ? { display: row.displayValue } : {}) }));
       },
+      valueFor: (parameterRef, text) => valueForText(parameterRef, text, signal),
       async pick(selector: SampleSelector) {
         const named = (selector.folders ?? []).map((folder) => folderPath(folder)).filter((folder): folder is string => Boolean(folder));
         const found = await findSamples({ folders: named.length ? named : defaultSampleFolders(), words: selector.words ?? [], limit: 50, random: selector.random === true || !(selector.words ?? []).length, signal });
@@ -1449,7 +1493,7 @@ export function createAbletonIntegration(options: Options): Integration {
 
   /** Undo one change through the bridge's guarded undo. Refusals keep the change and say why. */
   async function undoChange(target: string, signal: AbortSignal, discard = false): Promise<{ record?: ChangeRecord; text: string; isError: boolean }> {
-    const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied") : changes.get(target);
+    const entry = target === "last" ? [...changes.values()].reverse().find((item) => item.record.state === "applied" && !item.within) : changes.get(target);
     if (!entry) return { text: target === "last" ? "There's no change of Kumi's left to undo." : `There's no change ${target.slice(0, 32)} in this session.`, isError: true };
     if (entry.record.state === "undone") return { record: entry.record, text: JSON.stringify({ undone: entry.record.title, change: entry.record.id, already: true }), isError: false };
     if (entry.record.state === "expired") return { record: entry.record, text: entry.record.note ?? "Kumi can't undo this anymore.", isError: true };
@@ -1467,6 +1511,15 @@ export function createAbletonIntegration(options: Options): Integration {
       emitChange(entry.record);
       return entry.record;
     };
+    if (entry.members) {
+      // Several changes as one: each taken back by its own undo, latest first, and HISTORY keeps the one line.
+      const members = entry.members;
+      await quietly([], async () => { for (const id of [...members].reverse()) if (changes.get(id)?.record.state !== "undone") await undoChange(id, signal).catch(() => undefined); });
+      const left = members.filter((id) => changes.get(id)?.record.state !== "undone").length;
+      if (!left) return { record: update({ state: "undone" }), text: JSON.stringify({ undone: entry.record.title, change: entry.record.id }), isError: false };
+      const note = `Kumi took back ${members.length - left} of its ${members.length} changes; the rest changed in Live since, so Kumi left them.`;
+      return { record: update({ state: "kept", note }), text: note, isError: true };
+    }
     let result: CallToolResult;
     try {
       result = await tools.call("live_undo", { transactionId: entry.transactionId, confirmation: "undo", idempotencyKey: entry.undoKey, ...(discard ? { discard: true } : {}) }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs)]), { host: true });
@@ -1611,6 +1664,13 @@ export function createAbletonIntegration(options: Options): Integration {
     steps: string[];
     transport?: { position?: number; loop?: boolean };
     notes: string[];
+    /** Kumi's listening devices, one at the end of each source's chain (Main's for the mix), when they're used instead of scratch tracks. */
+    ears?: { link: EarsLink; taps: Map<string, Tap> };
+  }
+  /** Where the playhead is now; undefined when Live doesn't say. */
+  async function playheadNow(signal: AbortSignal): Promise<number | undefined> {
+    const at = (await rows("set", { fields: ["position"] }, signal))[0]?.position;
+    return typeof at === "number" ? at : undefined;
   }
   /** Where the transport is, to put it back after renders. */
   async function transportNow(signal: AbortSignal): Promise<NonNullable<Rig["transport"]>> {
@@ -1622,7 +1682,11 @@ export function createAbletonIntegration(options: Options): Integration {
   async function openRig(candidates: readonly AuditionRequest["candidates"][number][], fromBeat: number | undefined, beats: number | undefined, signal: AbortSignal): Promise<Rig> {
     const rig: Rig = { tag: randomUUID().slice(0, 4), sources: [], from: fromBeat ?? 0, beats: beats ?? 8, steps: [], notes: [], clips: candidates.some((candidate) => candidate.clip) };
     rig.transport = await transportNow(signal);
+    // Kumi's listening devices hear each source where it is; without them (no Max for Live, say) it records.
+    const link = await earsReady(signal);
     const tracks = await rows("track", { fields: ["name"] }, signal);
+    /** A source shares its name with another track: recording (routed by name) can't render it. */
+    let shared = false;
     for (const [index, candidate] of candidates.entries()) {
       // The whole mix: what Main plays, which Resampling records before Main's fader (so Main can stay silent).
       if (candidate.mix) {
@@ -1632,8 +1696,11 @@ export function createAbletonIntegration(options: Options): Integration {
       // By its reference from this turn, or (a goal resumed after a restart) by its name.
       const found = tracks.find((track) => track.ref === candidate.track) ?? tracks.find((track) => track.name === candidate.track);
       if (!found || typeof found.name !== "string") throw new ObservationError(`${candidate.track} isn't a track in this turn's discovery; discover again.`);
-      // Live routes by name: two tracks of one name can't be told apart.
-      if (tracks.filter((track) => track.name === found.name).length > 1) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
+      // Recording routes by name: two tracks of one name can't be told apart (a listening device needs no name).
+      if (tracks.filter((track) => track.name === found.name).length > 1) {
+        if (!link) throw new ObservationError(`Two tracks are named “${found.name}”; rename one so Kumi can render it.`);
+        shared = true;
+      }
       // Named twice (by reference and by name): rendered once.
       if (rig.sources.some((source) => source.name === found.name)) continue;
       rig.sources.push({ track: String(found.ref), name: found.name, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}`, label: candidate.label ?? `Candidate ${index + 1}`, ...(candidate.clip ? { clip: candidate.clip } : {}) });
@@ -1651,7 +1718,24 @@ export function createAbletonIntegration(options: Options): Integration {
         for (const source of rig.sources) longest = Math.max(longest, await copyClip(rig, source.track, source.clip, signal, source));
         rig.beats = beats ?? Math.min(32, longest || 8);
       }
-      await addScratch(rig, rig.sources, signal);
+      if (link) {
+        rig.ears = { link, taps: new Map() };
+        try { await placeTaps(rig, rig.sources, signal); }
+        catch (error) {
+          signal.throwIfAborted();
+          // The listening devices couldn't be placed: their steps go, and the sources are recorded instead (from
+          // now on in this Live, so no render waits on a device that won't start).
+          await removeTaps(rig);
+          // Only a device that never started says this Live can't run it; a refused load is about that track.
+          if (error instanceof EarsSilent) {
+            earsRefused = true;
+            rig.notes.push("Kumi's listening device didn't start in this Live (it needs Max for Live), so Kumi records to listen instead.");
+          }
+          if (shared) throw error;
+          delete rig.ears;
+          await addScratch(rig, rig.sources, signal);
+        }
+      } else await addScratch(rig, rig.sources, signal);
     });
     } catch (error) { await closeRig(rig); throw error; }
     return rig;
@@ -1690,15 +1774,220 @@ export function createAbletonIntegration(options: Options): Integration {
     const source = { ...candidate, scratch: `Kumi · render ${rig.sources.length + 1} ${rig.tag}` };
     await quietly(rig.steps, async () => {
       if (rig.clips) await copyClip(rig, candidate.track, candidate.clip ?? "first", signal, source);
-      await addScratch(rig, [source], signal);
+      if (rig.ears) await placeTaps(rig, [source], signal); else await addScratch(rig, [source], signal);
     });
     rig.sources.push(source);
+  }
+    /** A listening device that never said hello: this Live can't run it (no Max for Live, say). */
+  class EarsSilent extends ObservationError {}
+/** Kumi's end of its listening devices, opened once; undefined when they can't be used (then Kumi records instead). */
+  let earsSetup: Promise<EarsLink | undefined> | undefined;
+  /** The device didn't start in this Live (no Max for Live, say): Kumi records instead until Live restarts. */
+  let earsRefused = false;
+  /** Where the devices write what they heard, and the WAVs made from it (gone when Kumi closes). */
+  const earsFolder = join(tmpdir(), "kumi-ears", generation.slice(0, 8));
+  async function earsReady(signal: AbortSignal): Promise<EarsLink | undefined> {
+    if (options.ears === false || process.env.KUMI_EARS === "0" || earsRefused) return undefined;
+    if (!tools?.has("live_browser_load_preview") || !tools.has("live_browser_inspect") || !supported({ since: EARS_BRIDGE })) return undefined;
+    const given = options.ears ? options.ears.open : undefined;
+    earsSetup ??= (async () => {
+      const link = given ? await given() : await openEarsLink();
+      await mkdir(earsFolder, { recursive: true, mode: 0o700 });
+      if (given) return link;
+      // The device in the User Library's Kumi folder (rewritten only when this Kumi's differs), and listed by Live's Browser.
+      const installed = await installEars(options.userLibrary ?? userLibrary());
+      const deadline = Date.now() + (installed.written ? 20_000 : 4_000);
+      while (Date.now() < deadline) {
+        const seen = await tools!.call("live_browser_inspect", { itemId: EARS_ITEM }, AbortSignal.any([lifetime.signal, AbortSignal.timeout(5_000)])).then((read) => !read.isError, () => false);
+        if (seen) return link;
+        await delay(400, undefined, { signal: lifetime.signal });
+      }
+      await link.close();
+      return undefined;
+    })().catch(() => undefined);
+    const link = await earsSetup;
+    // Not ready this time (the Browser hadn't listed it yet, say): asked again next time.
+    if (!link) earsSetup = undefined;
+    signal.throwIfAborted();
+    return link;
+  }
+  /** Where a track is in Live's own terms ("live_set tracks 3", "live_set return_tracks 0", "live_set master_track"), from its reference. */
+  async function lomTrackPath(trackRef: string, signal: AbortSignal): Promise<string> {
+    const long = String(lengthen(trackRef, "trackRef"));
+    if (/:main_track:/.test(long)) return "live_set master_track";
+    const ret = /:return_track:(\d+)$/.exec(long);
+    if (ret) return `live_set return_tracks ${Number(ret[1])}`;
+    const index = Number(/:track:(\d+)$/.exec(long)?.[1]);
+    if (!Number.isInteger(index)) throw new ObservationError("Kumi couldn't tell where that track is; discover it again.");
+    // A reference's number counts the regular tracks, then the returns, then Main.
+    const regular = (await rows("track", { fields: ["name"] }, signal)).length;
+    if (index < regular) return `live_set tracks ${index}`;
+    const returns = (await rows("return-track", { fields: ["name"] }, signal)).length;
+    return index < regular + returns ? `live_set return_tracks ${index - regular}` : "live_set master_track";
+  }
+  /** A listening device at the end of each source's chain (Main's for the mix), quietly: the rig's own steps, undone when it closes. */
+  async function placeTaps(rig: Rig, sources: Rig["sources"], signal: AbortSignal): Promise<void> {
+    const ears = rig.ears!;
+    for (const source of sources) {
+      const trackRef = source.mix ? (await mainVolume(signal)).ref : source.track;
+      ears.taps.set(source.name, await placeTap(ears.link, trackRef, signal));
+    }
+  }
+  /** Load the device onto a track and wait for it to say hello from there (the one that loaded just now). */
+  async function placeTap(link: EarsLink, trackRef: string, signal: AbortSignal): Promise<Tap> {
+    const where = await lomTrackPath(trackRef, signal);
+    const before = new Set(link.taps().map((tap) => tap.id));
+    const loading = Date.now();
+    await step("load_device", { itemId: EARS_ITEM, trackRef }, signal);
+    // Live can give the new device a removed one's id: a device that says when it loaded is matched by that.
+    const fresh = (tap: Tap) => (tap.loadedAt !== undefined ? tap.loadedAt >= loading - 1_000 : !before.has(tap.id));
+    const tap = await link.waitFor((candidate) => fresh(candidate) && candidate.path.startsWith(`${where} devices `), 6_000, signal);
+    if (!tap) throw new EarsSilent("Kumi's listening device didn't start on that track (Max for Live is needed: Live Suite, or Standard with Max for Live).");
+    return tap;
+  }
+  /** The rig's listening devices taken away now (their loads undone), before it records instead. */
+  async function removeTaps(rig: Rig): Promise<void> {
+    const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+    const loads = rig.steps.filter((id) => changes.get(id)?.record.family === "device");
+    for (const id of [...loads].reverse()) {
+      await undoChange(id, cleanup).catch(() => undefined);
+      changes.delete(id);
+      rig.steps.splice(rig.steps.indexOf(id), 1);
+    }
+    rig.ears?.taps.clear();
+  }
+  /** A path as Max reads it: forward slashes everywhere. */
+  const maxPath = (file: string) => file.replace(/\\/g, "/");
+  /** The WAVs of earlier passes go once there are many: a goal hears hundreds. */
+  async function pruneEars(): Promise<void> {
+    try {
+      const names = (await readdir(earsFolder)).filter((name) => name.endsWith(".wav"));
+      if (names.length <= 96) return;
+      const dated = await Promise.all(names.map(async (name) => ({ name, at: statSync(join(earsFolder, name)).mtimeMs })));
+      for (const { name } of dated.sort((a, b) => a.at - b.at).slice(0, names.length - 64)) await rm(join(earsFolder, name), { force: true });
+    } catch { /* tidying is best effort */ }
+  }
+  /**
+   * One silent pass through the listening devices: Main to -inf (written down first, for a crash), every
+   * device recording, the part played, Main back exactly. Nothing is recorded into the Set and no track is
+   * armed or added. Each source's file (the part cut out on Live's beat, a moment before it) and where the
+   * part starts in it.
+   */
+  async function earsPass(rig: Rig, signal: AbortSignal): Promise<Map<string, { file: string; start: number }>> {
+    const tempo = currentTempo!;
+    const link = rig.ears!.link;
+    const files = new Map<string, { file: string; start: number }>();
+    const held = rig.hold;
+    let prior = held?.main?.prior;
+    let mainRef = held?.main?.ref;
+    if (prior === undefined) {
+      const main = await mainVolume(signal);
+      if (main.volume === undefined) throw new ObservationError("Live didn't say Main's level, so Kumi won't touch it.");
+      prior = main.volume; mainRef = main.ref;
+      const pending = restore.load();
+      if (prior === 0 && pending && (pending.path ? pending.path === project?.path : pending.set === currentSet)) prior = pending.volume;
+    }
+    const window = rig.window ?? { from: rig.from, beats: rig.beats };
+    const taps = [...rig.ears!.taps.entries()];
+    let started = false;
+    let failed = true;
+    try {
+      await quietly(undefined, async () => {
+        if (!held?.main) {
+          restore.save({ set: currentSet ?? "", ...(project?.path ? { path: project.path } : {}), volume: prior!, at: now().getTime() });
+          await step("set_mixer", { trackRef: mainRef!, volume: 0 }, signal);
+          if (held) held.main = { ref: mainRef!, prior: prior! };
+        }
+        const beatMs = 60 / tempo * 1000;
+        for (const longer of [false, true]) {
+          const span = renderSpan(window.from, window.beats, beatsPerBar, tempo, longer, 0);
+          const primeKey = `${span.position}`;
+          const priming = !held || held.primed !== primeKey;
+          if (priming && supported({ since: ARRANGEMENT_BRIDGE })) await step("play", { action: "back-to-arrangement" }, signal);
+          if (priming && rig.transport?.loop !== false) await step("set_transport", { loopEnabled: false }, signal);
+          // Room for the whole pass, Live's wait before it jumps (its launch quantization), and the steps around it.
+          const seconds = (span.wait + 4 * beatsPerBar) * beatMs / 1000 + 6;
+          started = true;
+          // The devices record from before Live moves; Live plays, then jumps to the count-in when its launch
+          // quantization says (on a beat or a bar). The position each device records says where every sample
+          // was, so the part is found wherever the jump landed.
+          await Promise.all(taps.map(([, tap]) => link.arm(tap, seconds, signal)));
+          await step("play", { action: "continue" }, signal);
+          const probe = taps[0]![1];
+          // Live may start right at the count-in (stopped there): then there's nothing to jump.
+          let first: { beats: number; running: boolean } | undefined;
+          for (let check = 0; check < 8 && !first?.running; check++) {
+            first = await link.transport(probe, signal);
+            if (!first?.running) await delay(15, undefined, { signal });
+          }
+          const there = first?.running === true && first.beats >= span.position - 0.01 && first.beats <= span.position + 0.25;
+          if (!there) await step("set_transport", { position: span.position }, signal);
+          // Until a device hears Live in the count-in (after the jump) and then past the part and its tail.
+          const end = window.from + window.beats + beatsPerBar / 2;
+          const countIn = (beats: number) => beats >= span.position - 0.01 && beats < Math.max(window.from, span.position + 0.5);
+          const deadline = Date.now() + seconds * 1000;
+          let jumped = there;
+          while (Date.now() < deadline) {
+            const now_ = await link.transport(probe, signal);
+            if (now_?.running) {
+              if (countIn(now_.beats)) jumped = true;
+              if (jumped && now_.beats >= end) break;
+            }
+            const ahead = jumped && now_ ? (end - now_.beats) * beatMs : 0;
+            await delay(Math.max(20, Math.min(500, ahead * 0.8)), undefined, { signal });
+          }
+          if (held) held.primed = primeKey;
+          await step("play", { action: "stop" }, signal);
+          started = false;
+          // Each device writes what it heard; the part is cut out of the stretch the transport played it in.
+          let late = false;
+          await Promise.all(taps.map(async ([name, tap]) => {
+            const raw = join(earsFolder, `${randomUUID()}.raw`);
+            try {
+              const written = await link.write(tap, maxPath(raw), signal);
+              const capture = await readCapture(raw, written.channels, written.sampleRate);
+              // Placed by the position each device recorded (an older device's capture, by where it was armed).
+              const stretches = runs(capture, { first: written.beats, afterJump: span.position });
+              // The last stretch that played the whole part.
+              const part = stretches.filter((run) => frameAt(run, window.from) !== undefined && frameAt(run, window.from + window.beats - 1e-3) !== undefined).at(-1);
+              if (!part) { if (stretches.length) late = true; return; }
+              const at = frameAt(part, window.from)!;
+              const lead = Math.round(LEAD_IN * capture.sampleRate);
+              const end = Math.min(part.to, at + Math.ceil((window.beats + beatsPerBar / 2) * part.samplesPerBeat));
+              const wav = join(earsFolder, `${randomUUID()}.wav`);
+              await writeCaptureWav(wav, capture, at - lead, end);
+              files.set(name, { file: wav, start: Math.min(at, lead) / capture.sampleRate });
+            } catch (error) {
+              rig.notes.push(error instanceof Error ? error.message.slice(0, 200) : "A listening device didn't write what it heard.");
+            } finally { await rm(raw, { force: true }).catch(() => undefined); }
+          }));
+          if (!late) break;
+          if (longer) rig.notes.push("Live jumped past the part's start before Kumi could hear it; listen again.");
+        }
+      });
+      failed = false;
+    } finally {
+      const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+      if (started) await stopEverything(cleanup);
+      // Every device stops recording, whatever happened.
+      for (const [, tap] of taps) link.stop(tap);
+      if (!held || failed) {
+        if (!held) {
+          const back = await quietly(undefined, () => putMainBack(prior!, cleanup));
+          if (back) restore.clear();
+          else rig.notes.push(`Main may still be silent: set it back to ${faderDb(prior!)} in Live.`);
+        }
+      }
+      void pruneEars();
+    }
+    return files;
   }
   /**
    * One silent pass: Main to -inf (written down first, for a crash), every scratch track armed and
    * recording, the part played, Main back exactly. Each source's file and where the part starts in it.
    */
   async function renderPass(rig: Rig, signal: AbortSignal): Promise<Map<string, { file: string; start: number }>> {
+    if (rig.ears) return earsPass(rig, signal);
     const tempo = currentTempo!;
     // Where a pass's time goes, for probing throughput (KUMI_TIMING=1 prints it).
     let lapAt = Date.now(); const laps: string[] = [];
@@ -2214,6 +2503,342 @@ export function createAbletonIntegration(options: Options): Integration {
     }
   }
   /**
+   * Hear tracks (or the mix) in the Set, the way the producer would: while Live plays and no stretch is
+   * named, through Kumi's listening devices as it plays (nothing else in Live is touched); otherwise a
+   * quiet pass over the stretch (the loop, or from the playhead), as an audition renders, with nothing
+   * to compare. Each one's file and where its part starts.
+   */
+  async function hearInSet(request: HearRequest, originalSignal: AbortSignal): Promise<HeardTake[] | string> {
+    if (!available || lost || !tools || currentEpoch === undefined) return NO_CURRENT_LIVE;
+    const tempo = currentTempo;
+    if (!tempo) return "Kumi doesn't know the Set's tempo yet; try again.";
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    const set = (await rows("set", { fields: ["playing", "position", "loop"] }, signal).catch(() => [] as JsonObject[]))[0];
+    const tell = (title: string, playing?: boolean) => { try { options.onAction?.({ title, ...(playing !== undefined ? { playing } : {}) }); } catch { /* a listener failure must not affect Live */ } };
+    if (set?.playing === true && request.fromBeat === undefined) {
+      const link = await earsReady(signal);
+      if (link) return hearAsItPlays(link, request, tell, signal);
+    }
+    if (!supported({ since: RENDER_BRIDGE })) return tooOld({ since: RENDER_BRIDGE });
+    if (rendering) return "Kumi is already listening to something; wait for it.";
+    // Stopped: the loop when it's on, else from the playhead, a few bars.
+    const loop = set?.loop && typeof set.loop === "object" ? set.loop as JsonObject : undefined;
+    const looped = loop?.enabled === true && typeof loop.length === "number" && loop.length > 0;
+    const fromBeat = request.fromBeat ?? (looped ? (typeof loop!.start === "number" ? loop!.start : 0) : typeof set?.position === "number" ? set.position : 0);
+    const beats = Math.min(64, request.beats ?? (looped ? loop!.length as number : 4 * beatsPerBar));
+    const candidates = request.mix ? [{ track: MIX_CANDIDATE, mix: true, label: "The whole mix" }] : request.tracks.map((track) => ({ track }));
+    tell(`Listening quietly from ${bars(fromBeat)}`, true);
+    rendering = true;
+    let rig: Rig | undefined;
+    const takes: HeardTake[] = [];
+    try {
+      rig = await openRig(candidates, fromBeat, beats, signal);
+      const rendered = await renderPass(rig, signal);
+      for (const source of rig.sources) {
+        const found = rendered.get(source.name);
+        if (found) takes.push({ label: source.mix ? "The whole mix" : source.name, file: found.file, start: found.start, seconds: beats * 60 / tempo, live: false });
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      return error instanceof Error ? error.message.slice(0, 400) : "Kumi couldn't hear that.";
+    } finally {
+      if (rig) await closeRig(rig);
+      rendering = false;
+      tell("Listened", false);
+    }
+    if (!takes.length) return `Nothing came through${rig?.notes.length ? `: ${rig.notes.join(" ")}` : ""}. Is something playing there in the Arrangement (its clips at ${bars(fromBeat)}, the track not muted)?`;
+    return takes;
+  }
+  /** Hear tracks (or the mix) for a few seconds as Live plays them: a listening device each, taken away after. */
+  async function hearAsItPlays(link: EarsLink, request: HearRequest, tell: (title: string, playing?: boolean) => void, signal: AbortSignal): Promise<HeardTake[] | string> {
+    const seconds = Math.min(60, Math.max(2, request.seconds ?? 8));
+    const steps: string[] = [];
+    const placed: { label: string; tap: Tap }[] = [];
+    try {
+      await quietly(steps, async () => {
+        if (request.mix) { placed.push({ label: "The whole mix", tap: await placeTap(link, (await mainVolume(signal)).ref, signal) }); return; }
+        const tracks = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+        for (const named of request.tracks) {
+          const found = tracks.find((track) => track.ref === named) ?? tracks.find((track) => track.name === named);
+          if (!found || typeof found.ref !== "string") throw new ObservationError(`${named} isn't a track in this turn's discovery; discover it again.`);
+          placed.push({ label: typeof found.name === "string" ? found.name : named, tap: await placeTap(link, found.ref, signal) });
+        }
+      });
+      tell(`Listening to ${placed.length === 1 ? placed[0]!.label : `${placed.length} tracks`} as it plays (${Math.round(seconds)} s)`);
+      await Promise.all(placed.map(({ tap }) => link.arm(tap, seconds + 2, signal)));
+      await delay(seconds * 1000, undefined, { signal });
+      const takes: HeardTake[] = [];
+      await Promise.all(placed.map(async ({ label, tap }) => {
+        const raw = join(earsFolder, `${randomUUID()}.raw`);
+        try {
+          const written = await link.write(tap, maxPath(raw), signal);
+          const capture = await readCapture(raw, written.channels, written.sampleRate);
+          const wav = join(earsFolder, `${randomUUID()}.wav`);
+          await writeCaptureWav(wav, capture, 0, capture.left.length);
+          takes.push({ label, file: wav, start: 0, seconds: capture.left.length / capture.sampleRate, live: true });
+        } finally { await rm(raw, { force: true }).catch(() => undefined); }
+      }));
+      return takes.sort((a, b) => placed.findIndex((item) => item.label === a.label) - placed.findIndex((item) => item.label === b.label));
+    } catch (error) {
+      signal.throwIfAborted();
+      return error instanceof Error ? error.message.slice(0, 400) : "Kumi couldn't hear that.";
+    } finally {
+      for (const { tap } of placed) link.stop(tap);
+      const cleanup = AbortSignal.any([lifetime.signal, AbortSignal.timeout(changeTimeoutMs * 3)]);
+      await quietly(undefined, async () => { for (const id of [...steps].reverse()) { await undoChange(id, cleanup).catch(() => undefined); changes.delete(id); } });
+      tell("Listened");
+      void pruneEars();
+    }
+  }
+  /** Kumi's hands, started once (a Mac builds its helper the first time); undefined where there are none. */
+  let handsSetup: Promise<Hands | undefined> | undefined;
+  async function handsReady(): Promise<Hands | undefined> {
+    if (options.hands === false) return undefined;
+    const tell = (title: string) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } };
+    handsSetup ??= (options.hands ? options.hands.open() : openHands({ onBuild: tell })).catch(() => undefined);
+    const hands = await handsSetup;
+    if (!hands) handsSetup = undefined;
+    return hands;
+  }
+  /** Live's commands whose menu item toggles (one item, retitled with the selection). */
+  const toggles = new Set(["freeze_track", "unfreeze_track"]);
+  /** Live's menus as last read (read again when an item isn't found: they change with the selection and the view). */
+  let menuItems: MenuItem[] | undefined;
+  /** The Set's tracks by name, in order: what a command changed is told from them. */
+  async function trackNames(signal: AbortSignal): Promise<string[]> {
+    const rows_ = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+    return rows_.map((row) => (typeof row.name === "string" ? row.name : ""));
+  }
+  /** A track the model names, by its reference from this turn or by its name; its reference. */
+  async function trackRefOf(named: string, signal: AbortSignal): Promise<string> {
+    const tracks = [...await rows("track", { fields: ["name"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+    const found = tracks.find((track) => track.ref === named) ?? tracks.find((track) => track.name === named);
+    if (!found || typeof found.ref !== "string") throw new ObservationError(`${named} isn't a track in this turn's discovery; discover it again.`);
+    return found.ref;
+  }
+  /**
+   * live_command: select what the command works on, press it in Live's menus (or the keys given), and
+   * say what changed. Changes Live makes this way are undone with Live's own undo, so HISTORY keeps them
+   * with that said.
+   */
+  async function liveCommand(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    if (!available || lost || !tools || currentEpoch === undefined) return { text: NO_CURRENT_LIVE, isError: true };
+    const hands = await handsReady();
+    if (!hands) return { text: process.platform === "darwin" ? "Kumi can't use Live's menus on this Mac yet: its helper is built with Xcode's command line tools (run xcode-select --install), or comes with Kumi's next update." : "Kumi can't use Live's menus on this computer.", isError: true };
+    const tell = (title: string) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } };
+    try {
+      if (!await hands.trusted()) {
+        // macOS shows its own request once; the producer turns Kumi's terminal on, then asks again.
+        await hands.trusted(true).catch(() => false);
+        return { text: "Kumi needs Accessibility access to use Live's menus. macOS just asked for it: in System Settings › Privacy & Security › Accessibility, turn on the app Kumi runs in (your terminal), then ask again. Tell the producer exactly that.", isError: true };
+      }
+      // Live's dialog first, when that's what's asked.
+      if (typeof input.answer === "string") {
+        const reply = await hands.answer(input.answer, signal);
+        if (!reply.ok) {
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const }));
+          return { text: open.open ? `Live's dialog has no "${input.answer}" button; its buttons: ${(open as { buttons?: string[] }).buttons?.join(", ") || "none Kumi can see"}.` : "Live has no dialog open.", isError: true };
+        }
+        tell(`Pressed ${input.answer} in Live's dialog`);
+        await delay(200, undefined, { signal });
+        const next = await hands.dialog(signal).catch(() => ({ open: false as const }));
+        return { text: JSON.stringify({ pressed: input.answer, ...(next.open ? { dialog: next } : {}) }), isError: false };
+      }
+      const command = typeof input.command === "string" ? COMMANDS[input.command] : undefined;
+      if (typeof input.command === "string" && !command) return { text: `Kumi doesn't know the command ${input.command}; name the menu item instead (menu).`, isError: true };
+      const menu = Array.isArray(input.menu) ? input.menu.filter((part): part is string => typeof part === "string") : undefined;
+      const keys = Array.isArray(input.keys) ? input.keys.filter((part): part is string => typeof part === "string") : undefined;
+      if (!command && !menu?.length && !keys?.length) return { text: "Give a command, a menu item (menu) or keys.", isError: true };
+      // What it works on, selected in Live first, the way the producer would before pressing the command.
+      const named = { track: typeof input.track === "string" ? input.track : undefined, tracks: Array.isArray(input.tracks) ? input.tracks.filter((item): item is string => typeof item === "string") : [],
+        clip: typeof input.clip === "string" ? input.clip : undefined };
+      const target = command?.target ?? "none";
+      if ((target === "track" || target === "track-or-clip") && !named.track && !named.clip && !named.tracks.length) return { text: `${input.command} works on a track: give track.`, isError: true };
+      if (target === "tracks" && named.tracks.length < 2 && !named.track) return { text: "Give the tracks to group, side by side, first to last (tracks).", isError: true };
+      if (target === "clip" && !named.clip) return { text: `${input.command} works on a clip: give clip (its clipRef from this turn, or "selected" for the one selected in Live).`, isError: true };
+      const before = await trackNames(signal);
+      const savedBefore = project?.path && existsSync(project.path) ? statSync(project.path).mtimeMs : undefined;
+      let what = "";
+      /** The tracks selected for it, by name (to see a freeze through). */
+      let chosen: string[] = [];
+      if (named.clip === "selected") {
+        // The clip the producer selected in Live: pressed as it is.
+        what = " the selected clip";
+      } else if (named.clip && (target === "clip" || target === "track-or-clip" || target === "none")) {
+        const long = String(lengthen(named.clip, "clipRef"));
+        const session = /^(\d+):clip:(\d+):(\d+)$/.exec(long);
+        // Live's scripting can't select a clip in the Arrangement, nor can its accessibility.
+        if (!session && target === "clip") return { text: "Kumi can't select a clip in the Arrangement for Live's own commands yet: ask the producer to click it, then use clip: \"selected\" (or work on a Session clip).", isError: true };
+        // Its slot selected with the Session in front: Live's own selection for the Create menu's commands.
+        if (session) await act(ACTIONS.find((kind) => kind.tool === "show")!, { action: "focus-view", view: "Session" }, signal);
+        // The clip's slot, so Live's selection is on it (Session view), and the clip in the Clip view.
+        const slot = session ? `${session[1]}:clip_slot:${session[2]}:${session[3]}` : undefined;
+        if (slot && !refs.has(slot)) refs.set(slot, "clip-slot");
+        const selected = slot ? await act(ACTIONS.find((kind) => kind.tool === "select")!, { slotRef: slot, detailClipRef: named.clip }, signal)
+          : await act(ACTIONS.find((kind) => kind.tool === "select")!, { detailClipRef: named.clip }, signal);
+        if (selected.isError) return { text: `Kumi couldn't select that clip in Live: ${selected.text.slice(0, 300)}`, isError: true };
+        what = " the clip";
+      } else if (named.track || named.tracks.length) {
+        const list = named.tracks.length ? named.tracks : [named.track!];
+        // Each by its name in Live's track headers, and which of that name it is (several tracks can share one).
+        const all = [...await rows("track", { fields: ["name", "kind", "isFrozen", "isVisible"] }, signal), ...await rows("return-track", { fields: ["name"] }, signal)];
+        const targets: { name: string; nth: number }[] = [];
+        for (const one of list) {
+          const ref = await trackRefOf(one, signal);
+          const index = all.findIndex((track) => track.ref === ref);
+          const row = all[index];
+          const name = typeof row?.name === "string" ? row.name : one;
+          // Live's freeze and group commands toggle: what's already so is said, not pressed (it would undo it).
+          const already = input.command === "freeze_track" && row?.isFrozen === true ? "is frozen already"
+            : (input.command === "unfreeze_track" || input.command === "flatten_track") && row?.isFrozen === false ? `isn't frozen${input.command === "flatten_track" ? " (Flatten works on a frozen track: freeze it first)" : ""}`
+            : input.command === "ungroup_tracks" && row && row.kind !== "group" ? "isn't a group" : undefined;
+          if (already) return { text: `${name} ${already}; nothing pressed.`, isError: true };
+          if (row?.isVisible === false) return { text: `${name} is inside a folded group, so Live's track headers don't show it: unfold the group, then ask again.`, isError: true };
+          targets.push({ name, nth: all.slice(0, Math.max(0, index)).filter((track) => track.name === name).length });
+        }
+        const selected = await hands.tracks(targets, signal).catch((error: unknown) => ({ ok: false, error: error instanceof Error ? error.message : "failed" }) as HandsReply);
+        if (!selected.ok && selected.error === "no-track") {
+          const missing = Array.isArray(selected.missing) ? (selected.missing as string[]).join(", ") : list.join(", ");
+          return { text: `Live's track headers don't show ${missing}: is it inside a folded group? Unfold the group, then ask again.`, isError: true };
+        }
+        if (!selected.ok) {
+          // An older helper, or no track headers to be found: one track can still be selected through Live's scripting.
+          if (list.length > 1) return { text: `Kumi couldn't select several tracks in Live here (${String(selected.error)}); select them in Live, then ask again.`, isError: true };
+          const viaScript = await act(ACTIONS.find((kind) => kind.tool === "select")!, { trackRef: await trackRefOf(list[0]!, signal) }, signal);
+          if (viaScript.isError) return { text: `Kumi couldn't select ${list[0]} in Live: ${viaScript.text.slice(0, 300)}`, isError: true };
+        } else tell(`Selected ${targets.map((target) => target.name).join(", ")}`);
+        chosen = targets.map((target) => target.name);
+        what = list.length > 1 ? ` ${list.length} tracks` : ` ${targets[0]!.name}`;
+      }
+      // Press it: the command's menu item (wherever Live keeps it), the item named, or the keys.
+      let pressed: string;
+      let key: string | undefined;
+      if (command || menu?.length) {
+        const look = (items: readonly MenuItem[]) => (command ? findItem(items, command.titles) : items.find((item) => item.path.length === menu!.length && item.path.every((part, index) => part.toLowerCase() === menu![index]!.toLowerCase()))
+          ?? findItem(items, [menu!.at(-1)!]));
+        menuItems ??= await hands.menus(signal);
+        let item = look(menuItems);
+        if (!item) { menuItems = await hands.menus(signal); item = look(menuItems); }
+        if (!item) return { text: `Live's menus don't have ${command ? `“${command.titles[0]}”` : `“${menu!.join(" › ")}”`} here: it may need a newer Live, Live Suite, or something selected first.`, isError: true };
+        const reply = await hands.menu(item.path, { signal, ...(command ? { titles: command.titles } : {}) });
+        if (!reply.ok) {
+          return { text: reply.error === "disabled" ? `Live has “${item.path.join(" › ")}” greyed out right now: it needs the right thing selected (and some commands need the Arrangement or Session view in front).`
+            : `Live didn't take “${item.path.join(" › ")}” (${String(reply.error)}).`, isError: true };
+        }
+        // What Live's menu said as it was pressed (its titles follow the selection: "Group Tracks"); a toggle's
+        // title can lag the selection, so a freeze is said as what it did.
+        const said = toggles.has(String(input.command)) ? command!.titles[0]! : typeof reply.title === "string" && reply.title ? reply.title : item.path.at(-1)!;
+        pressed = [...item.path.slice(0, -1), said].join(" › "); key = shortcut(item);
+      } else {
+        const reply = await hands.keys(keys!, { signal });
+        if (!reply.ok) return { text: `Live didn't take those keys (${String(reply.error)}).`, isError: true };
+        pressed = keys!.join(", ");
+      }
+      // A freeze renders first (Live shows its progress): seen through to the end in Live's own track state, so
+      // what's said is what happened, and the next command finds Live's menus caught up.
+      const toggle = input.command === "freeze_track" ? true : input.command === "unfreeze_track" || input.command === "flatten_track" ? false : undefined;
+      if (toggle !== undefined && chosen.length) {
+        tell(`${toggle ? "Freezing" : input.command === "flatten_track" ? "Flattening" : "Unfreezing"}${what}`);
+        for (let wait = 0; wait < 600; wait++) {
+          const rows_ = await rows("track", { fields: ["name", "isFrozen"] }, signal);
+          if (chosen.every((name) => rows_.some((row) => row.name === name && row.isFrozen === toggle))) break;
+          // A dialog with buttons asks something (the progress has none): it's said, not waited out.
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const, buttons: [] as string[] }));
+          if (open.open && (open.buttons?.length ?? 0) > 0) break;
+          await delay(100, undefined, { signal });
+        }
+      }
+      // A bounce or a conversion renders first, Live's progress window up meanwhile: seen through to its end.
+      if (command && /Bounce|Convert|Separate|Slice|Consolidate|Flatten|Paste Bounced/.test(command.titles[0]!)) {
+        const working = async () => { const open = await hands.dialog(signal).catch(() => ({ open: false as const, buttons: [] as string[] })); return open.open && (open.buttons?.length ?? 0) === 0; };
+        await delay(150, undefined, { signal });
+        for (let wait = 0; wait < 1_200 && await working(); wait++) await delay(100, undefined, { signal });
+      }
+      tell(command ? `${command.done}${what}` : `Pressed ${pressed} in Live`);
+      // Live does it on its own time: a bounce or a freeze renders first.
+      const dialog = await (async () => {
+        for (let check = 0; check < (command?.dialog ? 6 : 2); check++) {
+          await delay(command?.dialog ? 250 : 150, undefined, { signal });
+          const open = await hands.dialog(signal).catch(() => ({ open: false as const }));
+          // Live's progress (no buttons) isn't a question.
+          if (open.open && (open.buttons?.length ?? 0) > 0) return open;
+        }
+        return undefined;
+      })();
+      // Live's structure may have changed under every reference: read it all again.
+      refs.clear(); known.clear(); cursors.clear(); shortRefs.clear(); longRefs.clear(); observationGeneration++;
+      let after = await trackNames(signal);
+      // Tracks it adds or renames show a moment after (in place, a bounce may keep every name: then this ends soon).
+      const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((name, index) => name === b[index]);
+      for (let wait = 0; wait < 8 && !dialog && command && command.target !== "none" && same(after, before) && /Bounce|Convert|Separate|Slice|Group/.test(command.titles[0]!); wait++) {
+        await delay(250, undefined, { signal }); after = await trackNames(signal);
+      }
+      const added = after.filter((name) => !before.includes(name) || after.filter((other) => other === name).length > before.filter((other) => other === name).length);
+      const removed = before.filter((name) => !after.includes(name));
+      const saved = savedBefore !== undefined && project?.path && existsSync(project.path) && statSync(project.path).mtimeMs > savedBefore;
+      if (command || added.length || removed.length) {
+        emitChange({ id: `l${randomUUID().slice(0, 8)}`, family: "structure", title: command ? `${command.done}${what}` : `Pressed ${pressed} in Live`, state: "kept",
+          note: "Done with Live's own command: Live's undo (Cmd-Z) takes it back.", at: now().getTime() });
+      }
+      return { text: JSON.stringify({ pressed, ...(key ? { liveShortcut: key } : {}), ...(added.length ? { newTracks: added } : {}), ...(removed.length ? { goneTracks: removed } : {}),
+        ...(saved ? { saved: true } : {}), ...(dialog ? { dialog, next: "Answer it with answer (the button's title), or tell the producer what it asks." } : {}),
+        note: "References from before are gone: discover again before using any." }), isError: false };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { text: error instanceof HandsError || error instanceof ObservationError ? error.message : `Kumi couldn't use Live's menus: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
+    }
+  }
+  /** The plugin tool: a plug-in's guide (Kumi's knowledge, set against its real parameters), or a wavetable for it. */
+  async function pluginTool(input: JsonObject, originalSignal: AbortSignal): Promise<{ text: string; isError: boolean }> {
+    const signal = AbortSignal.any([originalSignal, lifetime.signal]);
+    if (!available || lost || !tools || currentEpoch === undefined) return { text: NO_CURRENT_LIVE, isError: true };
+    if (typeof input.device !== "string") return { text: "Give the plug-in device (its deviceRef from this turn).", isError: true };
+    const long = String(lengthen(input.device, "deviceRef"));
+    try { requireFreshReferences({ deviceRef: long }); } catch (error) { return { text: error instanceof Error ? error.message : "deviceRef must come from discovery in this turn", isError: true }; }
+    try {
+      // Its name, as Live shows it, from its track's devices.
+      const track = /^(\d+):device:(\d+):/.exec(long);
+      let name = "";
+      if (track) {
+        const devices = await tools.call("live_discover", { kind: "device", parent: `${track[1]}:track:${track[2]}`, fields: ["name", "className"], limit: pageLimit(), budget: wholeBudget() }, signal, { host: true });
+        const row = devices.isError ? undefined : ((payload(devices).items as JsonObject[] | undefined) ?? []).map((item) => object(item)).find((item) => item.ref === long);
+        name = typeof row?.name === "string" ? row.name : "";
+      }
+      const adapter = adapterFor(name);
+      if (input.action === "wavetable") {
+        const spec = object(input.wavetable ?? {});
+        const label = typeof spec.name === "string" && spec.name.trim() ? spec.name.trim().replace(/[\\/:*?"<>|]+/g, " ").slice(0, 48) : "Kumi Wavetable";
+        const fromAudio = spec.from_audio && typeof spec.from_audio === "object" ? object(spec.from_audio) : undefined;
+        const frames = await buildWavetable({
+          ...(Array.isArray(spec.keyframes) ? { keyframes: spec.keyframes as Keyframe[] } : {}),
+          ...(typeof spec.count === "number" ? { count: spec.count } : {}),
+          ...(fromAudio && typeof fromAudio.file === "string" ? { fromAudio: { file: audioPath(fromAudio.file), ...(typeof fromAudio.start === "number" ? { start: fromAudio.start } : {}), ...(typeof fromAudio.seconds === "number" ? { seconds: fromAudio.seconds } : {}) } } : {}) });
+        const folder = folderFor(adapter?.folders?.wavetables) ?? join(options.userLibrary ?? userLibrary(), "Kumi", "Wavetables");
+        await mkdir(folder, { recursive: true });
+        let file = join(folder, `${label}.wav`);
+        for (let index = 2; existsSync(file) && index < 1000; index++) file = join(folder, `${label} ${index}.wav`);
+        await writeWavetable(file, frames);
+        try { options.onAction?.({ title: `Made the wavetable ${basename(file, ".wav")} (${frames.length} frames)` }); } catch { /* a listener failure must not affect Live */ }
+        return { text: JSON.stringify({ made: basename(file, ".wav"), file, frames: frames.length,
+          next: adapter ? `It's in ${adapter.name}'s wavetable folder: in its window (set_device_details isEditorOpen opens it), the oscillator's wavetable menu lists it. Picking it there is a click for the producer; say where.`
+            : "Load it in the synth's oscillator from that file (most read 2048-sample frames)." }), isError: false };
+      }
+      // Every name the plug-in has, and the ones Live lets Kumi turn.
+      const read = await tools.call("live_device_read", { deviceRef: long, what: "parameter-names" }, signal, { host: true });
+      if (read.isError) return { text: /only a plug-in/.test(resultText(read)) ? "That isn't a plug-in: its parameters are all in discovery (kind parameter)." : `Live didn't list that plug-in's parameters: ${resultText(read).slice(0, 200)}`, isError: true };
+      const names = ((payload(read).names as unknown[] | undefined) ?? []).filter((item): item is string => typeof item === "string");
+      const exposed = (await deviceParameters(long, ["ref", "name", "displayValue"], signal))
+        .filter((row) => typeof row.name === "string" && row.name !== "Device On").map((row) => ({ name: String(row.name), ref: String(row.ref), ...(typeof row.displayValue === "string" ? { display: row.displayValue } : {}) }));
+      const guide = pluginGuide(name || "this plug-in", adapter, names, exposed);
+      const text = JSON.stringify(guide);
+      return { text: Buffer.byteLength(text) <= 48 * 1024 ? text : JSON.stringify({ ...guide, parameters: { ...(guide.parameters as JsonObject), groups: "too many to list" } }), isError: false };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { text: error instanceof ObservationError ? error.message : `Kumi couldn't read that plug-in: ${error instanceof Error ? error.message.slice(0, 200) : "it failed"}`, isError: true };
+    }
+  }
+  /**
    * An audition cut off by a crash left Main silent: with that Set open again, Main goes back to where
    * it was, and the producer is told (with any scratch tracks to delete). What was said, or nothing.
    */
@@ -2261,6 +2886,54 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     if (clip.isAudio === false) throw new ObservationError("That's a MIDI clip, which has no sound of its own: record its track to audio first (resampling), then listen to the recording.");
     if (typeof clip.filePath !== "string" || !clip.filePath) throw new ObservationError("Live didn't say which file that clip plays.");
     return clip.filePath;
+  }
+  /**
+   * One HISTORY line for changes made quietly (an arrangement): its undo takes them back, latest first. Those
+   * `apart` aren't undone with it (the playhead's move); they, and working steps already taken back, go. Its id.
+   */
+  function grouped(title: string, ids: readonly string[], apart: readonly string[] = []): string | undefined {
+    const members = ids.filter((id) => !apart.includes(id) && ["applied", "unsure", "kept"].includes(changes.get(id)?.record.state ?? ""));
+    const gone = ids.filter((id) => !members.includes(id));
+    release(gone.flatMap((id) => (changes.get(id)?.record.state === "applied" ? [changes.get(id)!.transactionId] : [])));
+    for (const id of gone) changes.delete(id);
+    if (!members.length) return undefined;
+    const record: ChangeRecord = { id: nextChangeId(), family: "clip", title: title.slice(0, 160), state: "applied", at: now().getTime() };
+    for (const id of members) changes.get(id)!.within = record.id;
+    changes.set(record.id, { record, transactionId: "", members });
+    emitChange(record); scheduleSave(20_000);
+    return record.id;
+  }
+  /** What arranging needs of Live: Kumi's reads and changes, quietly, with one line in HISTORY and one undo step in Live. */
+  function arrangeHost(): ArrangeHost {
+    // The first change checks that Live is still the Set Kumi read; the rest follow on from it.
+    let confirmed = false;
+    // Opening and closing Live's undo step aren't the answer's to cancel, as in a plan.
+    const lasting = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(10_000)]);
+    return {
+      tempo: () => currentTempo, beatsPerBar: () => beatsPerBar,
+      read: (kind, extra, signal) => rows(kind, extra, signal),
+      offers: (tool) => { const kind = CHANGES.find((candidate) => candidate.tool === tool); return Boolean(kind && supported(kind) && tools?.has(kind.preview) && tools.has(kind.apply)); },
+      async change(tool, input, signal) {
+        const outcome = await change(CHANGES.find((candidate) => candidate.tool === tool)!, input, signal, confirmed);
+        let reply: JsonObject = {};
+        try { reply = JSON.parse(outcome.text) as JsonObject; } catch { /* a refusal in words */ }
+        if (outcome.isError || typeof reply.change !== "string") throw new ObservationError(`${typeof reply.changed === "string" ? `${reply.changed}: ` : ""}${outcome.text.slice(0, 400)}`);
+        confirmed = true;
+        return { id: reply.change, ...(typeof reply.ref === "string" ? { ref: reply.ref } : {}) };
+      },
+      undo: async (id, signal) => !(await undoChange(id, signal)).isError,
+      async quietly(work) { const ids: string[] = []; const value = await quietly(ids, work); return { value, ids }; },
+      record: (title, ids, apart) => grouped(title, ids, apart),
+      async undoStep() {
+        if (!tools?.has("live_undo_step_begin") || !tools.has("live_undo_step_end")) return { opened: false, close: async () => {} };
+        let stepId: string | undefined;
+        try { const opened = payload(await tools.call("live_undo_step_begin", { label: "Kumi", timeoutMs: 600_000 }, lasting(), { host: true })); if (typeof opened.stepId === "string") stepId = opened.stepId; }
+        catch { /* Live's undo then has a step for each change */ }
+        return { opened: stepId !== undefined, close: async () => { if (stepId) await tools!.call("live_undo_step_end", { stepId }, lasting(), { host: true }).catch(() => undefined); } };
+      },
+      keepCopy: (signal) => keepCopy(signal),
+      tell: (title) => { try { options.onAction?.({ title }); } catch { /* a listener failure must not affect Live */ } },
+    };
   }
   function definitions(): KernelTool[] {
     const reads: KernelTool[] = tools!.list().map((tool) => ({ name: tool.name, description: tool.description ?? "Read current Live state", inputSchema: tool.inputSchema,
@@ -2378,7 +3051,15 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
         register(done.result);
         return { text: JSON.stringify(shorten(done)), isError: done.ok !== true };
       } }] : [];
-    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python];
+    // An arrangement from the producer's clips, as one change: offered where clips can be copied into the Arrangement.
+    const arranging: KernelTool[] = tools!.has("live_undo") && tools!.has("live_clip_duplicate_preview") && tools!.has("live_clip_duplicate_apply") ? [{ name: ARRANGE_TOOL, description: ARRANGE_DESCRIPTION, inputSchema: ARRANGE_SCHEMA,
+      execute: (input, signal) => arrange(input, arrangeHost(), AbortSignal.any([signal, lifetime.signal])) }] : [];
+    // Live's own menus and keys, where Kumi has hands (macOS, Windows) and the bridge can select things first.
+    const commands: KernelTool[] = options.hands !== false && (options.hands || process.platform === "darwin" || process.platform === "win32") && tools!.has("live_selection_preview")
+      ? [{ name: LIVE_COMMAND_TOOL, description: LIVE_COMMAND_DESCRIPTION, inputSchema: LIVE_COMMAND_SCHEMA, execute: (input, signal) => liveCommand(input, signal) }] : [];
+    // Plug-ins: Kumi's knowledge of them, set against their real parameters, and wavetables for their oscillators.
+    const plugins: KernelTool[] = tools!.has("live_device_read") ? [{ name: PLUGIN_TOOL, description: PLUGIN_DESCRIPTION, inputSchema: PLUGIN_SCHEMA, execute: (input, signal) => pluginTool(input, signal) }] : [];
+    return [...reads, sampleSearch, ...devices, ...edits, ...actions, ...batch, ...arranging, ...undo, ...watcher, ...auditions, ...renders, ...liveUndo, ...python, ...commands, ...plugins];
   }
   return {
     async start(signal) {
@@ -2475,6 +3156,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
     },
     audioFile: (named, signal) => clipFile(named, signal),
     audition: (request, signal) => audition(request, signal),
+    hear: (request, signal) => hearInSet(request, signal),
     goal: (request, signal) => openGoal(request, signal),
     async observe(originalSignal, hints) {
       const signal = AbortSignal.any([originalSignal, lifetime.signal]);
@@ -2634,7 +3316,7 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
             // Live's references changed with the connection: ones from earlier answers would fail (or, renumbered, point elsewhere).
             ...(afterReconnect ? { reconnected: "Kumi reconnected to Live since your last answer, so every reference from earlier answers (track:…, device:…, clip:… and the like) is gone. Use the ones listed here, or discover again." } : {}),
             // What Kumi changed lately and where each change stands, HISTORY undos and stopped answers included.
-            ...(changes.size ? { kumiChanges: [...changes.values()].slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
+            ...(changes.size ? { kumiChanges: [...changes.values()].filter((entry) => !entry.within).slice(-12).map(({ record }) => ({ change: record.id, what: record.title, state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
             truncated: page.truncated, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
             coverage: "Current open Set only. Bounded discovery; details and track counts require fresh paged reads. Names/paths are not durable identity.",
           }),
@@ -2659,9 +3341,13 @@ async function clipFile(named: string, originalSignal: AbortSignal): Promise<str
       // Remember the Set as Kumi leaves it, so next time's catch-up starts here (bounded).
       const remembered = project?.path && options.projectStore && available && !lost
         ? Promise.race([saveNow(2_000), new Promise<void>((resolve) => { setTimeout(resolve, 2_500).unref?.(); })]) : Promise.resolve();
-      closing = remembered.then(() => {
+      closing = remembered.then(async () => {
         closed = true; available = false; lifetime.abort(); invalidate(); focusFeed?.stop(); clearTimeout(transportTimer);
         for (const remove of unlisten) remove();
+        // The listening devices' socket, and what they wrote this session.
+        const link = await earsSetup?.catch(() => undefined);
+        await link?.close().catch(() => undefined);
+        await rm(earsFolder, { recursive: true, force: true }).catch(() => undefined);
         return tools ? tools.close() : endpoint ? endpoint.close() : Promise.resolve();
       });
       return closing;

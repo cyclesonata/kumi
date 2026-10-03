@@ -12,7 +12,7 @@ import { MORE_CHANGES, MORE_REFERENCE_FIELDS } from "./more-changes.js";
 /** A track as Kumi last saw it in discovery, for HISTORY's colour chip. */
 export interface KnownTrack { name: string; color?: string }
 
-/** What a change can look up while preparing: a sample by its path (one find_samples returned, or any audio file), with its folder. */
+/** What a change can look up while preparing: a sample by its path (one find_sounds returned, or any audio file), with its folder. */
 export interface ChangeContext {
   sample(path: string): { path: string; folder: string } | undefined;
   /** A device's parameters as Live has them now (for a parameter named rather than referenced). */
@@ -21,12 +21,14 @@ export interface ChangeContext {
   ranges(deviceRef: string): Promise<{ ref: string; name: string; min?: number; max?: number; value?: number; display?: string }[]>;
   /** A sample Kumi finds itself (at random, or the best match for the words), not one already picked in this answer. */
   pick(selector: SampleSelector): Promise<{ path: string; folder: string } | undefined>;
+  /** The value that makes a parameter show `text` ("800 Hz", "-6 dB", "Saw"), from Live's own text across its range; or why not. */
+  valueFor?(parameterRef: string, text: string): Promise<number | string>;
 }
 export interface SampleSelector { words?: string[]; folders?: string[]; random?: boolean }
 
-/** A `sample` input: the path of an audio file (one find_samples returned, or any on this computer), or a selector Kumi resolves itself (no search step in between). */
+/** A `sample` input: the path of an audio file (one find_sounds returned, or any on this computer), or a selector Kumi resolves itself (no search step in between). */
 export const SAMPLE_INPUT = {
-  description: "The path of an audio file (one find_samples returned, or any on this computer), or {\"random\": true, \"words\": [\"kick\"]} for Kumi to pick one itself (words and folders optional)",
+  description: "The path of an audio file (one find_sounds returned, or any on this computer), or {\"random\": true, \"words\": [\"kick\"]} for Kumi to pick one itself (words and folders optional)",
   anyOf: [
     { type: "string", minLength: 1, maxLength: 1024 },
     { type: "object", additionalProperties: false, properties: {
@@ -37,13 +39,13 @@ export const SAMPLE_INPUT = {
 
 /** A sample for a change: found earlier, or picked now. A string is a refusal. */
 async function sampleFor(input: unknown, context: ChangeContext): Promise<{ path: string; folder: string } | string> {
-  if (typeof input === "string") return context.sample(input) ?? "Give the path of an audio file on this computer (one find_samples returned, a recording, the producer's own), or {\"random\": true, \"words\": [...]} for Kumi to pick one.";
+  if (typeof input === "string") return context.sample(input) ?? "Give the path of an audio file on this computer (one find_sounds returned, a recording, the producer's own), or {\"random\": true, \"words\": [...]} for Kumi to pick one.";
   if (input && typeof input === "object" && !Array.isArray(input)) {
     const selector = input as JsonObject;
     const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
     return await context.pick({ words: strings(selector.words), folders: strings(selector.folders), random: selector.random === true }) ?? "No sample matches that; try other words or folders.";
   }
-  return "Give the sample as the path of an audio file (one find_samples returned, or any on this computer), or {\"random\": true, \"words\": [...]}.";
+  return "Give the sample as the path of an audio file (one find_sounds returned, or any on this computer), or {\"random\": true, \"words\": [...]}.";
 }
 
 export interface ChangeSummary {
@@ -79,7 +81,7 @@ export interface ChangeKind {
   /** More to say when Live refuses the change (what would have been accepted), so the model fixes it in one go. */
   explain?(error: string, input: JsonObject, context: ChangeContext): Promise<string | undefined>;
   /** What the change made that a later step can use directly (a new track, a loaded device), from the bridge's answer. */
-  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "session-clip" } | undefined;
+  produces?(applied: JsonObject): { ref: string; kind: "track" | "device" | "chain" | "session-clip" | "arrangement-clip" } | undefined;
   /** A change Live gives no way to take back (a rack's new chain): why, for HISTORY, which keeps it without an undo. */
   permanent?(input: JsonObject): string | undefined;
   /**
@@ -176,11 +178,16 @@ function mixerParts(prior: JsonObject, proposed: JsonObject, was: JsonObject, no
 function namedParameters(schema: JsonObject): JsonObject {
   const properties = { ...((schema.properties ?? {}) as JsonObject) };
   const NAME = { type: "string", minLength: 1, maxLength: 128, description: "The parameter's name on the device, as Live shows it; instead of parameterRef" };
+  // A value as a number in the parameter's range, or as the device shows it: Kumi reads the device's own text to place it.
+  const VALUE = { anyOf: [{ type: "number" }, { type: "string", minLength: 1, maxLength: 48 }], description: "A number in the parameter's range, or the value as the device shows it (\"800 Hz\", \"-6 dB\", \"35 %\", \"1.2 s\", \"Saw\")" };
   properties.parameter = NAME;
+  if (properties.value !== undefined) properties.value = VALUE;
   const values = properties.values as JsonObject | undefined;
   if (values && typeof values.items === "object") {
     const items = values.items as JsonObject;
-    properties.values = { ...values, items: { ...items, properties: { ...((items.properties ?? {}) as JsonObject), parameter: NAME },
+    const itemProperties: JsonObject = { ...((items.properties ?? {}) as JsonObject), parameter: NAME };
+    if (itemProperties.value !== undefined) itemProperties.value = VALUE;
+    properties.values = { ...values, items: { ...items, properties: itemProperties,
       required: ((items.required as string[] | undefined) ?? []).filter((field) => field !== "parameterRef") } };
   }
   return { ...schema, properties };
@@ -193,7 +200,7 @@ async function resolveParameters(given: JsonObject, context: ChangeContext): Pro
   const input: JsonObject = { ...given, ...(given.value !== undefined ? { value: numeric(given.value) } : {}),
     ...(Array.isArray(given.values) ? { values: given.values.map((item) => (item && typeof item === "object" && !Array.isArray(item) && "value" in item ? { ...(item as JsonObject), value: numeric((item as JsonObject).value) } : item)) } : {}) };
   const named = typeof input.parameter === "string" || (Array.isArray(input.values) && input.values.some((item) => item && typeof item === "object" && typeof (item as JsonObject).parameter === "string"));
-  if (!named) return input;
+  if (!named) return displayed(input, context);
   if (typeof input.deviceRef !== "string") return "Name the device (deviceRef) whose parameter this is.";
   const list = await context.parameters(input.deviceRef);
   const find = (name: string) => { const wanted = name.trim().toLowerCase(); return list.find((row) => row.name.toLowerCase() === wanted) ?? list.find((row) => row.name.toLowerCase().startsWith(wanted)); };
@@ -212,7 +219,38 @@ async function resolveParameters(given: JsonObject, context: ChangeContext): Pro
     const { parameter: _name, ...value } = item;
     values.push({ ...value, parameterRef: found.ref });
   }
-  return { ...rest, values };
+  return displayed({ ...rest, values }, context);
+}
+
+/**
+ * Values written as the device shows them ("800 Hz", "-6 dB", "Saw") become the values that show them, read from
+ * Live's own text across each parameter's range; numbers pass as they are. A text Kumi can't place says why.
+ */
+async function displayed(input: JsonObject, context: ChangeContext): Promise<JsonObject | string> {
+  const text = (value: unknown) => typeof value === "string" && value.trim() !== "" && !Number.isFinite(Number(value));
+  const convert = async (parameterRef: unknown, value: unknown): Promise<unknown> => {
+    if (!text(value) || typeof parameterRef !== "string") return value;
+    if (!context.valueFor) return `Give ${JSON.stringify(value)} as a number in the parameter's range: Kumi can't read this parameter's units here.`;
+    const found = await context.valueFor(parameterRef, value as string);
+    return found;
+  };
+  if (input.value !== undefined && typeof input.parameterRef === "string") {
+    const value = await convert(input.parameterRef, input.value);
+    if (typeof value === "string" && text(input.value)) return value;
+    return { ...input, value };
+  }
+  if (Array.isArray(input.values)) {
+    const values: unknown[] = [];
+    for (const item of input.values) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) { values.push(item); continue; }
+      const row = item as JsonObject;
+      const value = await convert(row.parameterRef, row.value);
+      if (typeof value === "string" && text(row.value)) return value;
+      values.push({ ...row, value });
+    }
+    return { ...input, values };
+  }
+  return input;
 }
 
 /** Live refused a value: each parameter it was for, with the range it takes and where it is now. */
@@ -305,7 +343,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   },
   {
     tool: "load_sample", preview: "live_device_preview", apply: "live_device_apply", family: "device",
-    description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is the path of an audio file (one find_samples returned, or any on this computer); trackRef comes from discovery in this turn or the track just added.",
+    description: "Load a sample into a new Simpler on an empty MIDI track (add the track first): one change, undone as one. sample is the path of an audio file (one find_sounds returned, or any on this computer); trackRef comes from discovery in this turn or the track just added.",
     inputSchema: { type: "object", additionalProperties: false, required: ["trackRef", "sample"], properties: {
       trackRef: { type: "string", minLength: 1, maxLength: 256 }, sample: SAMPLE_INPUT } },
     async prepare(input, context) {
@@ -326,7 +364,7 @@ const BASE_CHANGES: readonly ChangeKind[] = [
   {
     tool: "load_sample_to_pad", preview: "live_drum_pad_preview", apply: "live_drum_pad_apply", family: "device", always: true,
     unavailable: "There's no Drum Rack in the Set yet: load one with load_device first (search the Browser for \"Drum Rack\"), then its pads can take samples.",
-    description: "Load a sample onto an empty pad of a Drum Rack, in a new Simpler on that pad, or in Live 12's Drum Sampler with instrument \"Drum Sampler\"; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is the path of an audio file (one find_samples returned, or any on this computer).",
+    description: "Load a sample onto an empty pad of a Drum Rack, in a new Simpler on that pad, or in Live 12's Drum Sampler with instrument \"Drum Sampler\"; undo clears the pad. deviceRef is the Drum Rack from discovery in this turn; note is the pad's note: 36 (C1) is the first pad, then 37, 38 and so on up to 51 on a new rack. sample is the path of an audio file (one find_sounds returned, or any on this computer).",
     inputSchema: { type: "object", additionalProperties: false, required: ["deviceRef", "note", "sample"], properties: {
       deviceRef: { type: "string", minLength: 1, maxLength: 256 }, note: { type: "integer", minimum: 0, maximum: 127, description: "The pad: 36 is C1, the first pad" },
       sample: SAMPLE_INPUT, instrument: PAD_INSTRUMENT } },

@@ -4,6 +4,8 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditionEvent, ChangeRecord, ConnectionState, JsonObject, KernelTool, LiveFocus, LiveTransport, PinnedNode } from "../../src/core/contracts.js";
 import type { McpEndpoint } from "../../src/mcp/client.js";
 import { createAbletonIntegration } from "../../src/integrations/ableton/index.js";
+import type { EarsLink } from "../../src/ears/link.js";
+import type { Hands } from "../../src/hands/index.js";
 import { lowDisk } from "../../src/core/disk.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,13 +33,15 @@ type Options = {
   /** What's selected in Live, as the focus feed reports it. */ onFocus?: (focus: LiveFocus | null) => void;
   /** Live's transport, for the beat light. */ onTransport?: (transport: LiveTransport | null) => void;
   /** The session's own hooks, for a session over this bridge. */ onConnection?: (state: ConnectionState) => void; onAudition?: (event: AuditionEvent) => void;
-  /** Where the audition keeps Main's level while it renders. */ restoreFile?: string };
+  /** Where the audition keeps Main's level while it renders. */ restoreFile?: string;
+  /** Kumi's listening devices: a fake link, and the Browser listing the device (live_browser_inspect). Off when left out. */ ears?: { open: () => Promise<EarsLink> };
+  /** Kumi's hands (Live's menus): fake ones, with selecting and showing in Live. Off when left out. */ hands?: { open: () => Promise<Hands | undefined> } };
 export function bridge(options: Options = {}) {
   const requests: { name: string; args: JsonObject }[] = [];
   const records: ChangeRecord[] = [];
   let tempo = options.tempo ?? 120;
   let live = true; let epoch = 7;
-  let tracks: { name: string; color: number; armed?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
+  let tracks: { name: string; color: number; armed?: boolean; frozen?: boolean; input?: string; clips?: { start: number; filePath?: string }[]; made?: string; madeAt?: number; devices?: FixtureDevice[] }[] = [{ name: "Fixture Bass", color: 0xf7f47c }, { name: "Fixture Drums", color: 0x10ff00 },
     ...(options.extraTracks ?? []).map((track) => ({ name: track.name, color: 0x808080, devices: structuredClone(track.devices) })),
     ...Array.from({ length: options.bigSet ?? 0 }, (_, index) => ({ name: index % 4 === 0 ? `Bus ${index / 4 + 1}` : `Part ${index + 1}`, color: 0x808080,
       devices: ["Operator", "EQ Eight", "Compressor", "Reverb"].map((name) => ({ name, className: name.replace(/ /g, ""), params: [] })) }))];
@@ -68,7 +72,7 @@ export function bridge(options: Options = {}) {
     "live_tempo_preview", "live_tempo_apply", "live_mixer_preview", "live_mixer_apply",
     "live_session_structure_preview", "live_session_structure_apply", "live_object_rename_preview", "live_object_rename_apply", "live_audio_capture_apply", "live_transport_apply",
     "live_track_properties_preview", "live_track_properties_apply", "live_device_preview", "live_device_apply", "live_drum_pad_preview", "live_drum_pad_apply",
-    "live_browser_load_preview", "live_browser_load_apply", ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
+    "live_browser_load_preview", "live_browser_load_apply", ...(options.ears ? ["live_browser_inspect"] : []), ...(options.parameters ? ["live_device_parameter_preview", "live_device_parameter_apply"] : []),
     ...(options.racks || options.lateRacks ? ["live_rack_preview", "live_rack_apply", "live_chain_mixer_preview", "live_chain_mixer_apply"] : []),
     ...(options.savedSet ? ["live_project_backup_preview", "live_project_backup_apply"] : []),
     ...(options.renders ? ["live_transport_preview", "live_song_state", "live_track_structure_preview", "live_track_structure_apply", ...(options.parameters ? [] : ["live_device_parameter_preview", "live_device_parameter_apply"])] : []),
@@ -76,7 +80,8 @@ export function bridge(options: Options = {}) {
     ...(options.fullControl ? ["live_clip_delete_preview", "live_clip_delete_apply", "live_track_delete_preview", "live_track_delete_apply", "live_undo_step_begin", "live_undo_step_end", "live_render_offline",
       "live_arrangement_midi_clip_preview", "live_arrangement_midi_clip_apply", "live_clip_clear_range_preview", "live_clip_clear_range_apply", "live_subscribe",
       "live_device_edit_preview", "live_device_edit_apply", "live_song_undo", "live_song_redo", "live_device_read"] : []),
-    ...(options.python ? ["live_run_python"] : [])];
+    ...(options.python ? ["live_run_python"] : []),
+    ...(options.hands ? ["live_selection_preview", "live_selection_apply", "live_view_preview", "live_view_apply"] : [])];
   // Live's transport: what's playing and recording, and whether its ordinary stop is refused (as 1.0.33's was while playing).
   const transport = { playing: false, sessionRecord: false, arrangementRecord: false, refuseStop: false, emergencyStops: 0, recordUnsure: false };
   // Like the bridge, drum pad tools appear once the Set has a Drum Rack.
@@ -132,7 +137,7 @@ export function bridge(options: Options = {}) {
           ? tracks.map((track, index) => {
             // In a big Set, every fourth track (from the third) is a group holding the three after it.
             const big = index - 2; const group = options.bigSet && big >= 0 ? (big % 4 === 0 ? undefined : `7:track:${index - (big % 4)}`) : undefined;
-            return { ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true, ...(options.bigSet && big >= 0 && big % 4 === 0 ? { kind: "group" } : {}), ...(group ? { groupTrackRef: group } : {}) };
+            return { ref: `7:track:${index}`, parentRef: set.ref, name: track.name, color: track.color, armed: track.armed === true, isFrozen: track.frozen === true, ...(options.bigSet && big >= 0 && big % 4 === 0 ? { kind: "group" } : {}), ...(group ? { groupTrackRef: group } : {}) };
           })
           : args.kind === "selection" ? [{ ref: "7:selection:0", selectedTrackRef: "7:track:0" }]
           : args.kind === "main-track" ? [{ ref: "7:main_track:0", parentRef: set.ref, name: "Main", kind: "main", mixer: { volume: main.volume } }]
@@ -357,7 +362,9 @@ export function bridge(options: Options = {}) {
     onPointed: (pin) => pins.push(pin), ...(options.onFocus ? { onFocus: options.onFocus, focusIntervalMs: 60_000 } : {}), ...(options.onTransport ? { onTransport: options.onTransport } : {}),
     // Never the producer's own ~/.kumi: each bridge its own file.
     restoreFile: options.restoreFile ?? join(mkdtempSync(join(tmpdir(), "kumi-restore-")), "audition-restore.json"),
-    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12) });
+    lowDisk: (path, needed, what) => lowDisk(path, needed, what, async () => options.freeDisk ?? 1e12), ears: options.ears ?? false, hands: options.hands ?? false,
+    // Never the producer's own User Library: wavetables and devices go in a throwaway one.
+    userLibrary: mkdtempSync(join(tmpdir(), "kumi-user-library-")) });
   return {
     integration, requests, records, states, actions, auditions, released, pins, get tempo() { return tempo; },
     /** Live sends an event (notifications/live_event). */
@@ -386,6 +393,9 @@ export function bridge(options: Options = {}) {
     catalogChanged: () => { for (const listener of catalogListeners) listener(); },
     addDrumRack: () => { drumRack = true; for (const listener of catalogListeners) listener(); },
     deleteLastTrack: () => { tracks = tracks.slice(0, -1); },
+    /** Live makes a track itself (a bounce, a group), as a command of its own would. */
+    addTrack: (name: string) => { tracks = [...tracks, { name, color: 0x808080 }]; },
+    freeze: (name: string, frozen = true) => { tracks = tracks.map((track) => (track.name === name ? { ...track, frozen } : track)); },
     failApply: (how: "throw" | "uncertain" | "unreadable") => { applyFailure = how; },
     /** The next request to this tool waits, after it's sent, until released. */
     hold: (name: string) => {

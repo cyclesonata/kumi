@@ -41,18 +41,6 @@ jobs:
           cache: npm
           cache-dependency-path: apps/mcp-server/package-lock.json
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run property-test
-      - run: npm run coverage
-      - run: npm run benchmark
-      - name: Install independent FFmpeg oracle
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
-      - run: npm run audio:oracle
-      - run: npm run compatibility
-      - run: npm run package:verify
       - shell: bash
         run: |
           set -euo pipefail
@@ -87,19 +75,63 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  quality:
+    # Linux-only checks, run beside the candidate rather than before it, so the OS matrix starts
+    # as soon as the candidate is packed. The coverage run is the functional test run.
+    name: Coverage, benchmarks and the audio oracle
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/mcp-server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (Node 24)
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/mcp-server/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run coverage
+      - run: node --test scripts/release-documentation.test.mjs scripts/capability-manifest.test.mjs scripts/docs-drift.test.mjs scripts/release-retention.test.mjs
+      - run: npm run property-test
+      - run: npm run benchmark
+      - name: Install independent FFmpeg oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - run: npm run audio:oracle
+      - run: npm run compatibility
+      - run: npm run package:verify
+
   node:
-    name: Node ${{ matrix.node }} / ${{ matrix.os }}
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}${{ matrix.part && format(' / {0}', matrix.part) || '' }}
     needs: candidate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
-        node: [22, 24]
+        # tests: run the functional tests (a shard of them where given); verify: install and exercise the
+        # exact candidate. Windows runs its tests as four shards (balanced by cost) and its verification side by side.
+        include:
+          - { os: ubuntu-24.04, node: 22, tests: true, verify: true }
+          - { os: ubuntu-24.04, node: 24, tests: true, verify: true }
+          - { os: macos-15, node: 24, tests: true, verify: true }
+          - { os: windows-2025, node: 24, tests: true, shard: "1/4", part: "tests 1/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "2/4", part: "tests 2/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "3/4", part: "tests 3/4" }
+          - { os: windows-2025, node: 24, tests: true, shard: "4/4", part: "tests 4/4" }
+          - { os: windows-2025, node: 24, verify: true, part: "candidate" }
     defaults:
       run:
         working-directory: apps/mcp-server
     steps:
+      - name: Stop Windows Defender scanning the workspace (it slows every file the tests touch)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (Node 24)
         with:
@@ -115,42 +147,55 @@ jobs:
           name: exact-local-candidate
           path: ${{ runner.temp }}/ableton-candidate
       - run: npm run typecheck
-      - run: npm test
-      - run: npm run property-test
-      - run: npm run benchmark
-      - run: npm run compatibility
+      - if: matrix.tests
+        run: npm test
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+      - if: matrix.tests && !matrix.shard
+        run: npm run property-test
+      - if: matrix.verify
+        run: npm run compatibility
       - name: Verify installed package from the exact shared candidate
+        if: matrix.verify
         env:
           ABLETON_MCP_ARTIFACT: ${{ runner.temp }}/ableton-candidate/${{ needs.candidate.outputs.artifact_name }}
         run: npm run package:verify
       - name: Verify the exact shared candidate
+        if: matrix.verify
         shell: bash
         env:
           CANDIDATE_DIR: ${{ runner.temp }}/ableton-candidate
         run: node scripts/verify-candidate.mjs "$CANDIDATE_DIR/${{ needs.candidate.outputs.artifact_name }}" "$CANDIDATE_DIR/candidate-metadata.json" | tee "$RUNNER_TEMP/candidate-verification.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        if: matrix.verify
         with:
           name: candidate-verification-${{ matrix.os }}-node-${{ matrix.node }}
           path: ${{ runner.temp }}/candidate-verification.json
           if-no-files-found: error
           retention-days: 90
       - name: Verify production journeys from the exact shared candidate
+        if: matrix.verify
         env:
           ABLETON_MCP_ARTIFACT: ${{ runner.temp }}/ableton-candidate/${{ needs.candidate.outputs.artifact_name }}
         run: npm run journey:verify
-      - run: npm pack --dry-run --json
-      - run: npm run setup -- --output "${{ runner.temp }}/ableton-mcp-host.json"
-      - shell: bash
+      - if: matrix.verify
+        run: npm pack --dry-run --json
+      - if: matrix.verify
+        run: npm run setup -- --output "${{ runner.temp }}/ableton-mcp-host.json"
+      - if: matrix.verify
+        shell: bash
         run: |
           printf '%s\n' '{"command":"node","args":["dist/src/cli.js"]}' > "${{ runner.temp }}/ableton-mcp-legacy.json"
           npm run migrate -- --input "${{ runner.temp }}/ableton-mcp-legacy.json" --output "${{ runner.temp }}/ableton-mcp-migrated.json"
       - name: Exercise exact version-2 migration
+        if: matrix.verify
         shell: bash
         run: |
           node --input-type=module -e "import { writeSecretFile } from './dist/src/delivery.js'; writeSecretFile(process.argv[1], 'm'.repeat(32))" "${{ runner.temp }}/ableton-mcp-migration.secret"
           npm run migrate -- --input "${{ runner.temp }}/ableton-mcp-host.json" --output "${{ runner.temp }}/ableton-mcp-v2.json" --bridge-host 127.0.0.1 --bridge-port 19765 --realtime-port 19766 --secret-file "${{ runner.temp }}/ableton-mcp-migration.secret"
           node -e "const c=require(process.argv[1]);if(c.version!==2||c.bridge.host!=='127.0.0.1')process.exit(1)" "${{ runner.temp }}/ableton-mcp-v2.json"
-      - run: npm run diagnostics -- --config "${{ runner.temp }}/ableton-mcp-host.json"
+      - if: matrix.verify
+        run: npm run diagnostics -- --config "${{ runner.temp }}/ableton-mcp-host.json"
 
   remote-script:
     name: Python Remote Script contract / ${{ matrix.os }}
@@ -165,6 +210,12 @@ jobs:
         shell: bash
         working-directory: remote-script
     steps:
+      - name: Stop Windows Defender scanning the workspace
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with:
@@ -181,7 +232,7 @@ jobs:
   required:
     name: Required CI
     if: always()
-    needs: [candidate, node, remote-script]
+    needs: [candidate, quality, node, remote-script]
     runs-on: ubuntu-24.04
     steps:
       - name: Require the complete exact-candidate contract matrix
@@ -189,5 +240,6 @@ jobs:
         run: |
           set -euo pipefail
           test "${{ needs.candidate.result }}" = "success"
+          test "${{ needs.quality.result }}" = "success"
           test "${{ needs.node.result }}" = "success"
           test "${{ needs.remote-script.result }}" = "success"

@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { Writable } from "node:stream";
+import { localServers } from "@kumi/runtime";
 import { doctorChecks, runDoctor, type DoctorIo } from "../src/doctor.js";
+import { KUMI } from "@kumi/runtime";
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "kumi-doctor-"));
@@ -21,7 +23,8 @@ function setup() {
 }
 const io = (env: DoctorIo["env"], extra: Partial<DoctorIo> = {}): DoctorIo => ({ out: new Writable({ write(_c, _e, done) { done(); } }), env, nodeVersion: "v24.21.0",
   terminal: { isTTY: true, columns: 120, rows: 36 }, probeLive: async () => ({ started: true, connected: true, set: "Night Drive", realLive: true }), nodeVersionOf: async () => "v24.1.0",
-  videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli" }), ...extra });
+  videoPrograms: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli" }), hands: async () => undefined,
+  voice: async () => ({ ffmpeg: "/usr/bin/ffmpeg", whisper: "/usr/bin/whisper-cli", model: { name: "ggml-small.en-q5_1.bin" }, fetches: false }), ...extra });
 
 test("the doctor says what's fine and exactly what to fix, without printing secrets", async () => {
   const s = setup();
@@ -109,4 +112,57 @@ test("the doctor says whether Kumi's extension is in Live, the bridge's own, run
     assert.deepEqual(await line(), { status: "fix", text: "Kumi's extension in Live is from another bridge", next: "Run: npm run kumi -- bridge, then restart Live" });
     assert.match((await line({ liveVersion: "12.3.2" }))!.text, /Live 12\.3\.2 runs no extensions \(12\.4 and later do\)/);
   } finally { server.close(); s.cleanup(); }
+});
+
+test("the doctor says whether Kumi can use Live's own menus, and what to turn on when it can't", async () => {
+  const s = setup();
+  try {
+    const off = { status: "fix" as const, text: "Kumi can't use Live's own menus until Accessibility is on for this terminal", next: "System Settings › Privacy & Security › Accessibility: turn on the app Kumi runs in" };
+    const checks = await doctorChecks(io(s.env, { hands: async () => off }));
+    assert.deepEqual(checks.find((check) => /own menus/.test(check.text)), off);
+    assert.equal((await doctorChecks(io(s.env))).some((check) => /own menus/.test(check.text)), false, "nothing said where there are no hands");
+  } finally { s.cleanup(); }
+});
+
+test("the doctor says what Kumi knows of the library, or that it's still learning it", async () => {
+  const s = setup();
+  try {
+    const library = join(s.root, "library");
+    const env = { ...s.env, KUMI_LIBRARY_DIR: library };
+    const line = async () => (await doctorChecks(io(env))).find((check) => /library/.test(check.text));
+    assert.deepEqual(await line(), { status: "note", text: "Kumi hasn't learned your library yet", next: `It learns by itself while Kumi runs; ${KUMI} library shows where it's at` });
+    mkdirSync(library, { recursive: true });
+    writeFileSync(join(library, "state.json"), JSON.stringify({ version: 1, last: { startedAt: Date.now() - 3_600_000, finishedAt: Date.now() - 3_000_000, sounds: 48210, presets: 3140, sets: 37, failed: 2 } }));
+    assert.deepEqual(await line(), { status: "ok", text: "Knows your library: 48,210 sounds, 3,140 presets, 37 Sets (learned 50 minutes ago)" });
+    writeFileSync(join(library, "state.json"), JSON.stringify({ version: 1, learning: { pid: process.pid, startedAt: Date.now(), phase: "sounds", sounds: { known: 1204, todo: 8311, done: 1204 }, presets: { known: 0, todo: 0, done: 0 }, sets: { known: 0, todo: 0, done: 0 }, updatedAt: Date.now() } }));
+    assert.deepEqual(await line(), { status: "ok", text: "Learning your library in the background: 1,204 of 8,311 new sounds" });
+  } finally { s.cleanup(); }
+});
+
+test("the doctor names the model servers it found, says how to start one that's closed, and checks the model chosen on one", async () => {
+  const s = setup();
+  try {
+    const [ollama, lmstudio] = localServers([], {});
+    const qwen = { id: "ollama/qwen3:8b", provider: "ollama", model: "qwen3:8b", name: "qwen3:8b", efforts: [], tools: true };
+    const gemma = { ...qwen, id: "ollama/gemma3:4b", model: "gemma3:4b", name: "gemma3:4b", tools: false };
+    const modelServers = async () => [{ server: ollama!, running: true, models: [qwen, gemma] }, { server: lmstudio!, running: false }];
+    const checks = await doctorChecks(io({ ...s.env, KUMI_MODEL: "ollama/qwen3:8b" }, { modelServers }));
+    assert.deepEqual(checks[1], { status: "ok", text: "Ollama on this computer · model ollama/qwen3:8b" });
+    assert.deepEqual(checks[2], { status: "ok", text: "Model servers: Ollama on this computer (2 models, 1 can change the Set)" });
+    assert.deepEqual(checks[3], { status: "note", text: "LM Studio is installed but not running", next: "Open LM Studio and start its server (Developer tab), or run: lms server start" });
+    const missing = await doctorChecks(io({ ...s.env, KUMI_MODEL: "ollama/llama9:70b" }, { modelServers }));
+    assert.deepEqual(missing[1], { status: "fix", text: "Ollama doesn't have llama9:70b (model ollama/llama9:70b)", next: "Run: ollama pull llama9:70b" });
+    const closed = await doctorChecks(io({ ...s.env, KUMI_MODEL: "lmstudio/qwen/qwen3-8b" }, { modelServers }));
+    assert.deepEqual(closed[1], { status: "fix", text: "LM Studio isn't running (model lmstudio/qwen/qwen3-8b)", next: "Open LM Studio and start its server (Developer tab), or run: lms server start" });
+    assert.equal(closed.filter((check) => /LM Studio/.test(check.text)).length, 1, "said once");
+    const away = await doctorChecks(io({ ...s.env, OLLAMA_HOST: "studio.local" }, { modelServers: async () => [{ server: localServers([], { OLLAMA_HOST: "studio.local" })[0]!, running: false }] }));
+    assert.deepEqual(away.find((check) => /Ollama/.test(check.text)), { status: "note", text: "Ollama isn't answering at http://studio.local:11434 (OLLAMA_HOST)",
+      next: "Check that Ollama is running on studio.local and can be reached from here" });
+    // Signed in nowhere, a server with models is all Kumi needs.
+    const unsigned = await doctorChecks(io({ ...s.env, KUMI_MODEL: undefined, OPENAI_API_KEY: undefined }, { modelServers }));
+    assert.deepEqual(unsigned[1], { status: "ok", text: "Kumi starts with a model in Ollama, on this computer; no sign-in needed (/model changes it)" });
+    const nothing = await doctorChecks(io({ ...s.env, KUMI_MODEL: undefined, OPENAI_API_KEY: undefined }, { modelServers: async () => [] }));
+    assert.match(nothing[1]!.next ?? "", /or open Ollama or LM Studio$/);
+    assert.ok(!nothing.some((check) => /Model servers/.test(check.text)), "no line for servers that aren't there");
+  } finally { s.cleanup(); }
 });

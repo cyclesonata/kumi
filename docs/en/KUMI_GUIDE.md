@@ -27,6 +27,9 @@ key and says it isn't checked yet. `/logout` signs out.
 | Anthropic API | `anthropic/<model>` | `/login` with an API key, or `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | `/login` with an API key, or `OPENAI_API_KEY` |
 | OpenCode Zen and Go | `opencode/<model>`, `opencode-go/<model>` | `/login` with an API key (one for both), or `OPENCODE_API_KEY` |
+| Ollama, on your computer | `ollama/<model>` | None: found while it runs |
+| LM Studio, on your computer | `lmstudio/<model>` | None: found while its server runs |
+| Another OpenAI-compatible server | `<name>/<model>` | Named in `settings.json` ([below](#models-on-your-computer)), with a key if it wants one |
 
 A key saved with `/login` is used first; without one, Kumi uses the key in the
 environment, and can't sign out of that (unset it instead). Paste an API key
@@ -46,6 +49,33 @@ earlier model's private reasoning, which belongs to that model.
 When an answer fails because a sign-in is missing or was refused, Kumi offers to
 sign in and then sends your message again. When the provider doesn't offer the
 chosen model, Kumi offers to choose another.
+
+### Models on your computer
+
+- **Ollama** and **LM Studio** are found while they run, with no sign-in.
+  `/model` lists each as its own provider ("Ollama · on this computer") with the
+  models it has; one that's installed but closed says how to start it. Signed in
+  nowhere, Kumi starts with one of their models that can change the Set,
+  preferring one already loaded.
+- **Another OpenAI-compatible server** (llama.cpp's `llama-server`, vLLM, Jan…)
+  goes in `~/.kumi/settings.json`. Its name becomes its id (`llama.cpp` is
+  `llama-cpp/<model>`):
+
+  ```json
+  { "modelServers": [
+    { "name": "llama.cpp", "baseURL": "http://127.0.0.1:8080/v1" },
+    { "name": "Studio PC", "baseURL": "http://192.168.1.20:8000/v1", "apiKey": "…" }
+  ] }
+  ```
+
+- **Room for Kumi.** Its instructions and tools take about 25–30k tokens. Kumi
+  asks Ollama for room for them, the conversation and an answer (about 57k
+  tokens, up to what the model reads at most), and has LM Studio load a model
+  with that room when it isn't loaded with enough. The room takes memory, often
+  more than the model itself.
+- **A model that can't use tools** still talks about the Set but can't change it;
+  Kumi says so once and names one on the same server that can. `kumi doctor`
+  lists the servers it finds.
 
 ## Connect to Live
 
@@ -112,6 +142,33 @@ under way), Tab sends a message for after the answer, and `/btw` asks something
 on the side without interrupting. Esc stops the answer; the steps it finished
 stay. `/stop` stops Live (clips, the transport and recording) at any time.
 
+## Talking to Kumi
+
+Press **Ctrl-T** and say what you want, then press it again. What you said lands
+in the input box; Enter sends it.
+
+- **Hold to talk.** Hold Ctrl-T while you talk, and let go to stop. Terminals with
+  the kitty keyboard protocol (kitty, Ghostty, WezTerm, iTerm2) say when it's let
+  go; elsewhere Kumi follows the key's own repeats.
+- **While Kumi listens**, the input box shows a pulsing dot, the time and a level
+  meter. Enter stops and sends at once; Esc drops it. After you've spoken, 3
+  seconds of quiet stops it by itself. Two minutes at most at a time.
+- **`/voice`**: start or stop; send what you say as soon as you stop, without
+  Enter; the language you speak (English, your computer's, or any); the
+  microphone.
+- **Private.** ffmpeg hears the microphone and whisper.cpp writes down what you
+  said, on your computer; the recording is deleted as soon as it's written down.
+- **What it needs:** ffmpeg and whisper.cpp (`brew install ffmpeg whisper-cpp` on
+  a Mac; Kumi fetches them on Windows and Linux), and a speech model Kumi fetches
+  the first time you talk (about 190 MB, shared with video watching), with a
+  small voice-activity model that keeps music and noise from becoming words.
+  `kumi doctor` says whether talking is ready.
+- **The first time on a Mac**, macOS asks whether your terminal may use the
+  microphone. When Kumi can't hear you, it says why (no permission, only silence,
+  only quiet, no words) and offers the fix: the privacy settings, or another
+  microphone.
+- Talking is in the full-screen app; plain lines (`KUMI_UI=plain`) are typed only.
+
 ## Changes and undo
 
 Kumi plans a request as one set of changes and runs it at once. Every change
@@ -136,9 +193,10 @@ work isn't in the file, so it isn't in the copy, and an unsaved Set gets none.
 inside Live with Live's own API. A script's changes are one step in Live's
 undo, but they get no HISTORY entry; Live's undo takes them back.
 
-**What Live doesn't let scripts do:** save the Set, export or freeze a track,
-map a macro or a modulator to a parameter (Willington can map macros), or edit
-the Arrangement's automation lanes. Kumi says so and suggests a way round.
+**What Live doesn't let scripts do:** map a macro or a modulator to a parameter
+(Willington can map macros), or edit the Arrangement's automation lanes. Kumi
+says so and suggests a way round. Saving, exporting, freezing, bouncing and
+grouping go through [Live's own commands](#lives-own-commands).
 
 [How Kumi changes your Set](KUMI_CHANGES.md) lists every change Kumi can make.
 
@@ -155,7 +213,33 @@ track fed from the source track, or from "Resampling" for the whole mix, records
 the length you want in the Arrangement, and disarms the track. The recording
 stays in the Set as an audio clip. With the extension, Kumi can also render an
 audio track's own clips to a file without playing them (before the track's
-devices).
+devices). Live's own Bounce to New Track and Bounce Track in Place work too,
+through [Live's own commands](#lives-own-commands).
+
+## Live's own commands
+
+Some things Live's scripting doesn't offer at all. For those, Kumi uses Live's
+own menus, as you would: grouping and ungrouping tracks; freezing, unfreezing
+and flattening; bouncing without playing (Bounce to New Track, Bounce Track in
+Place); consolidating; converting audio to MIDI (melody, harmony, drums);
+separating stems; slicing to a MIDI track; saving the Set, or collecting all and
+saving; exporting audio or a MIDI clip.
+
+- Kumi selects what the command works on, presses it, and says what changed.
+  When Live opens a dialog (Export, say), Kumi reads it and answers it.
+- Tracks are selected by name through the accessibility Live 12 offers screen
+  readers. Live stays where it is: nothing comes to the front, and a command
+  takes well under a second (a bounce or a freeze as long as Live takes to
+  render).
+- A track already frozen isn't frozen again: Live's command would undo it, so
+  Kumi checks first.
+- Clip commands work on a Session clip, or on the clip you've selected in Live.
+  Kumi can't select a clip in the Arrangement yet.
+- HISTORY lists each command, and Live's own undo (Cmd-Z) takes it back.
+- **On a Mac** this uses Accessibility. The first time, macOS asks: turn on the
+  app Kumi runs in (your terminal) in System Settings › Privacy & Security ›
+  Accessibility. `kumi doctor` says whether it's on. **On Windows** it uses UI
+  Automation and needs nothing set up.
 
 ## Listening
 
@@ -177,6 +261,23 @@ and the like through macOS's `afconvert` or, elsewhere, `ffmpeg` (which Kumi
 fetches on Windows the first time it's needed). The analysis runs on your
 computer: only the numbers go to the model, never the audio.
 
+**Hearing the Set.** Ask about a track or the mix ("is the bass muddy?", "what
+clashes with the kick?") and Kumi hears it in Live directly, with nothing to set
+up:
+
+- **While Live plays**, it listens to what's playing for a few seconds, and
+  leaves Main and the transport alone.
+- **While Live is stopped**, it plays the loop (or a few bars from the playhead,
+  or the part you name) with Main silenced, and puts Main back.
+- **Several tracks at once:** each one's sound, and where two sit in the same
+  band at similar levels.
+- **How:** Kumi Ears, a small Max for Live device Kumi brings (`kumi bridge` puts
+  it in your User Library's Kumi folder). Kumi places it at the end of a track's
+  chain when it needs to hear it and takes it away after. Sound passes through
+  it untouched, and nothing is recorded into your Set.
+- Auditions and goals hear their candidates the same way: no scratch tracks, no
+  arming. Without Max for Live, Kumi records to listen instead.
+
 ## Matching a reference
 
 Ask Kumi to make something sound like a reference ("make the bass sound like
@@ -196,6 +297,55 @@ restart), and `/goal stop` ends it.
 
 What Kumi learns from each match is kept as a lesson (✦) for the next one;
 `/memory` lists them.
+
+## Arrangements
+
+Ask Kumi to turn a loop into a track: "arrange this", "make a 3-minute
+arrangement from these scenes", or "arrange it like this reference" with a file.
+
+- **Your material.** Session scenes (a section plays a scene's clips, or chosen
+  clips per track), or bars already in the Arrangement (their MIDI clips).
+- **The form.** Named sections with their lengths in bars. Without one from you,
+  Kumi picks one that suits the genre and tempo. With a reference, it hears the
+  reference's form (its sections, their energy, which ones come back) and
+  mirrors it.
+- **Variation.** Tracks come in and go out section by section. Transitions are a
+  gap before a drop, a track's fill clip at a section's end, and a riser or crash
+  ending where the next section starts, from an effects track or one of your
+  samples. Kumi writes no new parts unless you ask.
+- **In Live.** Your clips are copied into the Arrangement after what's there
+  already (or where you say), each section gets a locator, and the playhead goes
+  to the start.
+- **Undo.** The whole arrangement is one line in HISTORY with one undo, and one
+  Cmd-Z in Live.
+- **Limits.** Live's scripting can't draw automation in the Arrangement, so filter
+  sweeps and volume rides are yours to draw. Audio clips already in the
+  Arrangement can't be copied there: drag them into Session slots first. While
+  Live plays, the locators wait.
+
+See [how arranging works](KUMI_CHANGES.md#arrangements).
+
+## Plug-ins
+
+Kumi knows ten plug-ins well: Serum 2, Vital, Ozone 12, Pro-Q 4, Pro-L 2,
+Saturn 2, Decapitator, OTT, Supermassive and Pigments. Before it works on one, it
+reads the plug-in's guide: what it does, its sections, recipes for common sounds,
+and its real parameters, matched against what the plug-in shows Live.
+
+- **Values in the plug-in's own units:** "800 Hz", "-6 dB", "35 %", or a menu item
+  by name ("Saw"), placed by what the plug-in itself displays.
+- **The parameters Live shows.** Live lets Kumi turn only a plug-in's configured
+  parameters. The guide says which those are and how to add more: click
+  **Configure** in the plug-in's title bar and move the knobs in its window once.
+  Kumi can open the plug-in's window for you.
+- **What isn't a parameter** (an oscillator's wavetable, filter types, modulation
+  routing, Ozone's Master Assistant) is done in the plug-in's window; the guide
+  says where.
+- **Wavetables.** Kumi makes wavetables, from shapes and harmonics or cut from a
+  sound, for Serum, Vital and other wavetable synths, into the plug-in's folder;
+  you drop one on an oscillator.
+
+Other plug-ins work too, by their parameters' names.
 
 ## Watching video tutorials
 
@@ -270,6 +420,36 @@ technique.
 What Kumi looked up shows above its answer, a line each. It reads only public
 addresses, never your computer or your network, and treats what a page says as
 information, never as instructions.
+
+## Your library
+
+Kumi knows what you own, so you can ask for "a dusty snare like the one in this
+reference", "my usual vocal chain" or "the bass from my Night Drive Set".
+
+- **Where it looks.** Live's User Library and Places, the packs Live installed,
+  its Core Library, Splice's folder, and folders you list in `settings.json`
+  (`"libraryFolders": ["~/Samples"]`). A folder you name in a request is learned
+  next. Sets are found where Live last opened them, and beside them.
+- **What it learns.** Each sound: length, one-shot or loop, a loop's tempo, key
+  or note, loudness, brightness, envelope, what it is (kick, snare, pad, vocal,
+  fx…) and a fingerprint for finding sounds that sound alike. Each preset: its
+  device and kind. Each Set: tempo, key, tracks, chains, plug-ins, returns, clips
+  and the samples it plays.
+- **Out of the way.** Learning starts by itself a few seconds after Kumi does, in
+  a process of its own at the lowest priority, and holds while Live plays. After
+  the first time, only new and changed files are learned, and stopping loses
+  nothing.
+- **Finding things.** By words, class, tempo, key, length, or how close a sound is
+  to a file, a clip or a rendered track; presets by device and kind; your Sets by
+  tempo and key. "How do I… in Live?" is answered from Ableton's Live 12 manual,
+  citing the section.
+- **From your Sets.** Kumi learns how you work: tempos and keys, each kind of
+  track's instruments and usual chain, the plug-ins you reach for, your returns
+  and main chain, how you name and colour tracks. `/memory` lists it under "From
+  your Sets"; a line you forget stays forgotten.
+- **How it's going.** `/status`, the welcome screen, `kumi doctor` and
+  `kumi library` say; `kumi library --rebuild` learns everything again. It's kept
+  in `~/.kumi/library`, readable only by you.
 
 ## What Kumi remembers
 
@@ -380,8 +560,19 @@ closed). Your conversations, notes, recipes and sign-ins stay unless you add
 | Video transcription | 90 minutes at a time |
 | Free disk space checked first | 100 MB to record (on the Set's disk, or your home folder's for an unsaved Set), 100 MB to make a device (on the User Library's disk) |
 
-**Listening** hears files and recordings, not Live's output as it plays. It
-measures and compares; it doesn't judge taste.
+**Listening** hears files, recordings and the Set's tracks and mix (the Set
+through Kumi Ears, which needs Max for Live). It measures and compares; it
+doesn't judge taste.
+
+**Live's own commands** need Accessibility for your terminal on a Mac. Clip
+commands work on a Session clip or the clip you've selected.
+
+**Models on your computer:** a server that isn't running, a model it doesn't
+have, a model too big for the memory free, or a window too small for Kumi's
+instructions and tools is each said with what to do (`ollama serve`,
+`ollama pull <model>`, a smaller model, a larger context), and Kumi offers to
+send the message again or choose another model. Pictures from Kumi's tools reach
+a local model only as words.
 
 **Watching videos** depends on the sites as they are. Private, members-only and
 some age-restricted videos can't be read, and automatic captions can mishear
@@ -394,7 +585,9 @@ says which need which.
 ## Privacy: what leaves your computer
 
 - **Your model provider** gets your messages, the conversation, what Kumi reads
-  from the Set, the frames of videos it watches and the pictures it reads.
+  from the Set, the frames of videos it watches and the pictures it reads. With a
+  model on your computer, they stay on it (a server named in `settings.json` gets
+  them wherever it runs).
 - **Web search and reading** go to the search services above, and the pages Kumi
   reads see its requests. Kumi doesn't read an address that carries a key or a
   token.
@@ -402,6 +595,10 @@ says which need which.
   ffmpeg and whisper.cpp), Hugging Face (the speech model), nodejs.org (the
   installer's Node) and the video sites you name.
 - **Audio** is analysed on your computer; only the numbers go to the model.
+- **Your voice** is written down on your computer, and the recording deleted as
+  soon as it is; only the words leave, when you send them.
+- **Your library** is learned on your computer; only the manual's pages come from
+  ableton.com.
 
 Track, clip and device names, tool results and web pages are data for Kumi,
 never instructions. Kumi keeps its files in `~/.kumi`, readable only by you;
@@ -418,6 +615,9 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `effort` | `low`, `medium`, `high`, `xhigh` or `max`; absent means the model's default (`/effort`) |
 | `panelTab` | The Live pane's tab you had open last |
 | `updateCheck` | `false` turns off the check for a newer version at start |
+| `modelServers` | OpenAI-compatible model servers: `[{ "name", "baseURL", "apiKey" }]` ([models on your computer](#models-on-your-computer)) |
+| `libraryFolders` | More folders for Kumi to learn sounds, presets and Sets from |
+| `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |
 
 Environment variables (paths must be absolute):
 
@@ -429,6 +629,9 @@ Environment variables (paths must be absolute):
 | `KUMI_RECIPES_DIR`, `KUMI_PROJECTS_DIR`, `KUMI_GOALS_DIR` | Recipes; each Set's conversations, notes and last state; goals in progress |
 | `KUMI_INPUT_HISTORY_FILE`, `KUMI_GAPS_FILE`, `KUMI_RESTORE_FILE` | What you sent (for ↑), the gap log, and Main's level to put back after a crash mid-render |
 | `KUMI_VIDEOS_DIR`, `KUMI_TOOLS_DIR` | Watched videos, and the programs Kumi fetches |
+| `KUMI_LIBRARY_DIR` | What Kumi learned of your sounds, presets and Sets |
+| `OLLAMA_HOST`, `LM_API_TOKEN` | Where Ollama listens, as Ollama reads it; LM Studio's API token, when its server wants one |
+| `KUMI_EARS=0` | Hear the Set by recording, without Kumi Ears |
 | `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER`, `KUMI_WHISPER_MODEL` | Your own yt-dlp, ffmpeg, whisper.cpp (`whisper-cli`) or speech model (`ggml-*.bin`), by path |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, when Kumi doesn't find it |
 | `KUMI_LIVE_EXTENSIONS_DIR` | Where `kumi bridge` puts Kumi's extension and `kumi doctor` looks for it, when Kumi doesn't find Live's Extensions folder |

@@ -1,20 +1,24 @@
 import { KumiError, parseModelId, PROVIDER_INFO, PROVIDERS, type Effort, type ModelInfo, type ProviderId } from "@kumi/runtime";
-import type { ModelControl, ProviderStatus } from "../src/models.js";
+import type { LocalStatus, ModelControl, ProviderStatus } from "../src/models.js";
 
-/** A ModelControl held in memory: sign-ins, lists and choices, with each call recorded. */
-export function fakeModels(options: { model?: string; effort?: Effort; signedIn?: ProviderId[]; lists?: Partial<Record<ProviderId, ModelInfo[]>> } = {}) {
+/** A ModelControl held in memory: sign-ins, model servers, lists and choices, with each call recorded. */
+export function fakeModels(options: { model?: string; effort?: Effort; signedIn?: ProviderId[]; lists?: Partial<Record<string, ModelInfo[]>>; local?: LocalStatus[]; notes?: Record<string, string> } = {}) {
   const calls: string[] = [];
   let model = options.model;
   let effort = options.effort;
   const signedIn = new Set<ProviderId>(options.signedIn ?? []);
   const shared = (provider: ProviderId) => PROVIDERS.filter((other) => PROVIDER_INFO[other].credential === PROVIDER_INFO[provider].credential);
   let finishChatGPT: (() => void) | undefined;
-  const info = (id = model) => { const provider = id ? parseModelId(id)?.provider : undefined; return provider ? options.lists?.[provider]?.find((item) => item.id === id) : undefined; };
+  const local = options.local ?? [];
+  /** A model's provider, as the real control parses it: a provider's, or a server's. */
+  const providerOf = (id: string) => parseModelId(id)?.provider ?? local.find((server) => id.startsWith(`${server.id}/`))?.id;
+  const info = (id = model) => { const provider = id ? providerOf(id) : undefined; return provider ? options.lists?.[provider]?.find((item) => item.id === id) : undefined; };
+  const isLocal = (provider: string) => local.some((server) => server.id === provider);
   const control: ModelControl = {
     current() {
-      const found = info(); const provider = model ? parseModelId(model)?.provider : undefined;
+      const found = info(); const provider = model ? providerOf(model) : undefined; const server = local.find((item) => item.id === provider);
       return { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(found ? { name: found.name } : {}), ...(effort ? { effort } : {}),
-        ...(found?.defaultEffort ? { defaultEffort: found.defaultEffort } : {}), efforts: found?.efforts ?? [], pinned: false };
+        ...(found?.defaultEffort ? { defaultEffort: found.defaultEffort } : {}), efforts: found?.efforts ?? [], pinned: false, ...(server ? { where: server.where } : {}) };
     },
     async providers(): Promise<ProviderStatus[]> {
       return (["openai-codex", "anthropic", "openai", "opencode", "opencode-go"] as const).map((id) => {
@@ -24,25 +28,30 @@ export function fakeModels(options: { model?: string; effort?: Effort; signedIn?
           ...(about.keyPage ? { keyPage: about.keyPage } : {}), ...(about.keyEnv ? { keyEnv: about.keyEnv } : {}) };
       });
     },
+    async local() { return local; },
+    providerName(id) { return id in PROVIDER_INFO ? PROVIDER_INFO[id as ProviderId].name : local.find((server) => server.id === id)?.name ?? id; },
     async chooseDefault() {
       if (model) return undefined;
       const order = ["openai-codex", "anthropic", "openai", "opencode", "opencode-go"] as const;
-      const provider = order.find((id) => signedIn.has(id) && options.lists?.[id]?.length);
+      const provider = order.find((id) => signedIn.has(id) && options.lists?.[id]?.length) ?? local.find((server) => server.running && options.lists?.[server.id]?.length)?.id;
       const first = provider ? options.lists![provider]![0]! : undefined;
-      if (first) { model = first.id; calls.push(`default:${first.id}`); }
-      return first;
+      if (!first) return undefined;
+      model = first.id; calls.push(`default:${first.id}`);
+      const note = options.notes?.[first.id];
+      return { ...first, ...(note ? { note } : {}) };
     },
     async models(provider) {
       calls.push(`list:${provider}`);
-      if (!signedIn.has(provider)) throw new KumiError("auth", `Not signed in to ${PROVIDER_INFO[provider].name}.`, provider);
+      if (!isLocal(provider) && !signedIn.has(provider as ProviderId)) throw new KumiError("auth", `Not signed in to ${PROVIDER_INFO[provider as ProviderId].name}.`, provider);
       return options.lists?.[provider] ?? [];
     },
     async choose(next) {
-      const provider = parseModelId(next)!.provider;
-      if (!signedIn.has(provider)) throw new KumiError("auth", `Not signed in to ${PROVIDER_INFO[provider].name}.`, provider);
+      const provider = providerOf(next)!;
+      if (!isLocal(provider) && !signedIn.has(provider as ProviderId)) throw new KumiError("auth", `Not signed in to ${PROVIDER_INFO[provider as ProviderId].name}.`, provider);
       const found = info(next);
       if (effort && found && !found.efforts.some((level) => level.effort === effort)) effort = undefined;
       model = next; calls.push(`choose:${next}`);
+      return options.notes?.[next];
     },
     async setEffort(next) { effort = next; calls.push(`effort:${next ?? "default"}`); },
     async saveKey(provider, key) {
@@ -72,7 +81,7 @@ export function fakeModels(options: { model?: string; effort?: Effort; signedIn?
   return { control, calls, signedIn, finishChatGPT: () => finishChatGPT?.() };
 }
 
-export const MODELS: Partial<Record<ProviderId, ModelInfo[]>> = {
+export const MODELS: Partial<Record<string, ModelInfo[]>> = {
   "openai-codex": [
     { id: "openai-codex/gpt-6-astra", provider: "openai-codex", model: "gpt-6-astra", name: "GPT-6 Astra", description: "Frontier model for complex work",
       efforts: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }], defaultEffort: "medium" },

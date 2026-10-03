@@ -1,7 +1,9 @@
 /**
  * Decodes what a terminal sends in raw mode: typed text, keys with modifiers (xterm and
  * CSI u encodings), bracketed pastes, SGR mouse reports and focus changes. Sequences can
- * arrive split across reads; a lone Escape is only a key once nothing follows it.
+ * arrive split across reads; a lone Escape is only a key once nothing follows it. Terminals
+ * using the kitty keyboard protocol also say when a key repeats as it's held, and when it's
+ * let go.
  */
 
 export interface Modifiers {
@@ -11,7 +13,9 @@ export interface Modifiers {
 }
 
 export type InputEvent =
-  | ({ type: "key"; name: string } & Modifiers)
+  | ({ type: "key"; name: string; /** Held down and repeating, where the terminal says so. */ repeat?: true } & Modifiers)
+  /** A key let go: only terminals using the kitty protocol report it. */
+  | ({ type: "release"; name: string } & Modifiers)
   | { type: "text"; text: string }
   | { type: "paste"; text: string }
   | ({ type: "mouse"; action: "press" | "release" | "drag" | "move" | "wheel"; button: "left" | "middle" | "right" | "none"; direction?: "up" | "down"; x: number; y: number } & Modifiers)
@@ -31,6 +35,12 @@ const NONE: Modifiers = { ctrl: false, alt: false, shift: false };
 function modifiers(parameter: string | undefined): Modifiers {
   const bits = Math.max(0, (Number(parameter ?? 1) || 1) - 1);
   return { shift: Boolean(bits & 1), alt: Boolean(bits & 2) || Boolean(bits & 8), ctrl: Boolean(bits & 4) };
+}
+
+/** The modifiers, and after them the kitty protocol's event ("5:3"): 1 pressed (or unsaid), 2 repeating, 3 let go. */
+function keyState(parameter: string | undefined): { mods: Modifiers; event: number } {
+  const [mods, event] = (parameter ?? "1").split(":");
+  return { mods: modifiers(mods), event: Number(event) || 1 };
 }
 
 const lines = (text: string) => text.replace(/\r\n?/g, "\n");
@@ -109,8 +119,9 @@ export class InputParser {
     this.timer = undefined;
   }
 
-  private key(name: string, mods: Partial<Modifiers> = {}): void {
-    this.emit({ type: "key", name, ...NONE, ...mods });
+  private key(name: string, mods: Partial<Modifiers> = {}, event = 1): void {
+    if (event === 3) this.emit({ type: "release", name, ...NONE, ...mods });
+    else this.emit({ type: "key", name, ...NONE, ...mods, ...(event === 2 ? { repeat: true as const } : {}) });
   }
 
   /** Characters consumed from an escape at the start of the buffer, or 0 to wait for more. */
@@ -163,30 +174,33 @@ export class InputParser {
     if (params === "" && (final === "I" || final === "O")) { this.emit({ type: "focus", focused: final === "I" }); return length; }
     if (final === "Z") { this.key("tab", { shift: true }); return length; }
     const parts = params.split(";");
-    if (ARROWS[final]) { this.key(ARROWS[final]!, modifiers(parts[1])); return length; }
-    if ("PQRS".includes(final)) { this.key(SS3[final]!, modifiers(parts[1])); return length; }
+    if (ARROWS[final] || "PQRS".includes(final)) {
+      const { mods, event } = keyState(parts[1]);
+      this.key((ARROWS[final] ?? SS3[final])!, mods, event);
+      return length;
+    }
     if (final === "~") {
       const number = Number(parts[0]);
       if (number === 27 && parts.length >= 3) this.codeKey(Number(parts[2]), modifiers(parts[1]));
-      else if (TILDE[number]) this.key(TILDE[number]!, modifiers(parts[1]));
+      else if (TILDE[number]) { const { mods, event } = keyState(parts[1]); this.key(TILDE[number]!, mods, event); }
       return length;
     }
     if (final === "u") {
-      const code = Number(parts[0]!.split(":")[0]);
-      const [mods, event] = (parts[1] ?? "1").split(":");
-      if (event !== "3") this.codeKey(code, modifiers(mods));
+      const { mods, event } = keyState(parts[1]);
+      this.codeKey(Number(parts[0]!.split(":")[0]), mods, event);
       return length;
     }
     return length; // an unknown sequence is ignored, never typed
   }
 
-  private codeKey(code: number, mods: Modifiers): void {
+  private codeKey(code: number, mods: Modifiers, event = 1): void {
     const named: Record<number, string> = { 9: "tab", 13: "enter", 27: "escape", 127: "backspace", 8: "backspace" };
-    if (named[code]) { this.key(named[code]!, mods); return; }
+    if (named[code]) { this.key(named[code]!, mods, event); return; }
     if (!Number.isInteger(code) || code < 32) return;
     const character = String.fromCodePoint(code);
-    if (!mods.ctrl && !mods.alt) this.emit({ type: "text", text: mods.shift ? character.toUpperCase() : character });
-    else this.key(code === 32 ? "space" : character.toLowerCase(), mods);
+    // Text is typed as it's pressed (and again as it repeats); letting go of a letter means nothing.
+    if (!mods.ctrl && !mods.alt) { if (event !== 3) this.emit({ type: "text", text: mods.shift ? character.toUpperCase() : character }); }
+    else this.key(code === 32 ? "space" : character.toLowerCase(), mods, event);
   }
 
   private control(character: string, mods: Modifiers): void {

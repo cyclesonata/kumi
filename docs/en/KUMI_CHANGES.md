@@ -99,6 +99,7 @@ as few replies as it can.
 | `change_structure` | A return track added, a track or scene duplicated, a return deleted (kept) |
 | `set_scene`, `capture_scene` | A scene's colour, tempo and time signature; the playing clips captured as a new scene |
 | `set_locators` | Two named Arrangement locators marking a section |
+| `arrange` | A whole arrangement from your clips: sections with locators, loops copied through them, gaps, fills and risers, as one change ([Arrangements](#arrangements)) |
 | `write_midi_clip` | A new MIDI clip with notes in an empty Session slot |
 | `write_arrangement_clip` | MIDI clips with their notes straight into the Arrangement (needs Kumi's Live extension) |
 | `add_arrangement_clip` | An empty MIDI clip in the Arrangement |
@@ -126,6 +127,7 @@ as few replies as it can.
 | `delete_device`, `delete_clip`, `delete_scene`, `delete_track`, `delete_locator` | Deletions, all kept: Live's undo brings them back |
 | `clear_range` | A stretch of one track in the Arrangement cleared, clips at its edges cut (needs the extension; kept) |
 | `set_clip_follow_actions`, `edit_rack_mapping` | With [Willington](WILLINGTON_INTEGRATION.md) only: Follow Actions; macro names, mappings, variation names and chain zones |
+| `live_command` | Live's own commands its scripting lacks: group, freeze, flatten, bounce, consolidate, convert to MIDI, separate stems, slice, save, export ([the guide](KUMI_GUIDE.md#lives-own-commands); kept: Live's undo takes it back) |
 
 `make_changes` runs any of these in a plan, and `undo_change` undoes one.
 
@@ -153,7 +155,9 @@ clips, the transport and recording together; `/stop` does the same any time.
 
 | Tool | What it does |
 | --- | --- |
-| `find_samples` | Finds samples on disk by words in their names and folders, or at random, in the folders you name or where Live keeps samples |
+| `find_sounds` | Finds sounds on disk by words in their names and folders, or at random, in the folders you name or where Live keeps samples; once Kumi has learned your library, by what they are and how they sound too |
+| `find_presets`, `my_sets` | Your presets by words, device and kind; your Sets by words, tempo and key |
+| `plugin` | A plug-in's guide (what it does, its real parameters, which Kumi can turn now), or a wavetable made for it |
 | `audition` | Renders candidate tracks, or the whole mix (`{"mix": true}`), quietly in one pass and scores each against a reference |
 | `render` | Renders an audio track's own clips to a file without playing them, before its devices (needs the extension) |
 | `make_device` | Makes a Max for Live device ([the guide](KUMI_GUIDE.md#making-max-for-live-devices)) |
@@ -203,7 +207,7 @@ name macros and map them; modulators still can't be mapped.
 ## Samples and drum kits
 
 `load_sample` and `load_sample_to_pad` take any audio file on your computer by
-path, one `find_samples` returned, or words, folders or `{"random": true}` to
+path, one `find_sounds` returned, or words, folders or `{"random": true}` to
 let Kumi pick; `import_audio` takes a path. The bridge checks the file and gives
 Live a copy under the original file's name.
 For "make me a drum kit with random samples", Kumi adds a MIDI track, loads a
@@ -227,6 +231,34 @@ Live gives scripts no bounce, so Kumi resamples, in one plan:
 
 The recording is an ordinary audio clip that `listen` can hear. With the
 extension, `render` gives an audio track's own clips without playing them.
+
+## Arrangements
+
+`arrange` lays out a track in the Arrangement from your own clips, in one call.
+The model gives the form; Kumi works out every copy.
+
+- **Input.** `sections` in order: `name`, `bars`, the `scene` it plays (or
+  `tracks`, each a name or ref, or `{track, scene}` for another clip), and
+  optionally `gap` (tracks stop some beats before the end), `fill` (a track's
+  other clip at the end) and `riser` (a clip ending where the section ends). Also
+  `scene` (the default), `loop` (`from_bar`, `bars`: arrange from bars already in
+  the Arrangement), `start_bar` and `final`.
+- **Without sections** nothing changes: it returns the material, each scene's
+  clips by track with their lengths, where the Arrangement's clips end, and its
+  locators.
+- **Checks first.** Every track found and unambiguous, nothing in the Arrangement
+  where a clip would go. A refusal changes nothing.
+- **Undo.** One line in HISTORY, whose undo takes every copy back, latest first.
+  One undo step in Live holds it all, so one Cmd-Z. The playhead's move isn't
+  undone.
+- **What Live doesn't allow.** Automation in the Arrangement, so filter sweeps
+  and volume rides are yours to draw; copying audio clips already in the
+  Arrangement (a loop's audio clips there are left out, and said). While Live
+  plays, the locators and the playhead wait.
+
+`listen` with `form: true` gives a reference's sections in bars, each one's
+energy, density and low end, which ones are alike and its part (intro, build,
+peak, break, outro). The model mirrors it with `arrange`.
 
 ## Two channels into Live
 
@@ -270,8 +302,9 @@ None of these ask you anything.
 
 ## What Live doesn't let scripts do
 
-Save the Set, export or freeze a track, map macros or modulators (outside
-Willington), or edit the Arrangement's automation lanes. The model is told so,
+Save the Set, export, freeze or bounce a track, or group tracks: Kumi does those
+through Live's own menus (`live_command`). Map macros or modulators (outside
+Willington), or edit the Arrangement's automation lanes: the model is told so,
 says so plainly, and suggests a way round.
 
 ## Bridge versions
@@ -289,10 +322,11 @@ stops there and says to update; `kumi update` or `kumi bridge` does it.
 | 1.0.57 | Sets of any size |
 | 1.0.58 | `delete_clip`, `delete_scene`, `delete_track`, `delete_locator`; a plan as one Live undo step; `undo_in_live`; `edit_device`, `duplicate_device`; Live's events for FOCUS; Kumi's Live extension (`write_arrangement_clip`, `clear_range`, `render`) |
 | 1.0.68 | `run_python` |
+| 1.0.73 | Hearing a track, a return or the mix through Kumi Ears (older bridges record to listen) |
 
 The Willington tools appear whenever the bridge offers them, which it does only
 with the provider set up.
 
-Each Kumi release ships with a bridge: Kumi 1.6.1 with bridge 1.0.72, 1.6.0 with 1.0.71, 1.5 with
+Each Kumi release ships with a bridge: Kumi 1.7 with bridge 1.0.73, 1.6.1 with 1.0.72, 1.6.0 with 1.0.71, 1.5 with
 1.0.70, 1.4 with 1.0.69, 1.3 with 1.0.68, 1.2 with 1.0.66, 1.1 with 1.0.53 and
 1.0 with 1.0.52.

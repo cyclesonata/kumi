@@ -484,7 +484,7 @@ function countOnsets(strength: Float64Array): number {
 }
 
 /** Tempo from the onset curve's autocorrelation, 60–200 BPM, preferring the 90–160 range listeners tap. */
-function estimateTempo(strength: Float64Array, rate: number): { bpm: number; confidence: number } | null {
+export function estimateTempo(strength: Float64Array, rate: number): { bpm: number; confidence: number } | null {
   const minLag = Math.floor(rate * 60 / 200); const maxLag = Math.ceil(rate * 60 / 60);
   if (strength.length < maxLag * 3) return null;
   const mean = strength.reduce((sum, value) => sum + value, 0) / strength.length;
@@ -515,7 +515,7 @@ function estimateTempo(strength: Float64Array, rate: number): { bpm: number; con
 const MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 /** The key whose (Krumhansl–Kessler) profile best matches the music's pitch classes. */
-function estimateKey(chroma: Float64Array): { name: string; confidence: number } | null {
+export function estimateKey(chroma: Float64Array): { name: string; confidence: number } | null {
   const total = chroma.reduce((sum, value) => sum + value, 0);
   if (!(total > 0)) return null;
   const correlate = (profile: number[], tonic: number) => {
@@ -583,7 +583,7 @@ function amplitudeEnvelope(mono: Float32Array, sampleRate: number) {
 }
 
 /** YIN pitch (cumulative mean normalized difference), computed with FFT autocorrelation. */
-function trackPitch(mono: Float32Array, sampleRate: number): { hz: number; confidence: number; at: number }[] {
+export function trackPitch(mono: Float32Array, sampleRate: number): { hz: number; confidence: number; at: number }[] {
   const size = 2048; const maxLag = size; const hop = 1024;
   const out: { hz: number; confidence: number; at: number }[] = [];
   const fftSize = 4096;
@@ -726,7 +726,9 @@ function movement(mono: Float32Array, sampleRate: number, bpm?: number): SoundAn
     : change > 0 ? `opens over the note (${Math.round(early)} → ${Math.round(late)} Hz)` : `closes over the note (${Math.round(early)} → ${Math.round(late)} Hz)`;
   const rate = sampleRate / hop;
   const lfo = periodicity(valid.map((point) => Math.log2(Math.max(1, point.value))), rate, 0.5, 20);
-  const levelLfo = periodicity(levels.map((level) => Math.log10(1e-6 + level)), rate, 0.5, 20);
+  // A level's wobble means nothing in a take that's largely silence (its edges read as one).
+  const silent = levels.filter((level) => level === 0).length / Math.max(1, levels.length);
+  const levelLfo = silent > 0.2 ? undefined : periodicity(levels.map((level) => Math.log10(1e-6 + level)), rate, 0.5, 20);
   const chosen = lfo && (!levelLfo || lfo.strength >= levelLfo.strength) ? { ...lfo, on: "brightness (filter)" } : levelLfo ? { ...levelLfo, on: "level (tremolo or sidechain)" } : undefined;
   const note = chosen && bpm ? noteValue(chosen.hz, bpm) : undefined;
   return { brightness: brightnessText, ...(chosen && chosen.strength > 0.35 ? { lfo: { hz: round(chosen.hz, 2), on: chosen.on, depth: chosen.strength > 0.7 ? "strong" : "moderate", ...(note ? { atTempo: note } : {}) } } : {}) };

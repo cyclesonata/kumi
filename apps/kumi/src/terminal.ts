@@ -6,7 +6,7 @@ import { safeError } from "./config.js";
 import type { InputHistory } from "./history.js";
 import { KeyInput, type TerminalInput } from "./input.js";
 import type { ModelControl } from "./models.js";
-import { sanitizeText, StreamingText, webWords } from "./text.js";
+import { libraryLine, sanitizeText, StreamingText, webWords } from "./text.js";
 import type { UpdateControl } from "./update.js";
 import { KUMI } from "@kumi/runtime";
 
@@ -126,6 +126,9 @@ export function createTerminal(options: Options): Terminal {
   let cancelling = false;
   /** A newer Kumi's version, once the startup check or /update found one. */
   let newer: string | undefined;
+  /** /memory's lines from the producer's Sets, for /forget u<n>; and whether learning the library was mentioned. */
+  let tasteLines: { id: string; line: string }[] = [];
+  let toldLibrary = false;
   let suppressOutput = false;
   let displayedBytes = 0;
   let startedAt = performance.now();
@@ -200,7 +203,8 @@ export function createTerminal(options: Options): Terminal {
     }
     if (command === "/status") {
       const status = controller.status();
-      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}`);
+      const library = libraryLine(controller.library?.());
+      notice(`[status] ${status.state}; MCP/Live: ${status.connection}; turns ${status.turns}${status.maxTurns ? `/${status.maxTurns}` : ""}; ${status.observation ?? "No current Live observation"}${library ? `; ${library}` : ""}`);
       return;
     }
     // Connecting or reading the Set, not answering: keep the message and send it when Kumi is ready.
@@ -224,6 +228,10 @@ export function createTerminal(options: Options): Terminal {
           const techniques = await controller.techniques();
           notice(`[memory] Techniques: ${techniques.map((technique) => `${technique.id} ${technique.name} (for ${technique.fits})`).join(" · ") || "none yet"}`);
         }
+        if (controller.taste) {
+          tasteLines = await controller.taste();
+          notice(`[memory] From your Sets: ${tasteLines.map((line, index) => `u${index + 1} ${line.line}`).join(" · ") || "nothing yet"}`);
+        }
         return;
       }
       if (verb === "/recipes") {
@@ -246,6 +254,15 @@ export function createTerminal(options: Options): Terminal {
         return;
       }
       if (verb === "/forget") {
+        // A line from the producer's Sets is u and its place in /memory's list.
+        if (argument?.startsWith("u") && controller.forgetTaste) {
+          // The ids are places in /memory's list: read it when it hasn't been shown yet.
+          if (!tasteLines.length) tasteLines = await controller.taste?.() ?? [];
+          const line = tasteLines[Number(argument.slice(1)) - 1];
+          if (!line || !await controller.forgetTaste(line.id)) notice("[memory] Use: /forget <id>, with an id from /memory.");
+          else notice(`[memory] Forgot, from your Sets: ${line.line}`);
+          return;
+        }
         // A technique's id starts with t; a note's with p or s.
         if (argument?.startsWith("t") && controller.forgetTechnique) {
           if (!await controller.forgetTechnique(argument)) notice("[memory] Use: /forget <id>, with an id from /memory.");
@@ -277,16 +294,18 @@ export function createTerminal(options: Options): Terminal {
     if (!argument) {
       const current = models.current();
       const signedIn = (await models.providers()).filter((provider) => provider.signedIn).map((provider) => provider.id);
-      notice(`[model] ${current.model ?? "none chosen"}${current.effort ? `, effort ${current.effort}` : ""}. List a provider's with /model <provider> (${signedIn.join(", ") || "sign in first"}); choose with /model <provider>/<model>.`);
+      const running = (await models.local()).filter((server) => server.running).map((server) => server.id);
+      notice(`[model] ${current.model ?? "none chosen"}${current.effort ? `, effort ${current.effort}` : ""}. List a provider's with /model <provider> (${[...signedIn, ...running].join(", ") || "sign in first, or open Ollama or LM Studio"}); choose with /model <provider>/<model>.`);
       return;
     }
-    if ((PROVIDERS as readonly string[]).includes(argument)) {
-      const listed = await models.models(argument as ProviderId);
+    // A provider's or a server's name lists its models; a model id (with its slash) chooses one.
+    if (!argument.includes("/") && ((PROVIDERS as readonly string[]).includes(argument) || (await models.local()).some((server) => server.id === argument))) {
+      const listed = await models.models(argument);
       notice(`[model] ${argument}: ${listed.map((model) => model.model).join(", ") || "no models listed"}`);
       return;
     }
-    await models.choose(argument);
-    notice(`[model] ${argument} from the next answer on.`);
+    const note = await models.choose(argument);
+    notice(`[model] ${argument} from the next answer on.${note ? ` ${note}` : ""}`);
   }
   function handleEvent(event: SessionEvent) {
     if (closing) return;
@@ -298,6 +317,10 @@ export function createTerminal(options: Options): Terminal {
         break;
       case "connection": notice(`[connection] MCP/Live: ${event.state}${event.state !== "connected" ? "; no verified current Live observation" : ""}`); break;
       case "observation": notice(`[observation] ${event.label}`); break;
+      case "library":
+        // The first time, one quiet line; after that /status says how it's going.
+        if (!toldLibrary && (event.status.state === "learning" || event.status.state === "paused") && !event.status.learnedAt) { toldLibrary = true; notice("Learning your library in the background…"); }
+        break;
       case "resumed": {
         const when = since(event.savedAt, Date.now());
         notice(event.chosen ? `── Back to your conversation from ${when} ──` : event.unreadable ? `[resumed] Your conversation from ${when}, which this model can't continue:`
@@ -388,7 +411,9 @@ export function createTerminal(options: Options): Terminal {
       // No model yet: the first one a signed-in provider lists.
       if (!options.models.current().model) {
         void options.models.chooseDefault().then((chosen) => {
-          if (!closing) notice(chosen ? `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.` : `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model.`);
+          if (!closing) notice(!chosen ? `[model] Not signed in to a provider yet. Sign in with: ${KUMI} login <provider>, then /model; or open Ollama or LM Studio.`
+            : chosen.where ? `[model] ${chosen.id}, in ${options.models.providerName(chosen.provider)} ${chosen.where}. /model changes it.${chosen.note ? ` ${chosen.note}` : ""}`
+            : `[model] ${chosen.id}, the first ${chosen.provider} lists. /model changes it.`);
         }, () => undefined);
       }
       void Promise.resolve().then(() => { if (!closing) return controller.start(); }).catch(async (error: unknown) => {

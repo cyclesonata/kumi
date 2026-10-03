@@ -7,12 +7,16 @@ import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { apiKeyFor, ffmpegHint, findFfmpeg, findWhisper, OPENAI_CODEX, openCredentialStore, parseModelId, PROVIDER_INFO, whisperHint, type ProviderId } from "@kumi/runtime";
-import { findBridgeConfig, loadAuthFile, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
+import {
+  apiKeyFor, canBuildHands, ffmpegHint, findFfmpeg, findWhisper, listLocalModels, localInstalled, localServers, OPENAI_CODEX, openCredentialStore, openHands, parseLocalModelId, parseModelId, probeLocal, PROVIDER_INFO,
+  readLibraryState, since, startHint, terminalApp, voiceReadiness, whisperHint, type LocalServer, type ModelInfo, type ProviderId, type VoiceReadiness,
+} from "@kumi/runtime";
+import { findBridgeConfig, loadAuthFile, loadLibraryDir, loadProjectsDir, loadSettingsFile, loadToolsDir, readSettings, SUPPORTED_NODE_MAJORS } from "./config.js";
 import { OFFER_ORDER } from "./models.js";
 import { detectColorDepth } from "./tui/style.js";
 import { INSTALLED, KUMI, KUMI_REPAIR } from "@kumi/runtime";
 import { extensionAnswers, extensionDataDir, extensionSource, installedExtension, liveExtensionsDir, readExtension, runningExtension } from "./live-extension.js";
+import { systemLanguage } from "./voice.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -45,7 +49,16 @@ export interface DoctorIo {
   bundledBridgeVersion?: string;
   /** Where ffmpeg and whisper.cpp are, for watching videos; looked up (nothing fetched) when left out. */
   videoPrograms?: () => Promise<{ ffmpeg?: string | undefined; whisper?: string | undefined }>;
+  /** Whether Kumi can use Live's own menus here; asked of the helper (nothing built) when left out. */
+  hands?: () => Promise<Check | undefined>;
+  /** The model servers worth a line (running, installed, or named in settings.json) and their models; each asked when left out. */
+  modelServers?: () => Promise<ServerFinding[]>;
+  /** What talking to Kumi needs and has; looked up (nothing fetched, nothing asked) when left out. */
+  voice?: () => Promise<VoiceReadiness>;
 }
+
+/** A model server the doctor looked for: running (with its models, when it listed them), or the producer's but not running. */
+export interface ServerFinding { server: LocalServer; running: boolean; models?: ModelInfo[] }
 
 const tilde = (path: string) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path);
 const major = (version: string) => Number(version.replace(/^v/, "").split(".")[0]);
@@ -64,19 +77,33 @@ function nodeCheck(version: string): Check {
       next: INSTALLED ? `Run ${KUMI_REPAIR}, which brings Kumi's own Node back` : `Install Node 24 LTS from https://nodejs.org, then run: ${KUMI_REPAIR}` };
 }
 
-async function signInCheck(env: Env): Promise<Check> {
+async function signInCheck(env: Env, servers: readonly ServerFinding[]): Promise<Check> {
   const store = openCredentialStore(loadAuthFile(env));
   const signedIn = async (provider: ProviderId) => PROVIDER_INFO[provider].signIn === "chatgpt"
     ? (await store.get(OPENAI_CODEX).catch(() => undefined))?.type === "oauth"
     : Boolean(await apiKeyFor(provider, store, env).catch(() => undefined));
-  const model = env.KUMI_MODEL ?? readSettings(loadSettingsFile(env)).model;
+  const settings = readSettings(loadSettingsFile(env));
+  const model = env.KUMI_MODEL ?? settings.model;
   if (!model) {
     for (const provider of OFFER_ORDER) {
       if (await signedIn(provider)) return { status: "ok", text: `Signed in to ${PROVIDER_INFO[provider].name} · Kumi starts with its first model (/model changes it)` };
     }
-    return { status: "fix", text: "Not signed in to a provider", next: `${KUMI} login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key` };
+    const serving = servers.find((found) => found.running && found.models?.length);
+    if (serving) return { status: "ok", text: `Kumi starts with a model in ${serving.server.name}, ${serving.server.where}; no sign-in needed (/model changes it)` };
+    return { status: "fix", text: "Not signed in to a provider", next: `${KUMI} login openai-codex (a ChatGPT plan), or login anthropic, openai or opencode with an API key; or open Ollama or LM Studio` };
   }
   const parsed = parseModelId(model);
+  const onServer = parsed ? undefined : parseLocalModelId(model, localServers(settings.modelServers, env));
+  if (onServer) {
+    const { server } = onServer;
+    const found = servers.find((item) => item.server.id === server.id);
+    if (!found?.running) return { status: "fix", text: `${server.name} isn't running (model ${model})`, next: startHint(server) };
+    // A server named in settings.json may serve any name it's given; Ollama and LM Studio list all they have.
+    if (found.models && server.kind !== "openai-compatible" && !found.models.some((item) => item.model === onServer.model)) {
+      return { status: "fix", text: `${server.name} doesn't have ${onServer.model} (model ${model})`, next: server.kind === "ollama" ? `Run: ollama pull ${onServer.model}` : "Download it in LM Studio, or choose another model with /model in Kumi" };
+    }
+    return { status: "ok", text: `${server.name} ${server.where} · model ${model}` };
+  }
   if (!parsed) return { status: "fix", text: `The model "${model.slice(0, 80)}" isn't one Kumi knows`, next: "Choose one with /model in Kumi" };
   const info = PROVIDER_INFO[parsed.provider];
   if (!(await signedIn(parsed.provider))) return { status: "fix", text: `Not signed in to ${info.name} (model ${model})`, next: `${KUMI} login ${parsed.provider}` };
@@ -123,10 +150,95 @@ async function extensionCheck(env: Env, configPath: string, server: BridgeServer
   return { status: "ok", text: `Kumi's extension ${installed.version} is in Live; it starts with Live` };
 }
 
+/** Whether Kumi can use Live's own menus here: the helper, and (on a Mac) Accessibility for the terminal Kumi runs in. */
+async function handsCheck(): Promise<Check | undefined> {
+  if (process.platform === "win32") return { status: "ok", text: "Uses Live's own menus for what Live's scripting can't do (grouping, freezing, bouncing, saving)" };
+  if (process.platform !== "darwin") return undefined;
+  const hands = await openHands({ build: false, timeoutMs: 3_000 }).catch(() => undefined);
+  if (!hands) return canBuildHands() ? { status: "ok", text: "Uses Live's own menus (Kumi builds its helper the first time it needs it)" }
+    : { status: "note", text: "Kumi can't use Live's own menus here yet (grouping, freezing, bouncing, saving)", next: "Install Xcode's command line tools (xcode-select --install), or update Kumi" };
+  try {
+    return await hands.trusted() ? { status: "ok", text: "Uses Live's own menus (Accessibility is on for this terminal)" }
+      : { status: "fix", text: "Kumi can't use Live's own menus until Accessibility is on for this terminal", next: "System Settings › Privacy & Security › Accessibility: turn on the app Kumi runs in" };
+  } catch { return undefined; } finally { hands.close(); }
+}
+
+/** What Kumi knows of the producer's library, and whether it's still learning it. */
+async function libraryCheck(env: Env, now = Date.now()): Promise<Check | undefined> {
+  let dir: string;
+  try { dir = loadLibraryDir(env); } catch { return undefined; }
+  const state = await readLibraryState(dir).catch(() => undefined);
+  const counted = (sounds: number, presets: number, sets: number) => `${sounds.toLocaleString("en-US")} sounds, ${presets.toLocaleString("en-US")} presets, ${sets.toLocaleString("en-US")} Sets`;
+  if (state?.learning) {
+    const { learning } = state;
+    return { status: "ok", text: `Learning your library in the background${learning.phase === "sounds" && learning.sounds.todo ? `: ${learning.sounds.done.toLocaleString("en-US")} of ${learning.sounds.todo.toLocaleString("en-US")} new sounds` : ""}${state.last ? ` (knows ${counted(state.last.sounds, state.last.presets, state.last.sets)})` : ""}` };
+  }
+  if (state?.last) return { status: "ok", text: `Knows your library: ${counted(state.last.sounds, state.last.presets, state.last.sets)} (learned ${since(state.last.finishedAt, now)})` };
+  return { status: "note", text: "Kumi hasn't learned your library yet", next: `It learns by itself while Kumi runs; ${KUMI} library shows where it's at` };
+}
+
+/** The model servers worth a line, each asked whether it's running and what it has. */
+async function findServers(env: Env): Promise<ServerFinding[]> {
+  const servers = localServers(readSettings(loadSettingsFile(env)).modelServers, env);
+  const found = await Promise.all(servers.map(async (server): Promise<ServerFinding | undefined> => {
+    const running = await probeLocal(server);
+    const theirs = server.kind === "openai-compatible" || (server.kind === "ollama" && Boolean(env.OLLAMA_HOST)) || localInstalled(server.kind, env);
+    if (!running) return theirs ? { server, running } : undefined;
+    const models = await listLocalModels(server).catch(() => undefined);
+    return { server, running, ...(models ? { models } : {}) };
+  }));
+  return found.filter((item): item is ServerFinding => Boolean(item));
+}
+
+/**
+ * Which model servers are running, with what (and which can change the Set); one that's the
+ * producer's but closed, with how to start it (unless the model check already said so).
+ */
+function serverChecks(servers: readonly ServerFinding[], env: Env, said?: string): Check[] {
+  const checks: Check[] = [];
+  const running = servers.filter((found) => found.running);
+  if (running.length) {
+    const named = running.map(({ server, models }) => {
+      const able = models?.filter((model) => model.tools !== false).length;
+      const what = !models ? "its models unread" : `${models.length} ${models.length === 1 ? "model" : "models"}${able !== models.length ? `, ${able} can change the Set` : ""}`;
+      return `${server.name} ${server.where} (${what})`;
+    });
+    checks.push({ status: "ok", text: `Model servers: ${named.join("; ")}` });
+  }
+  for (const { server, running: up } of servers) {
+    if (up || server.id === said) continue;
+    const text = server.kind === "openai-compatible" ? `${server.name}, from settings.json, isn't answering at ${server.baseURL}`
+      : server.kind === "ollama" && env.OLLAMA_HOST ? `Ollama isn't answering at ${server.baseURL} (OLLAMA_HOST)` : `${server.name} is installed but not running`;
+    checks.push({ status: "note", text, next: startHint(server) });
+  }
+  return checks;
+}
+
+/**
+ * Talking to Kumi (ctrl+t): what's missing, or that it's ready. Never a fix: Kumi works without it, and
+ * off a Mac it fetches what it needs the first time the producer talks.
+ */
+export function voiceCheck(voice: VoiceReadiness, env: Env, platform: string = process.platform): Check {
+  if (!voice.fetches && (!voice.ffmpeg || !voice.whisper)) {
+    const both = !voice.ffmpeg && !voice.whisper;
+    const install = platform === "darwin" ? `brew install ${[!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper-cpp" : ""].filter(Boolean).join(" ")}`
+      : [!voice.ffmpeg ? ffmpegHint() : "", !voice.whisper ? whisperHint() : ""].filter(Boolean).join("; ");
+    return { status: "note", text: `Talking to Kumi (ctrl+t) needs ${both ? "ffmpeg and whisper.cpp" : !voice.ffmpeg ? "ffmpeg" : "whisper.cpp"}`, next: `Install ${both ? "them" : "it"}: ${install}` };
+  }
+  if (voice.allowed === false) return { status: "note", text: `Talking to Kumi (ctrl+t): macOS isn't letting ${terminalApp(env)} use the microphone`, next: "Allow it in System Settings › Privacy & Security › Microphone" };
+  const later = [!voice.ffmpeg ? "ffmpeg" : "", !voice.whisper ? "whisper.cpp" : "", !voice.model.path ? "its speech model (about 190 MB)" : ""].filter(Boolean);
+  if (later.length) return { status: "ok", text: `Talking to Kumi (ctrl+t): Kumi fetches ${later.join(" and ").replace(/ and (?=.* and )/, ", ")} the first time you talk` };
+  return { status: "ok", text: "Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer" };
+}
+
 export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
   const { env } = io;
   const node = nodeCheck(io.nodeVersion ?? process.version);
-  const checks: Check[] = [node, await signInCheck(env)];
+  const servers = await (io.modelServers ?? (() => findServers(env)))().catch((): ServerFinding[] => []);
+  const signIn = await signInCheck(env, servers);
+  // The model's server, when the model check is about it already.
+  const said = servers.find(({ server }) => signIn.text.startsWith(`${server.name} isn't running`))?.server.id;
+  const checks: Check[] = [node, signIn, ...serverChecks(servers, env, said)];
   const configPath = findBridgeConfig(env);
   if (!configPath) {
     checks.push({ status: "fix", text: "The Ableton bridge isn't installed, so Kumi can't see Live", next: `Quit Live, then run: ${KUMI} bridge` });
@@ -180,11 +292,18 @@ export async function doctorChecks(io: DoctorIo): Promise<Check[]> {
     try { accessSync(projects, constants.W_OK); } catch { try { accessSync(dirname(projects), constants.W_OK); } catch { writable = false; } }
     checks.push(writable ? { status: "ok", text: `Remembers Sets in ${tilde(projects)}` } : { status: "note", text: `Can't write ${tilde(projects)}, so Kumi won't catch you up on Sets`, next: "Check that folder's permissions, or set KUMI_PROJECTS_DIR" });
   } catch { /* an invalid KUMI_PROJECTS_DIR is reported when Kumi starts */ }
+  const library = await libraryCheck(env);
+  if (library) checks.push(library);
   // Watching videos: yt-dlp comes by itself when first needed; ffmpeg and whisper.cpp are the producer's.
   const programs = await (io.videoPrograms ?? (async () => ({ ffmpeg: await findFfmpeg({ env, toolsDir: loadToolsDir(env), installedOnly: true }), whisper: await findWhisper({ env, toolsDir: loadToolsDir(env), installedOnly: true }) })))().catch(() => ({ ffmpeg: undefined, whisper: undefined }));
   if (!programs.ffmpeg) checks.push({ status: "note", text: "Kumi reads a video's words but can't see its frames without ffmpeg", next: `Install it: ${ffmpegHint()}` });
   else if (!programs.whisper) checks.push({ status: "note", text: "Watches videos; one without captions needs whisper.cpp for its words", next: `Install it: ${whisperHint()}` });
   else checks.push({ status: "ok", text: "Watches videos: frames with ffmpeg, speech with whisper.cpp" });
+  // Live's own menus (grouping, freezing, bouncing, saving…): the helper, and on a Mac, Accessibility for this terminal.
+  const hands = await (io.hands ?? handsCheck)();
+  if (hands) checks.push(hands);
+  const voice = await (io.voice ?? (() => voiceReadiness({ env, toolsDir: loadToolsDir(env), language: readSettings(loadSettingsFile(env)).voice?.language ?? systemLanguage(env) })))().catch(() => undefined);
+  if (voice) checks.push(voiceCheck(voice, env));
   const terminal = io.terminal ?? { isTTY: Boolean(process.stdout.isTTY), ...(process.stdout.columns ? { columns: process.stdout.columns } : {}), ...(process.stdout.rows ? { rows: process.stdout.rows } : {}) };
   if (!terminal.isTTY) checks.push({ status: "note", text: "Not a terminal window here, so Kumi uses plain lines" });
   else {

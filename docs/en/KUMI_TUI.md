@@ -32,10 +32,13 @@ closes, crashes or is stopped.
   shows a `/goal` ("No goal yet" until there is one): the target, the best
   score with its trend, the leading candidate, and the time.
 - **Input box** (bottom left): messages waiting to be sent show above it, and a
-  pinned device as a chip.
+  pinned device as a chip. Empty, it says "ctrl+t to talk". While Kumi listens,
+  its bottom line shows a pulsing mint `●`, the time and a level meter, with the
+  keys that apply at its right; no red, which in Live means recording.
 
-The welcome screen shows what changed in the Set since you were last here, and a
-newer Kumi when there is one.
+The welcome screen shows what changed in the Set since you were last here, a
+newer Kumi when there is one, and, the first time, that Kumi is learning your
+library in the background.
 
 Below 100 columns the Live pane folds into a two-line strip above the input box
 (where you are and what Kumi is doing, then the last change with its undo).
@@ -54,10 +57,11 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
 | `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
-| `kumi model [<provider>/<model>]` | Show or choose the model |
+| `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
 | `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed; `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
-| `kumi doctor` | Check Node, sign-in, the bridge, Live, the extension, video programs and the terminal; says what to run |
+| `kumi doctor` | Check Node, sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run |
+| `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
 | `kumi update [--check \| --rollback]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
 | `kumi uninstall [--all] [--yes]` | Remove an installed Kumi; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question |
@@ -79,12 +83,13 @@ message, not a command.
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
 | `/refresh` | Read the Set again without asking the model |
 | `/copy` | Copy Kumi's last answer to the clipboard |
-| `/model`, `/effort` | Choose the model (from each provider's own list; type to filter) and how hard it thinks; from your next message |
+| `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
 | `/goal <what to reach>` | Go after a sound until Kumi gets there. `/goal` alone picks up a paused goal; `/goal stop` (or `/goal end`) ends it |
-| `/memory` | Everything Kumi keeps: notes about you and this Set, techniques, recipes and lessons; choose one to forget it (a recipe to run or forget) |
+| `/memory` | Everything Kumi keeps: notes about you and this Set, what it learned from your Sets, techniques, recipes and lessons; choose one to forget it (a recipe to run or forget) |
 | `/recipes` | Your recipes: run one (Kumi starts the message `Run my recipe "<name>" on ` for you to finish) or forget it |
-| `/status` | What Kumi is connected to, the model, and on an API key the tokens this session used |
+| `/status` | What Kumi is connected to, the model, how far it has got learning your library, and on an API key the tokens this session used |
+| `/voice` | Talking instead of typing: start or stop, "Send when you stop", the language you speak and the microphone |
 | `/update` | Get the newest Kumi: it asks, closes, updates and opens again with the same conversation |
 | `/help` | The keys and commands, as a note in the conversation |
 | `/quit` | Close Kumi |
@@ -107,6 +112,7 @@ answering; during an answer, Kumi says so and leaves things as they are.
 | Alt-← / Alt-→, Ctrl-← / Ctrl-→, Alt-B / Alt-F | Word left / right |
 | Ctrl-W, Alt-Backspace, Ctrl-Backspace | Delete the word before the cursor |
 | Ctrl-K / Ctrl-U | Delete to the end / start of the line |
+| Ctrl-T | Talk instead of typing: press it again to stop, or hold it while you talk. What you said lands in the box at the cursor; Enter stops and sends at once, Esc drops it |
 
 **Stopping and moving around**
 
@@ -152,7 +158,9 @@ Kumi detects how many colours the terminal shows; `KUMI_COLOR` (`truecolor`,
 terminal's symbols may not show (the old Windows console, the Linux console),
 Kumi uses two-letter badges instead of icons; `KUMI_ICONS=glyphs` or `badges`
 chooses. Windows Terminal is recommended on Windows. In terminals without the
-kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line.
+kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line. Those terminals
+say when a held Ctrl-T is let go; elsewhere, Kumi stops listening once the key's
+repeats stop.
 
 ## Design notes
 
@@ -178,6 +186,8 @@ lightened for display). Warning `#e7b45f`, error `#ee8479`, the beat light
    terminal is restored on exit, crashes and signals.
 2. Input (`keys.ts`): keys with modifiers (xterm and CSI u), pastes, mouse,
    sequences split across reads, and a lone Esc resolved by a short timeout.
+   With the kitty protocol, a held key's repeats and its let-go are events of
+   their own.
 3. Screen and renderer (`screen.ts`, `render.ts`): a grid of cells; each frame
    is diffed against the last and only changed cells are written, inside a
    synchronized update. Colour falls back from 24-bit to 256, 16 and none.

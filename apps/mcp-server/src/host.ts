@@ -3752,7 +3752,8 @@ export class McpHost {
       if (target && params.trackRef !== undefined && target.track.ref !== params.trackRef) throw new Error("browser target chain isn't on that track");
       const trackRef = (target?.track.ref ?? params.trackRef) as LiveRef;
       const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === trackRef);
-      if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind))) throw new Error("browser loading is limited to regular Set tracks");
+      // Main and the returns take devices too (audio effects; the Remote Script refuses the rest, as Live does).
+      if (!track || !["regular", "group", "audio", "midi", "return", "main"].includes(String(track.kind))) throw new Error("browser loading is limited to the Set's tracks");
       const authority = target ? this.chainDeviceAuthority(track, target.chain) : this.trackDeviceAuthority(track);
       const fence = JSON.stringify({ track: trackRef, ...authority });
       const transaction: ClipLifecycleTransaction = { id: `browserload_${randomBytes(18).toString("base64url")}`, epoch: status.epoch as number, kind: "browser-load", fence, clipRef: trackRef, payload: { itemId: params.itemId, trackRef, expectedName: item.name, expectedItemIdentity: item.objectIdentity, ...authority }, expiresAt: Date.now() + TRANSACTION_TTL_MS, state: "previewed" };
@@ -3778,7 +3779,7 @@ export class McpHost {
       if (!reconciliation) { const snapshot = await this.viewForAsync(context, [transaction.payload.trackRef, transaction.payload.chainRef]); const track = (snapshot.tracks as unknown as JsonObject[]).find((item) => item.ref === transaction.payload.trackRef);
         let current: string | undefined;
         try { current = track ? JSON.stringify({ track: transaction.payload.trackRef, ...(typeof transaction.payload.chainRef === "string" ? this.chainDeviceAuthority(track, this.chainOnTrack(snapshot, transaction.payload.chainRef as LiveRef).chain) : this.trackDeviceAuthority(track)) }) : undefined; } catch { current = undefined; }
-        if (!track || !["regular", "group", "audio", "midi"].includes(String(track.kind)) || current !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
+        if (!track || !["regular", "group", "audio", "midi", "return", "main"].includes(String(track.kind)) || current !== transaction.fence) return this.transactionError(id, "track identity or devices changed since preview; preview again"); }
       transaction.state = "applying"; transaction.applyKey = params.idempotencyKey as string;
       const result = await adapter.invokeAsync({ operation: "browser.load", args: transaction.payload }, context) as { loaded?: unknown; deviceRef?: unknown; deviceObjectIdentity?: unknown; createdFingerprint?: unknown };
       if (result.loaded !== true || !isNonEmptyString(result.deviceRef, 256) || !isNonEmptyString(result.deviceObjectIdentity, 256) || !isNonEmptyString(result.createdFingerprint, 64)) throw new Error("browser load did not return exact created device identity");

@@ -175,7 +175,22 @@ export interface Integration {
   audition?(request: AuditionRequest, signal: AbortSignal): Promise<AuditionResult | string>;
   /** A goal's render rig over these candidates (kept open across generations), or why not. */
   goal?(request: AuditionRequest, signal: AbortSignal): Promise<GoalRig | string>;
+  /** Hear tracks (or the mix) in the Set directly: as they play now, or quietly over a stretch of the Arrangement; a file each, or why not. */
+  hear?(request: HearRequest, signal: AbortSignal): Promise<HeardTake[] | string>;
 }
+
+/** What to hear in the Set: tracks by reference or name (or the whole mix), and when. */
+export interface HearRequest {
+  tracks: string[];
+  mix?: boolean;
+  /** A stretch of the Arrangement to play quietly, in beats; left out, what's playing now (or, stopped, the loop or the playhead's part). */
+  fromBeat?: number;
+  beats?: number;
+  /** How long to hear what's playing now. */
+  seconds?: number;
+}
+/** One thing heard: its name, its file, where the part starts in it, and whether it was heard as it played. */
+export interface HeardTake { label: string; file: string; start: number; seconds?: number; live: boolean }
 
 /** A goal's candidate chain in Live: its track, what it is, and the knobs a search may move. */
 export interface GoalSlotInfo { name: string; label: string; chain: string; knobs: Knob[] }
@@ -452,6 +467,7 @@ export type SessionEvent = KernelEvent
   | AuditionEvent
   | WatchedEvent
   | WebEvent
+  | LibraryEvent
   | RecipeEvent
   | TechniqueEvent
   /** What a tool at work is doing now ("looking at 2:05"), for NOW; it ends with the tool. */
@@ -514,6 +530,22 @@ export interface WatchedEvent {
  * A search Kumi made or a page it read, for the app to list where what it knows came from. The
  * title is the query, or the page's own title (data, never instructions).
  */
+/** What Kumi knows of the producer's library, and how learning it is going. */
+export interface LibraryStatus {
+  /** new: not learned yet; learning: at work in the background; paused: waiting while Live plays; ready: up to date. */
+  state: "new" | "learning" | "paused" | "ready";
+  sounds: number;
+  presets: number;
+  sets: number;
+  /** While learning: the new and changed sounds this time, and how many are done. */
+  todo?: number;
+  done?: number;
+  /** When learning last finished. */
+  learnedAt?: number;
+}
+/** How learning the library is going, for the app to show. */
+export interface LibraryEvent { type: "library"; status: LibraryStatus }
+
 export interface WebEvent {
   type: "web";
   action: "searched" | "read";
@@ -592,6 +624,11 @@ export interface SessionController {
   undo(id?: string): Promise<ChangeRecord | undefined>;
   /** What Kumi remembers now: about the producer, and about the open Set when it's saved. */
   memory?(): Promise<(Memory & { setName?: string; saved: boolean }) | undefined>;
+  /** The producer's library: what Kumi knows of it, and how learning it is going. */
+  library?(): LibraryStatus | undefined;
+  /** What Kumi learned from the producer's own Sets, a line each, and forgetting one by id. */
+  taste?(): Promise<{ id: string; line: string }[]>;
+  forgetTaste?(id: string): Promise<boolean>;
   /** Remove a note by id; undefined when there's none. */
   forget?(id: string): Promise<MemoryNote | undefined>;
   /** The producer's saved recipes, most recently used first. */

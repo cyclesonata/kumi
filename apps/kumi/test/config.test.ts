@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -111,6 +111,32 @@ test("the chosen model persists in an owner-only settings file; KUMI_MODEL overr
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a model on this computer is chosen like any other; the servers the producer names in settings.json are theirs to keep", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kumi-settings-"));
+  try {
+    const settingsFile = join(dir, "settings.json");
+    const local = { ...isolated, KUMI_SETTINGS_FILE: settingsFile };
+    for (const model of ["ollama/qwen3:8b", "ollama/hf.co/unsloth/Qwen3-30B-A3B-GGUF:Q4_K_M", "lmstudio/qwen/qwen3-8b"]) {
+      assert.deepEqual(loadConfig(["model", model], local), { mode: "model", settingsFile, model });
+      assert.equal(loadInferenceConfig({ ...local, KUMI_MODEL: model }).model, model);
+    }
+    // A server named in settings.json is one too, by its name as one word; one that isn't named isn't.
+    assert.throws(() => loadConfig(["model", "llama-cpp/qwen3-8b.gguf"], local), /ollama, lmstudio \(or a server in settings\.json\)/);
+    const servers = [{ name: "llama.cpp", baseURL: "http://127.0.0.1:8080/v1" }, { name: "Studio PC", baseURL: "http://192.168.1.20:8000", apiKey: "lan-token-0001" },
+      { name: "", baseURL: "http://127.0.0.1:1" }, { name: "No address", baseURL: "ftp://example.test" }, "not a server"];
+    writeFileSync(settingsFile, JSON.stringify({ model: "llama-cpp/qwen3-8b.gguf", modelServers: servers, editorNote: "theirs" }));
+    assert.deepEqual(readSettings(settingsFile), { model: "llama-cpp/qwen3-8b.gguf", modelServers: [{ name: "llama.cpp", baseURL: "http://127.0.0.1:8080/v1" },
+      { name: "Studio PC", baseURL: "http://192.168.1.20:8000/", apiKey: "lan-token-0001" }] });
+    assert.equal(loadConfig(["model", "studio-pc/Qwen/Qwen3-32B"], local).mode, "model");
+    // Choosing a model keeps the servers exactly as the producer wrote them, the ones Kumi can't use included.
+    writeSettings(settingsFile, { model: "ollama/qwen3:8b" });
+    assert.deepEqual(JSON.parse(readFileSync(settingsFile, "utf8")), { model: "ollama/qwen3:8b", modelServers: servers });
+    // Ollama and LM Studio need no sign-in, and say so.
+    assert.throws(() => loadConfig(["login", "ollama"], local), /Ollama needs no sign-in: while it's open, its models are in \/model, or choose one with: .* model ollama\/<model>/);
+    assert.throws(() => loadConfig(["logout", "lmstudio"], local), /LM Studio needs no sign-in/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("accepts an absolute existing bridge configuration without parsing its secrets", () => {
   const dir = mkdtempSync(join(tmpdir(), "kumi-config-"));
   try {
@@ -164,4 +190,18 @@ test("Live's Remote Scripts folder is in the User Library Live's own preferences
     writeFileSync(join(preferences, "Library.cfg"), `<?xml version="1.0"?><Ableton><ContentLibrary><UserLibrary><LibraryProject Id="0"><ProjectLocation /><ProjectName Value="User Library" /><ProjectPath Value="${literal.replace(/&/g, "&amp;")}" /></LibraryProject></UserLibrary></ContentLibrary></Ableton>`);
     assert.equal(liveUserLibrary(env), join(literal, "User Library"));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("settings keep the library's folders whoever writes them; `library` shows the library and `library --rebuild` learns it again", () => {
+  const root = mkdtempSync(join(tmpdir(), "kumi-library-settings-"));
+  try {
+    const file = join(root, "settings.json");
+    writeFileSync(file, JSON.stringify({ model: "anthropic/claude-sonnet-5", libraryFolders: ["~/Samples", 7, "", "/Volumes/Drive/Loops"] }));
+    assert.deepEqual(readSettings(file), { model: "anthropic/claude-sonnet-5", libraryFolders: ["~/Samples", "/Volumes/Drive/Loops"] }, "only folder names are kept");
+    writeSettings(file, { model: "openai/gpt-fixture" });
+    assert.deepEqual(readSettings(file).libraryFolders, ["~/Samples", "/Volumes/Drive/Loops"], "choosing a model keeps them");
+    assert.deepEqual(loadConfig(["library"]), { mode: "library", rebuild: false });
+    assert.deepEqual(loadConfig(["library", "--rebuild"]), { mode: "library", rebuild: true });
+    assert.throws(() => loadConfig(["library", "--everything"]), /Use: library \[--rebuild\]/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

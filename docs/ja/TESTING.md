@@ -102,12 +102,13 @@ node --test scripts/docs-drift.test.mjs scripts/release-documentation.test.mjs
 
 | ワークフロー | ジョブ | 実行内容 |
 | --- | --- | --- |
-| **CI** | `Build exact local candidate`（Ubuntu、Node 24） | 空白のチェック。ブリッジの型チェック、テスト、プロパティテスト、カバレッジ、ベンチマーク、`audio:oracle`、`compatibility`、`package:verify`。ブリッジを二回パックし（二回目は新しいクローンから）、バイト列が同一であることを求めます。tarball を `exact-local-candidate` アーティファクトとして 90 日間保持します |
-| | `Node 22, 24 / ubuntu-24.04, macos-15, windows-2025`（6 つのジョブ） | ブリッジの型チェック、テスト、プロパティテスト、ベンチマーク、`compatibility`。同じ tarball に対する `package:verify`、`scripts/verify-candidate.mjs`、`journey:verify`。セットアップ、移行、診断 |
+| **CI** | `Build exact local candidate`（Ubuntu、Node 24） | 空白のチェック。ブリッジを二回パックし（二回目は新しいクローンから）、バイト列が同一であることを求めます。tarball を `exact-local-candidate` アーティファクトとして 90 日間保持します |
+| | `Coverage, benchmarks and the audio oracle`（Ubuntu、Node 24、候補と並行） | ブリッジの型チェック、カバレッジ（機能テスト）、リリーススクリプトのテスト、プロパティテスト、ベンチマーク、`audio:oracle`、`compatibility`、`package:verify` |
+| | `Node 22, 24 / ubuntu-24.04`、`Node 24 / macos-15`、`Node 24 / windows-2025 / candidate` と `/ tests 1/4` から `4/4` | ブリッジの型チェックとテスト（Windows では各ファイルのコストで均した 4 つのシャードで。`TEST_SHARD=1/4` で一つを選択）、プロパティテスト、`compatibility`。同じ tarball に対する `package:verify`、`scripts/verify-candidate.mjs`、`journey:verify`。セットアップ、移行、診断 |
 | | `Python Remote Script contract`（同じ三つのシステム、Python 3.11） | Remote Script のファイルを tarball と照合し、Python のテストを実行し、パッケージをコンパイルします |
 | | `Required CI` | 上記がすべてパスした場合にだけパスします |
 | **Kumi** | `Kumi / Node 22`、`Kumi / Node 24`（Ubuntu）、`Kumi / macOS / Node 24`、`Kumi / Windows / Node 24` | ルートの型チェック、ブリッジのビルド、`KUMI_TEST_BRIDGE=1` を付けた `npm test`、`git diff --check` |
-| **Installer** | `Build the release bundle`、続いて `Install / macOS`、`Linux`、`Windows` | バンドルをビルドしてローカルで配信します。各システムで：プロデューサーと同じ方法でインストールし（Windows では Windows PowerShell 5.1）、バージョン、`doctor`、ブリッジの読み込みを確認し、修復として再インストールし、使い捨ての Remote Scripts フォルダーに `kumi bridge --yes` を実行し、`kumi update`（macOS と Linux では `--rollback` も）、`kumi uninstall` を実行します。`v*` タグでは、続いて `publish` がバンドルをリリースに添付します。 |
+| **Installer** | `Build Kumi's Mac helper`、`Build the release bundle`、続いて `Install / macOS`、`Linux`、`Windows` | Mac で Kumi が Live のメニューを使うためのヘルパー（ユニバーサル、署名済み）をビルドし、それを含むバンドルをビルドしてローカルで配信します。各システムで：プロデューサーと同じ方法でインストールし（Windows では Windows PowerShell 5.1）、バージョン、`doctor`、ブリッジの読み込みを確認し、修復として再インストールし、使い捨ての Remote Scripts フォルダーに `kumi bridge --yes` を実行し、`kumi update`（macOS と Linux では `--rollback` も）、`kumi uninstall` を実行します。`v*` タグでは、続いて `publish` がバンドルをリリースに添付します。 |
 
 `main` にマージするには、`Required CI` と 4 つの Kumi ジョブがパスする必要があります。Installer は必須ではありません。残りのルールは[リリースと配布](DISTRIBUTION_POLICY.md#マージゲート)にあります。
 

@@ -102,12 +102,13 @@ node --test scripts/docs-drift.test.mjs scripts/release-documentation.test.mjs
 
 | 工作流 | 作业 | 运行内容 |
 | --- | --- | --- |
-| **CI** | `Build exact local candidate`（Ubuntu，Node 24） | 空白字符检查；桥接的类型检查、测试、属性测试、覆盖率、基准测试、`audio:oracle`、`compatibility` 和 `package:verify`；打包桥接两次（第二次在全新的克隆中）并要求字节完全相同；把 tarball 作为 `exact-local-candidate` 产物保留 90 天 |
-| | `Node 22, 24 / ubuntu-24.04, macos-15, windows-2025`（六个作业） | 桥接的类型检查、测试、属性测试、基准测试和 `compatibility`；针对同一个 tarball 运行 `package:verify`、`scripts/verify-candidate.mjs` 和 `journey:verify`；设置、迁移和诊断 |
+| **CI** | `Build exact local candidate`（Ubuntu，Node 24） | 空白字符检查；打包桥接两次（第二次在全新的克隆中）并要求字节完全相同；把 tarball 作为 `exact-local-candidate` 产物保留 90 天 |
+| | `Coverage, benchmarks and the audio oracle`（Ubuntu，Node 24，与候选并行） | 桥接的类型检查、覆盖率（功能测试）、发布脚本的测试、属性测试、基准测试、`audio:oracle`、`compatibility` 和 `package:verify` |
+| | `Node 22, 24 / ubuntu-24.04`、`Node 24 / macos-15`、`Node 24 / windows-2025 / candidate` 以及 `/ tests 1/4` 到 `4/4` | 桥接的类型检查和测试（在 Windows 上分为按各文件耗时均衡的四个分片；`TEST_SHARD=1/4` 选择其一）、属性测试和 `compatibility`；针对同一个 tarball 运行 `package:verify`、`scripts/verify-candidate.mjs` 和 `journey:verify`；设置、迁移和诊断 |
 | | `Python Remote Script contract`（同样的三个系统，Python 3.11） | 对照 tarball 检查 Remote Script 的文件，运行 Python 测试，编译该包 |
 | | `Required CI` | 只有以上全部通过时才通过 |
 | **Kumi** | `Kumi / Node 22`、`Kumi / Node 24`（Ubuntu）、`Kumi / macOS / Node 24`、`Kumi / Windows / Node 24` | 根目录类型检查，构建桥接，使用 `KUMI_TEST_BRIDGE=1` 运行 `npm test`，`git diff --check` |
-| **Installer** | `Build the release bundle`，然后是 `Install / macOS`、`Linux`、`Windows` | 构建发行包并在本地提供。在每个系统上：像制作人那样安装（在 Windows 上使用 Windows PowerShell 5.1），检查版本、`doctor` 和桥接加载，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，运行 `kumi update`（在 macOS 和 Linux 上还有 `--rollback`），以及 `kumi uninstall`。在 `v*` 标签上，`publish` 随后把发行包附加到发布版本上。 |
+| **Installer** | `Build Kumi's Mac helper`、`Build the release bundle`，然后是 `Install / macOS`、`Linux`、`Windows` | 构建 Kumi 在 Mac 上使用 Live 菜单的辅助程序（通用、已签名），再构建包含它的发行包并在本地提供。在每个系统上：像制作人那样安装（在 Windows 上使用 Windows PowerShell 5.1），检查版本、`doctor` 和桥接加载，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，运行 `kumi update`（在 macOS 和 Linux 上还有 `--rollback`），以及 `kumi uninstall`。在 `v*` 标签上，`publish` 随后把发行包附加到发布版本上。 |
 
 要合并到 `main`，`Required CI` 和四个 Kumi 作业必须通过。Installer 不是必需的。其余规则见[发布与分发](DISTRIBUTION_POLICY.md#合并门禁)。
 

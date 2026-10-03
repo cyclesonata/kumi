@@ -3,14 +3,15 @@
  * HISTORY) and the input box, drawn over a SessionController. See docs/en/KUMI_TUI.md.
  */
 import {
-  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
-  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult,
+  FORGET_RECIPE_TOOL, FORGET_TOOL, KumiError, PROVIDER_INFO, REMEMBER_TOOL, SAVE_RECIPE_TOOL, since, type CatchUp, type ChangeRecord, type ConnectionState, type LibraryStatus, type ArrangementStrip, type ClipNote, type ClipView, type DevicePlacement, type DeviceTree, type Effort, type LiveFocus, type LiveTransport, type ModelInfo, type ProviderId,
+  type GoalStatus, type MatchStatus, type PinnedNode, type RecipeSummary, type SessionController, type SessionEvent, type SessionStrip, type TurnResult, type VoiceTrouble,
 } from "@kumi/runtime";
 import { safeError } from "../config.js";
 import type { InputHistory } from "../history.js";
-import type { ModelControl } from "../models.js";
-import { sanitizeText, StreamingText, webWords } from "../text.js";
+import type { LocalStatus, ModelControl } from "../models.js";
+import { libraryLine, sanitizeText, StreamingText, webWords } from "../text.js";
 import type { UpdateControl } from "../update.js";
+import type { VoiceControl } from "../voice.js";
 import { Editor, type EditorLayout } from "./editor.js";
 import { Picker, type PickerItem } from "./picker.js";
 import type { InputEvent } from "./keys.js";
@@ -26,7 +27,8 @@ import { detectIconStyle, icon, trackKind, type IconKind, type IconStyle } from 
 import { LOGO_HEIGHT, LOGO_LETTERS, LOGO_RULE, LOGO_WIDTH } from "./logo.js";
 import { treeRows, treeWindow, type TreeRow } from "./tree.js";
 import { TabPanel, type Tab, type TabRow } from "./tabs.js";
-import { textWidth, truncate } from "./width.js";
+import { VoiceInput } from "./voice.js";
+import { graphemes, textWidth, truncate } from "./width.js";
 import { wrap, type Span as TextSpan } from "./wrap.js";
 
 export interface TuiOptions {
@@ -54,6 +56,8 @@ export interface TuiOptions {
   panelTab?: { load(): string | undefined; save(id: string): void };
   /** Kumi's updates: /update, and a newer Kumi on the welcome screen. Without it, neither shows. */
   updates?: UpdateControl;
+  /** Talking instead of typing: ctrl+t and /voice. Without it, neither is offered. */
+  voice?: VoiceControl;
 }
 
 type Assistant = Extract<Entry, { kind: "assistant" }>;
@@ -93,6 +97,7 @@ const EFFORT_WORDS: Record<Effort, string> = { low: "Fastest; lighter thinking",
 const COMMANDS = [
   { name: "/new", about: "Forget this conversation and start fresh" },
   { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
+  { name: "/voice", about: "Talk instead of typing: ctrl+t, and how it listens" },
   { name: "/conversations", about: "Go back to an earlier conversation about this Set" },
   { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
   { name: "/undo", about: "Undo Kumi's last change" },
@@ -123,7 +128,7 @@ const MODEL_COMMANDS: readonly string[] = ["/model", "/effort", "/login", "/logo
 /** "/model" or "/nope" is a command; "/Users/me/ref.wav", a file dragged into the terminal, is a message. */
 export const isCommand = (text: string) => /^\/[A-Za-z]+(?:\s|$)/.test(text);
 
-const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques and recipes), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+const HELP = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
 /** How long NOW shows a change Kumi just made. */
 const CHANGE_FLASH_MS = 4_000;
 /** How often FOCUS's tree is read again while it shows. */
@@ -225,6 +230,12 @@ export function setNameFrom(label: string): string | undefined {
   return match?.[1]?.trim() || undefined;
 }
 
+/** A spoken language's name in English ("ja" → "Japanese"); "auto" is any. */
+export function languageName(code: string): string {
+  if (code === "auto") return "any language";
+  try { return new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code; } catch { return code; }
+}
+
 /** "3:05": minutes and seconds (hours when it's gone that long). */
 const clockOf = (ms: number) => { const whole = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const seconds = String(whole % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`; };
 
@@ -287,6 +298,9 @@ export class TuiApp {
   private catchUp: CatchUp | undefined;
   /** A newer Kumi's version, once the startup check or /update found one. */
   private newer: string | undefined;
+  /** What Kumi knows of the producer's library, and how learning it is going; whether its first learning was mentioned. */
+  private library: LibraryStatus | undefined;
+  private toldLibrary = false;
   /** Kumi's changes in the order they happened; each keeps its latest state. */
   private changes: ChangeRecord[] = [];
   private lastChange: { id: string; at: number } | undefined;
@@ -342,6 +356,8 @@ export class TuiApp {
   private recall: { index: number; draft: string } | undefined;
   /** The last message sent, to send again after a sign-in it was waiting for. */
   private lastSent: string | undefined;
+  /** Talking instead of typing (ctrl+t), when the app was given a microphone to hear. */
+  private readonly voice: VoiceInput | undefined;
   private readonly done: Promise<number>;
   private resolveDone!: (code: number) => void;
 
@@ -359,6 +375,15 @@ export class TuiApp {
     this.tabs = new TabPanel([history, ...(options.controller.goal ? [goal] : []), ...(options.tabs ?? [])], options.panelTab?.load(), (id) => options.panelTab?.save(id));
     this.renderer = new Renderer(this.depth);
     this.scheduler = new FrameScheduler(() => this.draw(), options.frameMs ?? 16);
+    this.voice = options.voice ? new VoiceInput(options.voice, {
+      insert: (text) => this.insertSpoken(text),
+      send: () => { void this.submit(); },
+      notice: (text, tone) => this.notice(text, tone),
+      offer: (trouble) => this.offerVoiceFix(trouble),
+      names: () => this.spokenNames(),
+      redraw: () => this.scheduler.request(),
+      animate: (on) => this.scheduler.setAnimating(on || this.busy),
+    }) : undefined;
     this.tty = new Tty({
       input: options.input, output: options.output,
       onInput: (event) => this.onInput(event),
@@ -374,6 +399,7 @@ export class TuiApp {
     this.options.input.once("end", () => { void this.finish(0); });
     this.options.output.once("error", () => { void this.finish(1); });
     if (this.options.startupNotice) this.notice(this.options.startupNotice, "info");
+    this.library = this.options.controller.library?.();
     this.scheduler.request();
     void Promise.resolve().then(() => { if (!this.closing) return this.options.controller.start(); }).catch((error: unknown) => {
       if (!this.closing) void this.finish(1, `Kumi couldn't start: ${safeError(error, this.secrets)}`);
@@ -431,7 +457,7 @@ export class TuiApp {
         if (event.state === "idle") this.afterBusy();
         if ((event.state === "running" || event.state === "cancelling") && !this.busySince) this.busySince = performance.now();
         else if (event.state === "idle") this.busySince = 0;
-        this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling");
+        this.scheduler.setAnimating(event.state === "running" || event.state === "cancelling" || Boolean(this.voice?.active));
         break;
       case "connection":
         // The session says what happened and what Kumi does about it (a notice).
@@ -442,6 +468,14 @@ export class TuiApp {
         break;
       case "observation":
         this.setName = setNameFrom(event.label);
+        break;
+      case "library":
+        this.library = event.status;
+        // The first time, the welcome screen says so; when a conversation already fills the screen, a quiet line does.
+        if (!this.toldLibrary && (event.status.state === "learning" || event.status.state === "paused") && !event.status.learnedAt) {
+          this.toldLibrary = true;
+          if (!this.transcript.isEmpty) this.notice("Learning your library in the background…", "info");
+        }
         break;
       case "focus":
         this.touched = touchedNext(this.focus, event.focus, this.touched);
@@ -768,6 +802,7 @@ export class TuiApp {
   private async finish(code = 0, message?: string): Promise<number> {
     if (this.closing) return this.done;
     this.closing = true;
+    this.voice?.cancel();
     this.keepTreeFresh(false);
     clearTimeout(this.wakeTimer); clearTimeout(this.beatTimer);
     this.suppress = true;
@@ -799,6 +834,21 @@ export class TuiApp {
 
   private onInput(event: InputEvent): void {
     if (this.closing) return;
+    // ctrl+t talks, from a list or the box; not over a key or a sign-in being entered, or a side answer still coming.
+    // Let go (where the terminal says), a held one stops.
+    const busyPanel = this.panel && this.panel.kind !== "pick" && (this.panel.kind !== "btw" || this.asides[this.panel.at]?.state === "asking");
+    if (this.voice && (event.type === "key" || event.type === "release") && event.name === "t" && event.ctrl && !event.alt && !busyPanel) {
+      if (event.type === "release") this.voice.release();
+      else {
+        if (this.panel) this.closePanel();
+        this.treeCursor = undefined; this.tabs.leave();
+        this.voice.press(event.repeat === true);
+      }
+      this.scheduler.request();
+      return;
+    }
+    // Other keys let go mean nothing here.
+    if (event.type === "release") return;
     if (this.panel && (event.type === "text" || event.type === "paste" || event.type === "key")) { this.panelInput(event); this.scheduler.request(); return; }
     if (event.type === "text" || event.type === "paste") {
       // Typing goes back to the input box.
@@ -820,6 +870,9 @@ export class TuiApp {
 
   private key(event: Extract<InputEvent, { type: "key" }>): void {
     const { name, ctrl, alt, shift } = event;
+    // Listening or writing down: esc and ctrl+c drop it, and enter stops and sends (the / menu, or a command in the box, as usual).
+    if (this.voice?.active && ((name === "escape" && !this.menu().length) || (ctrl && name === "c"))) { this.voice.cancel(); return; }
+    if (name === "enter" && !alt && !shift && this.voice?.active && !this.menu().length && !isCommand(this.editor.text.trim()) && this.voice.enter()) return;
     const menu = this.menu();
     const width = this.inputWidth();
     // Shift+Tab moves into the tabbed area (again, to its next tab); there, arrows and pages move, Enter
@@ -923,7 +976,7 @@ export class TuiApp {
       && (command.name !== "/memory" || this.options.controller.memory !== undefined) && (command.name !== "/recipes" || this.options.controller.recipes !== undefined)
       && (command.name !== "/conversations" || this.options.controller.conversations !== undefined) && (command.name !== "/reconnect" || this.options.controller.reconnect !== undefined)
       && (command.name !== "/stop" || this.options.controller.stopLive !== undefined) && (command.name !== "/update" || this.options.updates !== undefined)
-      && (command.name !== "/btw" || this.options.controller.aside !== undefined));
+      && (command.name !== "/btw" || this.options.controller.aside !== undefined) && (command.name !== "/voice" || this.voice !== undefined));
     if (this.menuIndex >= matches.length) this.menuIndex = 0;
     return matches;
   }
@@ -938,6 +991,8 @@ export class TuiApp {
     this.recall = undefined;
     if (command === "/quit") { this.editor.clear(); await this.finish(0); return; }
     if (command === "/help") { this.editor.clear(); this.notice(HELP, "info"); return; }
+    // Talking works any time, while Kumi works too.
+    if (command === "/voice" && this.voice) { this.editor.clear(); this.openVoice(); return; }
     // The model and its sign-ins can change any time: an answer running now finishes as it started.
     if (this.options.models && MODEL_COMMANDS.includes(command)) {
       this.editor.clear();
@@ -977,7 +1032,8 @@ export class TuiApp {
     if (command === "/status") {
       this.editor.clear();
       const status = controller.status();
-      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${this.tokensUsed()}`, "info");
+      const library = libraryLine(this.options.controller.library?.() ?? this.library);
+      this.notice(`${status.state === "idle" ? "Ready" : status.state} · Live ${status.connection} · ${this.modelLabel() ?? "no model"} · ${status.maxTurns ? `${status.turns} of ${status.maxTurns} turns` : `${status.turns} ${status.turns === 1 ? "turn" : "turns"}`}${status.observation ? ` · ${status.observation}` : ""}${library ? ` · ${library}` : ""}${this.tokensUsed()}`, "info");
       return;
     }
     // A side question, any time: answered on its own, without tools, and kept out of the conversation.
@@ -1162,7 +1218,7 @@ export class TuiApp {
    */
   private tokensUsed(): string {
     const provider = this.options.models?.current().provider;
-    if (!provider || PROVIDER_INFO[provider].signIn !== "api-key" || !this.used.answers) return "";
+    if (!provider || !(provider in PROVIDER_INFO) || PROVIDER_INFO[provider as ProviderId].signIn !== "api-key" || !this.used.answers) return "";
     const count = (n: number) => (n < 1_000 ? `${n}` : n < 1_000_000 ? `${(n / 1_000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`);
     return ` · this session: ${count(this.used.input)} tokens in${this.used.cached ? ` (${count(this.used.cached)} cached)` : ""}, ${count(this.used.output)} out`;
   }
@@ -1251,20 +1307,28 @@ export class TuiApp {
     }
   }
 
-  /** /model: every provider's models, from their own lists, under whether Kumi is signed in there. */
+  /**
+   * /model: every provider's models, from their own lists, under whether Kumi is signed in there;
+   * then the model servers on this computer (and any named in settings.json), from the servers.
+   */
   private async openModels(): Promise<void> {
     const models = this.options.models;
     if (!models) return;
     const picker = new Picker("Choose a model", [{ label: "Reading your sign-ins…", inert: true }], { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => this.chooseModelItem(item) };
     this.scheduler.request();
+    // Asked at once: a server that isn't running refuses straight away.
+    const servers = models.local().catch((): LocalStatus[] => []);
     const statuses = await this.options.models!.providers();
-    const lists = new Map<ProviderId, ModelInfo[] | "refused" | "unreadable">();
+    const lists = new Map<string, ModelInfo[] | "refused" | "unreadable">();
+    let local: LocalStatus[] | undefined;
     const current = models.current().model;
     const signInItem = (provider: typeof statuses[number], again = false): PickerItem => ({
       label: `Sign in to ${provider.name}${again ? " again" : ""}`, detail: provider.signIn === "chatgpt" ? "with your ChatGPT plan" : "with an API key",
       value: `signin:${provider.id}`, note: "sign in", noteTone: "accent" });
-    const build = (): PickerItem[] => statuses.flatMap((provider): PickerItem[] => {
+    const modelItem = (model: ModelInfo): PickerItem => ({ label: model.name, ...(model.description ? { detail: model.description } : {}), value: model.id,
+      ...(model.id === current ? { note: "current", noteTone: "accent" as const } : {}) });
+    const cloud = (): PickerItem[] => statuses.flatMap((provider): PickerItem[] => {
       const listed = lists.get(provider.id);
       const heading: PickerItem = { heading: true, label: provider.name, noteTone: listed === "refused" ? "warn" : "faint",
         note: listed === "refused" ? provider.via === "environment" ? `${provider.keyEnv} not accepted` : "sign-in not accepted"
@@ -1274,36 +1338,53 @@ export class TuiApp {
       if (listed === "refused") return [heading, signInItem(provider, true)];
       if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
       if (!listed.length) return [heading, { label: "It lists no models for this sign-in.", inert: true }];
-      return [heading, ...listed.map((model): PickerItem => ({ label: model.name, ...(model.description ? { detail: model.description } : {}), value: model.id,
-        ...(model.id === current ? { note: "current", noteTone: "accent" as const } : {}) }))];
+      return [heading, ...listed.map(modelItem)];
     });
+    // Servers need no sign-in: a running one lists its models, a closed one says how to start it.
+    const onThisComputer = (): PickerItem[] => {
+      if (!local) return [];
+      if (!local.length) return [{ heading: true, label: "On this computer" }, { label: "Open Ollama or LM Studio, and its models show here.", inert: true }];
+      return local.flatMap((server): PickerItem[] => {
+        const heading: PickerItem = { heading: true, label: `${server.name} · ${server.where}`, note: server.running ? "running" : "not running", noteTone: server.running ? "faint" : "warn" };
+        if (!server.running) return [heading, { label: server.start ?? "Start it, then /model again.", inert: true }];
+        const listed = lists.get(server.id);
+        if (listed === undefined) return [heading, { label: "Reading its models…", inert: true }];
+        if (listed === "refused") return [heading, { label: server.id === "lmstudio" ? "It wants an API token: set LM_API_TOKEN to one from its server settings." : "It didn't accept Kumi's key for it (apiKey in ~/.kumi/settings.json).", inert: true }];
+        if (listed === "unreadable") return [heading, { label: "Couldn't read its models just now; try /model again.", inert: true }];
+        if (!listed.length) return [heading, { label: server.id === "ollama" ? "No models yet: pull one that can use tools (ollama pull <model>)." : "No models yet: get one, then /model again.", inert: true }];
+        return [heading, ...listed.map(modelItem)];
+      });
+    };
     const update = () => {
       if (this.panel?.kind !== "pick" || this.panel.picker !== picker) return;
-      picker.setItems(build()); picker.select(current); this.scheduler.request();
+      picker.setItems([...cloud(), ...onThisComputer()]); picker.select(current); this.scheduler.request();
+    };
+    const read = async (id: string) => {
+      try { lists.set(id, await models.models(id)); }
+      catch (error) { lists.set(id, error instanceof KumiError && error.kind === "auth" ? "refused" : "unreadable"); }
+      update();
     };
     update();
-    await Promise.all(statuses.filter((provider) => provider.signedIn).map(async (provider) => {
-      try { lists.set(provider.id, await models.models(provider.id)); }
-      catch (error) { lists.set(provider.id, error instanceof KumiError && error.kind === "auth" ? "refused" : "unreadable"); }
-      update();
-    }));
+    await Promise.all([...statuses.filter((provider) => provider.signedIn).map((provider) => read(provider.id)),
+      servers.then(async (found) => { local = found; update(); await Promise.all(found.filter((server) => server.running).map((server) => read(server.id))); })]);
   }
 
   private async chooseModelItem(item: PickerItem): Promise<void> {
     const models = this.options.models!;
     const value = item.value!;
     if (value.startsWith("signin:")) { this.signIn(value.slice("signin:".length) as ProviderId, () => this.openModels()); return; }
+    let note: string | undefined;
     try {
-      await models.choose(value);
+      note = await models.choose(value);
     } catch (error) {
       // Its provider isn't signed in: sign in there first, then use it.
-      if (error instanceof KumiError && error.kind === "auth" && error.provider) { this.signIn(error.provider as ProviderId, () => this.chooseModelItem(item)); return; }
+      if (error instanceof KumiError && error.kind === "auth" && error.provider && error.provider in PROVIDER_INFO) { this.signIn(error.provider as ProviderId, () => this.chooseModelItem(item)); return; }
       throw error;
     }
     this.closePanel();
     const current = models.current();
     const effort = current.effort ? `, at ${current.effort} effort` : current.defaultEffort ? `, at its usual ${current.defaultEffort} effort` : "";
-    this.notice(`Kumi talks to ${current.name ?? value} from your next message${effort}.${current.pinned ? " KUMI_MODEL is set, so this lasts until Kumi closes." : ""}`, "info");
+    this.notice(`Kumi talks to ${current.name ?? value} from your next message${effort}.${current.pinned ? " KUMI_MODEL is set, so this lasts until Kumi closes." : ""}${note ? ` ${note}` : ""}`, "info");
   }
 
   /** /effort: the levels the current model takes, with its own default first. */
@@ -1393,14 +1474,101 @@ export class TuiApp {
     this.scheduler.request();
   }
 
+  /** What was said, into the box at the cursor, a space from the words either side. */
+  private insertSpoken(text: string): void {
+    const chars = graphemes(this.editor.text); const at = this.editor.cursor;
+    const before = chars[at - 1]; const after = chars[at];
+    this.editor.insert(`${before && !/\s/.test(before) ? " " : ""}${sanitizeText(text, this.secrets)}${after && !/\s/.test(after) ? " " : ""}`);
+    this.recall = undefined; this.menuDismissed = false;
+    this.scheduler.request();
+  }
+
+  /** Names Kumi can see in the Set (its name, the focused track, device and clip, what's pinned), so they're written down as spelled. */
+  private spokenNames(): string[] {
+    const focus = this.focus;
+    return [this.setName, focus?.track?.name, focus?.device, focus?.clip, this.pinned?.name].filter((name): name is string => Boolean(name));
+  }
+
+  /** /voice: start or stop listening, and how it listens: sending at once, the language spoken, the microphone. */
+  private openVoice(select?: string): void {
+    const control = this.options.voice!; const voice = this.voice!;
+    const build = (): PickerItem[] => {
+      const choices = control.choices();
+      return [
+        { label: voice.listening ? "Stop listening" : "Start listening", detail: "ctrl+t, or hold it while you talk", value: "listen" },
+        { label: "Send when you stop", detail: choices.send ? "What you say is sent at once" : "What you say waits in the box for enter", value: "send", note: choices.send ? "on" : "off", noteTone: choices.send ? "accent" : "faint" },
+        { label: "Language", detail: "What you speak", value: "language", note: languageName(choices.language), noteTone: "faint" },
+        { label: "Microphone", detail: "What Kumi listens through", value: "microphone", note: choices.microphone ?? "system default", noteTone: "faint" },
+      ];
+    };
+    const picker = new Picker("Talk to Kumi", build());
+    picker.select(select);
+    this.panel = { kind: "pick", picker, choose: (item) => {
+      if (item.value === "listen") { this.closePanel(); if (voice.listening) voice.stop(); else voice.start(); return; }
+      if (item.value === "send") { control.choose({ send: !control.choices().send }); picker.setItems(build()); this.scheduler.request(); return; }
+      if (item.value === "language") { this.openVoiceLanguage(); return; }
+      return this.openMicrophones();
+    } };
+    this.scheduler.request();
+  }
+
+  /** The language spoken: English (its own model), the computer's, or any (detected). */
+  private openVoiceLanguage(): void {
+    const control = this.options.voice!; const current = control.choices().language; const system = control.systemLanguage;
+    const items: PickerItem[] = [
+      { label: "English", detail: "A speech model for English alone: the quickest and surest", value: "en" },
+      ...[system, current].filter((code, index, codes) => code !== "en" && code !== "auto" && codes.indexOf(code) === index)
+        .map((code): PickerItem => ({ label: languageName(code), detail: "The speech model for many languages, told to expect this one", value: code })),
+      { label: "Any language", detail: "The speech model for many languages finds the one you speak", value: "auto" },
+    ].map((item) => (item.value === current ? { ...item, note: "current", noteTone: "accent" as const } : item));
+    const picker = new Picker("The language you speak", items);
+    this.panel = { kind: "pick", picker, choose: (item) => { control.choose({ language: item.value! }); this.openVoice("language"); } };
+    this.scheduler.request();
+  }
+
+  /** The microphones the computer has, and its default. */
+  private async openMicrophones(): Promise<void> {
+    const control = this.options.voice!; const current = control.choices().microphone ?? "";
+    const picker = new Picker("The microphone Kumi listens through", [{ label: "Looking for microphones…", inert: true }]);
+    this.panel = { kind: "pick", picker, choose: (item) => { control.choose({ microphone: item.value || null }); this.openVoice("microphone"); } };
+    this.scheduler.request();
+    const names = await control.microphones().catch(() => [] as string[]);
+    if (this.panel?.kind !== "pick" || this.panel.picker !== picker) return;
+    picker.setItems([
+      { label: "System default", detail: process.platform === "win32" ? "The first one Windows lists" : "The input your sound settings choose", value: "" },
+      ...[...names, ...(current && !names.includes(current) ? [current] : [])].map((name): PickerItem => ({ label: name, value: name })),
+    ].map((item) => (item.value === current ? { ...item, note: "current", noteTone: "accent" as const } : item)));
+    picker.select(current);
+    this.scheduler.request();
+  }
+
+  /** After listening failed for a reason with a fix, the fix, offered like a sign-in: the privacy settings, or another microphone. */
+  private offerVoiceFix(trouble: VoiceTrouble): void {
+    const control = this.options.voice;
+    if (!control || this.panel || this.closing) return;
+    const privacy = trouble === "permission" || trouble === "silence" || trouble === "device" ? control.openPrivacy : undefined;
+    const another = trouble === "silence" || trouble === "device";
+    if (!privacy && !another) return;
+    this.panel = { kind: "pick", picker: new Picker(trouble === "permission" ? "Let Kumi hear the microphone?" : "Fix the microphone?", [
+      ...(privacy ? [{ label: process.platform === "darwin" ? "Open Privacy & Security › Microphone" : "Open the microphone's privacy settings", value: "privacy" }] : []),
+      ...(another ? [{ label: "Choose another microphone", value: "microphone" }] : []),
+      { label: "Not now", value: "later" },
+    ]), choose: (item) => {
+      this.closePanel();
+      if (item.value === "privacy") privacy?.();
+      else if (item.value === "microphone") return this.openMicrophones();
+    } };
+    this.scheduler.request();
+  }
+
   /**
    * /memory: all Kumi keeps: notes about the producer and this Set, techniques and recipes. Choosing a
    * note or a technique offers to forget it; a recipe, to run or forget it.
    */
   private async openMemory(): Promise<void> {
     const { controller } = this.options;
-    const [memory, techniques, recipes, lessons] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([]),
-      controller.lessons?.() ?? Promise.resolve([])]);
+    const [memory, techniques, recipes, lessons, taste] = await Promise.all([controller.memory?.(), controller.techniques?.() ?? Promise.resolve([]), controller.recipes?.() ?? Promise.resolve([]),
+      controller.lessons?.() ?? Promise.resolve([]), controller.taste?.() ?? Promise.resolve([])]);
     if (!memory) return;
     const now = Date.now();
     const clean = (text: string, max: number) => sanitizeText(text, this.secrets).replaceAll("\n", " ").slice(0, max);
@@ -1420,20 +1588,24 @@ export class TuiApp {
       ...(controller.lessons ? [{ heading: true, label: "What Kumi learned matching sounds" }, ...(lessons.length
         ? lessons.map((lesson): PickerItem => ({ label: clean(lesson.line, 160), value: `lesson:${lesson.id}`, note: since(lesson.at, now), noteTone: "faint" }))
         : [{ label: "None yet: what won when Kumi matched a sound to a reference", inert: true }])] : []),
+      ...(controller.taste ? [{ heading: true, label: "From your Sets" }, ...(taste.length
+        ? taste.map((line): PickerItem => ({ label: clean(line.line, 160), value: `taste:${line.id}` }))
+        : [{ label: this.library?.state === "learning" || this.library?.state === "paused" ? "Learning your Sets…" : "Nothing yet: how you work, from your own Live Sets", inert: true }])] : []),
     ];
     const picker = new Picker("What Kumi remembers · notes, techniques and recipes", items, { filterable: true });
     this.panel = { kind: "pick", picker, choose: (item) => {
       const [kind, ...rest] = item.value!.split(":"); const id = rest.join(":");
       if (kind === "recipe") { const recipe = recipes.find((candidate) => candidate.name === id); if (recipe) this.recipeActions(recipe); return; }
-      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : kind === "lesson" ? "Forget this lesson?" : "Forget this note?", [
+      const confirm = new Picker(kind === "technique" ? "Forget this technique?" : kind === "lesson" ? "Forget this lesson?" : kind === "taste" ? "Forget this, from your Sets?" : "Forget this note?", [
         { label: "Forget it", detail: item.label, value: "yes" },
         { label: "Keep it", value: "no" },
       ]);
       this.panel = { kind: "pick", picker: confirm, choose: async (answer) => {
         this.closePanel();
         if (answer.value !== "yes") return;
-        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : kind === "lesson" ? await controller.forgetLesson?.(id) : await controller.forget?.(id);
-        if (!gone) this.notice(`That ${kind === "technique" || kind === "lesson" ? kind : "note"} was already gone.`, "info");
+        const gone = kind === "technique" ? await controller.forgetTechnique?.(id) : kind === "lesson" ? await controller.forgetLesson?.(id) : kind === "taste" ? await controller.forgetTaste?.(id) : await controller.forget?.(id);
+        if (!gone) this.notice(`That ${kind === "technique" || kind === "lesson" ? kind : kind === "taste" ? "line" : "note"} was already gone.`, "info");
+        else if (kind === "taste") this.notice(`Forgot, from your Sets: ${item.label}`, "info");
       } };
       this.scheduler.request();
     } };
@@ -1574,11 +1746,26 @@ export class TuiApp {
     this.scheduler.request();
   }
 
-  /** After a failed answer, the fix for what failed: sign in there, or another model. */
+  /** After a failed answer, the fix for what failed: sign in there, another model, or sending again once a server's back. */
   private offerFix(kind: string, provider: string | undefined): void {
     const models = this.options.models;
     if (!models || this.panel) return;
     if (kind === "config" && !models.current().model) { void this.openModels().catch((error: unknown) => this.panelFailed(error)); return; }
+    // A server on this computer that isn't answering: the message says how to start it; then it's one enter away.
+    if (kind === "network" && provider && !(provider in PROVIDER_INFO)) {
+      const name = models.providerName(provider);
+      this.panel = { kind: "pick", picker: new Picker("Send your message again?", [
+        { label: "Send it again", detail: `once ${name} is running`, value: "again" },
+        { label: "Choose another model", value: "model" },
+        { label: "Not now", value: "later" },
+      ]), choose: (item) => {
+        this.closePanel();
+        if (item.value === "again") this.resend();
+        else if (item.value === "model") return this.openModels();
+      } };
+      this.scheduler.request();
+      return;
+    }
     if (kind === "model" || kind === "config") {
       this.panel = { kind: "pick", picker: new Picker("Choose another model?", [{ label: "Choose a model", value: "model" }, { label: "Not now", value: "later" }]),
         choose: (item) => { this.closePanel(); if (item.value === "model") return this.openModels(); } };
@@ -1617,13 +1804,23 @@ export class TuiApp {
     if (!current.model) {
       const chosen = await models.chooseDefault();
       if (this.closing) return;
-      if (chosen) { this.notice(`Kumi talks to ${chosen.name}, ${PROVIDER_INFO[chosen.provider].name}'s first choice. /model changes it.`, "info"); return; }
-      this.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key.", "info");
+      if (chosen) {
+        const name = models.providerName(chosen.provider);
+        this.notice(chosen.where ? `Kumi talks to ${chosen.name}, in ${name} ${chosen.where}. /model changes it.${chosen.note ? ` ${chosen.note}` : ""}`
+          : `Kumi talks to ${chosen.name}, ${name}'s first choice. /model changes it.`, "info");
+        return;
+      }
+      this.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key. Or open Ollama or LM Studio to use models on this computer.", "info");
       if (!this.panel) await this.openModels();
       return;
     }
     const status = (await models.providers()).find((provider) => provider.id === current.provider);
     if (status && !status.signedIn) this.offerFix("auth", status.id);
+    // A model on a server that's closed: said now, before a message waits on it.
+    const server = status ? undefined : (await models.local()).find((item) => item.id === current.provider);
+    if (server && !server.running && !this.closing) {
+      this.notice(`${server.name} isn't running, so ${current.name ?? current.model!.slice(current.model!.indexOf("/") + 1)} can't answer yet. ${server.start ?? "Start it"}.`, "info");
+    }
   }
 
   /** Ask a side question: its answer streams into the btw panel, and nothing joins the conversation. */
@@ -1907,6 +2104,8 @@ export class TuiApp {
     }
     add();
     add("Kumi keeps each Set's conversations: /conversations goes back to one.", st.faint);
+    const library = libraryLine(this.library);
+    if (library) add(library, st.faint);
     if (this.newer) { add(); add(`Kumi ${this.newer} is out · /update gets it`, st.accent); }
     // The wordmark goes above, when the window has room for it and everything under it.
     if (width >= LOGO_WIDTH && height >= rows.length + LOGO_HEIGHT + 1) {
@@ -1940,7 +2139,7 @@ export class TuiApp {
       const label = goal ? `goal · ${goal.best ? `${goal.best.score}% · ` : ""}gen ${goal.generation} · ${clockOf(performance.now() - goal.since)}` : this.match ? `matching · ${this.match.best ? `${this.match.first !== undefined && this.match.first !== this.match.best.score ? `${this.match.first}→` : ""}${this.match.best.score}% · ` : ""}${clockOf(performance.now() - this.match.since)}`
         : this.turnChanges ? `working · ${this.turnChanges} ${this.turnChanges === 1 ? "change" : "changes"}` : "working";
       const action = this.lastAction && performance.now() - this.lastAction.at < CHANGE_FLASH_MS ? this.lastAction : undefined;
-      if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
+      if (action && (!flash || action.at > this.lastChange!.at) && (action.memory || !running || running.tool === "make_changes" || running.tool === "arrange" || ACTION_TOOLS.has(running.tool ?? ""))) return { dot, label, detail: `${action.glyph} ${action.title}`, detailStyle: st.bright };
       if (flash && (!running || running.tool === "make_changes")) return { dot, label, detail: `${flash.state === "heard" ? "♪" : "✓"} ${flash.title}`, detailStyle: st.bright };
       if (running) return { dot, label, detail: running.doing ?? doingLabel(running.tool, running.label), detailStyle: st.dim, activity: { kind: activityOf(running.tool), since: running.startedAt ?? performance.now() } };
       if (this.planning) return { dot, label, detail: "writing the plan", detailStyle: st.dim, activity: { kind: "code", since: this.planningSince } };
@@ -2323,8 +2522,10 @@ export class TuiApp {
     const x = box.x + 2;
     const width = Math.max(1, box.width - 4);
     const first = Math.max(0, Math.min(layout.cursorRow - visibleRows + 1, layout.rows.length - visibleRows));
+    // Listening or writing down: what's happening takes the box's bottom line, and its keys the hint.
+    const voice = this.voice?.view(performance.now());
     if (this.editor.isEmpty) {
-      const placeholder = this.busy && (this.current || this.pendingTurn) ? "Tell Kumi more while it works" : this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything";
+      const placeholder = voice?.placeholder ?? (this.busy && (this.current || this.pendingTurn) ? "Tell Kumi more while it works" : this.connection === "connected" ? "Ask Kumi about your Set" : "Ask Kumi anything");
       screen.put(x, box.y + 1, truncate(placeholder, width), st.faint);
     } else {
       layout.rows.slice(first, first + visibleRows).forEach((row, index) => screen.put(x, box.y + 1 + index, row, st.bright, box));
@@ -2332,9 +2533,14 @@ export class TuiApp {
     const hint = this.panel?.kind === "btw" ? "↑↓ to scroll · c copies · esc to close" : this.panel?.kind === "pick" ? "↑↓ to move · enter to choose · esc to close" : this.panel?.kind === "key" ? "enter to save · esc to cancel"
       : this.panel?.kind === "chatgpt" ? (this.panel.url ? "c copies the link · esc to cancel" : "esc to cancel")
       : this.menu().length ? "enter to choose · esc to close"
+      : voice ? voice.hint
       : this.busy && !this.editor.isEmpty && !isCommand(this.editor.text.trim()) ? (this.current || this.pendingTurn ? "enter sends now · tab after · esc stops" : "enter sends when ready")
-      : this.busy ? "esc to stop" : "enter to send";
-    if (textWidth(hint) + 2 < width) screen.put(box.x + box.width - 2 - textWidth(hint), box.y + box.height - 1, hint, st.faint);
+      : this.busy ? "esc to stop" : this.voice && this.editor.isEmpty ? "ctrl+t to talk" : "enter to send";
+    const bottom = box.y + box.height - 1;
+    let used = x;
+    for (const span of voice?.status ?? []) used = screen.put(used, bottom, span.text, span.style, box);
+    const at = box.x + box.width - 2 - textWidth(hint);
+    if (textWidth(hint) + 2 < width && at > used + 1) screen.put(at, bottom, hint, st.faint);
     return { x: x + layout.cursorColumn, y: box.y + 1 + layout.cursorRow - first };
   }
 

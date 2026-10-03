@@ -61,6 +61,10 @@ export interface ProgramOptions {
   signal?: AbortSignal;
   /** Told once when Kumi fetches yt-dlp, so the wait is explained. */
   onFetch?: (message: string) => void;
+  /** How far a fetch is, 0–1, as it downloads. */
+  onProgress?: (fraction: number) => void;
+  /** What the program is for, in the fetch's notice ("to write down what you say"); a video's use when left out. */
+  purpose?: string;
   /** For tests: fetch, instead of the network. */
   download?: (url: string, signal?: AbortSignal) => Promise<Uint8Array>;
   /** Only look for what's there: fetch nothing (for the doctor). */
@@ -170,6 +174,10 @@ export interface FfmpegOptions {
   /** Where Kumi keeps programs it fetched (~/.kumi/tools); set by configurePrograms when left out. */
   toolsDir?: string;
   onFetch?: (message: string) => void;
+  /** How far a fetch is, 0–1, as it downloads. */
+  onProgress?: (fraction: number) => void;
+  /** What ffmpeg is for, in the fetch's notice; reading audio and videos when left out. */
+  purpose?: string;
   /** Only look for what's there: fetch nothing (for the doctor). */
   installedOnly?: boolean;
   /** For tests: the network, the computer, and its free disk. */
@@ -212,11 +220,12 @@ export async function findFfmpeg(options: FfmpegOptions = {}): Promise<string | 
   // The archive, and the program unpacked from it, side by side for a moment.
   const full = await lowDisk(toolsDir, 2 * (published.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on", options.free);
   if (full) throw new VideoError(`Kumi needs ffmpeg for this, and would fetch it. ${full}`);
-  (options.onFetch ?? programDefaults.onFetch)?.(`Kumi is fetching ffmpeg, which it reads audio formats and videos with (once, about ${Math.round((published.size ?? 0) / 1e6)} MB).`);
+  (options.onFetch ?? programDefaults.onFetch)?.(`Kumi is fetching ffmpeg, ${options.purpose ?? "which it reads audio formats and videos with"} (once, about ${Math.round((published.size ?? 0) / 1e6)} MB).`);
   const archive = join(toolsDir, `.ffmpeg-${randomUUID()}${asset.endsWith(".zip") ? ".zip" : ".tar.xz"}`);
   const unpacked = join(toolsDir, `.ffmpeg-${randomUUID()}`);
   try {
-    if ((await downloadTo(published.browser_download_url!, archive, { toolsDir, ...(options.signal ? { signal: options.signal } : {}), ...(options.download ? { download: options.download } : {}) })) !== expected.toLowerCase()) {
+    if ((await downloadTo(published.browser_download_url!, archive, { toolsDir, ...(options.signal ? { signal: options.signal } : {}), ...(options.download ? { download: options.download } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}) }, published.size)) !== expected.toLowerCase()) {
       throw new VideoError("The ffmpeg Kumi downloaded didn't match its release's checksum, so it wasn't kept.");
     }
     await mkdir(unpacked, { recursive: true, mode: 0o700 });
@@ -248,8 +257,11 @@ function onPath(name: string, env: Env): string | undefined {
   return undefined;
 }
 
-/** A download streamed to `path`, with its SHA-256 (hex); nothing is left there on failure. */
-async function downloadTo(url: string, path: string, options: ProgramOptions): Promise<string> {
+/**
+ * A download streamed to `path`, with its SHA-256 (hex); nothing is left there on failure. How far it
+ * is goes to onProgress, against its length (or `size`, the length its publisher lists).
+ */
+async function downloadTo(url: string, path: string, options: ProgramOptions, size?: number): Promise<string> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const hash = createHash("sha256");
   try {
@@ -257,11 +269,20 @@ async function downloadTo(url: string, path: string, options: ProgramOptions): P
       const data = await options.download(url, options.signal);
       hash.update(data);
       await writeFile(path, data, { mode: 0o600 });
+      options.onProgress?.(1);
     } else {
       const response = await fetch(url, { redirect: "follow", ...(options.signal ? { signal: options.signal } : {}) });
       if (!response.ok || !response.body) throw new VideoError(`Downloading ${url.split("/").at(-1)} failed (${response.status}).`);
       const body = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream<Uint8Array>);
-      body.on("data", (chunk: Buffer) => hash.update(chunk));
+      const total = Number(response.headers.get("content-length")) || size || 0;
+      let received = 0; let told = -1;
+      body.on("data", (chunk: Buffer) => {
+        hash.update(chunk);
+        received += chunk.length;
+        // A whole percent at a time: the screen needn't redraw for every packet.
+        const percent = total ? Math.min(100, Math.floor(received / total * 100)) : -1;
+        if (percent > told) { told = percent; options.onProgress?.(percent / 100); }
+      });
       const file = createWriteStream(path, { mode: 0o600 });
       await (options.signal ? pipeline(body, file, { signal: options.signal }) : pipeline(body, file));
     }
@@ -303,7 +324,7 @@ export async function findWhisper(options: ProgramOptions): Promise<string | und
   const published = releases.flatMap((release) => release.assets ?? []).find((item) => item.name === asset && item.browser_download_url?.startsWith("https://github.com/"));
   const expected = /^sha256:([0-9a-f]{64})$/i.exec(published?.digest ?? "")?.[1];
   if (!published || !expected) return undefined;
-  options.onFetch?.("Kumi is fetching whisper.cpp, which transcribes a video's speech when it has no captions (once).");
+  options.onFetch?.(`Kumi is fetching whisper.cpp, ${options.purpose ?? "which transcribes a video's speech when it has no captions"} (once).`);
   const archive = join(options.toolsDir, `.whisper-${randomUUID()}${asset.endsWith(".zip") ? ".zip" : ".tar.gz"}`);
   const unpacked = join(options.toolsDir, `.whisper-${randomUUID()}`);
   try {
@@ -323,7 +344,11 @@ export async function findWhisper(options: ProgramOptions): Promise<string | und
   }
 }
 
-const WHISPER_MODELS = "https://huggingface.co/ggerganov/whisper.cpp";
+/** Where whisper.cpp's models are published (Hugging Face): its speech models, and its voice activity model. */
+const WHISPER_MODELS = "ggerganov/whisper.cpp";
+const VAD_MODELS = "ggml-org/whisper-vad";
+/** whisper.cpp's voice activity model (Silero, under a megabyte). */
+export const VAD_MODEL = "ggml-silero-v6.2.0.bin";
 
 /**
  * A whisper.cpp speech model: KUMI_WHISPER_MODEL, or `name` (such as ggml-small.en-q5_1.bin)
@@ -335,20 +360,34 @@ export async function whisperModel(name: string, options: ProgramOptions): Promi
     if (!existsSync(env.KUMI_WHISPER_MODEL)) throw new VideoError(`KUMI_WHISPER_MODEL names ${env.KUMI_WHISPER_MODEL}, which isn't there.`);
     return env.KUMI_WHISPER_MODEL;
   }
+  return publishedModel(WHISPER_MODELS, name, options);
+}
+
+/**
+ * whisper.cpp's voice activity model, fetched once beside the speech models, without a word (it's
+ * under a megabyte): with it, only stretches of speech are written down, never music or noise.
+ */
+export function vadModel(options: ProgramOptions): Promise<string> {
+  const { onFetch: _onFetch, onProgress: _onProgress, ...quiet } = options;
+  return publishedModel(VAD_MODELS, VAD_MODEL, quiet);
+}
+
+/** `name` from the Hugging Face repository `repo`, fetched once into `toolsDir`, checked against the SHA-256 it lists. */
+async function publishedModel(repo: string, name: string, options: ProgramOptions): Promise<string> {
   if (!/^ggml-[a-z0-9._-]+\.bin$/.test(name)) throw new VideoError(`${name} isn't a whisper.cpp model's name.`);
   const path = join(options.toolsDir, "whisper-models", name);
   if (existsSync(path) && statSync(path).size > 0) return path;
   const get = options.download ?? download;
-  const files = JSON.parse(new TextDecoder().decode(await get(`https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/main`, options.signal))) as { path?: string; size?: number; lfs?: { oid?: string } }[];
+  const files = JSON.parse(new TextDecoder().decode(await get(`https://huggingface.co/api/models/${repo}/tree/main`, options.signal))) as { path?: string; size?: number; lfs?: { oid?: string } }[];
   const listed = files.find((file) => file.path === name);
   const expected = listed?.lfs?.oid;
   if (!expected || !/^[0-9a-f]{64}$/i.test(expected)) throw new VideoError(`Kumi couldn't find the speech model ${name} to fetch.`);
   const full = await lowDisk(options.toolsDir, (listed?.size ?? 200 * MB) + 100 * MB, "Kumi keeps its programs on", options.free);
   if (full) throw new VideoError(`Transcribing needs a speech model, which Kumi would fetch. ${full}`);
-  options.onFetch?.(`Kumi is fetching a speech model, to transcribe videos without captions (once, about ${Math.round((listed?.size ?? 0) / 1e6)} MB).`);
+  options.onFetch?.(`Kumi is fetching a speech model, ${options.purpose ?? "to transcribe videos without captions"} (once, about ${Math.round((listed?.size ?? 0) / 1e6)} MB).`);
   const temporary = join(dirname(path), `.${name}-${randomUUID()}`);
   try {
-    if ((await downloadTo(`${WHISPER_MODELS}/resolve/main/${name}`, temporary, options)) !== expected.toLowerCase()) throw new VideoError("The speech model Kumi downloaded didn't match its checksum, so it wasn't kept.");
+    if ((await downloadTo(`https://huggingface.co/${repo}/resolve/main/${name}`, temporary, options, listed?.size)) !== expected.toLowerCase()) throw new VideoError("The speech model Kumi downloaded didn't match its checksum, so it wasn't kept.");
     await rename(temporary, path);
   } finally { await rm(temporary, { force: true }); }
   return path;

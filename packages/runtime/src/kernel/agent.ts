@@ -25,6 +25,12 @@ export interface ModelBinding {
   readonly id: string;
   readonly model: LanguageModelV4;
   prepare(request: ModelRequest): LanguageModelV4CallOptions;
+  /**
+   * How much conversation fits beside the instructions and tools (`fixed` bytes), for a model that
+   * reads less at once than the default budget assumes (one on the producer's computer). Asked
+   * before every call: what the model reads may be known only once its server has answered.
+   */
+  budget?(fixed: number): ContextBudget;
 }
 
 /** Plain JSON, owned by Kumi: settled messages only, including provider replay metadata. */
@@ -93,6 +99,9 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
   const lifetime = new AbortController();
   // What the conversation was made with besides its messages: some models' reasoning is bound to it.
   const toolsKey = createHash("sha256").update(JSON.stringify({ instructions, specs })).digest("base64url").slice(0, 22);
+  // A binding that sizes the conversation to its model is told what the instructions and tools take.
+  const fixed = Buffer.byteLength(instructions) + Buffer.byteLength(JSON.stringify(specs));
+  const budgetNow = (): ContextBudget => (options.budget || !binding.budget ? budget : binding.budget(fixed));
   let history = options.checkpoint ? restore(options.checkpoint, binding.id, toolsKey) : [];
   /** The turn under way: guidance waiting for its next step, and what it has said and done so far. */
   let running: { steering: string[]; context?: () => LanguageModelV4Message[] } | undefined;
@@ -137,7 +146,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
     try {
       for (let step = 0; ; step++) {
         if (step === maxSteps) { abort.throwIfAborted(); history = [...earlier, ...withoutImages(messages)]; return settled("max-steps"); }
-        const fitted = fit(earlier, messages, budget);
+        const fitted = fit(earlier, messages, budgetNow());
         if (fitted.history !== earlier || fitted.turn !== messages) {
           // Kumi just changed what came before. Some providers bind a model's reasoning to the exact
           // conversation it saw (Anthropic's current models refuse the request otherwise), so the
@@ -283,7 +292,7 @@ export function createAgentKernel(options: AgentKernelOptions): AgentKernel {
       const words = question.trim();
       if (!words || Buffer.byteLength(words) > MAX_STEER) throw new KumiError("request", "Ask a side question of at most 16 KiB.");
       const context = running?.context?.() ?? history;
-      const fitted = fit(context, [user(`${ASIDE_NOTE}\n\n${words}`)], budget);
+      const fitted = fit(context, [user(`${ASIDE_NOTE}\n\n${words}`)], budgetNow());
       // The conversation in plain words, its calls and their results written out: then no tools are
       // offered at all, which every provider takes (some can't be told "none" with calls in the conversation).
       const messages = plainWords([...fitted.history, ...fitted.turn]);

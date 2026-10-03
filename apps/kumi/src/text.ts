@@ -1,4 +1,4 @@
-import type { WebEvent } from "@kumi/runtime";
+import type { LibraryStatus, WebEvent } from "@kumi/runtime";
 
 /** Incremental terminal sanitizer: escape sequences and secret prefixes may span chunks. */
 export class StreamingText {
@@ -71,4 +71,16 @@ export function webWords(event: WebEvent, clean: (text: string, max: number) => 
   return { lead: "Read", title: titled ? `“${clean(event.title, 120)}”` : clean(`${place}${path}`, 120),
     detail: [titled ? place : "", event.kind && event.kind !== "a page" ? event.kind : "", event.files !== undefined ? `${event.files} ${event.files === 1 ? "file" : "files"}` : ""]
       .filter(Boolean).join(" · ") };
+}
+
+/** The library in a line: learning it (and how far), or what Kumi knows of it. */
+export function libraryLine(status: LibraryStatus | undefined): string | undefined {
+  if (!status || status.state === "new") return undefined;
+  const count = (value: number) => value.toLocaleString("en-US");
+  if (!status.learnedAt) {
+    if (status.state === "paused") return "Learning your library · paused while Live plays";
+    return `Learning your library in the background${status.todo ? ` · ${count(status.done ?? 0)} of ${count(status.todo)} sounds` : "…"}`;
+  }
+  const known = `Your library: ${count(status.sounds)} sounds · ${count(status.presets)} presets · ${count(status.sets)} Sets`;
+  return status.state === "learning" && status.todo ? `${known} · learning ${count(status.todo - (status.done ?? 0))} new` : known;
 }

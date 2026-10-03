@@ -136,6 +136,9 @@ test("an older bridge doesn't offer auditions; the request is checked before any
   assert.deepEqual(renderSpan(64, 4, 4, 60).position, 60);
   assert.deepEqual(renderSpan(16, 4, 4, 120, true), { position: 4, preroll: 12, wait: 18 }, "twice the lead-in, after a late pass");
   assert.deepEqual(renderSpan(2, 4, 4, 120), { position: 0, preroll: 2, wait: 8 }, "a part near the start plays from the start");
+  // Kumi's listening device records from before the transport moves: a bar's count-in is enough (two after a late pass).
+  assert.deepEqual(renderSpan(16, 4, 4, 120, false, 0), { position: 12, preroll: 4, wait: 10 });
+  assert.deepEqual(renderSpan(16, 4, 4, 120, true, 0), { position: 8, preroll: 8, wait: 14 });
 });
 
 /** The transport steps an audition took, in order: play actions, jumps, and recording on. */

@@ -53,6 +53,7 @@ Kumi 读取打开的工程，并做出你要求的修改。每项修改都以平
 | `change_structure` | 添加返回轨道、复制轨道或场景、删除返回轨道（kept） |
 | `set_scene`、`capture_scene` | 场景的颜色、速度和拍号；把正在播放的片段捕获为新场景 |
 | `set_locators` | 两个命名的编曲视图定位器，标出一个段落 |
+| `arrange` | 用你的片段生成整首编曲：带定位器的段落、贯穿其中复制的循环、空白、fill 和 riser，作为一次修改（[编曲](#编曲)） |
 | `write_midi_clip` | 在空的 Session 槽位中新建带音符的 MIDI 片段 |
 | `write_arrangement_clip` | 把带音符的 MIDI 片段直接写入编曲视图（需要 Kumi 的 Live 扩展） |
 | `add_arrangement_clip` | 编曲视图中的一个空 MIDI 片段 |
@@ -80,6 +81,7 @@ Kumi 读取打开的工程，并做出你要求的修改。每项修改都以平
 | `delete_device`、`delete_clip`、`delete_scene`、`delete_track`、`delete_locator` | 删除操作，全部为 kept：Live 的撤销可以恢复它们 |
 | `clear_range` | 清除编曲视图中一条轨道上的一段，切开位于两端边缘的片段（需要扩展；kept） |
 | `set_clip_follow_actions`、`edit_rack_mapping` | 仅在使用 [Willington](WILLINGTON_INTEGRATION.md) 时：Follow Actions；宏名称、映射、变体名称和链区域 |
+| `live_command` | Live 自己的、其脚本接口没有的命令：编组、冻结、平铺、并轨、合并、转换为 MIDI、分离音轨、切片、保存、导出（[指南](KUMI_GUIDE.md#live-自己的命令)；保留：用 Live 的撤销撤回） |
 
 `make_changes` 可以在计划中运行以上任意工具，`undo_change` 撤销其中一项。
 
@@ -102,7 +104,9 @@ Kumi 会在你要求时播放，或在有助于检查、展示它所搭建的内
 
 | 工具 | 作用 |
 | --- | --- |
-| `find_samples` | 根据文件名和文件夹中的词语，或随机地，在你指定的文件夹或 Live 存放采样的位置查找磁盘上的采样 |
+| `find_sounds` | 根据文件名和文件夹中的词语，或随机地，在你指定的文件夹或 Live 存放采样的位置查找磁盘上的声音；Kumi 学习了你的素材库之后，还能按声音是什么、听起来如何查找 |
+| `find_presets`、`my_sets` | 按词语、设备和类型查找你的预设；按词语、速度和调查找你的工程 |
+| `plugin` | 某个插件的指南（用途、真实参数、Kumi 现在能调节哪些），或为它制作的波表 |
 | `audition` | 在一次处理中安静地渲染候选轨道或整个混音（`{"mix": true}`），并将每一个与参考对比打分 |
 | `render` | 不经播放，把音频轨道自身的片段渲染为文件，取其设备之前的信号（需要扩展） |
 | `make_device` | 制作 Max for Live 设备（[指南](KUMI_GUIDE.md#制作-max-for-live-设备)） |
@@ -129,7 +133,7 @@ Live 不允许脚本把宏或调制器映射到参数、设置宏的范围或给
 
 ## 采样与鼓组
 
-`load_sample` 和 `load_sample_to_pad` 接受你电脑上任何音频文件的路径、`find_samples` 返回的文件，或者用词语、文件夹或 `{"random": true}` 让 Kumi 来挑；`import_audio` 接受一个路径。桥接会检查文件，并把一份以原文件名命名的副本交给 Live。对于“用随机采样给我做一套鼓组”这样的请求，Kumi 会添加一条 MIDI 轨道、加载一个 Drum Rack，并从 C1 开始往上在每个打击垫上放一个采样。Live 没有把采样放到打击垫上的单一调用，所以 Remote Script 会像 Push 那样，让 Browser 把一个 Simpler 热替换进打击垫，此前会先确认 Live 确实把该打击垫当作了目标。
+`load_sample` 和 `load_sample_to_pad` 接受你电脑上任何音频文件的路径、`find_sounds` 返回的文件，或者用词语、文件夹或 `{"random": true}` 让 Kumi 来挑；`import_audio` 接受一个路径。桥接会检查文件，并把一份以原文件名命名的副本交给 Live。对于“用随机采样给我做一套鼓组”这样的请求，Kumi 会添加一条 MIDI 轨道、加载一个 Drum Rack，并从 C1 开始往上在每个打击垫上放一个采样。Live 没有把采样放到打击垫上的单一调用，所以 Remote Script 会像 Push 那样，让 Browser 把一个 Simpler 热替换进打击垫，此前会先确认 Live 确实把该打击垫当作了目标。
 
 ## 重采样
 
@@ -142,6 +146,18 @@ Live 不给脚本提供并轨（bounce），所以 Kumi 在一个计划中进行
 5. 停止播放、停止录音，并取消该轨道的录音预备。
 
 录下的是一个普通的音频片段，`listen` 可以听到它。有扩展时，`render` 无需播放就能得到音频轨道自身的片段。
+
+## 编曲
+
+`arrange` 用你自己的片段，一次调用就在编曲视图中排出一首曲子。模型给出结构，Kumi 计算出每一次复制。
+
+- **输入。**按顺序排列的 `sections`：`name`、`bars`、它播放的 `scene`（或 `tracks`，每项是轨道名称或引用，或用 `{track, scene}` 指定另一个片段），以及可选的 `gap`（轨道在结尾前若干拍停止）、`fill`（结尾处轨道的另一个片段）和 `riser`（在段落结束处结束的片段）。还有 `scene`（默认）、`loop`（`from_bar`、`bars`：用编曲视图中已有的小节来编排）、`start_bar` 和 `final`。
+- **不给段落时**不做任何修改：返回素材，即每个场景中按轨道列出的片段及其长度、编曲视图中片段结束的位置，以及它的定位器。
+- **先检查。**每条轨道都能找到且没有歧义，要放片段的位置在编曲视图中是空的。拒绝时什么都不会改变。
+- **撤销。**HISTORY 中一行，它的撤销会按从新到旧的顺序撤回每一次复制。Live 的一个撤销步骤包含全部内容，所以只需一次 Cmd-Z。播放头的移动不会被撤销。
+- **Live 不允许的事。**编曲视图中的自动化，所以滤波扫频和音量起伏需要你自己画；复制编曲视图中已有的音频片段（那里的循环中的音频片段会被略过，并告诉你）。Live 播放时，定位器和播放头会等待。
+
+`listen` 加上 `form: true` 会给出参考曲按小节划分的段落，以及每段的能量、密度和低频、哪些段落相似、它的角色（前奏、铺垫、高潮、间奏、尾声）。模型再用 `arrange` 照着做。
 
 ## 进入 Live 的两条通道
 
@@ -166,7 +182,7 @@ Kumi 通过桥接的 Remote Script（Live 的 Python API，上面的每项修改
 
 ## Live 不允许脚本做的事
 
-保存工程、导出或冻结轨道、映射宏或调制器（Willington 之外），或编辑编曲视图的自动化线。模型知道这些限制，会直白地说明，并建议变通办法。
+保存工程、导出、冻结或并轨轨道、编组轨道：Kumi 通过 Live 自己的菜单（`live_command`）完成这些。映射宏或调制器（Willington 之外），或编辑编曲视图的自动化线：模型知道这些限制，会直白地说明，并建议变通办法。
 
 ## 桥接版本
 
@@ -181,7 +197,8 @@ Kumi 在连接时读取桥接的版本，不会提供桥接版本过旧而无法
 | 1.0.57 | 任意大小的工程 |
 | 1.0.58 | `delete_clip`、`delete_scene`、`delete_track`、`delete_locator`；整个计划作为 Live 撤销中的一步；`undo_in_live`；`edit_device`、`duplicate_device`；供 FOCUS 使用的 Live 事件；Kumi 的 Live 扩展（`write_arrangement_clip`、`clear_range`、`render`） |
 | 1.0.68 | `run_python` |
+| 1.0.73 | 通过 Kumi Ears 聆听轨道、返回轨道或混音（更早的桥接会先录音再聆听） |
 
 只要桥接提供 Willington 工具，它们就会出现，而桥接只在设置好该提供方后才会提供。
 
-每个 Kumi 版本都附带一个桥接：Kumi 1.6.1 附带桥接 1.0.72，1.6.0 附带 1.0.71，1.5 附带 1.0.70，1.4 附带 1.0.69，1.3 附带 1.0.68，1.2 附带 1.0.66，1.1 附带 1.0.53，1.0 附带 1.0.52。
+每个 Kumi 版本都附带一个桥接：Kumi 1.7 附带桥接 1.0.73，1.6.1 附带 1.0.72，1.6.0 附带 1.0.71，1.5 附带 1.0.70，1.4 附带 1.0.69，1.3 附带 1.0.68，1.2 附带 1.0.66，1.1 附带 1.0.53，1.0 附带 1.0.52。

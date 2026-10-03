@@ -29,7 +29,7 @@ test("the report holds versions, the doctor, the last conversation, the gap log 
     let printed = "";
     const code = await writeReport({ out: new Writable({ write(chunk, _e, done) { printed += String(chunk); done(); } }), env, home, user: "fixtureuser", folder: home,
       now: () => new Date("2026-09-29T20:00:00Z"), nodeVersion: "v24.21.0", terminal: { isTTY: false }, liveLogs: async () => [log],
-      videoPrograms: async () => ({}) });
+      videoPrograms: async () => ({}), voice: async () => ({ model: { name: "ggml-small.en-q5_1.bin" }, fetches: true }) });
     assert.equal(code, 0);
     const file = join(home, "kumi-report-2026-09-29T20-00-00.txt");
     assert.deepEqual(readdirSync(home).filter((name) => name.startsWith("kumi-report")), ["kumi-report-2026-09-29T20-00-00.txt"]);
