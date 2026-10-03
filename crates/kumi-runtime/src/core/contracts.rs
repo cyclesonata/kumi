@@ -1029,18 +1029,18 @@ pub struct ChainPlacement {
 
 /// A device chain by name, for NOW's picture: a track's or a chain's devices in order with the new
 /// one's place, and, inside a rack, the rack's chains side by side and which one it's in.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DevicePlacement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<usize>,
+    pub index: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rack: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chains: Option<Vec<ChainPlacement>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain: Option<usize>,
+    pub chain: Option<f64>,
 }
 
 /// What changed in a saved Set while Kumi wasn't running, in plain words. Names are data.

@@ -99,3 +99,22 @@ fn change_schemas_outputs_permanence_and_human_messages_match_source() {
     assert_eq!(*HOST_TOOLS, serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap());
     assert_eq!(*UNDO_DESCRIPTION, data["undoDescription"]);
 }
+
+#[test]
+fn base_change_summaries_match_complete_source_outputs() {
+    let data: Value = serde_json::from_str(include_str!("support/change-summaries-oracle.json")).unwrap();
+    let track =
+        |value: &Value| value.as_str().and_then(|key| data["tracks"].get(key)).map(|value| serde_json::from_value(value.clone()).unwrap());
+    for case in data["cases"].as_array().unwrap() {
+        let result = kind(case)
+            .summarize_base(
+                case["preview"].as_object().unwrap(),
+                case["input"].as_object().unwrap(),
+                &track,
+                case.get("applied").and_then(Value::as_object),
+            )
+            .unwrap();
+        let actual: Value = serde_json::from_str(&stringify(&serde_json::to_value(result).unwrap())).unwrap();
+        assert_eq!(actual, case["value"], "{case}");
+    }
+}

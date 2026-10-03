@@ -1,4 +1,5 @@
 //! Native change preparation and metadata for Live's guarded preview/apply operations.
+mod summaries;
 use crate::core::{contracts::*, errors::RuntimeError};
 use async_trait::async_trait;
 use kumi_common::js::{
@@ -604,3 +605,15 @@ pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState,
     }
 }
 // The change descriptions are implemented separately from their preparation.
+
+impl ChangeKind {
+    pub fn summarize_base(
+        &self,
+        preview: &JsonObject,
+        input: &JsonObject,
+        track: &dyn Fn(&Value) -> Option<KnownTrack>,
+        applied: Option<&JsonObject>,
+    ) -> Option<ChangeSummary> {
+        summaries::base(self, preview, input, track, applied)
+    }
+}
