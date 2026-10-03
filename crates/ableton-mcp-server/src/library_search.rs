@@ -213,6 +213,8 @@ impl LibrarySort {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryQuery {
+    /// Original validated host values retain JavaScript enum coercion and cursor identity.
+    pub host_values: Option<Value>,
     pub mode: LibraryMode,
     pub query: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -229,6 +231,7 @@ impl LibraryQuery {
     /// A query with only the mode and limit set, as the host builds one before adding filters.
     pub fn new(mode: LibraryMode, limit: usize) -> LibraryQuery {
         LibraryQuery {
+            host_values: None,
             mode,
             query: None,
             tags: None,
@@ -652,8 +655,16 @@ fn page_ids<T: Serialize>(
         revision_input.insert("ids".to_string(), Value::String(id_of(first).to_string()));
     }
     revision_input.insert("count".to_string(), Value::from(items.len()));
-    revision_input.insert("sort".to_string(), Value::String(sort.as_str().to_string()));
-    revision_input.insert("mode".to_string(), Value::String(query.mode.as_str().to_string()));
+    revision_input.insert(
+        "sort".to_string(),
+        if query.mode == LibraryMode::Tags {
+            json!("name")
+        } else {
+            query.host_values.as_ref().and_then(|v| v.get("sort")).cloned().unwrap_or(json!(sort.as_str()))
+        },
+    );
+    revision_input
+        .insert("mode".to_string(), query.host_values.as_ref().and_then(|v| v.get("mode")).cloned().unwrap_or(json!(query.mode.as_str())));
     let revision = hex::encode(Sha256::digest(stringify(&Value::Object(revision_input)).as_bytes()));
     if let Some(cursor) = &query.cursor {
         let decoded: Value = serde_json::from_str(&String::from_utf8_lossy(&node_base64_decode(cursor)))
@@ -705,6 +716,20 @@ fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
     unique
 }
 
+fn host_enum_seed(query: &LibraryQuery, key: &str) -> Option<String> {
+    let raw = query.host_values.as_ref()?.get(key)?.as_array()?;
+    let mut unique: Vec<&Value> = Vec::new();
+    for value in raw {
+        if value.is_array() || value.is_object() || !unique.contains(&value) {
+            unique.push(value);
+        }
+    }
+    let mut strings: Vec<String> =
+        unique.into_iter().map(|v| crate::host::helpers::js_string(v).expect("validated library enum")).collect();
+    strings.sort_by(|a, b| js_str_cmp(a, b));
+    Some(strings.join(","))
+}
+
 pub fn query_library_files(reader: &SqliteReader, query: &LibraryQuery) -> Result<LibraryPage<LibraryItem>, LibrarySearchError> {
     let files = read_library_files(reader)?;
     let TagIndex { tags_by_file, .. } = build_tag_index(reader, &files)?;
@@ -730,7 +755,10 @@ pub fn query_library_files(reader: &SqliteReader, query: &LibraryQuery) -> Resul
             continue;
         }
         let classification = classify_file_type(row.file_type, &row.name);
-        if requested_kinds.as_ref().is_some_and(|kinds| !kinds.contains(&classification.kind)) {
+        if query.host_values.as_ref().and_then(|v| v["kinds"].as_array()).filter(|a| !a.is_empty()).map_or_else(
+            || requested_kinds.as_ref().is_some_and(|kinds| !kinds.contains(&classification.kind)),
+            |a| !a.iter().any(|v| v == classification.kind.as_str()),
+        ) {
             continue;
         }
         let name_rejected = match (&name_matcher, &lowered_query) {
@@ -789,7 +817,8 @@ pub fn query_library_files(reader: &SqliteReader, query: &LibraryQuery) -> Resul
         "files|{}|{}|{}|{}",
         query.query.as_deref().unwrap_or(""),
         requested_tags.join(","),
-        sorted_unique(requested_kinds.iter().flatten().map(|kind| kind.as_str().to_string())).join(","),
+        host_enum_seed(query, "kinds")
+            .unwrap_or_else(|| sorted_unique(requested_kinds.iter().flatten().map(|kind| kind.as_str().to_string())).join(",")),
         sorted_unique(requested_sources.iter().flatten().cloned()).join(",")
     );
     let mut page = page_ids(matched, |item| &item.name, query, sort, &revision_seed, scanned_rows)?;
@@ -834,7 +863,10 @@ pub fn query_library_plugins(reader: &SqliteReader, query: &LibraryQuery) -> Res
             }
         }
         let format = plugin_format(row.get(2));
-        if requested_formats.as_ref().is_some_and(|formats| !formats.contains(&format.format)) {
+        if query.host_values.as_ref().and_then(|v| v["formats"].as_array()).filter(|a| !a.is_empty()).map_or_else(
+            || requested_formats.as_ref().is_some_and(|formats| !formats.contains(&format.format)),
+            |a| !a.iter().any(|v| v == format.format.as_str()),
+        ) {
             continue;
         }
         let module_id = row_number(row, 1);
@@ -856,7 +888,8 @@ pub fn query_library_plugins(reader: &SqliteReader, query: &LibraryQuery) -> Res
         "plugins|{}|{}|{}",
         query.query.as_deref().unwrap_or(""),
         sorted_unique(requested_vendors.iter().flatten().cloned()).join(","),
-        sorted_unique(requested_formats.iter().flatten().map(|format| format.as_str().to_string())).join(",")
+        host_enum_seed(query, "formats")
+            .unwrap_or_else(|| sorted_unique(requested_formats.iter().flatten().map(|format| format.as_str().to_string())).join(","))
     );
     page_ids(items, |item| &item.name, query, query.sort.unwrap_or(LibrarySort::UseCount), &revision_seed, scanned_rows)
 }
