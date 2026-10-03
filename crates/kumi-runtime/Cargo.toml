@@ -21,6 +21,10 @@ path = "src/bin/kumi-harness.rs"
 name = "kumi-library-measure"
 path = "src/bin/kumi-library-measure.rs"
 
+[[bin]]
+name = "kumi-library-learner"
+path = "src/bin/kumi-library-learner.rs"
+
 [dependencies]
 kumi-common.workspace = true
 async-trait.workspace = true
