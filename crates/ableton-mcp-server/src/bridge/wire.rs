@@ -4,6 +4,7 @@ use crate::registry::{canonical_json, CanonicalError, CanonicalLimits, WIRE_CANO
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -53,4 +54,72 @@ pub(super) fn random_id() -> String {
 }
 pub(super) fn digest(value: &Value) -> Result<String, LiveError> {
     Ok(hex::encode(Sha256::digest(canonical(value, false)?.as_bytes())))
+}
+
+/// JSON.parse accepts wire frames deeper than serde_json's default 128-level limit.
+/// Scan nesting before disabling that default: canonical signing permits depth 256,
+/// including an empty container at that depth, but never an unbounded Rust stack.
+pub(super) fn parse(bytes: &[u8]) -> Result<Value, LiveError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut nesting = 0usize;
+    for byte in text.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => {
+                    nesting += 1;
+                    if nesting > 257 {
+                        return Err(LiveError::error("wire payload is too deeply nested"));
+                    }
+                }
+                b']' | b'}' => nesting = nesting.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(&text);
+    deserializer.disable_recursion_limit();
+    let value = Value::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parsing_honors_the_256_level_wire_bound_beyond_serdes_default() {
+        for depth in [128, 129, 255, 256] {
+            let text = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            let value = parse(text.as_bytes()).unwrap();
+            assert!(canonical(&value, false).is_ok(), "depth {depth}");
+        }
+        let empty_at_bound = format!("{}{}", "[".repeat(257), "]".repeat(257));
+        assert!(canonical(&parse(empty_at_bound.as_bytes()).unwrap(), false).is_ok());
+        let leaf_past_bound = format!("{}0{}", "[".repeat(257), "]".repeat(257));
+        assert_eq!(
+            canonical(&parse(leaf_past_bound.as_bytes()).unwrap(), false).unwrap_err().message(),
+            "wire payload is too deeply nested"
+        );
+        let excessive = format!("{}0{}", "[".repeat(258), "]".repeat(258));
+        assert_eq!(parse(excessive.as_bytes()).unwrap_err().message(), "wire payload is too deeply nested");
+    }
+    #[test]
+    fn nesting_scan_ignores_escaped_string_contents_and_parser_still_checks_syntax() {
+        let value = serde_json::json!({"text":format!("{}\"{{[\\]}}", "[".repeat(1000))});
+        assert_eq!(parse(serde_json::to_string(&value).unwrap().as_bytes()).unwrap(), value);
+        assert!(parse(b"[1,]").is_err());
+        assert!(parse(b"{} {}").is_err());
+        assert_eq!(parse(b"\"\xff\"").unwrap(), Value::String("\u{fffd}".into()));
+    }
 }

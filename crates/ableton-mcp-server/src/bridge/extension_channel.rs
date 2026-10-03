@@ -355,9 +355,7 @@ impl ExtensionChannel {
                         if index == 0 {
                             continue;
                         }
-                        let result = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line[..index]))
-                            .map_err(LiveError::from)
-                            .and_then(|frame| channel.on_data(frame));
+                        let result = wire::parse(&line[..index]).and_then(|frame| channel.on_data(frame));
                         if let Err(error) = result {
                             failure = Some(error);
                         }

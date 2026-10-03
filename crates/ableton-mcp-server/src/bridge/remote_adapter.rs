@@ -431,9 +431,7 @@ impl RemoteScriptLiveAdapter {
                             failure = Some(LiveError::error("remote frame exceeds limit"));
                             break;
                         }
-                        let parsed = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line[..index]))
-                            .map_err(LiveError::from)
-                            .and_then(|frame| adapter.on_response(frame));
+                        let parsed = wire::parse(&line[..index]).and_then(|frame| adapter.on_response(frame));
                         if let Err(error) = parsed {
                             failure = Some(error);
                         }
