@@ -565,3 +565,92 @@ async fn a_midi_effect_that_runs_free_an_lfo_a_clock_passes_with_runs_free_witho
 }
 
 // ported with devices/tool.rs: "make_device makes an audio effect and an instrument, with Kumi's own knobs, and says to hear them"
+
+#[tokio::test(flavor = "current_thread")]
+async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
+    use futures::FutureExt;
+    use kumi_common::abort::Signal;
+    use kumi_runtime::devices::tool::{device_tool, DeviceToolOptions};
+    use std::cell::Cell;
+    use_built_harness();
+    let folder = tempfile::tempdir().unwrap();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = Rc::new(Cell::new(0));
+    let tool = device_tool(DeviceToolOptions {
+        user_library: folder.path().to_string_lossy().into(),
+        wait_ms: Some(5_000),
+        browser_sees: Rc::new({
+            let seen = seen.clone();
+            move |item, _| {
+                seen.borrow_mut().push(item);
+                calls.set(calls.get() + 1);
+                let listed = calls.get() > 1;
+                async move { Ok(listed) }.boxed_local()
+            }
+        }),
+    });
+    let guide = tool.execute(json!({"guide":true}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+    assert!(guide.text.starts_with("Making a MIDI effect"));
+    assert!(guide.text.contains("Every note-on the device sends gets a note-off"));
+    let made = tool.execute(lowest(), Signal::new()).await.unwrap();
+    assert!(!made.is_error, "{}", made.text);
+    let result: Value = serde_json::from_str(&made.text).unwrap();
+    assert_eq!(result["itemId"], "user_library/Kumi/Lowest Note");
+    assert_eq!(result["file"], folder.path().join("Kumi/Lowest Note.amxd").to_string_lossy().as_ref());
+    assert_eq!(result["controls"], json!(["Window (1–50 ms; 15)"]));
+    assert!(result["checks"].as_str().unwrap().contains("4 of 4"));
+    assert!(result.get("note").is_none());
+    assert_eq!(*seen.borrow(), ["user_library/Kumi/Lowest Note", "user_library/Kumi/Lowest Note"]);
+    let decoded = decode_amxd(&std::fs::read(folder.path().join("Kumi/Lowest Note.amxd")).unwrap()).unwrap();
+    assert_eq!(decoded.kind, DeviceType::MidiEffect);
+    assert_eq!(decoded.patcher["patcher"]["title"], "Lowest Note");
+    let again: Value = serde_json::from_str(&tool.execute(lowest(), Signal::new()).await.unwrap().text).unwrap();
+    assert_eq!(again["itemId"], "user_library/Kumi/Lowest Note 2");
+    let refused = tool
+        .execute(
+            with(
+                lowest(),
+                json!({"name":"Broken","code":"function midi(event) { if (event.type !== 'noteoff') send(event); }","tests":[]}),
+            ),
+            Signal::new(),
+        )
+        .await
+        .unwrap();
+    assert!(refused.is_error);
+    assert!(refused.text.contains("leaves notes hanging"));
+    assert!(!folder.path().join("Kumi/Broken.amxd").exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn make_device_makes_audio_effect_and_instrument_with_kumis_knobs() {
+    use futures::FutureExt;
+    use kumi_common::abort::Signal;
+    use kumi_runtime::devices::tool::{device_tool, DeviceToolOptions};
+    let folder = tempfile::tempdir().unwrap();
+    let tool = device_tool(DeviceToolOptions {
+        user_library: folder.path().to_string_lossy().into(),
+        wait_ms: Some(1_000),
+        browser_sees: Rc::new(|_, _| async { Ok(true) }.boxed_local()),
+    });
+    for (kind, start, phrase) in [
+        ("audio_effect", "Making an audio effect", "Max compiles the code when Live loads"),
+        ("instrument", "Making an instrument", "change(strike) != 0"),
+    ] {
+        let guide = tool.execute(json!({"guide":true,"type":kind}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+        assert!(guide.text.starts_with(start));
+        assert!(guide.text.contains(phrase));
+    }
+    let effect: Value = serde_json::from_str(&tool.execute(grit(), Signal::new()).await.unwrap().text).unwrap();
+    assert_eq!(effect["type"], "audio effect");
+    assert_eq!(effect["itemId"], "user_library/Kumi/Grit");
+    assert_eq!(
+        effect["controls"],
+        json!(["Drive (0–24 dB; 6)", "Tone (0–1; 0.5)", "Hard (on/off; off)", "Mix (0–100 %; 100)", "Output (-36–12 dB; 0)"])
+    );
+    assert!(effect["next"].as_str().unwrap().contains("audition"));
+    assert_eq!(decode_amxd(&std::fs::read(folder.path().join("Kumi/Grit.amxd")).unwrap()).unwrap().kind, DeviceType::AudioEffect);
+    let instrument: Value = serde_json::from_str(&tool.execute(pluck(), Signal::new()).await.unwrap().text).unwrap();
+    assert_eq!(instrument["type"], "instrument");
+    assert_eq!(instrument["voices"], 6);
+    assert_eq!(decode_amxd(&std::fs::read(folder.path().join("Kumi/Pluck.amxd")).unwrap()).unwrap().kind, DeviceType::Instrument);
+}
