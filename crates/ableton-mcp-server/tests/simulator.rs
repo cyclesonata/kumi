@@ -16,11 +16,18 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
         let events = Rc::new(RefCell::new(vec![]));
         let sink = events.clone();
         let _unsubscribe = live.subscribe(Rc::new(move |event| sink.borrow_mut().push(event.clone()))).unwrap();
+        let mut last_subscription: Option<String> = None;
         for step in scenario["steps"].as_array().unwrap() {
             let reference = LiveRef::from(step["ref"].as_str().unwrap_or(""));
             let before = kumi_common::time::now_ms();
             let mut result = match step["method"].as_str().unwrap() {
-                "invoke" => live.invoke(&serde_json::from_value(step["invocation"].clone()).unwrap()).map(Some),
+                "invoke" => {
+                    let mut invocation = step["invocation"].clone();
+                    if invocation["args"]["subscriptionId"] == "$last" {
+                        invocation["args"]["subscriptionId"] = json!(last_subscription);
+                    }
+                    live.invoke(&serde_json::from_value(invocation).unwrap()).map(Some)
+                }
                 "addNote" => live.add_note(&reference, &serde_json::from_value(step["note"].clone()).unwrap()).map(Some),
                 "external" => {
                     live.simulate_external_edit(&reference, step["property"].as_str().unwrap(), step["value"].clone()).map(|_| None)
@@ -34,6 +41,13 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
                 "reconnect" => live.reconnect().map(|status| Some(serde_json::to_value(status).unwrap())),
                 method => panic!("unknown test action {method}"),
             };
+            if step["invocation"]["operation"] == "observe.subscribe" && step.get("error").is_none() {
+                let result = result.as_mut().unwrap().as_mut().unwrap();
+                let id = result["subscriptionId"].as_str().unwrap();
+                assert!(id.starts_with("obs_") && id.len() < 40);
+                last_subscription = Some(id.to_owned());
+                result["subscriptionId"] = step["result"]["subscriptionId"].clone();
+            }
             if step["invocation"]["operation"] == "performance.read" {
                 let sampled = result.as_mut().unwrap().as_mut().unwrap();
                 let timestamp = sampled["sampledAt"].as_i64().unwrap();

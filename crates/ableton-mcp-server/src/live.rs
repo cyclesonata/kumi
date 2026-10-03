@@ -3395,6 +3395,8 @@ pub struct DeterministicLiveSimulator {
     modulation_amounts: RefCell<HashMap<String, HashMap<String, f64>>>,
     pub shown_messages: RefCell<Vec<Value>>,
     browser_preview: RefCell<Option<String>>,
+    observe_sequence: Cell<u64>,
+    observe_subscriptions: RefCell<HashMap<String, simulator_observe::ObserveSubscription>>,
 }
 impl Default for DeterministicLiveSimulator {
     fn default() -> Self {
@@ -3424,6 +3426,8 @@ impl DeterministicLiveSimulator {
             modulation_amounts: RefCell::new(HashMap::new()),
             shown_messages: RefCell::new(vec![]),
             browser_preview: RefCell::new(None),
+            observe_sequence: Cell::new(0),
+            observe_subscriptions: RefCell::new(HashMap::new()),
         }
     }
     fn next_sequence(&self) -> u64 {
@@ -4175,6 +4179,10 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "observe.subscribe" | "observe.poll" | "observe.unsubscribe" => self.invoke_observe(operation, args),
+            "session.capture-midi" | "scene.capture" | "session.audition-launch" | "session.audition-stop" | "session.emergency-stop" => {
+                self.invoke_session(operation, args)
+            }
             "data.get"
             | "data.set"
             | "note.select"
@@ -5448,3 +5456,9 @@ mod simulator_racks;
 
 #[path = "live_simulator_lom.rs"]
 mod simulator_lom;
+
+#[path = "live_simulator_session.rs"]
+mod simulator_session;
+
+#[path = "live_simulator_observe.rs"]
+mod simulator_observe;
