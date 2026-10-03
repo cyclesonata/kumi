@@ -108,7 +108,10 @@ impl StreamingText {
         for secret in &self.secrets {
             let mut length = (js::string::utf16_len(secret).saturating_sub(1)).min(pending_length);
             while length > retain {
-                if self.pending.ends_with(&js::string::head(secret, length)) {
+                if String::from_utf16(&secret.encode_utf16().take(length).collect::<Vec<_>>())
+                    .ok()
+                    .is_some_and(|prefix| self.pending.ends_with(&prefix))
+                {
                     retain = length;
                     break;
                 }

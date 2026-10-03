@@ -101,11 +101,12 @@ impl Utf8Decoder {
 pub struct KeyInput {
     source: Rc<dyn TerminalInput>,
     decoder: Rc<RefCell<Utf8Decoder>>,
+    listener: Rc<RefCell<Option<ByteListener>>>,
 }
 
 impl KeyInput {
     pub fn new(source: Rc<dyn TerminalInput>) -> KeyInput {
-        KeyInput { source, decoder: Rc::new(RefCell::new(Utf8Decoder::new())) }
+        KeyInput { source, decoder: Rc::new(RefCell::new(Utf8Decoder::new())), listener: Rc::new(RefCell::new(None)) }
     }
 }
 
@@ -123,6 +124,7 @@ impl TerminalInput for KeyInput {
     }
 
     fn resume(&self, listener: ByteListener) {
+        *self.listener.borrow_mut() = Some(listener.clone());
         let decoder = Rc::clone(&self.decoder);
         self.source.resume(Rc::new(move |chunk| {
             let text = decoder.borrow_mut().write(chunk);
@@ -134,13 +136,20 @@ impl TerminalInput for KeyInput {
     }
 
     fn pause(&self) {
+        self.listener.borrow_mut().take();
         self.source.pause();
     }
 
     fn on_end(&self, listener: Rc<dyn Fn()>) {
         let decoder = Rc::clone(&self.decoder);
+        let data = self.listener.clone();
         self.source.on_end(Rc::new(move || {
-            decoder.borrow_mut().end();
+            let tail = decoder.borrow_mut().end();
+            if let Some(data) = data.borrow().clone() {
+                for character in tail.chars() {
+                    data(character.to_string().as_bytes());
+                }
+            }
             listener();
         }));
     }
@@ -151,5 +160,11 @@ impl TerminalInput for KeyInput {
 
     fn emergency_raw_mode(&self) -> Option<RawModeRestorer> {
         self.source.emergency_raw_mode()
+    }
+}
+
+impl Drop for KeyInput {
+    fn drop(&mut self) {
+        self.source.pause();
     }
 }
