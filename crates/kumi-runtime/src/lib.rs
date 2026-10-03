@@ -28,9 +28,9 @@ pub use core::contracts::{
     PinnedNode, RecipeEvent, RecipeSummary, SavedConversation, SessionController, SessionEvent, SessionStatus, SessionStrip, StreamingCall,
     TechniqueEvent, TechniqueSummary, ToolImage, ToolResult, TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent, WebEvent,
 };
-pub use core::memory::{create_memory_store, memory_instructions, FORGET_TOOL, MAX_NOTE, MAX_NOTES, REMEMBER_TOOL};
-// TODO(port): re-exports from core/techniques
 pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
+pub use core::memory::{create_memory_store, memory_instructions, FORGET_TOOL, MAX_NOTE, MAX_NOTES, REMEMBER_TOOL};
+pub use core::techniques::{create_technique_store, technique_instructions, Technique, TechniqueBody, TechniqueSource, TechniqueStore};
 // TODO(port): re-exports from audio (analyzeFile, closeness, compare, hear, Analysis, Comparison)
 pub use audio::matching::Closeness;
 // TODO(port): re-exports from audio/tools
