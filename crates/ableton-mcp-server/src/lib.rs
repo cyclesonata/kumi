@@ -11,6 +11,7 @@ pub mod audio_standards;
 pub mod benchmark;
 pub mod bridge;
 pub mod cli;
+pub mod command;
 pub mod delivery;
 pub mod diagnostics;
 pub mod drum_sampler_preset;
