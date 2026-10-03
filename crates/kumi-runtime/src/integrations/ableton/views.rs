@@ -227,7 +227,7 @@ pub async fn device_tree(host: &dyn ViewHost, track_ref: &str, signal: Signal) -
 pub async fn session_strip(
     host: &dyn ViewHost,
     track_ref: &str,
-    scene: usize,
+    scene: f64,
     signal: Signal,
 ) -> Result<Option<SessionStrip>, RuntimeError> {
     if !readable(host) || !TRACK.is_match(track_ref) {
@@ -236,15 +236,17 @@ pub async fn session_strip(
     let result:Result<Option<SessionStrip>,RuntimeError>=async {
         let read=pages(host,object(json!({"kind":"clip-slot","parent":track_ref,"fields":["sceneIndex","clipRef","playingStatus"],"limit":host.page_limit(),"budget":host.whole_budget()})),signal.clone()).await?;
         if read.is_error==Some(true) {return Ok(None)}
-        let rows=rows(&payload(&read)?);let start=0.max((rows.len() as i64-7).min(scene as i64-3)) as usize;
-        let window:Vec<_>=rows.into_iter().skip(start).take(7).collect();
+        let rows=rows(&payload(&read)?);let start_number=if scene.is_nan(){f64::NAN}else{0f64.max((rows.len() as f64-7.).min(scene-3.))};
+        let start=start_number.trunc() as usize;
+        let end=(start_number+7.).trunc() as usize;
+        let window:Vec<_>=rows.into_iter().skip(start).take(end.saturating_sub(start)).collect();
         let clips=eager_all(window.iter().map(|row|async {
             if row.get("clipRef").and_then(Value::as_str).is_none()||row.get("ref").and_then(Value::as_str).is_none() {return Ok::<_,RuntimeError>(None)}
             let found=host.call("live_discover",object(json!({"kind":"session-clip","parent":row["ref"],"fields":["name","isAudio"],"limit":1})),signal.clone()).await.ok();
             let clip=match found.filter(|read|read.is_error!=Some(true)) {Some(read)=>rows_first(&payload(&read)?),None=>None};
             Ok(Some(SlotClip{name:clip.as_ref().and_then(|c|c.get("name")).and_then(Value::as_str).map(|s|head(s,256)).unwrap_or_default(),audio:clip.as_ref().and_then(|c|c.get("isAudio"))==Some(&Value::Bool(true))}))
         })).await?;
-        let mut slots=Vec::new();for (index,(row,clip)) in window.into_iter().zip(clips).enumerate(){slots.push(SessionSlot{index:row.get("sceneIndex").and_then(Value::as_f64).unwrap_or((start+index) as f64),clip,playing:(row.get("playingStatus").and_then(Value::as_f64)==Some(1.)).then_some(true),queued:(row.get("playingStatus").and_then(Value::as_f64)==Some(2.)).then_some(true)});}
+        let mut slots=Vec::new();for (index,(row,clip)) in window.into_iter().zip(clips).enumerate(){slots.push(SessionSlot{index:row.get("sceneIndex").and_then(Value::as_f64).unwrap_or(start_number+index as f64),clip,playing:(row.get("playingStatus").and_then(Value::as_f64)==Some(1.)).then_some(true),queued:(row.get("playingStatus").and_then(Value::as_f64)==Some(2.)).then_some(true)});}
         Ok(Some(SessionStrip{track_ref:track_ref.into(),scene,slots}))
     }.await;
     match result {

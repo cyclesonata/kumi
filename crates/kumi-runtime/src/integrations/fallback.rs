@@ -103,7 +103,7 @@ impl Integration for FallbackIntegration {
     fn has_session_strip(&self) -> bool {
         true
     }
-    async fn session_strip(&self, track_ref: &str, scene: usize, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
+    async fn session_strip(&self, track_ref: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
         let c = self.current();
         if c.has_session_strip() {
             c.session_strip(track_ref, scene, signal).await

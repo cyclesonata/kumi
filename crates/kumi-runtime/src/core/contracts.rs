@@ -387,7 +387,7 @@ pub trait Integration {
         false
     }
     /// A track's Session slots around a scene, for FOCUS.
-    async fn session_strip(&self, track_ref: &str, scene: usize, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
+    async fn session_strip(&self, track_ref: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
         let _ = (track_ref, scene, signal);
         Ok(None)
     }
@@ -682,7 +682,7 @@ pub struct SessionSlot {
 #[serde(rename_all = "camelCase")]
 pub struct SessionStrip {
     pub track_ref: String,
-    pub scene: usize,
+    pub scene: f64,
     pub slots: Vec<SessionSlot>,
 }
 
@@ -1713,7 +1713,7 @@ pub trait SessionController {
         false
     }
     /// A track's Session slots around a scene, and the Arrangement at a glance, for FOCUS (while connected).
-    async fn session_strip(&self, track_ref: &str, scene: usize) -> Result<Option<SessionStrip>, RuntimeError> {
+    async fn session_strip(&self, track_ref: &str, scene: f64) -> Result<Option<SessionStrip>, RuntimeError> {
         let _ = (track_ref, scene);
         Ok(None)
     }

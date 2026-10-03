@@ -44,7 +44,7 @@ try {
  await run('tree-depth','_tree',['7:track:0'],(_,a,i)=>page([{ref:'d'+i,chainList:[{ref:'c'+i}]}]));
  await run('tree-many-chains','_tree',['7:track:0'],(_,a,i)=>page(i===0?[{ref:'rack',chainList:Array.from({length:140},(_,i)=>({ref:'c'+i,name:'n'+i}))}]:[]));
  await run('tree-cancel','_tree',['7:track:0'],()=>({abort:true}));
- for(const count of [0,1,6,7,8,12])for(const scene of [0,3,6,20])await run(`strip-${count}-${scene}`,'sessionStrip',['7:track:0',scene],(_,a)=>a.kind==='clip-slot'?page(Array.from({length:count},(_,i)=>({ref:'slot'+i,sceneIndex:i,...(i%2?{clipRef:'clip'+i}:{}),playingStatus:i%3}))):page([{name:'Clip '+a.parent,isAudio:a.parent==='slot3'}]));
+ for(const count of [0,1,6,7,8,12])for(const scene of [-5,0,.5,3,3.5,6,6.5,20])await run(`strip-${count}-${scene}`,'sessionStrip',['7:track:0',scene],(_,a)=>a.kind==='clip-slot'?page(Array.from({length:count},(_,i)=>({ref:'slot'+i,sceneIndex:i,...(i%2?{clipRef:'clip'+i}:{}),playingStatus:i%3}))):page([{name:'Clip '+a.parent,isAudio:a.parent==='slot3'}]));
  for(const sceneIndex of [-1,0.5,'5',null,9])await run(`strip-index-${sceneIndex}`,'sessionStrip',['7:track:0',0],(_,a)=>a.kind==='clip-slot'?page([{ref:'slot',sceneIndex,clipRef:'clip'}]):page([{name:'🦀'.repeat(140),isAudio:true}]));
  for(const fail of ['error','throw','malformed','empty','cancel'])await run('strip-clip-'+fail,'sessionStrip',['7:track:0',0],(_,a)=>a.kind==='clip-slot'?page([{ref:'slot',clipRef:'clip'}]):fail==='error'?error:fail==='throw'?{throw:'oops'}:fail==='malformed'?{content:[]}:fail==='cancel'?{abort:true}:page());
  const note=(i)=>({id:i,pitch:60+i%12,start:i/4,duration:.25,velocity:80});

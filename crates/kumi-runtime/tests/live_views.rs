@@ -68,7 +68,7 @@ async fn paged_collections_and_all_focus_views_match_source_results_and_dispatch
                 views::pages(&host, args[0].as_object().unwrap().clone(), signal.clone()).await.map(|v| serde_json::to_value(v).unwrap())
             }
             "_tree" => views::device_tree(&host, args[0].as_str().unwrap(), signal.clone()).await.map(|v| serde_json::to_value(v).unwrap()),
-            "sessionStrip" => views::session_strip(&host, args[0].as_str().unwrap(), args[1].as_u64().unwrap() as usize, signal.clone())
+            "sessionStrip" => views::session_strip(&host, args[0].as_str().unwrap(), args[1].as_f64().unwrap(), signal.clone())
                 .await
                 .map(|v| serde_json::to_value(v).unwrap()),
             "arrangementStrip" => views::arrangement_strip(&host, signal.clone()).await.map(|v| serde_json::to_value(v).unwrap()),

@@ -1824,7 +1824,7 @@ impl SessionController for Session {
     fn has_session_strip(&self) -> bool {
         true
     }
-    async fn session_strip(&self, track_ref: &str, scene: usize) -> Result<Option<SessionStrip>, RuntimeError> {
+    async fn session_strip(&self, track_ref: &str, scene: f64) -> Result<Option<SessionStrip>, RuntimeError> {
         let i = {
             let s = self.0.state.borrow();
             s.integration.clone().filter(|i| s.connection == ConnectionState::Connected && i.has_session_strip())

@@ -13,6 +13,7 @@ pub mod focus;
 pub mod fold;
 mod inference;
 pub mod references;
+pub mod remember;
 pub mod views;
 pub mod pins;
 mod concurrent;
