@@ -10,6 +10,7 @@ import { chooseMoments, formatTime, parseCaptions, parseTime, transcriptLines } 
 import { saidAround } from "../src/video/captions.js";
 import { ffmpegAsset, findFfmpeg, findYtDlp, whisperAsset, whisperModel, ytDlpAsset } from "../src/video/programs.js";
 import { cuesFromWhisper, speechModelFor } from "../src/video/speech.js";
+import { systemProgram } from "../src/system.js";
 import { publicAddress, watchVideo, youtubeId } from "../src/video/index.js";
 import { videoTools, WATCH_VIDEO_TOOL } from "../src/video/tool.js";
 
@@ -241,7 +242,7 @@ test("off a Mac, ffmpeg is fetched once into Kumi's folder, checked against its 
     mkdirSync(join(build, "bin"), { recursive: true });
     writeFileSync(join(build, "bin", "ffmpeg"), "#!/bin/sh\necho ffmpeg version fixture\n"); writeFileSync(join(build, "bin", "ffprobe"), "x"); writeFileSync(join(build, "LICENSE.txt"), "LGPL");
     const archive = join(root, "build.tar.gz");
-    execFileSync("tar", ["-czf", archive, "-C", join(root, "build"), "ffmpeg-n9.0-latest-linux64-lgpl-9.0"]);
+    execFileSync(systemProgram("tar"), ["-czf", archive, "-C", join(root, "build"), "ffmpeg-n9.0-latest-linux64-lgpl-9.0"]);
     const data = readFileSync(archive);
     const asset = "ffmpeg-n9.0-latest-linux64-lgpl-9.0.tar.xz";
     const release = (digest: string) => new TextEncoder().encode(JSON.stringify({ assets: [{ name: asset, size: 141_000_000, digest, browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${asset}` }] }));

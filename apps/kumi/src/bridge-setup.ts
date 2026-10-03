@@ -7,6 +7,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -14,8 +15,8 @@ import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { findBridgeConfig, kumiDir, remoteScriptsDir } from "./config.js";
 import { readBridgeServer } from "./doctor.js";
-import { extensionSource, installExtension, liveExtensionsDir } from "./live-extension.js";
-import { EARS_NAME, installEars, KUMI, KUMI_REPAIR, KUMI_START } from "@kumi/runtime";
+import { extensionSource, installExtension, liveExtensionsDir, removeFormerExtension } from "./live-extension.js";
+import { EARS_NAME, installEars, KUMI, KUMI_REPAIR, KUMI_START, systemProgram } from "@kumi/runtime";
 
 type Env = Readonly<Record<string, string | undefined>>;
 export interface Ran { code: number; stdout: string; stderr: string }
@@ -30,9 +31,10 @@ export interface BridgeSetupIo {
   allowDirty?: boolean;
   /** How long to wait for Live after installing; 0 doesn't wait. */
   waitMs?: number;
-  // For tests: what runs programs, whether Live is running, the question, the clock.
+  // For tests: what runs programs, whether Live is running, whether its Remote Script answers, the question, the clock.
   run?: (command: string, args: readonly string[], cwd?: string) => Promise<Ran>;
   liveRunning?: () => Promise<boolean>;
+  remoteScriptAnswers?: (configPath: string) => Promise<boolean>;
   confirm?: (question: string) => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   /** The bridge's folder in this repository. */
@@ -72,11 +74,45 @@ export function runProgram(command: string, args: readonly string[], cwd?: strin
   });
 }
 
+/**
+ * Whether Live's Remote Script answers on the bridge's port: a plain connect, closed at once (no secret
+ * goes anywhere). It answers only once Live has loaded it. A configuration that can't be read says yes,
+ * so the lifecycle's own check decides.
+ */
+export function remoteScriptAnswers(configPath: string): Promise<boolean> {
+  let host: unknown; let port: unknown;
+  try { ({ host, port } = (JSON.parse(readFileSync(configPath, "utf8")) as { bridge?: { host?: unknown; port?: unknown } }).bridge ?? {}); } catch { return Promise.resolve(true); }
+  if ((host !== "127.0.0.1" && host !== "::1") || typeof port !== "number" || !Number.isInteger(port)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const socket = connect({ host, port });
+    const done = (answers: boolean) => { socket.destroy(); resolve(answers); };
+    socket.setTimeout(1_500, () => done(false));
+    socket.once("connect", () => done(true)); socket.once("error", () => done(false));
+  });
+}
+
 /** Whether Live is running: on macOS its process is "Live"; on Windows, "Ableton Live … .exe". */
 export async function isLiveRunning(run: NonNullable<BridgeSetupIo["run"]>): Promise<boolean> {
   if (process.platform === "darwin") return (await run("pgrep", ["-x", "Live"])).code === 0;
-  if (process.platform === "win32") return /Ableton Live/i.test((await run("tasklist", ["/FI", "IMAGENAME eq Ableton Live*", "/NH"])).stdout);
+  if (process.platform === "win32") return /Ableton Live/i.test((await run(systemProgram("tasklist"), ["/FI", "IMAGENAME eq Ableton Live*", "/NH"])).stdout);
   return false;
+}
+
+/**
+ * While Kumi waits for Live, Ctrl-C, Enter or Esc stop the waiting. They're read as keys (the terminal
+ * in raw mode), not taken as a signal: a lifecycle step under way finishes rather than leaving its
+ * lock behind, and on Windows cmd doesn't then ask "Terminate batch job (Y/N)?" over kumi.cmd.
+ */
+function stopOnKey(input: BridgeSetupIo["input"]): { stopped: boolean; pressed: Promise<void>; release(): void } {
+  const stop = { stopped: false, pressed: new Promise<void>(() => {}), release: () => {} };
+  const tty = input as (Readable & { isTTY?: boolean; setRawMode?: (on: boolean) => unknown }) | undefined;
+  if (!tty?.isTTY || typeof tty.setRawMode !== "function") return stop;
+  let pressed!: () => void;
+  stop.pressed = new Promise<void>((resolve) => { pressed = resolve; });
+  const onData = (chunk: Buffer | string) => { if (/[\x03\x1b\r\n]/.test(String(chunk))) { stop.stopped = true; pressed(); } };
+  tty.setRawMode(true); tty.on("data", onData); tty.resume();
+  stop.release = () => { tty.removeListener("data", onData); try { tty.setRawMode!(false); } catch { /* the terminal went */ } tty.pause(); };
+  return stop;
 }
 
 async function ask(io: BridgeSetupIo, question: string): Promise<boolean> {
@@ -112,6 +148,8 @@ function placeExtension(io: BridgeSetupIo, say: (line?: string) => void, bridgeR
   if (!folder || !source) return;
   try {
     const placed = installExtension(source, folder);
+    // Kumi 1.6.0 and before put it in %APPDATA%\Ableton on Windows, which Live doesn't read.
+    removeFormerExtension(io.env);
     if (!placed.changed) return;
     const next = liveOpen ? " It starts the next time you open Live." : "";
     say(placed.replaced ? `Updated Kumi's extension in Live.${next}` : `Added Kumi's extension to Live: it renders tracks without playing them, writes MIDI clips in the Arrangement, and adds "Ask Kumi about this" to Live's right-click menu.${next}`);
@@ -220,17 +258,27 @@ export async function setupBridge(io: BridgeSetupIo): Promise<number> {
   say("");
   say(config ? "Now open Live. Kumi connects on its own." : "Now open Live, and in Settings → Link, Tempo & MIDI choose AbletonMcpBridge as a Control Surface. Kumi connects on its own.");
 
-  // Watch for Live, and record that the bridge reaches it (the lifecycle's read-only activation).
+  // Watch for Live, and record that the bridge reaches it (the lifecycle's read-only activation). The
+  // activation takes seconds (on Windows each of its permission checks starts PowerShell), so it runs
+  // only once Live's Remote Script answers on its port, which a plain connect says in a moment.
   const waitMs = io.waitMs ?? 10 * 60_000;
   if (waitMs <= 0) return 0;
-  say("Waiting for Live… (Ctrl-C stops waiting; nothing else depends on it)");
-  const sleep = io.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const attempts = Math.max(1, Math.ceil(waitMs / 3_000));
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const check = lifecycleAnswer(await lifecycle(root, "activate"));
-    if (check.ok && activated(check.value)) { say(`Live is connected through the new bridge. Run: ${KUMI_START}`); return 0; }
-    if (attempt < attempts - 1) await sleep(3_000);
-  }
-  say(`Live didn't connect yet; Kumi will connect when it does. If it doesn't, run: ${KUMI} doctor`);
+  say("Waiting for Live… (Enter or Ctrl-C stops waiting; nothing else depends on it)");
+  const sleep = io.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref(); }));
+  const answers = io.remoteScriptAnswers ?? remoteScriptAnswers;
+  const configPath = findBridgeConfig(io.env) ?? join(state, "bridge-config.json");
+  const attempts = Math.max(1, Math.ceil(waitMs / 2_000));
+  const stop = stopOnKey(io.input);
+  try {
+    for (let attempt = 0; attempt < attempts && !stop.stopped; attempt++) {
+      if (await answers(configPath)) {
+        const check = lifecycleAnswer(await lifecycle(root, "activate"));
+        if (check.ok && activated(check.value)) { say(`Live is connected through the new bridge. Run: ${KUMI_START}`); return 0; }
+      }
+      if (attempt < attempts - 1 && !stop.stopped) await Promise.race([sleep(2_000), stop.pressed]);
+    }
+  } finally { stop.release(); }
+  say(stop.stopped ? `Stopped waiting. Kumi connects on its own once Live has AbletonMcpBridge as a Control Surface; ${KUMI} doctor says how it stands.`
+    : `Live didn't connect yet; Kumi will connect when it does. If it doesn't, run: ${KUMI} doctor`);
   return 0;
 }

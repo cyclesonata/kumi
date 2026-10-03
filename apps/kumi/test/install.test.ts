@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { KUMI_VERSION } from "@kumi/runtime";
+import { KUMI_VERSION, systemProgram } from "@kumi/runtime";
+import { runProgram } from "../src/bridge-setup.js";
 import { askRelease, checkRelease, fetchManifest, newerVersion, PATH_MARKER, rollbackInstalled, swapIn, uninstallInstalled, updateInstalled } from "../src/install.js";
 
 const out = () => { const stream = new PassThrough(); let text = ""; stream.on("data", (chunk) => { text += String(chunk); }); return { stream, text: () => text }; };
@@ -20,7 +21,7 @@ function fakeRelease(dir: string, version: string): { bundle: Buffer; sha256: st
   writeFileSync(join(stage, "apps", "kumi", "bin", "kumi.mjs"), `process.stdout.write("Kumi ${version}\\n");\n`);
   writeFileSync(join(stage, "package.json"), JSON.stringify({ version }));
   const file = join(dir, `kumi-${version}.tar.gz`);
-  execFileSync("tar", ["-czf", file, "-C", stage, "."]);
+  execFileSync(systemProgram("tar"), ["-czf", file, "-C", stage, "."]);
   const bundle = readFileSync(file);
   return { bundle, sha256: createHash("sha256").update(bundle).digest("hex") };
 }
@@ -45,6 +46,11 @@ test("asked now (/update, update --check), a release says whether it's newer; no
 
 test("update puts the new Kumi in place only after checking it, keeps the one before, and rollback goes back", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kumi-install-"));
+  // Where Git for Windows is, its tools go first on PATH, as in a PowerShell started from Git Bash: its GNU tar
+  // reads "C:\…" as a remote host, so the update has to unpack with Windows' own.
+  const path = process.env.PATH;
+  const gnu = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "usr", "bin");
+  if (process.platform === "win32" && existsSync(join(gnu, "tar.exe"))) process.env.PATH = `${gnu};${path ?? ""}`;
   try {
     const home = join(dir, "home"); const scripts = join(dir, "Remote Scripts");
     mkdirSync(join(home, "app", "apps", "kumi", "bin"), { recursive: true }); mkdirSync(scripts);
@@ -67,9 +73,11 @@ test("update puts the new Kumi in place only after checking it, keeps the one be
     assert.equal(await updateInstalled({ out: otherNode.stream, env, fetcher: serve({ kumi: next, bundle: "kumi.tar.gz", sha256: release.sha256, node: "99.0.0" }) }), 1);
     assert.match(otherNode.text(), /needs Node 99\. Run the installer again/);
 
-    const updated = out();
-    assert.equal(await updateInstalled({ out: updated.stream, env, fetcher: serve({ kumi: next, bundle: "kumi.tar.gz", sha256: release.sha256, node }) }), 0, updated.text());
+    const updated = out(); const ran: string[] = [];
+    const run = (command: string, args: readonly string[], cwd?: string) => { ran.push(command); return runProgram(command, args, cwd); };
+    assert.equal(await updateInstalled({ out: updated.stream, env, run, fetcher: serve({ kumi: next, bundle: "kumi.tar.gz", sha256: release.sha256, node }) }), 0, updated.text());
     assert.match(updated.text(), new RegExp(`Kumi is now ${next.replaceAll(".", "\\.")}`));
+    assert.ok(ran.includes(systemProgram("tar")), "unpacked with the system's own tar");
     assert.match(readFileSync(join(home, "app", "apps", "kumi", "bin", "kumi.mjs"), "utf8"), /99\.0\.0/);
     assert.equal(JSON.parse(readFileSync(join(home, "app.previous", "package.json"), "utf8")).version, KUMI_VERSION, "the one before is kept");
     assert.equal(existsSync(join(home, "app.new")), false); assert.equal(existsSync(join(home, "downloads", "kumi.tar.gz")), false, "nothing left behind");
@@ -83,7 +91,10 @@ test("update puts the new Kumi in place only after checking it, keeps the one be
     const same = out();
     assert.equal(await updateInstalled({ out: same.stream, env, fetcher: serve({ kumi: KUMI_VERSION, bundle: "kumi.tar.gz", sha256: release.sha256, node }) }), 0);
     assert.match(same.text(), /up to date/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("uninstall removes Kumi, its Node and its launcher, and keeps the producer's own files unless asked", async () => {

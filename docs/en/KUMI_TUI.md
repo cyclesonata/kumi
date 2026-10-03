@@ -1,214 +1,208 @@
-# Kumi terminal UI
+# Kumi commands, keys and screens
 
-Status: direction agreed on 2026-09-27. The foundations and the full-screen app
-are built (`apps/kumi/src/tui/`) and run against real Live. FOCUS follows Live's
-selection (basic tier) and HISTORY lists Kumi's changes, each with its own undo
-([how changes work](KUMI_CHANGES.md)). The owner's "Kumi TUI Mockups" canvas shows
-every state below.
+English · [简体中文](../zh-CN/KUMI_TUI.md) · [日本語](../ja/KUMI_TUI.md)
 
-## Decisions
+The reference for Kumi's terminal app: what's on screen, every command and key,
+and the plain mode. The [guide](KUMI_GUIDE.md) explains what Kumi does.
 
-- **Full screen.** Kumi owns the whole terminal window (alternate screen) and
-  draws every cell, so panes scroll independently and stay put. The conversation
-  still reads like a chat: newest at the bottom, following a streaming answer.
-- **Layout.** A header (Set name, Live connection, transport), the conversation
-  on the left, a Live pane on the right and the input box at the bottom left.
-  The Live pane has three parts: FOCUS (where you are in Live), NOW (what Kumi is
-  doing, drawn live) and HISTORY (what Kumi changed, each with its own undo).
-  Below about 100 columns the Live pane folds into a two-line strip above the
-  input box, and history opens on demand.
-- **Look.** No boxes: areas are separated by background shade. Greys, one
-  accent (mint `#86e3b5`) and Live's own track colours; colour always means
-  something. Words before symbols; the only symbols are `■` track colour,
-  `●` live/active/new value, `○` offline/old value, `✓` done, `…` working,
-  `▾`/`▸` open/closed group and `›` path, plus the transport's own `▶`, `●` and
-  `■` when NOW shows Kumi playing, recording or stopping. Motion only shows that
-  something is happening or changing.
-- **Speak music.** Tool activity reads as "looked at Bass and Drums", never as a
-  tool name. No startup dumps; the `/` menu is short and curated.
-- **Focus in two tiers.** Basic focus for everyone comes from Live's scripting
-  API: Session or Arrangement, which panel is open (Browser, Clip or Device
-  view), the selected track, scene, clip slot, clip, device, rack chain and last
-  clicked parameter, and selected notes. Precise focus is opt-in and uses macOS
-  Accessibility, which Live 12 fills for screen readers: the exact focused
-  control, the clip tab (Notes, Envelopes with the chosen envelope, MPE), the
-  Browser item, mixer controls and the Arrangement position. The indicator only
-  shows what Live actually reports, because it defines what "this" means.
-- **The model is the producer's choice, made in place.** `/model`, `/effort`,
-  `/login` and `/logout` open a panel above the input box, drawn like the `/`
-  menu: providers as headings with whether Kumi is signed in there, their models
-  read from the providers themselves (Kumi keeps no list), then the model servers
-  on this computer ("Ollama · on this computer", a closed one with how to start
-  it), typing to filter. The
-  header names the model and its effort. A key is typed or pasted into a box that
-  shows only dots and its length, and is checked before it's kept. A failure that
-  has a fix offers it: a missing or refused sign-in asks "Sign in to Anthropic?"
-  and resends the message after; a model the provider doesn't offer opens the
-  list; a server that stops answering offers to send the message again. Changes
-  apply from the next message, so they're allowed mid-answer.
-- **Talking instead of typing.** Ctrl-T listens; pressed again, or let go after
-  holding it, it stops. While Kumi listens, the input box's bottom line shows a
-  pulsing mint `●`, the time and a level meter (`▁▃▅▇`), and the keys that apply
-  at its right; what was said is written down on the computer and lands in the
-  box at the cursor, for Enter. No panel and no red: in Live, red means recording.
-  The empty box's hint says "ctrl+t to talk". `/voice` holds the settings.
-- **Memory is quiet.** Kumi keeps notes on its own as it answers; each shows as
-  one faint line in the conversation, never a step, a prompt or a graph.
-  `/memory` lists the notes (about you, about this Set) in a panel like
-  `/model`'s, and choosing one offers to forget it.
-- **Undo is first-class.** Every change is a history entry backed by a bridge
-  transaction with verified undo; a whole turn can be undone too.
-- **A view, not the engine.** Visual building blocks are described as data by
-  the runtime, so a later desktop or web front end can draw the same things.
+## The screen
 
-## Foundations
+Kumi takes the whole terminal window and gives it back as it was when Kumi
+closes, crashes or is stopped.
 
-Built from terminal primitives in `apps/kumi/src/tui/`, no UI framework:
+- **Header:** Kumi, the Set's name, the model and its effort, and Live's
+  connection. While Live plays, a yellow light blinks on its beat (brightest on
+  the bar's first beat) beside the tempo.
+- **Conversation** (left): your messages, Kumi's answers and its steps, in plain
+  words ("looked at your Set"), each with its timing. A step at work animates by
+  kind (searching, reading, building a device, changing, listening, playing);
+  the same step done several times folds into one line ("read a page ×3").
+  What Kumi heard shows as a small spectrum, and what it keeps as a line of its
+  own: ✎ a note, ◆ a technique, ↻ a recipe, ✦ a lesson from matching.
+- **FOCUS** (top right): where you are in Live, following your selection as it
+  changes: a track's device tree with rack chains, a clip's notes as a small
+  piano roll, or a Session or Arrangement strip. A device you point at (click
+  it, or use **Ask Kumi about this** in Live) is pinned for your next messages.
+- **NOW** (middle right): what Kumi is doing, drawn as it happens: a value's
+  before and after, a new clip's notes, a colour swatch, a device landing in its
+  chain, "▶ Playing from the start marker".
+- **Tabs** (bottom right): **HISTORY** lists the latest three things Kumi kept
+  (each with **forget**), then every change, newest first, each with **undo**,
+  or **kept** / **no undo** / **check Live** when it can't be undone. **GOAL**
+  shows a `/goal` ("No goal yet" until there is one): the target, the best
+  score with its trend, the leading candidate, and the time.
+- **Input box** (bottom left): messages waiting to be sent show above it, and a
+  pinned device as a chip. Empty, it says "ctrl+t to talk". While Kumi listens,
+  its bottom line shows a pulsing mint `●`, the time and a level meter, with the
+  keys that apply at its right; no red, which in Live means recording.
 
-1. **Terminal I/O**: raw mode, alternate screen, bracketed paste, mouse (SGR),
-   focus events, autowrap off; the terminal is restored on normal exit, crashes
-   and signals.
-2. **Input**: keys with modifiers (xterm and CSI u encodings), pastes, mouse and
-   focus events, sequences split across reads, and a lone Escape resolved by a
-   short timeout. With the kitty protocol, a held key's repeats and its let-go
-   are events of their own.
-3. **Screen and renderer**: a grid of cells with grapheme widths; each frame is
-   diffed against the previous one and only changed cells are written, inside a
-   synchronized update. Colour degrades from 24-bit to 256, 16 and none.
-4. **Text**: grapheme widths (wide CJK and emoji take two cells), wrapping and
-   truncation.
-5. **Frames**: redraws are coalesced; an animation clock runs only while
-   something moves.
+The welcome screen shows what changed in the Set since you were last here, a
+newer Kumi when there is one, and, the first time, that Kumi is learning your
+library in the background.
 
-Tests replay the renderer's output through a small terminal interpreter, which
-must reproduce the intended frame exactly.
+Below 100 columns the Live pane folds into a two-line strip above the input box
+(where you are and what Kumi is doing, then the last change with its undo).
+Below 24×8 Kumi asks for a bigger window.
 
-On top of these, `app.ts` draws the layout and handles input: an editor for the
-input box (`editor.ts`), the conversation as entries laid out per width
-(`transcript.ts`), the `/` menu, scrolling that holds its place while text
-arrives, and the narrow layout. Terminals that support the kitty keyboard
-protocol report Shift+Enter distinctly, and when Ctrl-T is let go (hold it to
-talk); elsewhere its repeats stopping say so. `KUMI_UI=plain` or piped output keeps the
-old line-by-line interface (`terminal.ts`).
+## Commands in a terminal
 
-## Next
+Run these as `kumi <command>`; from a copy of the repository, as
+`npm run kumi -- <command>`.
 
-1. ~~**Focus feed**~~: done for the basic tier (Live's scripting API, read twice a
-   second, shown when it changes). Next, the opt-in Accessibility tier.
-2. ~~**Kumi's edits**~~: done. Almost every change Live's scripting allows, each a
-   HISTORY entry backed by its bridge transaction, undone by a click, `/undo` or
-   asking Kumi. NOW shows each change for a moment as it lands, and what Kumi
-   plays or records ("▶ Playing from the start marker", "● Recording in the Arrangement
-   on Bounce", "■ Stopped"), which leaves no HISTORY entry. `/stop` stops Live
-   any time.
-3. **NOW building blocks**: partly done. A mixer or device-parameter change shows
-   its before and after as positions (`██████████░░ → █████░░░░░░░`), in Live's
-   own units in the title ("-2.0 dB", "159 Hz"). A new MIDI clip shows its notes
-   as a two-row braille piano roll: time runs across, higher notes sit higher,
-   quieter notes are dimmer, and up to eight pitches get a lane each, so a drum
-   pattern reads as a grid. A colour change shows the old and new colours as
-   swatches (`████ → ████`), and the track's chip takes the new colour. Still to
-   do: a device chain, locators on a timeline, and bars instead of beats.
-4. ~~**Saved sessions**~~: done. Every Set's conversations are kept (the latest
-   20). Opening Kumi on a Set picks up its latest and shows the recent exchanges
-   ("Continuing your conversation from 2 hours ago"), with its HISTORY (without
-   undo). `/new` starts afresh under a line ("New conversation. Kumi won't use
-   what's above"), `/conversations` goes back to an earlier one, and ↑ and ↓ go
-   through what you sent, across `/new` and restarts.
-5. ~~**Listening, notes, techniques and recipes**~~: done. What Kumi heard is a
-   line in the conversation with a small spectrum (ten bands, sub to air,
-   `▁▂▃▄▅▆▇█`), and a comparison shows each band as dB over or under the
-   reference, coloured when it matters (±1.5 dB). Everything Kumi keeps is a line
-   of its own kind, with its glyph and colour: `✎` notes, `◆` techniques, `↻`
-   recipes. NOW shows it for a moment, and the HISTORY tab lists the latest three
-   first, above Kumi's changes, with a **forget** click each.
-   `/memory` opens all of it in the panel above the input box; `/recipes` the
-   recipes.
+| Command | What it does |
+| --- | --- |
+| `kumi` | Open Kumi on the Set Live has open |
+| `kumi --inference-only` | Chat without Live |
+| `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
+| `kumi login` | Sign in: asks whether with ChatGPT or an API key |
+| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
+| `kumi logout <provider>` | Remove Kumi's sign-in there |
+| `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
+| `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
+| `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed; `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
+| `kumi doctor` | Check Node, sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run |
+| `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
+| `kumi update [--check \| --rollback]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before (an installed Kumi only) |
+| `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
+| `kumi uninstall [--all] [--yes]` | Remove an installed Kumi; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question |
+| `kumi --version` (or `-v`), `kumi --help` | Version; help |
 
-6. ~~**Matching and goals**~~: done. An audition is a line in the conversation
-   per round ("Round 2 · 58% → 71% · brighter overall", then each candidate's
-   score, quietly) and one `♪` line in HISTORY with its score where an undo would
-   be. A match run keeps "matching · 58→71% · 2:05" in NOW while it works and
-   says how it ended. `/goal` opens the GOAL tab beside HISTORY, the first tab
-   after it: what the goal is after, its state, generations, candidates heard and
-   time, the best score with a sparkline of its trend (`▁▂▃▅▇█`), the leader and
-   its chain, what the model tried last, where the best was kept, and tokens on
-   an API key; NOW keeps "goal · 81% · gen 12 · 3:05". Lessons from matching are
-   `✦` lines, listed in `/memory` with forget.
+## Commands inside Kumi
 
-7. ~~**Activity and talking while Kumi works**~~: done. Each kind of step has
-   its own animation while it runs, a glyph in its row (a dot circling for a
-   search, lines read down a page, blocks filling for a device, a fader for a
-   change, a level meter for listening) and a wider scene under NOW (a scanner,
-   words lit one by one, tracks looked over, blocks stacking, a knob gliding, a
-   meter, a playhead); the words shimmer and the time counts up. Repeated steps
-   fold into one line ("read a page ×3") 3 s after the last: the extra lines fade,
-   then go one by one. Enter while Kumi works sends a message it reads after the
-   step under way; Tab, one for after the answer; both wait above the box.
-   `/btw` asks on the side, in a panel, kept out of the conversation. While Live
-   plays, a yellow light in the header blinks on its beat (from Live's transport
-   events and its tempo, no MIDI setup), brightest on the bar's first beat.
+Type `/` for a menu of these: ↑↓ choose, Tab completes, Enter runs, Esc closes.
+A message that starts with a path (a file dragged into the terminal) is a
+message, not a command.
 
-Done alongside: the welcome screen catches you up on a saved Set ("Since you were
-last here · 3 days ago", a few plain-words lines); once the conversation has
-started, the same summary arrives as a note.
+| Command | What it does |
+| --- | --- |
+| `/new` | Start a fresh conversation. What's above stays on screen under a line, the last conversation is kept, and HISTORY's undo still works |
+| `/btw <question>` | Ask something on the side, any time, even while Kumi works: answered from the conversation so far, without tools, in a panel, and not added to the conversation. `/btw` alone shows the last answer again |
+| `/conversations` | This Set's kept conversations (the latest 20); choose one to carry on with it |
+| `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
+| `/undo` | Undo Kumi's latest change |
+| `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
+| `/refresh` | Read the Set again without asking the model |
+| `/copy` | Copy Kumi's last answer to the clipboard |
+| `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message |
+| `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
+| `/goal <what to reach>` | Go after a sound until Kumi gets there. `/goal` alone picks up a paused goal; `/goal stop` (or `/goal end`) ends it |
+| `/memory` | Everything Kumi keeps: notes about you and this Set, what it learned from your Sets, techniques, recipes and lessons; choose one to forget it (a recipe to run or forget) |
+| `/recipes` | Your recipes: run one (Kumi starts the message `Run my recipe "<name>" on ` for you to finish) or forget it |
+| `/status` | What Kumi is connected to, the model, how far it has got learning your library, and on an API key the tokens this session used |
+| `/voice` | Talking instead of typing: start or stop, "Send when you stop", the language you speak and the microphone |
+| `/update` | Get the newest Kumi: it asks, closes, updates and opens again with the same conversation |
+| `/help` | The keys and commands, as a note in the conversation |
+| `/quit` | Close Kumi |
 
-## Edge cases to design for
+`/new`, `/reconnect`, `/refresh` and `/undo` work only while Kumi isn't
+answering; during an answer, Kumi says so and leaves things as they are.
 
-Collected during review; none of these block the foundations.
+## Keys
 
-**Big edits**
-- "Make me a 50-bar clip with lots of notes at random velocities": the 2-bar
-  piano roll does not scale. Show an overview strip (a cell per beat or bar,
-  with note density and pitch range), a detail window that follows the write
-  position, a velocity lane like Live's (`▁▂▃▅▇`), progress ("bar 23 of 50 ·
-  1,240 notes") and a summary when done (range, count, velocity spread). One undo
-  covers the whole clip. Drawing is throttled to the frame rate, never per note.
-- Batch changes across many tracks ("lower all synths 3 dB") are one expandable
-  history entry.
+**Typing and sending**
 
-**Routing**
-- Five MIDI tracks into one MIDI track: a fan-in diagram with track colour
-  chips, and a note about the destination's monitoring, the usual gotcha.
-- Sidechain from a silent trigger track (Operator into a Utility at −inf,
-  compressor on Bass keyed from the trigger): a signal-flow line with the tap
-  point marked between Operator and Utility, drawn out to Bass's compressor.
-  Say which tap was used ("Pre FX", or after Operator), and why it works.
+| Key | Action |
+| --- | --- |
+| Enter | Send. While Kumi works, it reads the message after the step under way |
+| Tab, while Kumi works | Send the message after the answer instead; it waits above the box |
+| Alt-↑ | Take the last waiting message back into the box |
+| Ctrl-J, Alt-Enter, Shift-Enter | New line (Shift-Enter in terminals that report it) |
+| ↑ and ↓ | Move through the box's lines, then through what you sent before (kept across `/new` and restarts, without secrets) |
+| Ctrl-A / Ctrl-E, Home / End | Start / end of the line |
+| Alt-← / Alt-→, Ctrl-← / Ctrl-→, Alt-B / Alt-F | Word left / right |
+| Ctrl-W, Alt-Backspace, Ctrl-Backspace | Delete the word before the cursor |
+| Ctrl-K / Ctrl-U | Delete to the end / start of the line |
+| Ctrl-T | Talk instead of typing: press it again to stop, or hold it while you talk. What you said lands in the box at the cursor; Enter stops and sends at once, Esc drops it |
 
-**Racks**
-- Nested instrument and effect racks, chains and drum pads: the focus path
-  collapses middle levels ("■ Keys › … › Chorus › Rate"); the device view is a
-  tree with chains; the touched device is marked; devices with the same name
-  are told apart by their chain; macro changes show the parameters they move.
+**Stopping and moving around**
 
-**Undo**
-- Undo refused because the producer changed the same thing afterwards: say so
-  and offer the choice. Undo of something later changes depend on (a created
-  track that then got a device): offer to undo those too. Undone with Cmd-Z in
-  Live: mark the entry "undone in Live".
+| Key | Action |
+| --- | --- |
+| Esc | Close the `/` menu; otherwise stop Kumi's answer (the steps it finished stay, waiting messages go back into the box); otherwise unpin the pinned device |
+| Ctrl-C | Stop Kumi's answer; when idle, clear the box; with an empty box, quit |
+| Ctrl-D | Quit, when idle with an empty box |
+| Page Up / Page Down, mouse wheel | Scroll the conversation (the wheel over the tabs scrolls the tab); it stays put while new text arrives |
+| Ctrl-Home / Ctrl-End | The start of the conversation / back to the latest |
+| Ctrl-L | Redraw the screen |
 
-**Names and colours**
-- Long, duplicate, emoji, CJK and right-to-left names; names are always data,
-  never instructions. Very dark track colours are lightened for display; many
-  tracks can share a colour.
+**The Live pane**
 
-**Scale**
-- 150+ tracks, nested groups (group path in the focus), clips with 10,000 notes.
+| Key | Action |
+| --- | --- |
+| Tab, when idle | Into FOCUS's device tree, at Live's selection: ↑↓ move, Enter points at the row, Esc or Tab goes back to typing |
+| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move, Enter does the row's **undo** or **forget**, Esc or Tab goes back |
+| Mouse | Click **undo** or **forget** at a row's end, a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
 
-**Live features**
-- Automation (curve with the old shape as a ghost), MPE and per-note
-  expression, scale mode and microtonal tunings (pitch labels from the tuning),
-  groove and swing, time-signature changes on the ruler, take lanes and comping,
-  frozen tracks, Max for Live devices, plug-ins with generic parameter names,
-  stepped parameters (shown as choices, not a knob).
+**Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,
+Enter chooses, Esc closes; in `/model`, `/memory`, `/conversations` and
+`/recipes`, typing filters the list. In the key box, paste the key and press
+Enter; Kumi checks it with the provider, or saves it unchecked when the provider
+can't be reached. In the ChatGPT sign-in panel, `c` copies the link. In the
+`/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
+copies, and Esc, Enter or Space closes it.
 
-**While Live is running**
-- Playback during edits; the producer moving the same control mid-change (keep
-  their value and say so); switching Sets mid-session (history stays with its
-  Set); Live disconnecting mid-change.
+## Plain mode
 
-**Terminals**
-- Very narrow windows (minimal mode below 60 columns), resizing during an
-  animation, tmux, macOS Terminal (no 24-bit colour or synchronized output),
-  light terminal themes (Kumi paints its own background), input methods for
-  Japanese and Chinese, and screen readers (a plain mode).
+`KUMI_UI=plain`, or input or output through a pipe, gives a plain line-by-line interface
+instead, which suits screen readers and logs. It has `/help`, `/status`,
+`/undo`, `/stop`, `/refresh`, `/reconnect`, `/new`, `/conversations [n]`,
+`/model [provider/model]`, `/effort [level|default]`, `/logout <provider>`,
+`/memory`, `/forget <id>`, `/recipes`, `/update` and `/quit`, but no `/btw`,
+`/goal` or `/copy`. Sign in from a shell with `kumi login`. Ctrl-C stops the
+answer, or quits when idle.
+
+## Terminals
+
+Kumi detects how many colours the terminal shows; `KUMI_COLOR` (`truecolor`,
+`256`, `16`, `none`) overrides it, and `NO_COLOR` is honoured. Where the
+terminal's symbols may not show (the old Windows console, the Linux console),
+Kumi uses two-letter badges instead of icons; `KUMI_ICONS=glyphs` or `badges`
+chooses. Windows Terminal is recommended on Windows. In terminals without the
+kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line. Those terminals
+say when a held Ctrl-T is let go; elsewhere, Kumi stops listening once the key's
+repeats stop.
+
+## Design notes
+
+For people working on the app (`apps/kumi/src/tui/`).
+
+**Principles.** Kumi owns the whole window and draws every cell, so panes scroll
+on their own and stay put. No boxes: areas are separated by background shade.
+Colour always means something. Words before symbols, and steps read as music
+("looked at Bass and Drums"), never as tool names. Motion only shows that
+something is happening or changing. The pane is a view: the runtime describes
+what to draw as data, so another front end could draw the same things.
+
+**Palette** (`style.ts`). Greys from `#0e0f12` (ground) to `#f4f6f8` (bright),
+one accent, mint `#86e3b5`, and Live's own track colours (very dark ones are
+lightened for display). Warning `#e7b45f`, error `#ee8479`, the beat light
+`#ffe14d`. What Kumi keeps has a colour per kind: notes `#8cc8ff`, techniques
+`#c7a6ff`, recipes `#f2a6c4`, lessons `#e7c88f`.
+
+**Foundations**, built from terminal primitives with no UI framework:
+
+1. Terminal I/O (`tty.ts`): raw mode, the alternate screen, bracketed paste,
+   SGR mouse, focus events, the kitty keyboard protocol where offered; the
+   terminal is restored on exit, crashes and signals.
+2. Input (`keys.ts`): keys with modifiers (xterm and CSI u), pastes, mouse,
+   sequences split across reads, and a lone Esc resolved by a short timeout.
+   With the kitty protocol, a held key's repeats and its let-go are events of
+   their own.
+3. Screen and renderer (`screen.ts`, `render.ts`): a grid of cells; each frame
+   is diffed against the last and only changed cells are written, inside a
+   synchronized update. Colour falls back from 24-bit to 256, 16 and none.
+4. Text (`width.ts`, `wrap.ts`): grapheme widths (wide CJK and emoji take two
+   cells), wrapping and truncation.
+5. Frames (`scheduler.ts`): redraws are coalesced, and an animation clock runs
+   only while something moves.
+
+`app.ts` draws the layout and handles input; `editor.ts` is the input box,
+`transcript.ts` the conversation, `tree.ts` the device tree and `tabs.ts` the
+tabs. Tests replay the renderer's output through a small terminal interpreter,
+which must reproduce the intended frame exactly.
+
+**Not done yet:** a picture in NOW for locators and new tracks; a fan-in or
+sidechain diagram for routing; an overview strip for very long clips; one
+expandable HISTORY entry for a change across many tracks; offering to undo the
+changes that depend on one; marking an entry "undone in Live"; FOCUS through
+macOS Accessibility (the exact control, the clip tab, the Browser item).

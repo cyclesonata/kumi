@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, chmodSync } from "node:fs";
+import { constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { platform } from "node:process";
@@ -202,13 +202,30 @@ function ensureDiagnosticsFile(path: string): boolean {
   }
 }
 
+/**
+ * A lock whose lifecycle process has gone: its pid names no running process. A `kumi bridge` stopped
+ * with Ctrl-C while it waits for Live ends its lifecycle mid-step, and its lock would otherwise refuse
+ * every later install, upgrade and uninstall. A lock that can't be read, or whose owner runs, isn't.
+ */
+function staleLock(path: string): boolean {
+  try {
+    const entry = lstatSync(path);
+    if (!entry.isFile() || entry.isSymbolicLink()) return false;
+    const { pid } = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown };
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) return false;
+    try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  } catch { return false; }
+}
+
 async function withLifecycleLock<T>(stateDirectory: string, task: () => Promise<T>): Promise<T> {
   const lockPath = join(stateDirectory, "lifecycle.lock");
   assertNoLinkedAncestors(lockPath);
-  try {
-    writeFileSync(lockPath, `${JSON.stringify({ version: 1, pid: process.pid, startedAt: new Date().toISOString() })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  } catch (error) {
-    throw new Error("another lifecycle operation owns the state lock; inspect the owner before removing a stale lock", { cause: error });
+  const take = () => writeFileSync(lockPath, `${JSON.stringify({ version: 1, pid: process.pid, startedAt: new Date().toISOString() })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try { take(); } catch (error) {
+    const refused = (cause: unknown) => new Error("another lifecycle operation owns the state lock; inspect the owner before removing a stale lock", { cause });
+    if (!staleLock(lockPath)) throw refused(error);
+    rmSync(lockPath, { force: true });
+    try { take(); } catch (again) { throw refused(again); }
   }
   try {
     if (platform !== "win32") chmodSync(lockPath, 0o600);
@@ -258,6 +275,44 @@ function pathEntryExists(path: string): boolean {
 
 function tryRemove(path: string, recursive = false): boolean {
   try { rmSync(path, { recursive, force: true }); return true; } catch { return false; }
+}
+
+/** Files of the Remote Script's folder that the Remote Script reads only when they're owner-only. */
+const OWNER_ONLY_REMOTE_FILES = ["bridge-reference.json", "willington.json"];
+
+/**
+ * A folder copied file by file, never over a file; with `missingOnly`, into a folder already there, only
+ * what it lacks (putting a half-removed original back: what's left of it is the original). Not fs.cpSync:
+ * Node 22's aborts the whole process on Windows for some non-ASCII paths, which a User Library's can have.
+ */
+function copyFolder(from: string, to: string, missingOnly: boolean): void {
+  mkdirSync(to, { recursive: missingOnly });
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const source = join(from, entry.name); const target = join(to, entry.name);
+    if (entry.isDirectory()) copyFolder(source, target, missingOnly);
+    else if (entry.isFile()) { if (!missingOnly || !existsSync(target)) copyFileSync(source, target, fsConstants.COPYFILE_EXCL); }
+    else throw new Error(`managed tree contains an unsupported entry: ${source}`);
+  }
+}
+
+/**
+ * Moves the Remote Script's folder: a rename, or, where it and the owner state are on different drives
+ * (Live's User Library on another drive or volume: rename refuses with EXDEV), a copy and then the
+ * original's removal. A copy takes the destination's permissions, so the files the Remote Script needs
+ * owner-only are made so again. A move that fails partway leaves the original where it was.
+ */
+function moveRemoteFolder(from: string, to: string): void {
+  try { renameSync(from, to); return; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error; }
+  const copy = (source: string, target: string, restoring: boolean) => {
+    copyFolder(source, target, restoring);
+    for (const name of OWNER_ONLY_REMOTE_FILES) if (existsSync(join(target, name))) secureWindowsFile(join(target, name));
+  };
+  try { copy(from, to, false); } catch (error) { rmSync(to, { recursive: true, force: true }); throw error; }
+  try { rmSync(from, { recursive: true, force: true, maxRetries: 5 }); } catch (error) {
+    // Some of the original may be gone: put it back whole from the copy before saying it failed.
+    copy(to, from, true); rmSync(to, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function parseReceipt(path: string): LifecycleReceipt {
@@ -489,7 +544,7 @@ function quarantinePath(stateDirectory: string, label: string): string {
 
 function restoreBackup(destination: string, backup: string | null): void {
   if (existsSync(destination)) rmSync(destination, { recursive: true, force: true });
-  if (backup && existsSync(backup)) renameSync(backup, destination);
+  if (backup && existsSync(backup)) moveRemoteFolder(backup, destination);
 }
 
 export async function runLifecycle(options: LifecycleOptions): Promise<LifecycleResult> {
@@ -630,7 +685,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
       fault(options, "before-remote");
       const installed = installRemoteScript(join(options.packageRoot, "remote-script", REMOTE_PACKAGE, REMOTE_MODULE), paths.remoteScriptDirectory, { force: true, configPath: paths.configPath });
       backup = installed.backup;
-      if (backup) { const ownerBackup = quarantinePath(options.stateDirectory, "rollback-generation"); renameSync(backup, ownerBackup); backup = ownerBackup; }
+      if (backup) { const ownerBackup = quarantinePath(options.stateDirectory, "rollback-generation"); moveRemoteFolder(backup, ownerBackup); backup = ownerBackup; }
       fault(options, "after-remote");
       if (!backup) throw new Error("upgrade did not retain a previous Remote Script generation");
       assertPackageStillBound(options.packageRoot, packageEvidence!, options.allowDirtyPrivateBuild === true);
@@ -670,7 +725,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
     let diagnosticsQuarantine: string | undefined;
     let diagnosticsCreated = false;
     try {
-      if (existsSync(paths.remoteScriptDirectory)) { remoteQuarantine = quarantinePath(options.stateDirectory, "repair-remote"); renameSync(paths.remoteScriptDirectory, remoteQuarantine); }
+      if (existsSync(paths.remoteScriptDirectory)) { remoteQuarantine = quarantinePath(options.stateDirectory, "repair-remote"); moveRemoteFolder(paths.remoteScriptDirectory, remoteQuarantine); }
       if (existsSync(paths.configPath) && !configValid) { configQuarantine = quarantinePath(options.stateDirectory, "repair-config"); renameSync(paths.configPath, configQuarantine); }
       if (diagnosticsPath !== undefined && !diagnosticsValid) {
         if (pathEntryExists(diagnosticsPath)) { diagnosticsQuarantine = quarantinePath(options.stateDirectory, "repair-diagnostics"); renameSync(diagnosticsPath, diagnosticsQuarantine); }
@@ -690,7 +745,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
       result.applied = true; result.state = "completed"; result.restartRequired = true; result.recovery.quarantine = remoteQuarantine ?? configQuarantine ?? diagnosticsQuarantine; result.verification = { changed: true, priorDrift: drift, configRepaired: !configValid, diagnosticsRepaired: !diagnosticsValid, secretPermissions: secretPermissions(paths.secretPath), repairedRemoteFiles: Object.keys(next.remoteFiles).length, configQuarantine: configQuarantine ?? null, diagnosticsQuarantine: diagnosticsQuarantine ?? null, journalFinalized }; result.instructions = [next.activation.remediation]; completeSteps(result); return result;
     } catch (error) {
       if (existsSync(paths.remoteScriptDirectory)) rmSync(paths.remoteScriptDirectory, { recursive: true, force: true });
-      if (remoteQuarantine && existsSync(remoteQuarantine)) renameSync(remoteQuarantine, paths.remoteScriptDirectory);
+      if (remoteQuarantine && existsSync(remoteQuarantine)) moveRemoteFolder(remoteQuarantine, paths.remoteScriptDirectory);
       if (configQuarantine && existsSync(configQuarantine)) { if (existsSync(paths.configPath)) rmSync(paths.configPath, { force: true }); renameSync(configQuarantine, paths.configPath); }
       else if (!configValid && existsSync(paths.configPath)) rmSync(paths.configPath, { force: true });
       if (diagnosticsCreated && diagnosticsPath && pathEntryExists(diagnosticsPath)) rmSync(diagnosticsPath, { force: true });
@@ -709,9 +764,9 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
     const previousPackage = verifyReleasePackage(receipt.previous.packageRoot, options.allowDirtyPrivateBuild === true);
     if (previousPackage.manifestSha256 !== receipt.previous.releaseManifestSha256 || previousPackage.manifest.protocol.registryHash !== receipt.previous.registryHash) throw new Error("previous package root is unavailable or differs from the retained generation");
     const failedGeneration = quarantinePath(options.stateDirectory, "rolled-back-generation");
-    renameSync(paths.remoteScriptDirectory, failedGeneration);
+    moveRemoteFolder(paths.remoteScriptDirectory, failedGeneration);
     try {
-      renameSync(receipt.previous.remoteBackup, paths.remoteScriptDirectory);
+      moveRemoteFolder(receipt.previous.remoteBackup, paths.remoteScriptDirectory);
       const verified = verifyFiles(paths.remoteScriptDirectory, receipt.previous.remoteFiles);
       if (!verified.valid) throw new Error("previous Remote Script generation failed hash verification");
       writeConfig(paths.configPath, receipt.previous.config, true);
@@ -722,8 +777,8 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
     } catch (error) {
       const compensationErrors: unknown[] = [];
       try {
-        if (existsSync(paths.remoteScriptDirectory)) renameSync(paths.remoteScriptDirectory, receipt.previous.remoteBackup);
-        if (existsSync(failedGeneration)) renameSync(failedGeneration, paths.remoteScriptDirectory);
+        if (existsSync(paths.remoteScriptDirectory)) moveRemoteFolder(paths.remoteScriptDirectory, receipt.previous.remoteBackup);
+        if (existsSync(failedGeneration)) moveRemoteFolder(failedGeneration, paths.remoteScriptDirectory);
       } catch (cause) { compensationErrors.push(cause); }
       try {
         writeConfig(paths.configPath, receipt.config, existsSync(paths.configPath));
@@ -762,7 +817,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
     let receiptCommitted = false;
     try {
       if (secretStaged) readSecretFile(paths.secretPath);
-      if (remoteStaged) renameSync(paths.remoteScriptDirectory, remoteStaged);
+      if (remoteStaged) moveRemoteFolder(paths.remoteScriptDirectory, remoteStaged);
       if (configStaged) renameSync(paths.configPath, configStaged);
       if (secretStaged) renameSync(paths.secretPath, secretStaged);
       const preserved = [...new Set([...(receipt.retained?.preserved ?? []), !drift.valid ? remoteStaged : undefined, previousDrift && !previousDrift.valid ? receipt.previous?.remoteBackup : undefined].filter((path): path is string => Boolean(path)))];
@@ -779,7 +834,7 @@ export async function runLifecycle(options: LifecycleOptions): Promise<Lifecycle
       if (!receiptCommitted) {
         if (secretStaged && existsSync(secretStaged) && !existsSync(paths.secretPath)) renameSync(secretStaged, paths.secretPath);
         if (configStaged && existsSync(configStaged) && !existsSync(paths.configPath)) renameSync(configStaged, paths.configPath);
-        if (remoteStaged && existsSync(remoteStaged) && !existsSync(paths.remoteScriptDirectory)) renameSync(remoteStaged, paths.remoteScriptDirectory);
+        if (remoteStaged && existsSync(remoteStaged) && !existsSync(paths.remoteScriptDirectory)) moveRemoteFolder(remoteStaged, paths.remoteScriptDirectory);
       }
       throw error;
     }

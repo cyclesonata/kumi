@@ -173,6 +173,17 @@ jobs:
           if (-not (Test-Path (Join-Path $scripts 'AbletonMcpBridge\ableton_mcp_remote_script.py'))) { throw 'no Remote Script' }
           $update = & $kumi update | Out-String; Write-Host $update
           if ($update -notmatch 'up to date') { throw 'update did not say up to date' }
+          # A real update, as a producer gets one: this Kumi says it's older, and Git's tools come first on PATH, as in
+          # a PowerShell started from Git Bash. Their GNU tar reads "C:\..." as a remote host; Kumi unpacks with Windows' own.
+          $versionFile = Join-Path $env:KUMI_HOME 'app\packages\runtime\dist\src\version.js'
+          [IO.File]::WriteAllText($versionFile, ([IO.File]::ReadAllText($versionFile) -replace 'KUMI_VERSION = "[^"]+"', 'KUMI_VERSION = "0.0.1"'))
+          $gnu = 'C:\Program Files\Git\usr\bin'
+          if (-not (Test-Path (Join-Path $gnu 'tar.exe'))) { throw 'this runner has no Git GNU tar to put first on PATH' }
+          $path = $env:Path; $env:Path = "$gnu;$path"
+          try { $update = & $kumi update | Out-String; $updated = $LASTEXITCODE } finally { $env:Path = $path }
+          Write-Host $update
+          if ($updated -ne 0 -or $update -notmatch 'Kumi is now') { throw 'a real update failed' }
+          if ((& $kumi --version) -ne $version) { throw "the update didn't bring the release" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
           & $kumi uninstall --yes
           Start-Sleep -Seconds 15

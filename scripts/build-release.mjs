@@ -20,6 +20,8 @@ const out = join(root, "release");
 const stage = join(out, "stage");
 const say = (line) => process.stdout.write(`${line}\n`);
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+// Windows' own tar: from Git Bash, GNU tar comes first on PATH, and it reads "C:\…" as a remote host.
+const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
 const sh = (command, args, cwd) => execFileSync(command, args, { cwd, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, COPYFILE_DISABLE: "1" }, shell: process.platform === "win32" && command === npm }).toString();
 const json = (file) => JSON.parse(readFileSync(file, "utf8"));
 
@@ -82,7 +84,7 @@ writeFileSync(join(stage, "kumi-install.json"), `${JSON.stringify({ kumi: versio
 
 say("Packing…");
 const bundle = join(out, "kumi.tar.gz");
-sh("tar", ["-czf", bundle, "-C", stage, "."], root);
+sh(tar, ["-czf", bundle, "-C", stage, "."], root);
 const sha256 = createHash("sha256").update(readFileSync(bundle)).digest("hex");
 const manifest = { kumi: version, bundle: "kumi.tar.gz", sha256, node: process.versions.node, bridge: bridgeVersion };
 writeFileSync(join(out, "kumi-release.json"), `${JSON.stringify(manifest, null, 2)}\n`);

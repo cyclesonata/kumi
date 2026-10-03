@@ -3,6 +3,10 @@
 A census of the Live Object Model inside real Live, so that "Kumi can't do that" means
 Live's API can't, never that the bridge didn't get round to it.
 
+> Taken once, on Live 12.4.15b5 (macOS arm64) with bridge 1.0.55, 2026-09-30, and not updated
+> since. Every operation in the first table below is still in the bridge's registry. The
+> [capability matrix](../en/CAPABILITY_MATRIX.md) draws on it.
+
 ## How it was taken
 
 The Remote Script's `dev.lom-audit` operation (developers only; no Kumi tool offers it)
@@ -77,3 +81,8 @@ bridge reads Simpler's markers as parameters).
 Still impossible through either API, and said so plainly: saving the Set, export, freeze,
 creating group tracks, mapping a macro or an arbitrary modulator to a parameter (outside
 Wavetable's matrix and Drift's), and editing Arrangement automation lanes.
+
+Two notes on that list: the optional [Willington](../en/WILLINGTON_INTEGRATION.md) provider maps
+macros natively, on one exact Live build, outside Live's API. And `live_run_python` (`run_python`
+in Kumi) runs Python inside Live with this same API, so it reaches every member counted here but
+nothing beyond it.
