@@ -41,3 +41,6 @@ docs/evidence/willington-review.json
 packages/runtime/hands/
 
 /target/
+
+# Local port inventory and agent handoff notes
+/.port-notes/

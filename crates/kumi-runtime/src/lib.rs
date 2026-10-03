@@ -28,9 +28,9 @@ pub use core::contracts::{
     PinnedNode, RecipeEvent, RecipeSummary, SavedConversation, SessionController, SessionEvent, SessionStatus, SessionStrip, StreamingCall,
     TechniqueEvent, TechniqueSummary, ToolImage, ToolResult, TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent, WebEvent,
 };
-// TODO(port): re-exports from core/memory
+pub use core::memory::{create_memory_store, memory_instructions, FORGET_TOOL, MAX_NOTE, MAX_NOTES, REMEMBER_TOOL};
 // TODO(port): re-exports from core/techniques
-// TODO(port): re-exports from core/gaps
+pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
 // TODO(port): re-exports from audio (analyzeFile, closeness, compare, hear, Analysis, Comparison)
 pub use audio::matching::Closeness;
 // TODO(port): re-exports from audio/tools
@@ -41,14 +41,17 @@ pub use audio::matching::Closeness;
 // TODO(port): re-exports from video
 // TODO(port): re-exports from video/programs
 // TODO(port): re-exports from voice
-// TODO(port): re-exports from core/recipes
 pub use command::{INSTALLED, KUMI, KUMI_REPAIR, KUMI_START};
 pub use core::errors::{FailureKind, KumiError, RuntimeError};
+pub use core::recipes::{
+    create_recipe_store, recipe_instructions, recipe_tools, slug, Recipe, RecipeStore, FORGET_RECIPE_TOOL, RUN_RECIPE_TOOL,
+    SAVE_RECIPE_TOOL,
+};
 pub use system::system_program;
 pub use version::KUMI_VERSION;
 // TODO(port): re-exports from core/session
-// TODO(port): re-exports from kernel/agent
-// TODO(port): re-exports from kernel/budget
+pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};
+pub use kernel::budget::{budget_for, ContextBudget, DEFAULT_BUDGET};
 // TODO(port): re-exports from providers
 // TODO(port): re-exports from providers/models
 // TODO(port): re-exports from providers/local
