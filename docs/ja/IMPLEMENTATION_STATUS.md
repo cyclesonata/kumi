@@ -32,7 +32,7 @@
 | [kumi-benchmark.md](../evidence/kumi-benchmark.md) | 2026-09-30 | 12.4 beta | 1.0.52 | 曲の一部分を耳で再現する：実行とスコア |
 | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.53 | Willington を通じた Follow Actions と Legato。読み戻しと取り消し |
 | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json) | 2026-09-30 | 12.4.15b4 | 1.0.52 | Willington による編集を使った Kumi との会話。それぞれ取り消し済み |
-| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01 | 12.4.15b5 | 1.0.66 | Willington を通じたラックのチェーンゾーン：読み取り、書き込み、取り消し、保存して開き直し |
+| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01、2026-10-02 | 12.4.15b5 | 1.0.66 | Willington を通じたラックのチェーンゾーン：読み取り、書き込み、取り消し、保存して開き直し。その後、信号のゲート、フェード、Max の `live.object` での書き込み・読み戻し・復元 |
 | [capability-manifest.json](../evidence/capability-manifest.json) | レジストリとともに再生成 | — | 現行 | レジストリのすべての操作（実行可能なものと予約済みのもの）と、レジストリのハッシュ |
 | `phase-3`〜`phase-9` のファイル | 2026-07-26〜07-28 | 12.4.5b8 | 0.1.0 | Kumi 以前の、ブリッジの最初の本物の Live での実行：ディスカバリー、試聴、トランスポート、クリップ、アレンジメント、ミキサー、オートメーション、デバイス、Browser、ルーティング、録音、プロジェクトファイル、イベント、リアルタイムとキャプチャ。加えて [FFmpeg のラウドネスオラクル](../evidence/phase-8-audio-oracle.json)と、偽の Live に対するパッケージ版でのジャーニー。過去の記録です：ブリッジはその後大きく変わっています。 |
 
@@ -42,7 +42,7 @@
 - 一部の変更は Kumi では取り消せず、Live 自身の取り消しでしか戻せません。[Live の安全性](LIVE_SAFETY.md)を参照してください。
 - Windows では、Kumi の拡張機能は未テストで、1.6.0 以前からの `kumi update` は tar のエラーで失敗することがあります。[Windows](SUPPORT_MATRIX.md#windows) を参照してください。
 - これまでの本物の Live でのテストは Live 12.4.15 beta で、ほとんどが Apple silicon の Mac です。Live 12.0〜12.3、Intel Mac、スクリーンリーダーは未テストです。
-- Willington による編集には特定の一つの Live ビルドが必要です。[Willington 連携](WILLINGTON_INTEGRATION.md)を参照してください。
+- Willington による編集には、Willington のバインディングがある Live ビルドが必要です：macOS ARM64 の Live 12.4.15b4 と b5（ラックのチェーンのゾーンは b5 のみ）。[Willington 連携](WILLINGTON_INTEGRATION.md)を参照してください。
 - Kumi とブリッジには署名がありません。[リリースと配布](DISTRIBUTION_POLICY.md)を参照してください。
 
 ## 残っている作業

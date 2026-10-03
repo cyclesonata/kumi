@@ -22,7 +22,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 | 12.0 至 12.3 | 桥接提供该版本 Live 的 API 所具备的功能；没有扩展，因此上述功能都不可用。`kumi doctor` 会说明这一点。未测试。 |
 | 11 或更早 | 不支持。 |
 
-版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。可选的 Willington 提供方只适用于某一个确切的 Live 构建版本；见 [Willington 集成](WILLINGTON_INTEGRATION.md)。
+版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。可选的 Willington 提供方有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5 的绑定（机架链区域仅限 b5）；见 [Willington 集成](WILLINGTON_INTEGRATION.md)。
 
 ## Windows
 

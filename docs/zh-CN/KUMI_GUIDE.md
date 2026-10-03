@@ -39,7 +39,7 @@ Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包
 
 桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并告诉你如何连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
 
-**可选：Willington。** 装上单独安装的 Willington provider 后，Kumi 还可以编辑 Follow Actions、映射机架的宏旋钮以及设置链区域（chain zone）。它只在 macOS ARM64 上的某一个确切的 Live 版本上运行；请见[可选的 Willington 集成](WILLINGTON_INTEGRATION.md)。
+**可选：Willington。** 装上单独安装的 Willington provider 后，Kumi 还可以编辑 Follow Actions、映射机架的宏旋钮以及设置链区域（chain zone）。它有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5 的绑定（链区域仅限 b5）；请见[可选的 Willington 集成](WILLINGTON_INTEGRATION.md)。
 
 ## 使用 Kumi
 

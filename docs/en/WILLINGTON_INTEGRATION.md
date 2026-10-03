@@ -4,8 +4,9 @@ English · [简体中文](../zh-CN/WILLINGTON_INTEGRATION.md) · [日本語](../
 
 Willington is a separately installed set of native providers that reach parts
 of Live its Python API doesn't: Session clip Follow Actions, rack macro
-mappings and names, and rack chain zones. Each provider is built for one exact
-Live build on macOS ARM64 and is experimental. Ordinary Kumi and the bridge
+mappings and names, and rack chain zones. The multi-version bundle selects bindings for the exact
+connected Live build. Follow Actions and DeviceTools have validated macOS ARM64
+b4/b5 profiles; Rack Zones is supported on Live 12.4.15b5 macOS ARM64. Ordinary Kumi and the bridge
 need none of it: without it, these tools simply don't appear.
 
 ## What it adds
@@ -27,17 +28,21 @@ work with any bridge.
 
 ## Install and enable
 
-1. Install the providers you want into Live's Remote Scripts folder, beside
-   AbletonMcpBridge: `WillingtonBindings` (Follow Actions),
+1. Install the multi-version bundle into Live's Remote Scripts folder, beside
+   AbletonMcpBridge. Include the required `WillingtonRuntime` alongside the
+   providers you want: `WillingtonBindings` (Follow Actions),
    `WillingtonDeviceTools` (macros and variations; it must provide
    `get_macro_mapping` and `get_selected_variation_name`) and
-   `WillingtonRackZones` (zones). Each checks that it runs in the exact Live
-   build it was made for, and refuses to install on any other.
+   `WillingtonRackZones` (zones). Manual copies must preserve the runtime,
+   `build/<profile-id>/` directories and manifests. Each provider selects
+   validated bindings using the running Live process’s OS, architecture, version
+   and executable hash. Native packages also verify the running Mach-O UUID.
+   Windows and Intel macOS bindings are not yet available.
 2. Turn off any standalone Willington control surface in Live and restart Live.
    The bridge won't share the providers with another owner.
 3. Create `willington.json` beside the bridge's `__init__.py`, in
    `Remote Scripts/AbletonMcpBridge`. It must be a regular file, owner-only and
-   at most 4 KiB, with exactly these keys:
+   at most 4 KiB, with the keys below (`rackZones` is optional):
 
    ```json
    {"version": 1, "followActions": true, "deviceTools": true, "rackZones": true, "enableWrites": false}
@@ -53,23 +58,75 @@ work with any bridge.
 
 4. For Follow Action edits, WillingtonBindings also needs a passing self-test:
    `self-test.json` in its folder with `"status": "passed"` and
-   `library_sha256` equal to the SHA-256 of its `libwillington.dylib`. Without
-   it, Follow Action edits stay off and the other providers still work.
+   `library_sha256` equal to the SHA-256 of the selected
+   `build/<profile-id>/libwillington.dylib` (the root library for legacy packages).
+   Repeat the [standalone self-test](#follow-action-self-test) after switching
+   builds or replacing that library. Without matching evidence, Follow Action
+   edits stay off and the other providers still work. Set `enableWrites` to
+   `true` when ready to enable edits.
 5. Restart Live. Config changes take effect only at Live's start.
 
 Kumi updates keep `willington.json`. Delete it to go back to the plain bridge.
 
-None of the providers is used, and the bridge carries on without them, when the
-file is missing a key or has an unknown one, any provider it names fails to
-load, another owner already holds them, or a standalone Follow Action, device
-or zone surface is already installed. Live's log (Log.txt) says which: "Willington extensions
-initialized; writes enabled", "Willington extensions unavailable: …; ordinary
-bridge remains active" or "Willington Follow Action writes unavailable: …".
+A missing validated profile skips only that component: one configuration can
+use Follow Actions and DeviceTools on b4 and also Rack Zones on b5. These typed
+no-profile refusals are cached and logged once per component per Live process.
+
+Malformed configuration, missing artifacts, integrity errors, unexpected startup
+failures or another active owner leave the native extensions unavailable; the
+ordinary bridge stays active. Live's log (Log.txt) reports the cause and names
+the providers actually active and enabled for writes. A missing or stale Follow
+self-test disables only Follow writes.
 
 When the Remote Script stops, it turns Follow Action writes off and uninstalls
 DeviceTools and RackZones. Follow Action bindings can't be uninstalled: they
 stay registered in that Live process, and the bridge reuses them, writes off,
 when it starts again.
+
+## Follow Action self-test
+
+Repeat after switching Live builds or replacing the selected Follow library. This
+procedure works with the distributed bundle; no source checkout or `manage.py`
+is needed. The standalone test creates a fixture track and performs native writes
+and Live Undo in the current Set, so use a disposable Set.
+
+1. Disable `AbletonMcpBridge` and standalone Willington surfaces in Live’s Control
+   Surface settings, then quit Live. Native Follow properties remain registered
+   until the process exits.
+2. Start the intended Live build, open a disposable Set with playback stopped,
+   and select only `WillingtonBindings` as the Willington Control Surface, with
+   MIDI input/output None. Its installed `status.json` should report
+   `"status": "registered"`.
+3. Queue the test with this command, replacing the folder argument with the
+   installed Bindings directory. It refuses pending commands and removes the
+   old receipt so it cannot be mistaken for this run.
+
+   ```sh
+   python3 - '/path/to/User Library/Remote Scripts/WillingtonBindings' <<'PYTEST'
+   import json, os, sys
+   from pathlib import Path
+   folder = Path(sys.argv[1]).expanduser()
+   assert (folder / '__init__.py').is_file(), 'Not an installed Bindings folder'
+   command = folder / 'command.json'
+   assert not command.exists(), 'A command is already pending'
+   (folder / 'self-test.json').unlink(missing_ok=True)
+   temporary = folder / 'command.json.tmp'
+   temporary.write_text(json.dumps({'action': 'self_test'}) + '\n')
+   os.replace(temporary, command)
+   PYTEST
+   ```
+
+4. Wait for the new `self-test.json` to finish with `"status": "passed"` and a
+   `library_sha256`. A running or failed report does not enable writes. Inspect
+   `command-error.json` if the command fails. The hash must match the selected
+   `build/<profile-id>/libwillington.dylib` (or root library for a legacy install);
+   `shasum -a 256 '/full/path/to/libwillington.dylib'` prints that digest. Keep
+   the receipt in the installed Bindings folder.
+5. Set the standalone `WillingtonBindings` Control Surface to None, quit Live,
+   and restart before enabling `AbletonMcpBridge` again. Discard the disposable
+   Set. Do not select standalone Willington surfaces alongside Kumi: both would
+   attempt to own native bindings. Kumi rechecks the receipt against its selected
+   library before enabling Follow writes with `enableWrites: true`.
 
 ## Follow Actions
 
@@ -141,13 +198,22 @@ asked is put back exactly.
 | --- | --- | --- | --- | --- |
 | Follow Actions | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json), 2026-09-30 | 12.4.15b5, macOS arm64 | 1.0.53 | Kumi changes and undo on a saved test Set, transport stopped |
 | Follow Actions, macros, mapping | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json), 2026-09-30 | 12.4.15b4 ARM64 | 1.0.52 | A real Kumi chat: Follow Actions, macro rename, mapping, each undone |
-| Rack zones | [rack-zones-b5.json](../evidence/rack-zones-b5.json), 2026-10-01 | 12.4.15b5 (2026-09-24 build), arm64 | 1.0.66 | Readback, write, undo and redo, Sets saved and reopened, the installed bridge and Kumi's undo |
+| Rack zones | [rack-zones-b5.json](../evidence/rack-zones-b5.json), 2026-10-01; completion 2026-10-02 | 12.4.15b5 (2026-09-24 build), arm64 | 1.0.66 (Kumi transactions) | Readback, write, undo and redo, save/reopen, Kumi undo; completion adds signal gating, fades and actual Max invocation |
 
 Variation rename and the inverted continuous and enum mappings were tested
-through the bridge directly. None of these runs covers playback: Follow Action
-scheduling, how a zone sounds, or selector changes while playing. Follow Action
-and macro edits weren't tested across saving and reopening a Set. Rack zones
-aren't supported on 12.4.15b4 or any other build.
+through the bridge directly. Follow Action scheduling and save/reopen persistence
+of Follow Action and macro edits were not tested.
+
+Rack Zones completion results and receipt digests are in the [public validation
+summary](../evidence/rack-zones-b5.json): 42 signal-gating checks, 49 fade
+measurements with 14 directional comparisons, and seven actual Max `live.object`
+write/read/restore cycles. The promoted `live-12.4.15b5-arm64` library is
+byte-identical to the tested candidate library. Measurements use normalized Live
+meters; exact linear gain, silence at fade endpoints, held-note edits, overlapping
+multi-chain crossfades and other builds/platforms are not claimed. Rack Zones
+remains unsupported on b4. Raw completion receipts and the harness are retained
+in the private Willington repository at the immutable commit recorded in the
+summary; those raw files are not published here.
 
 The bridge's automated tests cover the rest without Live: missing providers,
 malformed config, stale and conflicting edits, partial writes, ownership and
