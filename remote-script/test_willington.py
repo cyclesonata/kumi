@@ -1,5 +1,12 @@
 import hashlib
+import json
+import tempfile
+import types
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+import AbletonMcpBridge as wrapper
 from test_remote_script import FakeSong, FakeClip, _protect_windows_owner_only
 from ableton_mcp_remote_script import LiveObjectMapper, validate_operation_payload
 
@@ -252,61 +259,299 @@ class DeviceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'variation must be selected'):
                 self.mapper._willington_device_read({'ref': self.ref, 'kind': 'variation-name'})
 
+class ComponentUnavailableError(RuntimeError): pass
+
+
+class _ProviderFixture:
+    """Native doubles preserve process registration and remove only owned patches."""
+    components = ('WillingtonBindings', 'WillingtonDeviceTools', 'WillingtonRackZones')
+    labels = ('follow', 'devices', 'zones')
+
+    def __init__(self, root):
+        self.root = root
+        self.path = root / 'willington.json'
+        self.mapper = types.SimpleNamespace()
+        self.live = types.ModuleType('Live')
+        self.chain_class = type('Chain', (), {})
+        self.device_class = type('Device', (), {})
+        self.live.Chain = types.SimpleNamespace(Chain=self.chain_class)
+        self.calls = []; self.logs = []; self.providers = []
+        self.library = root / 'build' / 'selected-profile' / 'libwillington.dylib'
+        self.library.parent.mkdir(parents=True)
+        self.library.write_bytes(b'selected native library')
+        self.root_library = root / 'libwillington.dylib'
+        self.root_library.write_bytes(b'legacy native library')
+        self.follow = types.SimpleNamespace(path=str(self.library),
+            willington_enable_writes=lambda value: self.calls.append(('follow', value)))
+        self.devices = self.patchable('devices', self.device_class, ('willington_test_method',))
+        self.zones = self.patchable('zones', self.chain_class, ('get_zone', 'set_zone'))
+        bindings = types.ModuleType('WillingtonBindings')
+        bindings.__file__ = str(root / 'bindings.py'); bindings.install = self.install_follow
+        devices_api = types.ModuleType('WillingtonDeviceTools.api'); devices_api.install = self.install_devices
+        zones_api = types.ModuleType('WillingtonRackZones.api'); zones_api.install = self.install_zones
+        runtime = types.ModuleType('WillingtonRuntime'); runtime.ComponentUnavailableError = ComponentUnavailableError
+        self.modules = {'Live': self.live, 'WillingtonBindings': bindings,
+            'WillingtonDeviceTools': types.ModuleType('WillingtonDeviceTools'),
+            'WillingtonDeviceTools.api': devices_api,
+            'WillingtonRackZones': types.ModuleType('WillingtonRackZones'),
+            'WillingtonRackZones.api': zones_api, 'WillingtonRuntime': runtime}
+        self.write_receipt()
+
+    def write_config(self, config):
+        self.path.write_text(json.dumps(config))
+        self.path.chmod(0o600)
+        _protect_windows_owner_only(self.path)
+
+    def write_receipt(self, payload=None):
+        payload = self.library.read_bytes() if payload is None else payload
+        (self.root / 'self-test.json').write_text(json.dumps({
+            'status': 'passed', 'library_sha256': hashlib.sha256(payload).hexdigest()}))
+
+    def patchable(self, label, cls, names):
+        native = types.SimpleNamespace(patches=[],
+            enable=lambda value: self.calls.append((label, value)))
+        def uninstall():
+            self.calls.append((label, 'uninstall'))
+            for owner, name, method in reversed(native.patches):
+                if getattr(owner, name, None) is method: delattr(owner, name)
+            native.patches = []
+        native.uninstall = uninstall
+        native.fixture_class = cls; native.fixture_names = names
+        return native
+
+    def install_follow(self):
+        self.calls.append(('follow', 'install'))
+        self.live._willington_native_library = self.follow
+        return self.follow
+
+    def install_patches(self, label, native):
+        self.calls.append((label, 'install'))
+        for name in native.fixture_names:
+            method = lambda *args: None
+            setattr(native.fixture_class, name, method)
+            native.patches.append((native.fixture_class, name, method))
+        attribute = '_willington_' + ('device' if label == 'devices' else 'zone') + '_libraries'
+        setattr(self.live, attribute, [native])
+        return native
+
+    def install_devices(self): return self.install_patches('devices', self.devices)
+    def install_zones(self): return self.install_patches('zones', self.zones)
+
+    def fail_install(self, component, error):
+        position = self.components.index(component)
+        module = component if position == 0 else component + '.api'
+        def fail():
+            self.calls.append((self.labels[position], 'install'))
+            raise error
+        self.modules[module].install = fail
+
+    def construct(self):
+        provider = wrapper._WillingtonProvider(self.mapper, self.logs.append)
+        self.providers.append(provider)
+        return provider
+
+
+@contextmanager
+def _provider_fixture(config=None, modules=None):
+    with tempfile.TemporaryDirectory() as folder:
+        fixture = _ProviderFixture(Path(folder))
+        if config is not None:
+            fixture.write_config({'version': 1, 'followActions': False, 'deviceTools': False,
+                                  'enableWrites': False, **config})
+        fixture.modules.update(modules or {})
+        with patch.object(wrapper, '__file__', str(fixture.root / '__init__.py')), \
+                patch.dict('sys.modules', fixture.modules):
+            try: yield fixture
+            finally:
+                for provider in fixture.providers: provider.close()
+
+
 class ProviderTests(unittest.TestCase):
+    def assert_closed(self, fixture, provider):
+        for name in ('willington_follow_writes', 'willington_device_writes', 'willington_zone_writes'):
+            self.assertFalse(getattr(fixture.mapper, name))
+        for name in ('follow', 'devices', 'zones'): self.assertIsNone(getattr(provider, name))
+        self.assertIsNone(getattr(fixture.live, '_kumi_willington_owner', None))
+
     def test_absent_invalid_and_duplicate_owner_fail_closed(self):
-        import tempfile, json, types
-        from pathlib import Path
-        from unittest.mock import patch
-        import AbletonMcpBridge as wrapper
-        with tempfile.TemporaryDirectory() as folder:
-            mapper=types.SimpleNamespace(); logs=[]; live=types.SimpleNamespace(_kumi_willington_owner=object())
-            with patch.object(wrapper,'__file__',str(Path(folder)/'__init__.py')), patch.dict('sys.modules',{'Live':live}):
-                wrapper._WillingtonProvider(mapper,logs.append)
-                self.assertFalse(mapper.willington_follow_writes)
-                path=Path(folder)/'willington.json';path.write_text('{}');path.chmod(0o600)
-                wrapper._WillingtonProvider(mapper,logs.append)
-                self.assertFalse(mapper.willington_device_writes)
-                path.write_text(json.dumps({'version':1,'followActions':False,'deviceTools':False,'enableWrites':False}))
-                owner=live._kumi_willington_owner
-                wrapper._WillingtonProvider(mapper,logs.append)
-                self.assertIs(live._kumi_willington_owner,owner)
-                self.assertEqual(len(logs),2)
+        with _provider_fixture() as fixture:
+            owner = fixture.live._kumi_willington_owner = object()
+            fixture.construct()
+            self.assertFalse(fixture.mapper.willington_follow_writes)
+            fixture.write_config({})
+            fixture.construct()
+            self.assertFalse(fixture.mapper.willington_device_writes)
+            fixture.write_config({'version': 1, 'followActions': False, 'deviceTools': False, 'enableWrites': False})
+            fixture.construct()
+            self.assertIs(fixture.live._kumi_willington_owner, owner)
+            self.assertEqual(len(fixture.logs), 2)
+
     def test_missing_follow_self_test_preserves_independent_device_writes(self):
-        import tempfile, json, types
-        from pathlib import Path
-        from unittest.mock import patch
-        import AbletonMcpBridge as wrapper
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'willington.json'
-            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': True, 'enableWrites': True})); path.chmod(0o600); _protect_windows_owner_only(path)
-            mapper = types.SimpleNamespace(); live = types.SimpleNamespace(); logs = []; calls = []
-            follow = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(('follow', value)))
-            devices = types.SimpleNamespace(enable=lambda value: calls.append(('devices', value)), uninstall=lambda: None)
-            modules = {'Live': live, 'WillingtonBindings': types.SimpleNamespace(__file__=str(Path(folder)/'bindings.py'), install=lambda: follow), 'WillingtonDeviceTools.api': types.SimpleNamespace(install=lambda: devices)}
-            with patch.object(wrapper, '__file__', str(path.with_name('__init__.py'))), patch.dict('sys.modules', modules):
-                provider = wrapper._WillingtonProvider(mapper, logs.append)
-                self.assertFalse(mapper.willington_follow_writes)
-                self.assertTrue(mapper.willington_device_writes)
-                self.assertTrue(any('self-test.json' in line for line in logs))
+        with _provider_fixture({'followActions': True, 'deviceTools': True, 'enableWrites': True}) as fixture:
+            (fixture.root / 'self-test.json').unlink()
+            provider = fixture.construct()
+            self.assertFalse(fixture.mapper.willington_follow_writes)
+            self.assertTrue(fixture.mapper.willington_device_writes)
+            self.assertNotIn(('follow', True), fixture.calls)
+            self.assertIn(('devices', True), fixture.calls)
+            self.assertTrue(any('self-test.json' in line for line in fixture.logs))
+            self.assertEqual(fixture.logs[-1], 'Willington extensions initialized; active providers: Follow Actions, Device Tools; writes enabled: Device Tools')
+            provider.close()
+            self.assert_closed(fixture, provider)
+
+    def test_each_typed_component_refusal_preserves_others_and_is_cached(self):
+        for refused in _ProviderFixture.components:
+            for writes in (False, True):
+                with self.subTest(component=refused, writes=writes), _provider_fixture({
+                        'followActions': True, 'deviceTools': True, 'rackZones': True, 'enableWrites': writes}) as fixture:
+                    refusal = 'Willington %s unavailable for macos/arm64 Live 12.4.15b4: 0 exact validated profiles' % refused
+                    fixture.fail_install(refused, ComponentUnavailableError(refusal))
+                    for attempt in range(2):
+                        provider = fixture.construct()
+                        self.assertIs(fixture.live._kumi_willington_owner, provider)
+                        for component, label, flag in zip(fixture.components, fixture.labels,
+                                ('willington_follow_writes', 'willington_device_writes', 'willington_zone_writes')):
+                            active = component != refused
+                            self.assertEqual(getattr(provider, label) is not None, active)
+                            self.assertEqual(getattr(fixture.mapper, flag), active and writes)
+                            self.assertEqual(fixture.calls.count((label, True)), (attempt + 1) * int(active and writes))
+                        self.assertEqual(fixture.live._kumi_willington_unavailable_components, {refused})
+                        self.assertEqual(fixture.logs.count(refusal), 1)
+                        self.assertFalse(any('extensions unavailable:' in line for line in fixture.logs))
+                        if refused == 'WillingtonBindings':
+                            self.assertIsNone(getattr(fixture.live, '_willington_native_library', None))
+                        if refused == 'WillingtonDeviceTools': self.assertFalse(fixture.devices.patches)
+                        if refused == 'WillingtonRackZones':
+                            self.assertFalse(callable(getattr(fixture.chain_class, 'get_zone', None)))
+                            self.assertFalse(callable(getattr(fixture.chain_class, 'set_zone', None)))
+                        provider.close(); provider.close()
+                        self.assert_closed(fixture, provider)
+                    for component, label in zip(fixture.components, fixture.labels):
+                        expected = 1 if component == refused or label == 'follow' else 2
+                        self.assertEqual(fixture.calls.count((label, 'install')), expected)
+                    for label, component in zip(fixture.labels[1:], fixture.components[1:]):
+                        self.assertEqual(fixture.calls.count((label, 'uninstall')), 0 if component == refused else 2)
+
+    def test_all_typed_refusals_log_zero_active_and_zero_writable_providers(self):
+        with _provider_fixture({'followActions': True, 'deviceTools': True,
+                                'rackZones': True, 'enableWrites': True}) as fixture:
+            for component in fixture.components:
+                fixture.fail_install(component, ComponentUnavailableError(component + ': no exact validated profile'))
+            for _ in range(2):
+                provider = fixture.construct()
+                self.assertEqual(fixture.logs[-1], 'Willington extensions initialized; active providers: none; writes enabled: none')
+                self.assertIs(fixture.live._kumi_willington_owner, provider)
+                provider.close(); self.assert_closed(fixture, provider)
+            self.assertEqual(fixture.live._kumi_willington_unavailable_components, set(fixture.components))
+            for component, label in zip(fixture.components, fixture.labels):
+                self.assertEqual(fixture.calls.count((label, 'install')), 1)
+                self.assertEqual(fixture.logs.count(component + ': no exact validated profile'), 1)
+                self.assertNotIn((label, True), fixture.calls)
+
+    def test_hard_install_failures_retry_and_tear_down_with_any_runtime(self):
+        runtime_cases = ('typed', 'absent', 'missing-symbol')
+        for runtime in runtime_cases:
+            modules = {} if runtime == 'typed' else {'WillingtonRuntime':
+                None if runtime == 'absent' else types.ModuleType('WillingtonRuntime')}
+            for failed in _ProviderFixture.components:
+                with self.subTest(runtime=runtime, component=failed), _provider_fixture({
+                        'followActions': True, 'deviceTools': True, 'rackZones': True, 'enableWrites': True}, modules) as fixture:
+                    fixture.fail_install(failed, RuntimeError('Unsupported executable or library hash'))
+                    for attempt in range(2):
+                        provider = fixture.construct()
+                        self.assert_closed(fixture, provider)
+                        self.assertFalse(getattr(fixture.live, '_kumi_willington_unavailable_components', ()))
+                        self.assertTrue(any('extensions unavailable: Unsupported executable or library hash' in line for line in fixture.logs))
+                        failed_label = fixture.labels[fixture.components.index(failed)]
+                        self.assertEqual(fixture.calls.count((failed_label, 'install')), attempt + 1)
+                        self.assertEqual(fixture.calls.count(('devices', 'uninstall')),
+                                         attempt + 1 if failed == 'WillingtonRackZones' else 0)
+                        self.assertFalse(fixture.devices.patches); self.assertFalse(fixture.zones.patches)
+                        provider.close()
+
+    def test_enable_failure_disables_and_uninstalls_acquired_providers_without_caching(self):
+        for failed_label in ('devices', 'zones'):
+            with self.subTest(component=failed_label), _provider_fixture({
+                    'followActions': True, 'deviceTools': True, 'rackZones': True, 'enableWrites': True}) as fixture:
+                def fail(value): raise RuntimeError('unexpected enable failure')
+                getattr(fixture, failed_label).enable = fail
+                for _ in range(2):
+                    provider = fixture.construct()
+                    self.assert_closed(fixture, provider)
+                    self.assertFalse(getattr(fixture.live, '_kumi_willington_unavailable_components', ()))
+                    self.assertIn(('follow', True), fixture.calls)
+                    self.assertEqual(fixture.calls[-3:], [('follow', False), ('devices', 'uninstall'), ('zones', 'uninstall')])
+                    self.assertFalse(fixture.devices.patches); self.assertFalse(fixture.zones.patches)
+                self.assertEqual(fixture.calls.count((failed_label, 'install')), 2)
+
+    def test_legacy_packages_without_typed_runtime_still_install(self):
+        for runtime in (None, types.ModuleType('WillingtonRuntime')):
+            with self.subTest(runtime=runtime), _provider_fixture({'followActions': True,
+                    'deviceTools': True, 'rackZones': True, 'enableWrites': True}, {'WillingtonRuntime': runtime}) as fixture:
+                provider = fixture.construct()
+                self.assertIs(fixture.live._kumi_willington_owner, provider)
+                for label in fixture.labels:
+                    self.assertIs(getattr(provider, label), getattr(fixture, label))
+                    self.assertIn((label, 'install'), fixture.calls)
+                    self.assertIn((label, True), fixture.calls)
+                self.assertFalse(any('unavailable' in line for line in fixture.logs))
+                provider.close(); provider.close(); self.assert_closed(fixture, provider)
+                self.assertEqual(fixture.calls.count(('devices', 'uninstall')), 1)
+                self.assertEqual(fixture.calls.count(('zones', 'uninstall')), 1)
+
+    def test_follow_evidence_uses_selected_profile_library(self):
+        for matching in (False, True):
+            with self.subTest(matching=matching), _provider_fixture({'followActions': True, 'enableWrites': True}) as fixture:
+                fixture.write_receipt(fixture.library.read_bytes() if matching else fixture.root_library.read_bytes())
+                provider = fixture.construct()
+                self.assertEqual(fixture.mapper.willington_follow_writes, matching)
+                self.assertEqual(fixture.calls.count(('follow', True)), int(matching))
+                self.assertEqual(fixture.logs[-1], 'Willington extensions initialized; active providers: Follow Actions; writes enabled: ' + ('Follow Actions' if matching else 'none'))
                 provider.close()
 
+    def test_pathless_legacy_follow_uses_matching_root_library_receipt(self):
+        with _provider_fixture({'followActions': True, 'enableWrites': True}) as fixture:
+            del fixture.follow.path
+            fixture.write_receipt(fixture.root_library.read_bytes())
+            provider = fixture.construct()
+            self.assertTrue(fixture.mapper.willington_follow_writes)
+            self.assertIn(('follow', True), fixture.calls)
+            self.assertIs(provider.follow, fixture.follow)
+            provider.close(); self.assert_closed(fixture, provider)
+
     def test_device_owner_enable_and_teardown(self):
-        import tempfile,json,types
-        from pathlib import Path
-        from unittest.mock import patch
-        import AbletonMcpBridge as wrapper
-        with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'willington.json';path.write_text(json.dumps({'version':1,'followActions':False,'deviceTools':True,'enableWrites':True}));path.chmod(0o600);_protect_windows_owner_only(path)
-            calls=[];native=types.SimpleNamespace(enable=lambda enabled:calls.append(enabled),uninstall=lambda:calls.append('uninstall'))
-            live=types.SimpleNamespace();mapper=types.SimpleNamespace()
-            with patch.object(wrapper,'__file__',str(path.with_name('__init__.py'))),patch.dict('sys.modules',{'Live':live,'WillingtonDeviceTools':types.ModuleType('WillingtonDeviceTools'),'WillingtonDeviceTools.api':types.SimpleNamespace(install=lambda:native)}):
-                provider=wrapper._WillingtonProvider(mapper,None)
-                self.assertTrue(mapper.willington_device_writes)
-                self.assertIs(live._kumi_willington_owner,provider)
-                provider.close();provider.close()
-                self.assertEqual(calls,[True,'uninstall'])
-                self.assertFalse(mapper.willington_device_writes)
-                self.assertIsNone(live._kumi_willington_owner)
+        with _provider_fixture({'deviceTools': True, 'enableWrites': True}) as fixture:
+            provider = fixture.construct()
+            self.assertTrue(fixture.mapper.willington_device_writes)
+            self.assertIs(fixture.live._kumi_willington_owner, provider)
+            provider.close(); provider.close()
+            self.assertEqual(fixture.calls, [('devices', 'install'), ('devices', True), ('devices', 'uninstall')])
+            self.assert_closed(fixture, provider)
+
+    def test_follow_reconnect_reuses_realistic_disabled_native_registration(self):
+        with _provider_fixture({'followActions': True}) as fixture:
+            first = fixture.construct()
+            self.assertIs(fixture.live._willington_native_library, fixture.follow)
+            self.assertTrue(fixture.live._kumi_willington_registered)
+            first.close(); first.close()
+            second = fixture.construct()
+            self.assertIs(second.follow, fixture.follow)
+            self.assertIs(fixture.live._kumi_willington_follow_library, fixture.follow)
+            self.assertTrue(fixture.live._kumi_willington_registered)
+            self.assertEqual(fixture.calls, [('follow', 'install'), ('follow', False), ('follow', False), ('follow', False)])
+            self.assertFalse(any('unavailable' in line for line in fixture.logs))
+            second.close(); self.assert_closed(fixture, second)
+
+    def test_standalone_native_registrations_are_not_replaced_or_uninstalled(self):
+        for label in _ProviderFixture.labels:
+            with self.subTest(component=label), _provider_fixture({}) as fixture:
+                getattr(fixture, 'install_' + label)()
+                provider = fixture.construct()
+                self.assert_closed(fixture, provider)
+                self.assertEqual(fixture.calls, [(label, 'install')])
+                if label == 'follow': self.assertIs(fixture.live._willington_native_library, fixture.follow)
+                else: self.assertTrue(getattr(fixture, label).patches)
+                self.assertTrue(any('already installed' in line for line in fixture.logs))
 
 
 class ReviewRegressions(unittest.TestCase):
@@ -383,24 +628,3 @@ class ReviewRegressions(unittest.TestCase):
             self.assertEqual(test.mapping, prior)
             test.apply('macro-mapping', {'mapping': None, 'parameterValue': 2500.7})
             self.assertIsNone(test.mapping)
-
-    def test_follow_provider_reconnect_reuses_disabled_native_registration(self):
-        import tempfile, json, types
-        from pathlib import Path
-        from unittest.mock import patch
-        import AbletonMcpBridge as wrapper
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'willington.json'
-            path.write_text(json.dumps({'version': 1, 'followActions': True, 'deviceTools': False, 'enableWrites': False})); path.chmod(0o600); _protect_windows_owner_only(path)
-            calls = []; live = types.SimpleNamespace(); mapper = types.SimpleNamespace()
-            native = types.SimpleNamespace(willington_enable_writes=lambda value: calls.append(value))
-            with patch.object(wrapper, '__file__', str(path.with_name('__init__.py'))), patch.dict('sys.modules', {'Live': live, 'WillingtonBindings': types.SimpleNamespace(install=lambda: (calls.append('install'), native)[1])}):
-                first = wrapper._WillingtonProvider(mapper, None)
-                first.close(); first.close()
-                second = wrapper._WillingtonProvider(mapper, None)
-                self.assertIs(second.follow, native)
-                second.close()
-            self.assertEqual(calls.count('install'), 1)
-            self.assertFalse(mapper.willington_follow_writes)
-            self.assertIsNone(live._kumi_willington_owner)
-            self.assertIs(live._kumi_willington_follow_library, native)

@@ -32,7 +32,7 @@
 | [kumi-benchmark.md](../evidence/kumi-benchmark.md) | 2026-09-30 | 12.4 beta | 1.0.52 | 凭耳朵重建一首曲子中的一个段落：运行与评分 |
 | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.53 | 通过 Willington 设置 Follow Actions 和 Legato，读回并撤销 |
 | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json) | 2026-09-30 | 12.4.15b4 | 1.0.52 | 一次使用 Willington 编辑的 Kumi 对话，每项编辑都已撤销 |
-| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01 | 12.4.15b5 | 1.0.66 | 通过 Willington 处理机架链区域：读取、写入、撤销、保存并重新打开 |
+| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01、2026-10-02 | 12.4.15b5 | 1.0.66 | 通过 Willington 处理机架链区域：读取、写入、撤销、保存并重新打开；之后还有信号门控、淡变，以及 Max `live.object` 的写入、读回和恢复 |
 | [capability-manifest.json](../evidence/capability-manifest.json) | 随注册表重新生成 | — | 当前 | 每个注册表操作（可执行或保留），以及注册表的哈希 |
 | `phase-3` 至 `phase-9` 的文件 | 2026-07-26 至 07-28 | 12.4.5b8 | 0.1.0 | 桥接在有 Kumi 之前最早的几次真实 Live 运行：探查、试听、走带、片段、编曲视图、调音台、自动化、设备、Browser、路由、录音、项目文件、事件、实时控制和捕获；另有 [FFmpeg 响度对照基准](../evidence/phase-8-audio-oracle.json)，以及针对假 Live 运行的打包用户旅程。这些是历史记录：此后桥接已有很大变化。 |
 
@@ -42,7 +42,7 @@
 - 有些修改无法通过 Kumi 撤销，只能用 Live 自己的撤销；见 [Live 安全](LIVE_SAFETY.md)。
 - 在 Windows 上，Kumi 的扩展尚未测试，并且从 1.6.0 或更早版本运行 `kumi update` 可能因 tar 错误而失败；见 [Windows](SUPPORT_MATRIX.md#windows)。
 - 到目前为止的真实 Live 测试都在 Live 12.4.15 beta 上进行，主要是在 Apple 芯片的 Mac 上。Live 12.0 至 12.3、Intel Mac 和屏幕阅读器都未经测试。
-- Willington 编辑需要某一个确切的 Live 构建版本；见 [Willington 集成](WILLINGTON_INTEGRATION.md)。
+- Willington 编辑需要 Willington 有绑定的 Live 构建版本：macOS ARM64 上的 Live 12.4.15b4 和 b5（机架链区域仅限 b5）；见 [Willington 集成](WILLINGTON_INTEGRATION.md)。
 - Kumi 和桥接都没有签名；见[发布与分发](DISTRIBUTION_POLICY.md)。
 
 ## 待完成的工作

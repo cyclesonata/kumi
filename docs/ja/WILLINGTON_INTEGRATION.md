@@ -2,7 +2,7 @@
 
 [English](../en/WILLINGTON_INTEGRATION.md) · [简体中文](../zh-CN/WILLINGTON_INTEGRATION.md) · 日本語
 
-Willington は、別途インストールするネイティブプロバイダーのセットで、Live の Python API では届かない部分に手が届きます。Session クリップの Follow Action、ラックのマクロのマッピングと名前、ラックのチェーンのゾーンです。各プロバイダーは macOS ARM64 上の特定の Live ビルド 1 つのために作られており、実験的なものです。通常の Kumi とブリッジにはどれも必要ありません。なければ、これらのツールが表示されないだけです。
+Willington は、別途インストールするネイティブプロバイダーのセットで、Live の Python API では届かない部分に手が届きます。Session クリップの Follow Action、ラックのマクロのマッピングと名前、ラックのチェーンのゾーンです。マルチバージョンのバンドルが、接続している Live のビルドそのものに合うバインディングを選びます。Follow Action と DeviceTools には検証済みの macOS ARM64 b4/b5 用プロファイルがあり、RackZones は macOS ARM64 の Live 12.4.15b5 でサポートされています。通常の Kumi とブリッジにはどれも必要ありません。なければ、これらのツールが表示されないだけです。
 
 ## 追加されるもの
 
@@ -18,9 +18,9 @@ Willington は、別途インストールするネイティブプロバイダー
 
 ## インストールと有効化
 
-1. 使いたいプロバイダーを、Live の Remote Scripts フォルダーの AbletonMcpBridge の隣にインストールします。`WillingtonBindings`（Follow Action）、`WillingtonDeviceTools`（マクロとバリエーション。`get_macro_mapping` と `get_selected_variation_name` を提供している必要があります）、`WillingtonRackZones`（ゾーン）です。どれも、作られた対象の Live ビルドそのもので動いていることを確認し、ほかのビルドにはインストールを拒否します。
+1. マルチバージョンのバンドルを、Live の Remote Scripts フォルダーの AbletonMcpBridge の隣にインストールします。使いたいプロバイダーと一緒に、必須の `WillingtonRuntime` も入れてください。プロバイダーは `WillingtonBindings`（Follow Action）、`WillingtonDeviceTools`（マクロとバリエーション。`get_macro_mapping` と `get_selected_variation_name` を提供している必要があります）、`WillingtonRackZones`（ゾーン）です。手作業でコピーするときは、ランタイム、`build/<profile-id>/` フォルダー、マニフェストをそのまま残してください。各プロバイダーは、動いている Live プロセスの OS、アーキテクチャ、バージョン、実行ファイルのハッシュから、検証済みのバインディングを選びます。ネイティブパッケージは、動いている Mach-O の UUID も確認します。Windows と Intel macOS 用のバインディングはまだありません。
 2. Live でスタンドアロンの Willington コントロールサーフェスをすべてオフにし、Live を再起動します。ブリッジはプロバイダーをほかの持ち主と共有しません。
-3. `Remote Scripts/AbletonMcpBridge` の中、ブリッジの `__init__.py` の隣に `willington.json` を作ります。通常のファイルで、オーナー専用、4 KiB 以下で、ちょうど次のキーを持つ必要があります。
+3. `Remote Scripts/AbletonMcpBridge` の中、ブリッジの `__init__.py` の隣に `willington.json` を作ります。通常のファイルで、オーナー専用、4 KiB 以下で、次のキーを持つ必要があります（`rackZones` は省略可）。
 
    ```json
    {"version": 1, "followActions": true, "deviceTools": true, "rackZones": true, "enableWrites": false}
@@ -34,14 +34,42 @@ Willington は、別途インストールするネイティブプロバイダー
    | `rackZones` | 省略可。WillingtonRackZones を読み込む |
    | `enableWrites` | 編集を許可する。`false` ではプロバイダーを読み込むが、編集は提供しない |
 
-4. Follow Action を編集するには、WillingtonBindings のセルフテストに合格していることも必要です。そのフォルダーに、`"status": "passed"` と、`libwillington.dylib` の SHA-256 に等しい `library_sha256` を持つ `self-test.json` が必要です。これがないと Follow Action の編集はオフのままですが、ほかのプロバイダーは動作します。
+4. Follow Action を編集するには、WillingtonBindings のセルフテストに合格していることも必要です。そのフォルダーに、`"status": "passed"` と、選ばれた `build/<profile-id>/libwillington.dylib`（従来のパッケージではルートのライブラリ）の SHA-256 に等しい `library_sha256` を持つ `self-test.json` が必要です。ビルドを切り替えたときや、そのライブラリを置き換えたときは、[スタンドアロンのセルフテスト](#follow-action-のセルフテスト)をやり直してください。一致する証拠がないと Follow Action の編集はオフのままですが、ほかのプロバイダーは動作します。編集を有効にする準備ができたら、`enableWrites` を `true` にします。
 5. Live を再起動します。設定の変更は、Live の起動時にだけ反映されます。
 
 Kumi を更新しても `willington.json` は残ります。素のブリッジに戻すには、このファイルを削除してください。
 
-ファイルにキーが足りないか未知のキーがある、ファイルが指定するプロバイダーのどれかが読み込みに失敗する、別の持ち主がすでにプロバイダーを保持している、スタンドアロンの Follow Action・デバイス・ゾーンのサーフェスがすでにインストールされている、のいずれかのときは、どのプロバイダーも使われず、ブリッジはそれらなしで動き続けます。どれにあたるかは Live のログ（Log.txt）に出ます。「Willington extensions initialized; writes enabled」、「Willington extensions unavailable: …; ordinary bridge remains active」、「Willington Follow Action writes unavailable: …」のいずれかです。
+検証済みのプロファイルがないときは、そのコンポーネントだけが飛ばされます。1 つの設定で、b4 では Follow Action と DeviceTools を、b5 ではさらに RackZones も使えます。こうしたプロファイルがないことによる型付きの拒否は、Live のプロセスごと、コンポーネントごとにキャッシュされ、ログに出るのも 1 回だけです。
+
+不正な設定、足りないアーティファクト、整合性のエラー、予期しない起動時の失敗、ほかに動いている持ち主のいずれかがあると、ネイティブの拡張は使えなくなりますが、通常のブリッジは動き続けます。Live のログ（Log.txt）には、原因と、実際に動いているプロバイダー、書き込みが有効なプロバイダーの名前が出ます。Follow のセルフテストがないか古いときは、Follow の書き込みだけがオフになります。
 
 Remote Script が止まると、Follow Action の書き込みをオフにし、DeviceTools と RackZones をアンインストールします。Follow Action のバインディングはアンインストールできず、その Live プロセスに登録されたままになります。ブリッジが再び起動すると、書き込みをオフにした状態でそれを再利用します。
+
+## Follow Action のセルフテスト
+
+Live のビルドを切り替えたときや、選ばれた Follow のライブラリを置き換えたときは、やり直してください。この手順は配布されたバンドルで使えます。ソースのチェックアウトや `manage.py` は要りません。スタンドアロンのテストは、今の Set にフィクスチャのトラックを作り、ネイティブの書き込みと Live の取り消しを行うので、使い捨ての Set を使ってください。
+
+1. Live のコントロールサーフェスの設定で `AbletonMcpBridge` とスタンドアロンの Willington サーフェスを無効にし、Live を終了します。ネイティブの Follow のプロパティは、プロセスが終わるまで登録されたままです。
+2. 使う予定の Live のビルドを起動し、再生を止めた状態で使い捨ての Set を開き、Willington のコントロールサーフェスとして `WillingtonBindings` だけを選びます。MIDI の入力と出力は None にします。インストールされた `status.json` が `"status": "registered"` を示しているはずです。
+3. 次のコマンドでテストをキューに入れます。フォルダーの引数は、インストールした Bindings のフォルダーに置き換えてください。保留中のコマンドがあれば拒否し、古いレシートを削除するので、今回の実行と取り違えることはありません。
+
+   ```sh
+   python3 - '/path/to/User Library/Remote Scripts/WillingtonBindings' <<'PYTEST'
+   import json, os, sys
+   from pathlib import Path
+   folder = Path(sys.argv[1]).expanduser()
+   assert (folder / '__init__.py').is_file(), 'Not an installed Bindings folder'
+   command = folder / 'command.json'
+   assert not command.exists(), 'A command is already pending'
+   (folder / 'self-test.json').unlink(missing_ok=True)
+   temporary = folder / 'command.json.tmp'
+   temporary.write_text(json.dumps({'action': 'self_test'}) + '\n')
+   os.replace(temporary, command)
+   PYTEST
+   ```
+
+4. 新しい `self-test.json` が `"status": "passed"` と `library_sha256` を持って完了するのを待ちます。実行中や失敗の報告では、書き込みは有効になりません。コマンドが失敗したら `command-error.json` を確認してください。ハッシュは、選ばれた `build/<profile-id>/libwillington.dylib`（従来のインストールではルートのライブラリ）と一致する必要があります。`shasum -a 256 '/full/path/to/libwillington.dylib'` でそのダイジェストを表示できます。レシートは、インストールした Bindings のフォルダーに残しておいてください。
+5. スタンドアロンの `WillingtonBindings` コントロールサーフェスを None にし、Live を終了して再起動してから、`AbletonMcpBridge` を再び有効にします。使い捨ての Set は破棄します。スタンドアロンの Willington サーフェスを Kumi と一緒に選ばないでください。両方がネイティブのバインディングを持とうとします。Kumi は、`enableWrites: true` で Follow の書き込みを有効にする前に、自分が選んだライブラリに対してレシートを確認し直します。
 
 ## Follow Action
 
@@ -91,9 +119,11 @@ Drum Rack とリターンチェーンは拒否されます。ゾーンには 4 �
 | --- | --- | --- | --- | --- |
 | Follow Action | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json)、2026-09-30 | 12.4.15b5、macOS arm64 | 1.0.53 | 保存したテスト Set での Kumi の変更と取り消し、トランスポート停止中 |
 | Follow Action、マクロ、マッピング | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json)、2026-09-30 | 12.4.15b4 ARM64 | 1.0.52 | 実際の Kumi のチャット：Follow Action、マクロ名の変更、マッピング、それぞれを取り消し |
-| ラックのゾーン | [rack-zones-b5.json](../evidence/rack-zones-b5.json)、2026-10-01 | 12.4.15b5（2026-09-24 ビルド）、arm64 | 1.0.66 | 読み戻し、書き込み、取り消しとやり直し、Set の保存と再オープン、インストール済みのブリッジと Kumi の取り消し |
+| ラックのゾーン | [rack-zones-b5.json](../evidence/rack-zones-b5.json)、2026-10-01、完了 2026-10-02 | 12.4.15b5（2026-09-24 ビルド）、arm64 | 1.0.66（Kumi のトランザクション） | 読み戻し、書き込み、取り消しとやり直し、保存と再オープン、Kumi の取り消し。完了時の検証で、信号のゲーティング、フェード、実際の Max からの呼び出しを追加 |
 
-バリエーション名の変更と、反転した continuous と enum のマッピングは、ブリッジを直接使ってテストしました。どの実行も再生はカバーしていません。Follow Action のスケジューリング、ゾーンの鳴り方、再生中のセレクターの変更です。Follow Action とマクロの編集は、Set の保存と再オープンをまたいではテストしていません。ラックのゾーンは、12.4.15b4 でもほかのどのビルドでもサポートされていません。
+バリエーション名の変更と、反転した continuous と enum のマッピングは、ブリッジを直接使ってテストしました。Follow Action のスケジューリングと、Follow Action とマクロの編集が Set の保存と再オープンのあとも残るかどうかは、テストしていません。
+
+ラックのゾーンの完了時の検証結果とレシートのダイジェストは、[公開の検証サマリー](../evidence/rack-zones-b5.json)にあります。信号のゲーティングのチェック 42 件、フェードの測定 49 件とそれによる向きの比較 14 件、実際の Max の `live.object` による書き込み・読み取り・復元のサイクル 7 回です。正式に採用した `live-12.4.15b5-arm64` のライブラリは、テストした候補のライブラリとバイト単位で同一です。測定には正規化した Live のメーターを使っています。正確な線形のゲイン、フェードの端点での無音、ノートを押さえたままの編集、複数のチェーンが重なるクロスフェード、ほかのビルドやプラットフォームについては主張していません。ラックのゾーンは、b4 では引き続きサポートされていません。完了時の生のレシートとハーネスは、非公開の Willington リポジトリの、サマリーに記録した不変のコミットに保管されています。その生のファイルはここでは公開していません。
 
 ブリッジの自動テストは、残りを Live なしでカバーしています。プロバイダーがない場合、不正な設定、古い編集や競合する編集、部分的な書き込み、持ち主の扱いと再接続、応答の喪失です。
 

@@ -325,23 +325,42 @@ class _WillingtonProvider:
                 raise ValueError("rack zone bindings already installed")
             self.live = Live
             Live._kumi_willington_owner = self
+            try:
+                from WillingtonRuntime import ComponentUnavailableError as unavailable
+            except ImportError:
+                unavailable = ()  # Older packages have no typed availability error.
+
+            def install_component(component, module):
+                if component in getattr(Live, "_kumi_willington_unavailable_components", ()):
+                    return None
+                from importlib import import_module
+                try:
+                    return import_module(module).install()
+                except unavailable as error:
+                    # A no-profile refusal precedes native loading/patching and cannot
+                    # change in this Live process. Integrity/installation errors retry.
+                    refused = set(getattr(Live, "_kumi_willington_unavailable_components", ()))
+                    refused.add(component)
+                    Live._kumi_willington_unavailable_components = refused
+                    if callable(log): log(str(error))
+                    return None
+
             if config["followActions"]:
-                from WillingtonBindings import install
                 # Clip properties retain native function pointers for this Live process.
                 # The Follow package has no uninstall; reuse our disabled registration
                 # on reconnect instead of installing those properties a second time.
                 self.follow = getattr(Live, "_kumi_willington_follow_library", None)
                 if self.follow is None:
-                    self.follow = install()  # validates executable SHA and running Mach-O UUID
-                    Live._kumi_willington_follow_library = self.follow
-                self.follow.willington_enable_writes(False)
-                Live._kumi_willington_registered = True
+                    self.follow = install_component("WillingtonBindings", "WillingtonBindings")
+                    if self.follow is not None:
+                        Live._kumi_willington_follow_library = self.follow
+                if self.follow is not None:
+                    self.follow.willington_enable_writes(False)
+                    Live._kumi_willington_registered = True
             if config["deviceTools"]:
-                from WillingtonDeviceTools.api import install
-                self.devices = install()
+                self.devices = install_component("WillingtonDeviceTools", "WillingtonDeviceTools.api")
             if config.get("rackZones", False):
-                from WillingtonRackZones.api import install
-                self.zones = install()
+                self.zones = install_component("WillingtonRackZones", "WillingtonRackZones.api")
             if config["enableWrites"]:
                 # Follow bindings require evidence for this exact compiled library,
                 # matching the standalone adapter's operator enablement contract.
@@ -351,7 +370,8 @@ class _WillingtonProvider:
                         import WillingtonBindings
                         folder = Path(WillingtonBindings.__file__).parent
                         evidence = json.loads((folder / "self-test.json").read_text())
-                        digest = hashlib.sha256((folder / "libwillington.dylib").read_bytes()).hexdigest()
+                        library_path = Path(getattr(self.follow, "path", folder / "libwillington.dylib"))
+                        digest = hashlib.sha256(library_path.read_bytes()).hexdigest()
                         if evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
                             raise ValueError("current-library Follow Action self-test is required")
                         self.follow.willington_enable_writes(True)
@@ -364,7 +384,14 @@ class _WillingtonProvider:
                 if self.zones is not None:
                     self.zones.enable(True)
                     self.mapper.willington_zone_writes = True
-            if callable(log): log("Willington extensions initialized; writes " + ("enabled" if config["enableWrites"] else "disabled"))
+            if callable(log):
+                components = (("Follow Actions", self.follow, self.mapper.willington_follow_writes),
+                              ("Device Tools", self.devices, self.mapper.willington_device_writes),
+                              ("Rack Zones", self.zones, self.mapper.willington_zone_writes))
+                active = [name for name, provider, _ in components if provider is not None]
+                writable = [name for name, _, enabled in components if enabled]
+                log("Willington extensions initialized; active providers: " + (", ".join(active) or "none")
+                    + "; writes enabled: " + (", ".join(writable) or "none"))
         except Exception as error:
             try: self.close()
             except Exception: pass  # Capability flags are cleared even if native teardown fails.

@@ -1,7 +1,7 @@
 {
-  "status": "experimental-b5-tested",
+  "status": "supported-b5-validated",
   "version": "12.4.15b5 (2026-09-24_415b783fcc)",
-  "profile_id": "live-12.4.15b5-rack-zones-arm64",
+  "profile_id": "live-12.4.15b5-arm64",
   "library_sha256": "7401983ead1b32655678e3b2aad37225e6fbacebac9470398872b73641c0c242",
   "native_source_sha256": "75e383bf6439061a1a03cee51e9c9e89f33570ee24f363bf9b9b091a40ab6443",
   "tests": {
@@ -17,12 +17,17 @@
     "installed_authenticated_bridge_zone_readbacks": 7,
     "kumi_installed_host_preview_apply_idempotency_history_undo": 7,
     "kumi_runtime_change_tests": 40,
-    "live_extension_registry_and_socket_tests": 10
+    "live_extension_registry_and_socket_tests": 10,
+    "signal_gating": 42,
+    "fade_measurements": 49,
+    "fade_directional_comparisons": 14,
+    "max_live_object_write_read_restore": 7
   },
   "limits": [
-    "Audible MIDI/selector behavior untested",
-    "Max whitelist registration tested; actual live.object invocation untested",
-    "b4 and other Live builds unsupported"
+    "Exact linear gain curve or silence at fade endpoints not claimed",
+    "Held-note or dynamic playback edits not tested",
+    "Overlapping multi-chain crossfades not tested",
+    "Other Live builds or platforms unsupported"
   ],
   "evidence": {
     "readback-b5.json": "81d740ec1778fda797e1d1d81427ad93c063f07d96f6452a0db179d8e822be17",
@@ -32,5 +37,26 @@
     "kumi-mapper-b5.json": "b99083bcf256fd3a90511b81d9b18b0a963b8147cf61aa8acaf81ee0b1bdaeda",
     "installed-bridge-b5.json": "dd73e4cfad7330b87b1efe4bea030e1440c40a376d22aa012c6c5da5e5879992",
     "kumi-host-live-b5.json": "56e803ed8dbb2aaaa6ac960ace18b8a90ca247b10dc0429694c114ea995587cb"
+  },
+  "not_claimed": [
+    "Exact linear gain curve or silence at fade endpoints not claimed",
+    "Held-note or dynamic playback edits not tested",
+    "Overlapping multi-chain crossfades not tested",
+    "Other Live builds or platforms unsupported"
+  ],
+  "completion": {
+    "date": "2026-10-02",
+    "tested_profile_id": "live-12.4.15b5-rack-zones-arm64",
+    "promoted_profile_id": "live-12.4.15b5-arm64",
+    "promoted_library_matches_tested": true,
+    "scope": "All seven supported combinations: selector/key/velocity on Instrument and MIDI Effect Racks; selector on Audio Effect Racks. One regular chain per rack.",
+    "measurement": "Normalized Live stereo meters, not calibrated linear gain. 42 static gating cases passed; 49 fade measurements produced 14 passing directional attenuation comparisons. Seven actual Max live.object write/read/restore cycles changed state and restored original endpoints.",
+    "receipt_sha256": {
+      "signal-behavior.json": "e37423899ebd957bb4561dbcf325e849067004308982034d6a2c0e4364ea569a",
+      "signal-fades.json": "10359303097e6a03714e596da8dea08f81dcb9dc3318150e8183971287b7f591",
+      "zone-live-object.json": "32882b6b05d907389b6df0ef8ef18f61e2317d271f7bad6257f15230e85be019",
+      "runtime-matrix.json": "129b13953bdf18616c9d9c5ad032a425d61955e44ba5919cde6c8442407c0ba4"
+    },
+    "provenance": "Raw receipts and harness are retained in private cyclesonata/willington at immutable commit 9cd65b281fb7276a38fc54e7172a893e1ed96c21. Receipt digests identify that evidence; raw files are not published here."
   }
 }

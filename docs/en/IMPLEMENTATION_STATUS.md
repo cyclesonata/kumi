@@ -46,7 +46,7 @@ bridge, the version given is the one in the commit that added it.
 | [kumi-benchmark.md](../evidence/kumi-benchmark.md) | 2026-09-30 | 12.4 beta | 1.0.52 | Recreating a section of a track by ear: runs and scores |
 | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.53 | Follow Actions and Legato through Willington, read back and undone |
 | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json) | 2026-09-30 | 12.4.15b4 | 1.0.52 | A Kumi conversation using the Willington edits, each undone |
-| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01 | 12.4.15b5 | 1.0.66 | Rack chain zones through Willington: read, written, undone, saved and reopened |
+| [rack-zones-b5.json](../evidence/rack-zones-b5.json) | 2026-10-01, 2026-10-02 | 12.4.15b5 | 1.0.66 | Rack chain zones through Willington: read, written, undone, saved and reopened; then signal gating, fades and Max `live.object` writes, read back and restored |
 | [capability-manifest.json](../evidence/capability-manifest.json) | regenerated with the registry | — | current | Every registry operation, executable or reserved, and the registry's hash |
 | `phase-3` to `phase-9` files | 2026-07-26 to 07-28 | 12.4.5b8 | 0.1.0 | The bridge's first real-Live runs, before Kumi: discovery, audition, transport, clips, Arrangement, mixer, automation, devices, Browser, routing, recording, project files, events, realtime and capture; plus the [FFmpeg loudness oracle](../evidence/phase-8-audio-oracle.json) and the packaged journeys against a fake Live. History: the bridge has changed a great deal since. |
 
@@ -60,7 +60,8 @@ bridge, the version given is the one in the commit that added it.
   earlier can fail on a tar error; see [Windows](SUPPORT_MATRIX.md#windows).
 - Real-Live testing so far is on Live 12.4.15 beta, mostly on Apple silicon
   Macs. Live 12.0 to 12.3, Intel Macs and screen readers are untested.
-- The Willington edits need one exact Live build; see
+- The Willington edits need a Live build Willington has bindings for: macOS
+  ARM64 Live 12.4.15b4 and b5, with rack chain zones on b5 only; see
   [Willington integration](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
 

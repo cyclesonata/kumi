@@ -209,10 +209,38 @@ bridge's lines from it.
 ## Willington
 
 `willington.json` beside `__init__.py` loads the optional, separately installed
-Willington providers (Follow Actions, rack macros and mappings, rack chain
-zones) for one exact Live build on macOS ARM64. Without the file, nothing
-changes. Configuration, behavior and evidence:
+providers. Without the file, nothing changes. Configuration and ownership:
 https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md
+
+With the Willington multi-version bundle, install `WillingtonRuntime` beside the
+provider packages. At startup their `install()` functions select bindings using
+the connected Live process's OS, architecture, version and executable hash.
+Validated macOS ARM64 12.4.15b4/b5 bindings can coexist in one installation;
+a missing validated component profile skips only that component. Artifact or
+integrity failures tear down all native providers; ordinary Kumi stays active.
+The existing owner-only `willington.json` opt-in and write controls still apply.
+Follow Action evidence must match the selected library, so rerun its self-test
+after switching builds, following the [standalone self-test procedure](https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md#follow-action-self-test).
+Windows and Intel macOS bindings are not yet available.
+
+The optional Willington rack-zone adapter adds `selector-zone`, `key-zone`, and
+`velocity-zone` to `live_willington_device_preview`. Use `ref` for the rack and
+`targetRef` for a regular chain. Preview captures all four integer endpoints;
+apply and history undo fence rack/chain identity and the complete zone state.
+Audio Effect Racks support selector zones; Instrument and MIDI Effect Racks
+also support key and velocity zones. Drum/return chains are rejected. Playback
+must be stopped. Moving boundaries may require specifying both fade endpoints
+to maintain `minimum <= fadeMinimum <= fadeMaximum <= maximum`.
+
+Install the exact-build `WillingtonRackZones` Remote Script package alongside
+the existing adapters, then add the optional `"rackZones": true` field to the
+owner-only `willington.json`. The existing `enableWrites` flag controls writes.
+Rack Zones is supported on Live 12.4.15b5 macOS ARM64 and included in the
+validated multi-version bundle. Default installation selects its exact b5 profile;
+other builds remain unavailable. The current validation adds 42 actual signal-gating
+checks, 49 fade measurements and seven actual Max `live.object` write/read/restore
+checks to the earlier Kumi transaction tests. See the
+[public validation summary and receipt digests](https://github.com/user1303836/kumi/blob/main/docs/evidence/rack-zones-b5.json) for the measured scope.
 
 ## Tests
 
