@@ -6,6 +6,7 @@
 pub mod audio;
 mod events;
 pub mod helpers;
+pub mod mutations;
 mod project;
 mod protocol;
 mod reads;
@@ -55,6 +56,9 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    in_flight_mutations: RefCell<std::collections::HashMap<String, Rc<mutations::MutationFlight>>>,
+    open_undo_step: RefCell<Option<Value>>,
+    song_history_calls: RefCell<VecDeque<(String, Value)>>,
     analysis_runner: crate::analysis_runner::AnalysisRunner,
     adapter: Rc<dyn AsyncLiveAdapter>,
     views: Rc<LiveViews>,
@@ -122,6 +126,9 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            in_flight_mutations: RefCell::new(Default::default()),
+            open_undo_step: RefCell::new(None),
+            song_history_calls: RefCell::new(VecDeque::new()),
             analysis_runner: crate::analysis_runner::AnalysisRunner::new(),
             initialized: Cell::new(false),
             initialized_notification: Cell::new(false),
