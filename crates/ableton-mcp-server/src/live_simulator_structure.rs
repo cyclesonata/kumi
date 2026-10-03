@@ -89,7 +89,7 @@ fn lane_path(state: &Value, reference: &str) -> Option<String> {
     }
     None
 }
-fn absolute_audio_path(value: Option<&Value>) -> Result<String, LiveError> {
+pub(super) fn absolute_audio_path(value: Option<&Value>) -> Result<String, LiveError> {
     let s = value
         .and_then(Value::as_str)
         .filter(|s| {

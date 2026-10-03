@@ -288,3 +288,115 @@ impl DeterministicLiveSimulator {
         }
     }
 }
+
+fn device_parameter_refs(devices: &Value, refs: &mut Vec<Value>) {
+    for device in array(devices) {
+        refs.extend(array(&device["parameters"]).iter().map(|p| p["ref"].clone()));
+        for chain in array(&device["chains"]) {
+            device_parameter_refs(&chain["devices"], refs);
+        }
+        for pad in array(&device["drumPads"]) {
+            for chain in array(&pad["chains"]) {
+                device_parameter_refs(&chain["devices"], refs);
+            }
+        }
+    }
+}
+impl DeterministicLiveSimulator {
+    pub(super) fn clear_envelopes(&self, args: &Map<String, Value>) -> Result<Value, LiveError> {
+        let reference = string_arg(args, "clipRef")?;
+        let mut state = self.state.borrow_mut();
+        let path = clip_path(&state, reference)?;
+        let authority = if reference.starts_with("arrangement-clip:") {
+            Self::arrangement_authority_revision(&state, reference)?
+        } else {
+            simulator_revision(&Self::session_clip_authority(&state, reference)?)
+        };
+        if args.get("expectedAuthorityDigest") != Some(&json!(authority)) {
+            return Err(LiveError::error("clip hierarchy changed since preview"));
+        }
+        let track = array(&state["tracks"])
+            .iter()
+            .find(|t| array(&t["clips"]).iter().any(|c| c["ref"] == reference))
+            .ok_or_else(|| LiveError::error("envelope clear requires a Session clip"))?;
+        let mut refs = Vec::new();
+        device_parameter_refs(&track["devices"], &mut refs);
+        if !track["mixer"].is_null() {
+            for key in ["volumeRef", "panRef", "cueRef"] {
+                if track["mixer"][key].as_str().is_some_and(|s| !s.is_empty()) {
+                    refs.push(track["mixer"][key].clone());
+                }
+            }
+            refs.extend(array(&track["mixer"]["sendRefs"]).iter().filter(|r| r.as_str().is_some_and(|s| !s.is_empty())).cloned());
+        }
+        let clip = state.pointer_mut(&path).unwrap();
+        let presence = refs.iter().map(|r| r.as_str().is_some_and(|r| clip["envelopes"].get(r).is_some())).collect::<Vec<_>>();
+        if args.get("expectedEnvelopesRevision") != Some(&json!(simulator_revision(&json!(presence)))) {
+            return Err(LiveError::error("clip envelope collection changed since preview"));
+        }
+        let cleared = presence.iter().filter(|p| **p).count();
+        clip["envelopes"] = json!({});
+        drop(state);
+        self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":"automation.envelope.clear"}));
+        Ok(json!({"cleared":cleared,"envelopesRevision":simulator_revision(&json!(vec![false;refs.len()]))}))
+    }
+    pub(super) fn invoke_gap_automation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
+        let reference = string_arg(args, "clipRef").map_err(|_| LiveError::type_error("clipRef is invalid"))?;
+        let mut state = self.state.borrow_mut();
+        let path = clip_path(&state, reference)?;
+        let parameter = string_arg(args, "parameterRef").map_err(|_| LiveError::type_error("parameterRef is invalid"))?;
+        if operation == "automation.value-at" {
+            let time = ranged_number(args.get("time").unwrap_or(&Value::Null), 0., f64::INFINITY, false, "time is invalid")?;
+            let clip = state.pointer(&path).unwrap();
+            let points = clip["envelopes"].get(parameter);
+            let Some(points) = points.filter(|v| !v.is_null()) else {
+                return Ok(json!({"value":null}));
+            };
+            let points = array(points);
+            if points.is_empty() {
+                return Ok(json!({"value":0}));
+            }
+            let after = points.iter().position(|p| p["time"].as_f64().is_some_and(|t| t >= time));
+            let Some(after) = after.filter(|a| *a > 0) else {
+                return Ok(json!({"value":if after==Some(0){&points[0]["value"]}else{&points.last().unwrap()["value"]}}));
+            };
+            let left = &points[after - 1];
+            let right = &points[after];
+            let lt = left["time"].as_f64().unwrap();
+            let rt = right["time"].as_f64().unwrap();
+            let lv = left["value"].as_f64().unwrap();
+            let rv = right["value"].as_f64().unwrap();
+            return Ok(json!({"value":if rt==lt{rv}else{lv+(rv-lv)*(time-lt)/(rt-lt)}}));
+        }
+        let authority = simulator_revision(
+            &json!({"clip":Self::session_clip_authority(&state,reference)?,"parameter":Self::parameter_authority(&state,parameter)?}),
+        );
+        if args.get("expectedAuthorityDigest") != Some(&json!(authority))
+            || args.get("expectedEnvelopeRevision") != Some(&json!(envelope_revision(state.pointer(&path).unwrap(), parameter)))
+        {
+            return Err(LiveError::error("automation target identity or envelope changed since preview"));
+        }
+        let start = ranged_number(args.get("start").unwrap_or(&Value::Null), 0., f64::INFINITY, false, "start is invalid")?;
+        let length = ranged_number(args.get("length").unwrap_or(&Value::Null), 0.001, f64::INFINITY, false, "length is invalid")?;
+        let value = ranged_number(args.get("value").unwrap_or(&Value::Null), f64::NEG_INFINITY, f64::INFINITY, false, "value is invalid")?;
+        let clip = state.pointer_mut(&path).unwrap();
+        if start + length > clip["length"].as_f64().unwrap() + 1e-9 {
+            return Err(LiveError::error("the step is outside the clip"));
+        }
+        if clip["envelopes"].is_null() {
+            clip["envelopes"] = json!({});
+        }
+        let mut kept = array(&clip["envelopes"][parameter])
+            .iter()
+            .filter(|p| p["time"].as_f64().is_some_and(|t| t < start || t > start + length))
+            .cloned()
+            .collect::<Vec<_>>();
+        kept.extend([json!({"time":start,"value":value}), json!({"time":start+length,"value":value})]);
+        kept.sort_by(|a, b| a["time"].as_f64().unwrap().total_cmp(&b["time"].as_f64().unwrap()));
+        clip["envelopes"][parameter] = json!(kept);
+        drop(state);
+        self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":operation}));
+        self.next_sequence();
+        Ok(json!({"inserted":1}))
+    }
+}

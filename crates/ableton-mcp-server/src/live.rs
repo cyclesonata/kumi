@@ -4163,6 +4163,24 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "locator.jump" | "view.set" | "view.control" => self.invoke_view_control(operation, args),
+            "automation.step.insert" | "automation.value-at" => self.invoke_gap_automation(operation, args),
+            "automation.envelope.clear" => self.clear_envelopes(args),
+            "clip.set"
+            | "clip.action"
+            | "clip.follow-actions.set"
+            | "audio.clip.set"
+            | "audio.warp-marker.read"
+            | "audio.warp-marker.add"
+            | "audio.warp-marker.move"
+            | "audio.warp-marker.delete" => self.invoke_clip_properties(operation, args),
+            "arrangement.clip.create"
+            | "arrangement.audio-clip.create"
+            | "arrangement.clip.delete"
+            | "arrangement.clip.move"
+            | "clip.duplicate"
+            | "clip.move"
+            | "session.audio-clip.create" => self.invoke_clips(operation, args),
             "track.create-return"
             | "track.delete-return"
             | "track.duplicate"
@@ -5365,3 +5383,6 @@ mod simulator_views;
 
 #[path = "live_simulator_structure.rs"]
 mod simulator_structure;
+
+#[path = "live_simulator_clips.rs"]
+mod simulator_clips;

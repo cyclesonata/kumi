@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::json;
-fn fields(row: &Value, names: &[&str]) -> Value {
+pub(super) fn fields(row: &Value, names: &[&str]) -> Value {
     Value::Object(names.iter().map(|name| ((*name).into(), row[*name].clone())).collect())
 }
 fn track_view(track: &Value) -> Value {
@@ -13,7 +13,7 @@ fn fence(args: &Map<String, Value>, state: &Value, what: &str) -> Result<(), Liv
         Ok(())
     }
 }
-fn set_bool(row: &mut Value, args: &Map<String, Value>, key: &str, target: &str) -> Result<(), LiveError> {
+pub(super) fn set_bool(row: &mut Value, args: &Map<String, Value>, key: &str, target: &str) -> Result<(), LiveError> {
     if let Some(value) = args.get(key) {
         if !value.is_boolean() {
             return Err(LiveError::type_error(format!("{key} is invalid")));
@@ -22,7 +22,14 @@ fn set_bool(row: &mut Value, args: &Map<String, Value>, key: &str, target: &str)
     }
     Ok(())
 }
-fn set_number(row: &mut Value, args: &Map<String, Value>, key: &str, min: f64, max: f64, integer: bool) -> Result<(), LiveError> {
+pub(super) fn set_number(
+    row: &mut Value,
+    args: &Map<String, Value>,
+    key: &str,
+    min: f64,
+    max: f64,
+    integer: bool,
+) -> Result<(), LiveError> {
     if let Some(value) = args.get(key) {
         ranged_number(value, min, max, integer, &format!("{key} is invalid"))?;
         row[key] = value.clone();
@@ -319,6 +326,84 @@ impl DeterministicLiveSimulator {
                 Ok(result)
             }
             _ => unreachable!("view dispatcher routes only implemented operations"),
+        }
+    }
+}
+
+impl DeterministicLiveSimulator {
+    pub(super) fn invoke_view_control(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
+        match operation {
+            "locator.jump" => {
+                let direction = args
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .filter(|d| ["next", "previous"].contains(d))
+                    .ok_or_else(|| LiveError::range_error("locator jump direction is invalid"))?;
+                let mut state = self.state.borrow_mut();
+                let before = state["playback"]["transport"]["position"].as_f64().unwrap_or(0.);
+                let mut times =
+                    array(&state["arrangement"]["locators"]).iter().map(|l| l["position"].as_f64().unwrap()).collect::<Vec<_>>();
+                times.sort_by(f64::total_cmp);
+                if direction == "previous" {
+                    times.reverse();
+                }
+                let position = times
+                    .into_iter()
+                    .find(|time| if direction == "next" { *time > before + 1e-9 } else { *time < before - 1e-9 })
+                    .unwrap_or(before);
+                state["playback"]["transport"]["position"] = position.into();
+                state["set"]["position"] = position.into();
+                drop(state);
+                self.emit(LiveEventType::Transport, None, json!({"operation":operation}));
+                Ok(json!({"direction":direction,"before":before,"position":position}))
+            }
+            "view.set" => {
+                let view = bounded_text(args.get("view").unwrap_or(&Value::Null), 64, "view is invalid")?;
+                let mut state = self.state.borrow_mut();
+                state["view"] = json!({"visibleView":view,"follow":state["view"].get("follow").filter(|v|!v.is_null()).cloned().unwrap_or_else(||json!(false))});
+                drop(state);
+                self.emit(LiveEventType::State, None, json!({"operation":operation}));
+                Ok(json!({"view":view,"visible":true}))
+            }
+            "view.control" => {
+                let action = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .filter(|a| {
+                        [
+                            "zoom-in",
+                            "zoom-out",
+                            "scroll-left",
+                            "scroll-right",
+                            "follow-on",
+                            "follow-off",
+                            "collapse-track",
+                            "expand-track",
+                            "hide-view",
+                            "focus-view",
+                            "browser-toggle",
+                        ]
+                        .contains(a)
+                    })
+                    .ok_or_else(|| LiveError::range_error("view control action is invalid"))?;
+                if ["hide-view", "focus-view"].contains(&action) {
+                    bounded_text(args.get("view").unwrap_or(&Value::Null), 64, "view name is required")?;
+                }
+                let mut state = self.state.borrow_mut();
+                if ["follow-on", "follow-off"].contains(&action) {
+                    state["view"] = json!({"visibleView":state["view"].get("visibleView").filter(|v|!v.is_null()).cloned().unwrap_or_else(||json!("Session")),"follow":action=="follow-on"});
+                }
+                if ["collapse-track", "expand-track"].contains(&action) {
+                    let reference = string_arg(args, "trackRef")?;
+                    if !array(&state["tracks"]).iter().any(|t| t["ref"] == reference) {
+                        return Err(LiveError::error("track reference is stale or invalid"));
+                    }
+                }
+                drop(state);
+                self.emit(LiveEventType::State, None, json!({"operation":operation}));
+                Ok(json!({"action":action,"done":true}))
+            }
+            _ => unreachable!("view control dispatcher routes only implemented operations"),
         }
     }
 }
