@@ -4,10 +4,12 @@ With the Willington multi-version bundle, install `WillingtonRuntime` beside the
 provider packages. At startup their `install()` functions select bindings using
 the connected Live process's OS, architecture, version and executable hash.
 Validated macOS ARM64 12.4.15b4/b5 bindings can coexist in one installation;
-unsupported builds and missing artifacts leave the native provider unavailable.
+a missing validated component profile skips only that component. Artifact or
+integrity failures tear down all native providers; ordinary Kumi stays active.
 The existing owner-only `willington.json` opt-in and write controls still apply.
 Follow Action evidence must match the selected library, so rerun its self-test
-after switching builds. Windows and Intel macOS bindings are not yet available.
+after switching builds, following the [standalone self-test procedure](https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md#follow-action-self-test).
+Windows and Intel macOS bindings are not yet available.
 
 The optional Willington rack-zone adapter adds `selector-zone`, `key-zone`, and
 `velocity-zone` to `live_willington_device_preview`. Use `ref` for the rack and
@@ -26,8 +28,7 @@ validated multi-version bundle. Default installation selects its exact b5 profil
 other builds remain unavailable. The current validation adds 42 actual signal-gating
 checks, 49 fade measurements and seven actual Max `live.object` write/read/restore
 checks to the earlier Kumi transaction tests. See the
-[Willington completion evidence](https://github.com/cyclesonata/willington/tree/feat/platform-version-bindings/evidence/rack-zones/b5/completion-2026-10-02)
-and `docs/evidence/rack-zones-b5.json` for the measured scope.
+[public validation summary and receipt digests](https://github.com/user1303836/kumi/blob/main/docs/evidence/rack-zones-b5.json) for the measured scope.
 
 This directory contains a dependency-light Control Surface package and its
 transport implementation. Live loads `AbletonMcpBridge/__init__.py` and calls
