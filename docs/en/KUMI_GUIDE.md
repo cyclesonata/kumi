@@ -88,9 +88,9 @@ Live (**No Live access**) and says how to connect. `kumi --bridge-config
 --inference-only` chats without Live.
 
 **Optional: Willington.** With the separately installed Willington provider,
-Kumi can also edit Follow Actions, map rack macros and set chain zones. It runs
-on one exact Live build on macOS ARM64; see [Optional Willington
-integration](WILLINGTON_INTEGRATION.md).
+Kumi can also edit Follow Actions, map rack macros and set chain zones. It has
+bindings for Live 12.4.15b4 and b5 on macOS ARM64 (chain zones on b5 only); see
+[Optional Willington integration](WILLINGTON_INTEGRATION.md).
 
 ## Working with Kumi
 

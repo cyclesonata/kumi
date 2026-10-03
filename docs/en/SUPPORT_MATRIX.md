@@ -30,8 +30,9 @@ brings it.
 Editions: the bridge discovers what the Live it connects to offers, so devices
 and content an edition lacks (Standard and Intro have fewer) stay unavailable
 rather than guessed. Making Max for Live devices needs Max for Live (Suite, or
-Standard with the add-on). The optional Willington provider works with one
-exact Live build; see [Willington integration](WILLINGTON_INTEGRATION.md).
+Standard with the add-on). The optional Willington provider has bindings
+for macOS ARM64 Live 12.4.15b4 and b5 (rack chain zones on b5 only); see
+[Willington integration](WILLINGTON_INTEGRATION.md).
 
 ## Windows
 
