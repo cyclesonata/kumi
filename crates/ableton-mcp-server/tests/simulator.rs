@@ -52,6 +52,16 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
                 );
             }
         }
+        let mut held = live.held_fire_buttons.borrow().iter().cloned().collect::<Vec<_>>();
+        held.sort();
+        assert_eq!(
+            canonical(
+                json!({"selectedNotes":*live.selected_notes.borrow(),"heldFireButtons":held,"shownMessages":*live.shown_messages.borrow()})
+            ),
+            canonical(scenario["effects"].clone()),
+            "{} effects",
+            scenario["name"]
+        );
         assert_eq!(
             canonical(serde_json::to_value(live.snapshot().unwrap_or_else(|error| panic!("{}: {error}", scenario["name"]))).unwrap()),
             canonical(scenario["snapshot"].clone()),

@@ -3389,6 +3389,12 @@ pub struct DeterministicLiveSimulator {
     pub undo_step: RefCell<Option<Value>>,
     pub closed_undo_steps: RefCell<Vec<String>>,
     pub live_history: RefCell<(u64, u64)>,
+    stored_data: RefCell<HashMap<String, String>>,
+    pub selected_notes: RefCell<HashMap<String, Vec<Value>>>,
+    pub held_fire_buttons: RefCell<std::collections::HashSet<String>>,
+    modulation_amounts: RefCell<HashMap<String, HashMap<String, f64>>>,
+    pub shown_messages: RefCell<Vec<Value>>,
+    browser_preview: RefCell<Option<String>>,
 }
 impl Default for DeterministicLiveSimulator {
     fn default() -> Self {
@@ -3412,6 +3418,12 @@ impl DeterministicLiveSimulator {
             undo_step: RefCell::new(None),
             closed_undo_steps: RefCell::new(vec![]),
             live_history: RefCell::new((1, 0)),
+            stored_data: RefCell::new(HashMap::new()),
+            selected_notes: RefCell::new(HashMap::new()),
+            held_fire_buttons: RefCell::new(std::collections::HashSet::new()),
+            modulation_amounts: RefCell::new(HashMap::new()),
+            shown_messages: RefCell::new(vec![]),
+            browser_preview: RefCell::new(None),
         }
     }
     fn next_sequence(&self) -> u64 {
@@ -4163,6 +4175,24 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "data.get"
+            | "data.set"
+            | "note.select"
+            | "note.delete-range"
+            | "fire-button.set"
+            | "track.action"
+            | "device.property.set"
+            | "device.action"
+            | "sample.set"
+            | "sample.slice"
+            | "wavetable.set"
+            | "wavetable.modulation.set"
+            | "plugin.parameter-names"
+            | "device.banks.read"
+            | "clip.time-convert"
+            | "application.message"
+            | "browser.preview.start"
+            | "browser.preview.stop" => self.invoke_lom(operation, args),
             "drum-pad.set"
             | "drum-pad.load-sample"
             | "drum-pad.load-samples"
@@ -5415,3 +5445,6 @@ mod simulator_device_state;
 
 #[path = "live_simulator_racks.rs"]
 mod simulator_racks;
+
+#[path = "live_simulator_lom.rs"]
+mod simulator_lom;
