@@ -155,6 +155,14 @@ impl ExtensionChannel {
     pub fn endpoint(&self) -> Option<ExtensionEndpoint> {
         self.0.endpoint.borrow().clone()
     }
+    pub(super) fn share_callback(&self) -> Rc<dyn Fn(&Path)> {
+        let weak = Rc::downgrade(&self.0);
+        Rc::new(move |folder| {
+            if let Some(inner) = weak.upgrade() {
+                *inner.storage.borrow_mut() = folder.into();
+            }
+        })
+    }
     pub fn share(&self, folder: impl Into<PathBuf>) {
         *self.0.storage.borrow_mut() = folder.into();
     }
