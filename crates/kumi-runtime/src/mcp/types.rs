@@ -586,19 +586,82 @@ impl ContentBlock {
 }
 
 /// `tools/call`'s result (extra top-level keys kept); `content` is `[]` only when absent.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Input field order is retained because an unwrapped/error result is shown as JSON to the model.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallToolResult {
-    #[serde(default, rename = "_meta", deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Meta>,
-    #[serde(default)]
     pub content: Vec<ContentBlock>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<JsonObject>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-    #[serde(flatten)]
     pub rest: JsonObject,
+    pub field_order: Vec<String>,
+}
+impl<'de> Deserialize<'de> for CallToolResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fields {
+            #[serde(default, rename = "_meta", deserialize_with = "present")]
+            meta: Option<Meta>,
+            #[serde(default)]
+            content: Vec<ContentBlock>,
+            #[serde(default, deserialize_with = "present")]
+            structured_content: Option<JsonObject>,
+            #[serde(default, deserialize_with = "present")]
+            is_error: Option<bool>,
+            #[serde(flatten)]
+            rest: JsonObject,
+        }
+        let value = JsonObject::deserialize(deserializer)?;
+        let field_order = value.keys().cloned().collect();
+        let fields: Fields = serde_json::from_value(Value::Object(value)).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            meta: fields.meta,
+            content: fields.content,
+            structured_content: fields.structured_content,
+            is_error: fields.is_error,
+            rest: fields.rest,
+            field_order,
+        })
+    }
+}
+impl Serialize for CallToolResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut keys: Vec<&str> = self.field_order.iter().map(String::as_str).collect();
+        for key in ["_meta", "content", "structuredContent", "isError"].into_iter().chain(self.rest.keys().map(String::as_str)) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        let mut out = serializer.serialize_map(None)?;
+        for key in keys {
+            match key {
+                "_meta" => {
+                    if let Some(value) = &self.meta {
+                        out.serialize_entry(key, value)?;
+                    }
+                }
+                "content" => out.serialize_entry(key, &self.content)?,
+                "structuredContent" => {
+                    if let Some(value) = &self.structured_content {
+                        out.serialize_entry(key, value)?;
+                    }
+                }
+                "isError" => {
+                    if let Some(value) = self.is_error {
+                        out.serialize_entry(key, &value)?;
+                    }
+                }
+                _ => {
+                    if let Some(value) = self.rest.get(key) {
+                        out.serialize_entry(key, value)?;
+                    }
+                }
+            }
+        }
+        out.end()
+    }
 }
 
 #[cfg(test)]

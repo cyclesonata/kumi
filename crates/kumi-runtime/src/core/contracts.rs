@@ -666,9 +666,9 @@ pub struct SlotClip {
     pub audio: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSlot {
-    pub index: usize,
+    pub index: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<SlotClip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -678,7 +678,7 @@ pub struct SessionSlot {
 }
 
 /// A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStrip {
     pub track_ref: String,

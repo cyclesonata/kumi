@@ -953,6 +953,12 @@ impl McpEndpoint for Endpoint {
             let params = json!({ "name": name, "arguments": args });
             let result = self.request("tools/call", Some(params), self.timeout, &signal).await?;
             serde_json::from_value::<CallToolResult>(Value::Object(payload_object(&result)))
+                .map(|mut result| {
+                    // The SDK's CallToolResultSchema emits known keys in schema order.
+                    // Direct test/custom endpoints retain their own object insertion order.
+                    result.field_order.clear();
+                    result
+                })
                 .map_err(|error| RequestFailure::Invalid(error.to_string()))
         }
         .await;
@@ -966,6 +972,7 @@ impl McpEndpoint for Endpoint {
                 Ok(CallToolResult {
                     is_error: Some(true),
                     content: vec![ContentBlock::text(format!("The bridge rejected the arguments: {reason}"))],
+                    field_order: vec!["isError".into(), "content".into()],
                     ..Default::default()
                 })
             }
