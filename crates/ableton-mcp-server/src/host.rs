@@ -6,6 +6,7 @@
 pub mod audio;
 mod events;
 pub mod helpers;
+mod managed;
 pub mod mutations;
 mod project;
 mod protocol;
