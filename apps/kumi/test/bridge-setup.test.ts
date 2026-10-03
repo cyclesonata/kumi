@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { setupBridge, type BridgeSetupIo, type Ran } from "../src/bridge-setup.js";
-import { liveExtensionsDir } from "../src/live-extension.js";
+import { formerExtensionsDir, liveExtensionsDir, removeFormerExtension } from "../src/live-extension.js";
 
 /** A repository bridge at `bundled`, Live's Remote Scripts folder, and (with `installed`) a bridge installed there. */
 function world(options: { bundled: string; installed?: string }) {
@@ -33,7 +33,7 @@ function world(options: { bundled: string; installed?: string }) {
   const env = { KUMI_REMOTE_SCRIPTS_DIR: scripts, KUMI_LIVE_EXTENSIONS_DIR: join(root, "Ableton", "Extensions") };
   const io = ({ env: extraEnv, ...extra }: Partial<BridgeSetupIo> = {}): BridgeSetupIo => ({
     out: output, env: { ...env, ...extraEnv }, bridgeDir, home: join(root, "kumi"), waitMs: 0, yes: true,
-    liveRunning: async () => false, sleep: async () => {},
+    liveRunning: async () => false, remoteScriptAnswers: async () => true, sleep: async () => {},
     async run(command, args, cwd) {
       calls.push({ command, args });
       if (command === "npm" && args[0] === "pack") {
@@ -130,6 +130,38 @@ test("after installing, Kumi waits for Live to connect through the new bridge", 
   } finally { w.done(); }
 });
 
+test("while it waits, the lifecycle's activation (seconds on Windows) runs only once Live's Remote Script answers on its port", async () => {
+  const w = world({ bundled: "1.0.34", installed: "1.0.33" });
+  try {
+    w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle/v1", state: "planned" }), answer({ version: "ableton-mcp-lifecycle/v1", state: "installed-restart-required" }),
+      answer({ version: "ableton-mcp-lifecycle/v1", action: "activate", state: "completed", verification: { installationValid: true, liveConnected: true, provenance: "real-live" } }));
+    let asked = 0; let slept = 0;
+    assert.equal(await setupBridge(w.io({ waitMs: 60_000, remoteScriptAnswers: async () => ++asked > 3, sleep: async () => { slept++; } })), 0);
+    assert.equal(w.calls.filter((call) => call.args[1] === "activate").length, 1, "one activation, once Live answered");
+    assert.equal(asked, 4); assert.equal(slept, 3);
+    assert.match(w.out, /Live is connected through the new bridge/);
+  } finally { w.done(); }
+});
+
+test("Enter or Ctrl-C stops the waiting as keys (raw mode, put back after), not as a signal that would cut a step short", async () => {
+  for (const key of ["\r", "\u0003"]) {
+    const w = world({ bundled: "1.0.34", installed: "1.0.33" });
+    try {
+      w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle/v1", state: "planned" }), answer({ version: "ableton-mcp-lifecycle/v1", state: "installed-restart-required" }));
+      const raw: boolean[] = [];
+      const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: (on: boolean) => { raw.push(on); } });
+      // Live never answers, and the pause between looks never ends: only the key ends the waiting.
+      let asked = 0;
+      const result = setupBridge(w.io({ input, waitMs: 60_000, remoteScriptAnswers: async () => { if (++asked === 1) setImmediate(() => input.write(key)); return false; }, sleep: () => new Promise(() => {}) }));
+      assert.equal(await result, 0);
+      assert.equal(asked, 1);
+      assert.deepEqual(raw, [true, false]);
+      assert.equal(w.calls.filter((call) => call.args[1] === "activate").length, 0);
+      assert.match(w.out, /Stopped waiting\. Kumi connects on its own once Live has AbletonMcpBridge as a Control Surface/);
+    } finally { w.done(); }
+  }
+});
+
 test("a User Library without a Remote Scripts folder gets one; without a User Library, Kumi says where it looked", async () => {
   const w = world({ bundled: "1.0.34" });
   try {
@@ -190,7 +222,25 @@ test("without Live's own folder (Live never opened), the extension isn't placed 
 test("Live's Extensions folder comes from the environment given, never the producer's own home by default", () => {
   assert.equal(liveExtensionsDir({}, "darwin"), undefined, "no HOME given: no folder (a test's partial environment can't reach the real Live)");
   assert.equal(liveExtensionsDir({ HOME: "/Users/p" }, "darwin"), join("/Users/p", "Library", "Application Support", "Ableton", "Extensions"));
-  assert.equal(liveExtensionsDir({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32"), join("C:/Users/p/AppData/Roaming", "Ableton", "Extensions"));
+  assert.equal(liveExtensionsDir({ LOCALAPPDATA: "C:/Users/p/AppData/Local", APPDATA: "C:/Users/p/AppData/Roaming" }, "win32"), join("C:/Users/p/AppData/Local", "Ableton", "Extensions"), "where Live on Windows keeps its database too");
+  assert.equal(liveExtensionsDir({ APPDATA: "C:/Users/p/AppData/Roaming" }, "win32"), undefined, "not %APPDATA%'s, which Live doesn't read");
   assert.equal(liveExtensionsDir({ HOME: "/home/p" }, "linux"), undefined);
   assert.equal(liveExtensionsDir({ KUMI_LIVE_EXTENSIONS_DIR: "/x/Extensions", HOME: "/Users/p" }, "darwin"), "/x/Extensions");
+});
+
+test("on Windows, the extension Kumi 1.6.0 put in %APPDATA%\\Ableton, which Live doesn't read, is taken out; someone else's stay", () => {
+  const root = mkdtempSync(join(tmpdir(), "kumi-former-extension-"));
+  try {
+    const appdata = join(root, "Roaming"); const env = { APPDATA: appdata };
+    assert.equal(formerExtensionsDir(env, "darwin"), undefined); assert.equal(formerExtensionsDir({ ...env, KUMI_LIVE_EXTENSIONS_DIR: join(root, "x") }, "win32"), undefined);
+    const former = formerExtensionsDir(env, "win32")!;
+    assert.equal(removeFormerExtension(env, "win32"), false, "nothing there");
+    mkdirSync(join(former, "kumi.kumi", "dist"), { recursive: true }); mkdirSync(join(appdata, "Ableton", "Extensions Data", "kumi.kumi"), { recursive: true });
+    assert.equal(removeFormerExtension(env, "win32"), true);
+    assert.equal(existsSync(former) || existsSync(join(appdata, "Ableton", "Extensions Data")), false, "the folders Kumi made go once they're empty");
+    assert.equal(existsSync(join(appdata, "Ableton")), true, "Live's own folder stays");
+    mkdirSync(join(former, "kumi.kumi"), { recursive: true }); mkdirSync(join(former, "someone.else"), { recursive: true });
+    assert.equal(removeFormerExtension(env, "win32"), true);
+    assert.equal(existsSync(join(former, "kumi.kumi")), false); assert.equal(existsSync(join(former, "someone.else")), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

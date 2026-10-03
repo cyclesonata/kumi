@@ -72,7 +72,7 @@ you moved elsewhere (it reads Live's own settings for that).
 **Kumi's Live extension.** On Live 12.4 and later, `kumi bridge` also puts Kumi's
 extension into Live's Extensions folder (on macOS
 `~/Library/Application Support/Ableton/Extensions/kumi.kumi`; on Windows Kumi
-uses `%APPDATA%\Ableton\Extensions`, which isn't confirmed on Windows yet).
+uses `%LOCALAPPDATA%\Ableton\Extensions`, which isn't confirmed on Windows yet).
 Live starts it the next time it opens. The extension writes MIDI clips straight
 into the Arrangement, clears a stretch of a track, renders a track's clips
 without playing them, and adds **Ask Kumi about this** to Live's right-click

@@ -130,7 +130,7 @@ ableton-mcp-lifecycle <action> --remote-scripts-dir DIR [options]
 | 文件夹 | macOS | Windows |
 | --- | --- | --- |
 | Remote Scripts（默认 User Library） | `~/Music/Ableton/User Library/Remote Scripts` | `Documents\Ableton\User Library\Remote Scripts`（或在 `OneDrive\Documents` 下） |
-| Extensions（Live 12.4 或更高） | `~/Library/Application Support/Ableton/Extensions` | `%APPDATA%\Ableton\Extensions`（尚未确认） |
+| Extensions（Live 12.4 或更高） | `~/Library/Application Support/Ableton/Extensions` | `%LOCALAPPDATA%\Ableton\Extensions`（尚未确认） |
 | Control Surface 设置 | Live → Settings → Link, Tempo & MIDI | Options → Settings → Link, Tempo & MIDI |
 
 如果你移动过 User Library，Live 的 **Settings → Library** 会显示它的位置；Kumi 会从 Live 的偏好设置中自行找到它。切勿安装到 Live 的应用程序文件夹中。

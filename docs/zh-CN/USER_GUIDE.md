@@ -150,7 +150,7 @@ Live 连接期间，桥接每 10 秒寻找一次扩展。扩展一旦应答，�
 | `ABLETON_MCP_EXTENSION=off` | 不连接扩展 |
 | `ABLETON_MCP_EXTENSION=external` | 连接正在运行的扩展，但从不自行启动扩展 |
 | `ABLETON_MCP_EXTENSION_DIR` | 由桥接启动的扩展存放其端点、密钥和渲染文件的位置（默认：配置文件旁边的 `live-extension`） |
-| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live 的 Extensions 文件夹，如果不在默认位置（`~/Library/Application Support/Ableton/Extensions`、`%APPDATA%\Ableton\Extensions`） |
+| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live 的 Extensions 文件夹，如果不在默认位置（`~/Library/Application Support/Ableton/Extensions`、`%LOCALAPPDATA%\Ableton\Extensions`） |
 
 ## 命令
 

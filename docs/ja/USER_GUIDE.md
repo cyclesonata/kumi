@@ -150,7 +150,7 @@ Live が接続している間、ブリッジは 10 秒ごとに拡張機能を�
 | `ABLETON_MCP_EXTENSION=off` | 拡張機能に接続しない |
 | `ABLETON_MCP_EXTENSION=external` | 動いている拡張機能に接続するが、自分では起動しない |
 | `ABLETON_MCP_EXTENSION_DIR` | ブリッジが起動した拡張機能が、エンドポイント、シークレット、レンダリングを置く場所（デフォルト：設定の隣の `live-extension`） |
-| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live の Extensions フォルダ。デフォルト（`~/Library/Application Support/Ableton/Extensions`、`%APPDATA%\Ableton\Extensions`）以外の場合に指定します |
+| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live の Extensions フォルダ。デフォルト（`~/Library/Application Support/Ableton/Extensions`、`%LOCALAPPDATA%\Ableton\Extensions`）以外の場合に指定します |
 
 ## コマンド
 

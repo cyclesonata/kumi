@@ -189,7 +189,7 @@ Without the flag there's no log.
 | Folder | macOS | Windows |
 | --- | --- | --- |
 | Remote Scripts (default User Library) | `~/Music/Ableton/User Library/Remote Scripts` | `Documents\Ableton\User Library\Remote Scripts` (or under `OneDrive\Documents`) |
-| Extensions (Live 12.4 or later) | `~/Library/Application Support/Ableton/Extensions` | `%APPDATA%\Ableton\Extensions` (not yet confirmed) |
+| Extensions (Live 12.4 or later) | `~/Library/Application Support/Ableton/Extensions` | `%LOCALAPPDATA%\Ableton\Extensions` (not yet confirmed) |
 | Control Surface setting | Live → Settings → Link, Tempo & MIDI | Options → Settings → Link, Tempo & MIDI |
 
 If you moved your User Library, Live's **Settings → Library** shows where it

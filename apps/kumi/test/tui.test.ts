@@ -35,11 +35,18 @@ test("widths follow graphemes: ASCII 1, CJK and emoji 2, combining marks join th
 });
 
 test("colour depth comes from the environment, and colours degrade to 256 and 16", () => {
-  assert.equal(detectColorDepth({ COLORTERM: "truecolor" }), "truecolor");
-  assert.equal(detectColorDepth({ TERM_PROGRAM: "Apple_Terminal", TERM: "xterm-256color" }), "256");
-  assert.equal(detectColorDepth({ TERM: "xterm-256color" }), "256");
-  assert.equal(detectColorDepth({ NO_COLOR: "1", COLORTERM: "truecolor" }), "none");
-  assert.equal(detectColorDepth({ KUMI_COLOR: "16", COLORTERM: "truecolor" }), "16");
+  assert.equal(detectColorDepth({ COLORTERM: "truecolor" }, "darwin"), "truecolor");
+  assert.equal(detectColorDepth({ TERM_PROGRAM: "Apple_Terminal", TERM: "xterm-256color" }, "darwin"), "256");
+  assert.equal(detectColorDepth({ TERM: "xterm-256color" }, "linux"), "256");
+  assert.equal(detectColorDepth({}, "linux", "6.8.0"), "16");
+  assert.equal(detectColorDepth({ NO_COLOR: "1", COLORTERM: "truecolor" }, "darwin"), "none");
+  assert.equal(detectColorDepth({ KUMI_COLOR: "16", COLORTERM: "truecolor" }, "darwin"), "16");
+  // Windows' console and Windows Terminal draw 24-bit colour without saying so; the oldest Windows 10 didn't.
+  assert.equal(detectColorDepth({}, "win32", "10.0.19045"), "truecolor");
+  assert.equal(detectColorDepth({ WT_SESSION: "x", TERM: "xterm-256color" }, "win32", "10.0.26100"), "truecolor");
+  assert.equal(detectColorDepth({}, "win32", "10.0.10586"), "16");
+  assert.equal(detectColorDepth({ NO_COLOR: "1" }, "win32", "10.0.19045"), "none");
+  assert.equal(detectColorDepth({ KUMI_COLOR: "256" }, "win32", "10.0.19045"), "256");
   assert.equal(to256([255, 0, 0]), 196);
   assert.equal(to256([128, 128, 128]), 244);
   assert.equal(to16([250, 250, 250]), 15);

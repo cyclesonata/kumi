@@ -13,6 +13,7 @@ export { createRecipeStore, FORGET_RECIPE_TOOL, recipeInstructions, recipeTools,
 export { KumiError, type FailureKind } from "./core/errors.js";
 export { KUMI_VERSION } from "./version.js";
 export { INSTALLED, KUMI, KUMI_REPAIR, KUMI_START } from "./command.js";
+export { systemProgram } from "./system.js";
 export { createSession } from "./core/session.js";
 export { createAgentKernel, type AgentKernel, type AgentKernelOptions, type Checkpoint, type ModelBinding, type ModelRequest } from "./kernel/agent.js";
 export { DEFAULT_BUDGET, type ContextBudget } from "./kernel/budget.js";

@@ -30,7 +30,7 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 
 Windows でまだ確認できていないこと：
 
-- **Live が Extensions フォルダーを置く場所。** Kumi は `%APPDATA%\Ableton\Extensions` を使い、`KUMI_LIVE_EXTENSIONS_DIR` で上書きできます。これが確認できるまで、拡張機能の機能は Windows では未テストです。
+- **Live が Extensions フォルダーを置く場所。** Kumi は `%LOCALAPPDATA%\Ableton\Extensions` を使い、`KUMI_LIVE_EXTENSIONS_DIR` で上書きできます。これが確認できるまで、拡張機能の機能は Windows では未テストです。
 - **Windows のターミナルでのフルスクリーンアプリ。** Windows Terminal を推奨します。[ターミナル](KUMI_TUI.md#ターミナル)を参照してください。
 - **Kumi 1.6.0 以前からの `kumi update`** は、PATH 上で Git の `tar` が Windows 自身の `tar` より前にあると（Git Bash から起動した PowerShell など）、tar のエラーで失敗します。インストールのコマンドをもう一度実行するか、`kumi update` の前に `$env:Path = "$env:SystemRoot\System32;$env:Path"` を実行してください。
 

@@ -184,7 +184,7 @@ Its tools appear in `tools/list` once it answers; see the
 | `ABLETON_MCP_EXTENSION=off` | Don't connect to the extension |
 | `ABLETON_MCP_EXTENSION=external` | Connect to a running extension, but never start one |
 | `ABLETON_MCP_EXTENSION_DIR` | Where a bridge-started extension keeps its endpoint, secret and renders (default: `live-extension` beside the configuration) |
-| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live's Extensions folder, if not the default (`~/Library/Application Support/Ableton/Extensions`, `%APPDATA%\Ableton\Extensions`) |
+| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live's Extensions folder, if not the default (`~/Library/Application Support/Ableton/Extensions`, `%LOCALAPPDATA%\Ableton\Extensions`) |
 
 ## Commands
 

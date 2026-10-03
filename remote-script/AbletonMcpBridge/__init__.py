@@ -174,9 +174,11 @@ def _windows_acl_owner_only(path: Path) -> bool:
         )
         environment = dict(os.environ)
         environment["ABLETON_MCP_ACL_PATH"] = encoded
+        # By its full path: a bare name is looked for in Live's own folder and the working folder first.
+        powershell = os.path.join(os.environ.get("SYSTEMROOT") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
         # Live has no console of its own: without this flag each check would open a console window.
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
             capture_output=True, timeout=10, env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return result.returncode == 0

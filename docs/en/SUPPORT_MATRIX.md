@@ -46,7 +46,7 @@ only an ordinary account or a moved library has.
 Not yet confirmed on Windows:
 
 - **Where Live keeps its Extensions folder.** Kumi uses
-  `%APPDATA%\Ableton\Extensions`; `KUMI_LIVE_EXTENSIONS_DIR` overrides it. Until
+  `%LOCALAPPDATA%\Ableton\Extensions`; `KUMI_LIVE_EXTENSIONS_DIR` overrides it. Until
   that's confirmed, the extension's features are untested on Windows.
 - **The full-screen app in Windows terminals.** Windows Terminal is recommended;
   see [terminals](KUMI_TUI.md#terminals).

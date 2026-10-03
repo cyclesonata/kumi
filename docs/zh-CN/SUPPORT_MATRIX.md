@@ -30,7 +30,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 尚未在 Windows 上确认：
 
-- **Live 把 Extensions 文件夹放在哪里。** Kumi 使用 `%APPDATA%\Ableton\Extensions`；`KUMI_LIVE_EXTENSIONS_DIR` 可以覆盖它。在确认之前，扩展的各项功能在 Windows 上都未经测试。
+- **Live 把 Extensions 文件夹放在哪里。** Kumi 使用 `%LOCALAPPDATA%\Ableton\Extensions`；`KUMI_LIVE_EXTENSIONS_DIR` 可以覆盖它。在确认之前，扩展的各项功能在 Windows 上都未经测试。
 - **全屏应用在 Windows 终端中的表现。** 推荐使用 Windows Terminal；见[终端](KUMI_TUI.md#终端)。
 - **从 Kumi 1.6.0 或更早版本运行 `kumi update`** 时，如果 PATH 上 Git 的 `tar` 排在 Windows 自带的 tar 前面（例如在从 Git Bash 启动的 PowerShell 中），会因 tar 错误而失败。请重新运行那行安装命令，或在 `kumi update` 之前运行 `$env:Path = "$env:SystemRoot\System32;$env:Path"`。
 

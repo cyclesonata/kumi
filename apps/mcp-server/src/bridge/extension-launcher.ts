@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,11 +75,17 @@ export function parseExtensionHosts(listing: string): { kumi: string[]; live: bo
   return { kumi, live };
 }
 
-export function runningExtensionHosts(): { kumi: string[]; live: boolean } {
-  const listing = process.platform === "win32"
-    ? spawnSync(windowsPowerShell(), ["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { $_.CommandLine }"], { encoding: "utf8", windowsHide: true })
-    : spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
-  return parseExtensionHosts(listing.stdout ?? "");
+/**
+ * The Extension Hosts running now, asked without holding the bridge: on Windows the listing (PowerShell
+ * and CIM) takes about half a second, and waiting for it blocked every request the bridge was serving.
+ */
+export function runningExtensionHosts(): Promise<{ kumi: string[]; live: boolean }> {
+  const [command, args]: [string, string[]] = process.platform === "win32"
+    ? [windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { $_.CommandLine }"]]
+    : ["ps", ["-axo", "command="]];
+  return new Promise((resolve) => {
+    execFile(command, args, { encoding: "utf8", windowsHide: true, timeout: 20_000, maxBuffer: 16 * 1024 * 1024 }, (_error, stdout) => resolve(parseExtensionHosts(String(stdout ?? ""))));
+  });
 }
 
 export interface LaunchOptions {
@@ -124,8 +130,8 @@ export async function launchExtension(options: LaunchOptions): Promise<LaunchOut
   if (readExtensionEndpoint(options.storageDirectory)) return "answering";
   // One Extension Host reaches a Live: a Kumi one another bridge started (with its own storage folder)
   // is used where it is; Live's own (a producer's installed extensions) leaves Kumi's to kumi.ablx.
-  const look = () => (options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : runningExtensionHosts());
-  const running = look();
+  const look = async () => (options.scan === false ? { kumi: [], live: false } : typeof options.scan === "function" ? options.scan() : await runningExtensionHosts());
+  const running = await look();
   const shared = running.kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
   if (shared) { options.onShared?.(shared); return "shared"; }
   // Live runs the extensions installed in it (kumi bridge installs Kumi's) and lets no other host in.
@@ -140,7 +146,7 @@ export async function launchExtension(options: LaunchOptions): Promise<LaunchOut
     // Another bridge is starting one: wait for it, in this folder or its own, and use it.
     while (Date.now() < deadline) {
       if (readExtensionEndpoint(options.storageDirectory)) return "answering";
-      const other = look().kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
+      const other = (await look()).kumi.find((folder) => folder !== options.storageDirectory && readExtensionEndpoint(folder));
       if (other) { options.onShared?.(other); return "shared"; }
       await pause(100);
     }
