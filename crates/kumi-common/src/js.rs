@@ -1,0 +1,410 @@
+//! JavaScript's ways with values, where Kumi's files, hashes and messages depend on them:
+//! `JSON.stringify` (numbers as `Number.prototype.toString` writes them, integer-like keys first),
+//! and strings measured in UTF-16 code units as `.length` and `.slice()` measure them.
+
+pub mod json {
+    use serde_json::Value;
+
+    /// `JSON.stringify(value)`: no spaces, JavaScript's number formatting and key order.
+    pub fn stringify(value: &Value) -> String {
+        let mut out = String::new();
+        write(value, &mut out, None, 0);
+        out
+    }
+
+    /// `JSON.stringify(value, null, indent)`.
+    pub fn stringify_pretty(value: &Value, indent: usize) -> String {
+        if indent == 0 {
+            return stringify(value);
+        }
+        let mut out = String::new();
+        write(value, &mut out, Some(indent.min(10)), 0);
+        out
+    }
+
+    /// `JSON.stringify(value, null, 2)` with a trailing newline: how Kumi writes its files.
+    pub fn file_text(value: &Value) -> String {
+        let mut text = stringify_pretty(value, 2);
+        text.push('\n');
+        text
+    }
+
+    /// `Buffer.byteLength(JSON.stringify(value))`.
+    pub fn byte_length(value: &Value) -> usize {
+        stringify(value).len()
+    }
+
+    fn write(value: &Value, out: &mut String, indent: Option<usize>, depth: usize) {
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(&number(n)),
+            Value::String(s) => escape(s, out),
+            Value::Array(items) => {
+                if items.is_empty() {
+                    out.push_str("[]");
+                    return;
+                }
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    newline(out, indent, depth + 1);
+                    write(item, out, indent, depth + 1);
+                }
+                newline(out, indent, depth);
+                out.push(']');
+            }
+            Value::Object(map) => {
+                if map.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                out.push('{');
+                let mut first = true;
+                for key in ordered_keys(map) {
+                    if !first {
+                        out.push(',');
+                    }
+                    first = false;
+                    newline(out, indent, depth + 1);
+                    escape(key, out);
+                    out.push(':');
+                    if indent.is_some() {
+                        out.push(' ');
+                    }
+                    write(&map[key], out, indent, depth + 1);
+                }
+                newline(out, indent, depth);
+                out.push('}');
+            }
+        }
+    }
+
+    fn newline(out: &mut String, indent: Option<usize>, depth: usize) {
+        if let Some(width) = indent {
+            out.push('\n');
+            for _ in 0..depth * width {
+                out.push(' ');
+            }
+        }
+    }
+
+    /// JavaScript lists an object's integer-like keys first, ascending, then the rest in insertion order.
+    fn ordered_keys(map: &serde_json::Map<String, Value>) -> Vec<&String> {
+        let mut indices: Vec<(u32, &String)> = Vec::new();
+        let mut rest: Vec<&String> = Vec::new();
+        for key in map.keys() {
+            match array_index(key) {
+                Some(index) => indices.push((index, key)),
+                None => rest.push(key),
+            }
+        }
+        if indices.is_empty() {
+            return rest;
+        }
+        indices.sort_by_key(|(index, _)| *index);
+        indices.into_iter().map(|(_, key)| key).chain(rest).collect()
+    }
+
+    /// A canonical array index: "0", or digits without a leading zero, below 2^32 − 1.
+    fn array_index(key: &str) -> Option<u32> {
+        if key == "0" {
+            return Some(0);
+        }
+        if key.is_empty() || key.starts_with('0') || !key.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        key.parse::<u32>().ok().filter(|index| *index < u32::MAX)
+    }
+
+    /// A number as `JSON.stringify` writes it: `Number.prototype.toString`, or `null` when not finite.
+    pub fn number(n: &serde_json::Number) -> String {
+        if let Some(i) = n.as_i64() {
+            return i.to_string();
+        }
+        if let Some(u) = n.as_u64() {
+            return u.to_string();
+        }
+        match n.as_f64() {
+            Some(f) if f.is_finite() => super::number::to_string(f),
+            _ => "null".to_string(),
+        }
+    }
+
+    /// A string as `JSON.stringify` writes it, quotes included.
+    pub fn escape(s: &str, out: &mut String) {
+        out.push('"');
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\u{8}' => out.push_str("\\b"),
+                '\u{c}' => out.push_str("\\f"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    /// `JSON.stringify(text)`: a string, quoted and escaped.
+    pub fn quote(text: &str) -> String {
+        let mut out = String::with_capacity(text.len() + 2);
+        escape(text, &mut out);
+        out
+    }
+}
+
+pub mod number {
+    /// `Number.prototype.toString()` for radix 10 (ECMA-262 Number::toString).
+    pub fn to_string(value: f64) -> String {
+        if value.is_nan() {
+            return "NaN".into();
+        }
+        if value == 0.0 {
+            return "0".into();
+        }
+        if value.is_infinite() {
+            return if value > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        }
+        let negative = value < 0.0;
+        let magnitude = value.abs();
+        // Rust's `{:e}` is the shortest round-tripping representation: "d.ddddde±x".
+        let formatted = format!("{magnitude:e}");
+        let (mantissa, exponent) = formatted.split_once('e').expect("exponent form");
+        let exponent: i32 = exponent.parse().expect("exponent");
+        let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let digits = digits.trim_end_matches('0');
+        let digits = if digits.is_empty() { "0" } else { digits };
+        let k = digits.len() as i32;
+        let n = exponent + 1;
+        let mut out = String::new();
+        if negative {
+            out.push('-');
+        }
+        if k <= n && n <= 21 {
+            out.push_str(digits);
+            for _ in 0..(n - k) {
+                out.push('0');
+            }
+        } else if 0 < n && n <= 21 {
+            out.push_str(&digits[..n as usize]);
+            out.push('.');
+            out.push_str(&digits[n as usize..]);
+        } else if -6 < n && n <= 0 {
+            out.push_str("0.");
+            for _ in 0..(-n) {
+                out.push('0');
+            }
+            out.push_str(digits);
+        } else {
+            let e = n - 1;
+            let sign = if e < 0 { '-' } else { '+' };
+            out.push_str(&digits[..1]);
+            if k > 1 {
+                out.push('.');
+                out.push_str(&digits[1..]);
+            }
+            out.push('e');
+            out.push(sign);
+            out.push_str(&e.abs().to_string());
+        }
+        out
+    }
+
+    /// `Number(text)` for the common case: a finite decimal, or None (NaN) when it isn't one.
+    pub fn parse(text: &str) -> Option<f64> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Some(0.0);
+        }
+        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+            return u64::from_str_radix(hex, 16).ok().map(|v| v as f64);
+        }
+        match trimmed {
+            "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+            "-Infinity" => return Some(f64::NEG_INFINITY),
+            _ => {}
+        }
+        if trimmed.chars().any(|c| !(c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))) {
+            return None;
+        }
+        trimmed.parse::<f64>().ok()
+    }
+
+    /// `Number.isSafeInteger(value)`.
+    pub fn is_safe_integer(value: f64) -> bool {
+        value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0
+    }
+
+    /// `value.toFixed(digits)`.
+    pub fn to_fixed(value: f64, digits: usize) -> String {
+        if !value.is_finite() {
+            return to_string(value);
+        }
+        if value.abs() >= 1e21 {
+            return to_string(value);
+        }
+        let text = format!("{value:.digits$}");
+        if text.starts_with("-0") && text.trim_start_matches(['-', '0', '.']).is_empty() {
+            text[1..].to_string()
+        } else {
+            text
+        }
+    }
+
+    /// `Math.round(value)`: halves round toward +∞, as JavaScript rounds.
+    pub fn round(value: f64) -> f64 {
+        (value + 0.5).floor()
+    }
+}
+
+pub mod string {
+    /// `text.length`: UTF-16 code units.
+    pub fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    /// `Buffer.byteLength(text)`: UTF-8 bytes.
+    pub fn byte_length(text: &str) -> usize {
+        text.len()
+    }
+
+    /// `text.slice(start, end)` in UTF-16 code units (negative indices count from the end). A cut
+    /// through a surrogate pair keeps the whole character out, since Rust strings can't hold half of one.
+    pub fn slice(text: &str, start: i64, end: Option<i64>) -> String {
+        let len = utf16_len(text) as i64;
+        let clamp = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
+        let from = clamp(start);
+        let to = end.map(clamp).unwrap_or(len);
+        if to <= from {
+            return String::new();
+        }
+        let mut out = String::new();
+        let mut at: i64 = 0;
+        for ch in text.chars() {
+            let width = ch.len_utf16() as i64;
+            if at >= from && at + width <= to {
+                out.push(ch);
+            }
+            at += width;
+            if at >= to {
+                break;
+            }
+        }
+        out
+    }
+
+    /// `text.slice(0, max)`, for bounding what's shown or kept.
+    pub fn head(text: &str, max: usize) -> String {
+        slice(text, 0, Some(max as i64))
+    }
+
+    /// `text.trim()`: JavaScript's white space and line terminators, U+FEFF included.
+    pub fn trim(text: &str) -> &str {
+        text.trim_matches(is_js_whitespace)
+    }
+
+    pub fn trim_start(text: &str) -> &str {
+        text.trim_start_matches(is_js_whitespace)
+    }
+
+    pub fn trim_end(text: &str) -> &str {
+        text.trim_end_matches(is_js_whitespace)
+    }
+
+    fn is_js_whitespace(c: char) -> bool {
+        c.is_whitespace() || c == '\u{FEFF}'
+    }
+
+    /// `text.padEnd(width)` in UTF-16 code units.
+    pub fn pad_end(text: &str, width: usize) -> String {
+        let mut out = text.to_string();
+        for _ in utf16_len(text)..width {
+            out.push(' ');
+        }
+        out
+    }
+
+    /// `text.padStart(width, fill)` in UTF-16 code units, with a one-character fill.
+    pub fn pad_start(text: &str, width: usize, fill: char) -> String {
+        let mut out = String::new();
+        for _ in utf16_len(text)..width {
+            out.push(fill);
+        }
+        out.push_str(text);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn numbers_print_as_javascript_does() {
+        for (value, expected) in [
+            (1.0, "1"),
+            (-1.0, "-1"),
+            (0.5, "0.5"),
+            (123.456, "123.456"),
+            (1e21, "1e+21"),
+            (1e20, "100000000000000000000"),
+            (1e-7, "1e-7"),
+            (0.000001, "0.000001"),
+            (1.5e-7, "1.5e-7"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (120.0, "120"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (-0.0, "0"),
+            (1234.5e-10, "1.2345e-7"),
+            (9007199254740993.0, "9007199254740992"),
+        ] {
+            assert_eq!(number::to_string(value), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn stringify_matches_json_stringify() {
+        let value = json!({"b": 1.0, "2": [true, null, "x\n\"\u{1}"], "1": {"nested": 1.5}, "a": 1e21, "e": [], "o": {}});
+        assert_eq!(json::stringify(&value), r#"{"1":{"nested":1.5},"2":[true,null,"x\n\"\u0001"],"b":1,"a":1e+21,"e":[],"o":{}}"#);
+        assert_eq!(
+            json::stringify_pretty(&json!({"a": [1, {"b": 2}], "c": {}}), 2),
+            "{\n  \"a\": [\n    1,\n    {\n      \"b\": 2\n    }\n  ],\n  \"c\": {}\n}"
+        );
+        assert_eq!(json::stringify(&json!(f64::NAN)), "null");
+        assert_eq!(json::quote("hi"), "\"hi\"");
+    }
+
+    #[test]
+    fn strings_measure_in_utf16() {
+        assert_eq!(string::utf16_len("a😀b"), 4);
+        assert_eq!(string::slice("a😀b", 1, Some(3)), "😀");
+        assert_eq!(string::slice("a😀b", 1, Some(2)), "");
+        assert_eq!(string::slice("hello", -3, None), "llo");
+        assert_eq!(string::head("hello", 2), "he");
+        assert_eq!(string::trim("\u{FEFF} x \n"), "x");
+        assert_eq!(string::pad_end("ab", 4), "ab  ");
+        assert_eq!(string::pad_start("7", 3, '0'), "007");
+    }
+
+    #[test]
+    fn number_helpers() {
+        assert_eq!(number::to_fixed(1.005, 2), "1.00");
+        assert_eq!(number::to_fixed(-0.001, 2), "0.00");
+        assert_eq!(number::round(2.5), 3.0);
+        assert_eq!(number::round(-2.5), -2.0);
+        assert!(number::is_safe_integer(3.0));
+        assert!(!number::is_safe_integer(3.5));
+        assert_eq!(number::parse(" 12 "), Some(12.0));
+        assert_eq!(number::parse("12px"), None);
+        assert_eq!(number::parse(""), Some(0.0));
+    }
+}
