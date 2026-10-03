@@ -228,12 +228,37 @@ pub mod number {
 
     /// `Number(text)` for the common case: a finite decimal, or None (NaN) when it isn't one.
     pub fn parse(text: &str) -> Option<f64> {
-        let trimmed = text.trim();
+        let trimmed = super::string::trim(text);
         if trimmed.is_empty() {
             return Some(0.0);
         }
-        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
-            return u64::from_str_radix(hex, 16).ok().map(|v| v as f64);
+        if let Some((digits, width)) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .map(|v| (v, 4))
+            .or_else(|| trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")).map(|v| (v, 3)))
+            .or_else(|| trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")).map(|v| (v, 1)))
+        {
+            if digits.is_empty() {
+                return None;
+            }
+            let mut bits = Vec::with_capacity(digits.len().saturating_mul(width));
+            for digit in digits.chars() {
+                let value = digit.to_digit(1 << width)?;
+                for bit in (0..width).rev() {
+                    bits.push((value >> bit) & 1);
+                }
+            }
+            let first = bits.iter().position(|bit| *bit != 0).unwrap_or(bits.len());
+            let bits = &bits[first..];
+            if bits.len() > 1024 {
+                return Some(f64::INFINITY);
+            }
+            let mut mantissa = bits.iter().take(53).fold(0_u64, |n, bit| (n << 1) | *bit as u64);
+            if bits.len() > 53 && bits[53] == 1 && (mantissa & 1 != 0 || bits[54..].contains(&1)) {
+                mantissa += 1;
+            }
+            return Some(mantissa as f64 * 2.0_f64.powi(bits.len().saturating_sub(53) as i32));
         }
         match trimmed {
             "Infinity" | "+Infinity" => return Some(f64::INFINITY),
@@ -384,6 +409,19 @@ pub mod string {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn number_parsing_matches_javascript_whitespace_and_radix_rounding() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("../tests/number-oracle.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let actual = number::parse(case["text"].as_str().unwrap()).unwrap_or(f64::NAN);
+            if let Some(expected) = case["value"].as_f64() {
+                assert_eq!(actual, expected, "{case}");
+            } else {
+                assert_eq!(number::to_string(actual), case["value"], "{case}");
+            }
+        }
+    }
 
     #[test]
     fn numbers_print_as_javascript_does() {
