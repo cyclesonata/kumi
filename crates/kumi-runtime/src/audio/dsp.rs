@@ -160,17 +160,20 @@ impl TruePeak {
         self.at = (self.at + 1) % 12;
     }
     pub fn peak(&self) -> f64 {
-        PHASES
-            .iter()
-            .map(|coefficients| {
-                coefficients
-                    .iter()
-                    .enumerate()
-                    .map(|(tap, coefficient)| coefficient * self.history[(self.at + 12 - 1 - tap) % 12])
-                    .sum::<f64>()
-                    .abs()
-            })
-            .fold(0.0, f64::max)
+        // Each phase uses the same delayed samples. Walk the ring once for all four phases;
+        // retaining each phase's tap order also retains the source's floating-point result.
+        let phases = &*PHASES;
+        let mut values = [0.0_f64; 4];
+        let mut at = self.at;
+        for tap in 0..12 {
+            at = if at == 0 { 11 } else { at - 1 };
+            let sample = self.history[at];
+            values[0] += phases[0][tap] * sample;
+            values[1] += phases[1][tap] * sample;
+            values[2] += phases[2][tap] * sample;
+            values[3] += phases[3][tap] * sample;
+        }
+        values[0].abs().max(values[1].abs()).max(values[2].abs()).max(values[3].abs())
     }
 }
 pub fn db(power: f64) -> f64 {
