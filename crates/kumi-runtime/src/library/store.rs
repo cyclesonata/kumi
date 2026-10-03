@@ -56,7 +56,7 @@ async fn replace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Every entry is about one file, as it was when learned.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub path: String,
     pub size: u64,

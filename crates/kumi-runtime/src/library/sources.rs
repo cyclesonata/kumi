@@ -31,7 +31,8 @@ pub struct Source {
     pub kind: SourceKind,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceOptions {
     pub home: Option<String>,
     /// Node's names: "darwin", "win32", "linux"…
