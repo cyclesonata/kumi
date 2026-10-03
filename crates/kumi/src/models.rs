@@ -561,3 +561,55 @@ impl ModelControl {
         Ok(self.binding_with_info().await?.binding)
     }
 }
+
+/// The app-facing model controls, including the injectable source test contract.
+#[async_trait::async_trait(?Send)]
+pub trait ModelController {
+    fn current(&self) -> CurrentModel;
+    async fn providers(&self) -> Result<Vec<ProviderStatus>, RuntimeError>;
+    async fn local(&self) -> Vec<LocalStatus>;
+    fn provider_name(&self, id: &str) -> String;
+    async fn choose_default(&self) -> Result<Option<DefaultModel>, RuntimeError>;
+    async fn models(&self, provider: &str, refresh: bool) -> Result<Vec<ModelInfo>, RuntimeError>;
+    async fn choose(&self, next: &str) -> Result<Option<String>, RuntimeError>;
+    async fn set_effort(&self, next: Option<Effort>) -> Result<(), RuntimeError>;
+    async fn save_key(&self, provider: ProviderId, key: &str, signal: Option<Signal>) -> Result<ApiKeyCheck, RuntimeError>;
+    async fn sign_in_chatgpt(&self, io: ChatGptSignIn) -> Result<(), RuntimeError>;
+    async fn sign_out(&self, provider: ProviderId) -> Result<bool, RuntimeError>;
+}
+#[async_trait::async_trait(?Send)]
+impl ModelController for ModelControl {
+    fn current(&self) -> CurrentModel {
+        ModelControl::current(self)
+    }
+    async fn providers(&self) -> Result<Vec<ProviderStatus>, RuntimeError> {
+        ModelControl::providers(self).await
+    }
+    async fn local(&self) -> Vec<LocalStatus> {
+        ModelControl::local(self).await
+    }
+    fn provider_name(&self, id: &str) -> String {
+        ModelControl::provider_name(self, id)
+    }
+    async fn choose_default(&self) -> Result<Option<DefaultModel>, RuntimeError> {
+        ModelControl::choose_default(self).await
+    }
+    async fn models(&self, provider: &str, refresh: bool) -> Result<Vec<ModelInfo>, RuntimeError> {
+        ModelControl::models(self, provider, refresh).await
+    }
+    async fn choose(&self, next: &str) -> Result<Option<String>, RuntimeError> {
+        ModelControl::choose(self, next).await
+    }
+    async fn set_effort(&self, next: Option<Effort>) -> Result<(), RuntimeError> {
+        ModelControl::set_effort(self, next).await
+    }
+    async fn save_key(&self, provider: ProviderId, key: &str, signal: Option<Signal>) -> Result<ApiKeyCheck, RuntimeError> {
+        ModelControl::save_key(self, provider, key, signal).await
+    }
+    async fn sign_in_chatgpt(&self, io: ChatGptSignIn) -> Result<(), RuntimeError> {
+        ModelControl::sign_in_chatgpt(self, io).await
+    }
+    async fn sign_out(&self, provider: ProviderId) -> Result<bool, RuntimeError> {
+        ModelControl::sign_out(self, provider).await
+    }
+}
