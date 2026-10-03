@@ -201,6 +201,7 @@ fn registry_request(operation: &str, fields: &Value) -> Result<Value, LiveError>
         _ => fields.get("args").cloned().unwrap_or_else(|| json!({})),
     })
 }
+use super::listeners::Listeners;
 use crate::loopback::LOOPBACK_PROTOCOL_VERSION;
 use crate::registry::{validate_live_operation_request, validate_live_operation_result};
 use async_trait::async_trait;
@@ -274,8 +275,8 @@ struct RemoteInner {
     hello: RefCell<Option<oneshot::Sender<Result<(), LiveError>>>>,
     cached: RefCell<LiveStatus>,
     pending: RefCell<HashMap<String, Pending>>,
-    listeners: RefCell<Vec<LiveListener>>,
-    status_listeners: RefCell<Vec<StatusListener>>,
+    listeners: Listeners<dyn Fn(&LiveEvent)>,
+    status_listeners: Listeners<dyn Fn(Option<&LiveStatus>)>,
     last_event_epoch: Cell<Option<i64>>,
     last_event_sequence: Cell<u64>,
     reopening: RefCell<Option<SharedResult>>,
@@ -308,8 +309,8 @@ impl RemoteScriptLiveAdapter {
                 json!({"connected":false,"adapter":"unavailable","epoch":null,"protocol":LIVE_PROTOCOL_VERSION,"capabilities":[],"reason":"not-connected"}),
             )?),
             pending: RefCell::new(HashMap::new()),
-            listeners: RefCell::new(vec![]),
-            status_listeners: RefCell::new(vec![]),
+            listeners: Listeners::default(),
+            status_listeners: Listeners::default(),
             last_event_epoch: Cell::new(None),
             last_event_sequence: Cell::new(0),
             reopening: RefCell::new(None),
@@ -338,15 +339,7 @@ impl RemoteScriptLiveAdapter {
     }
     fn emit_status(&self) {
         let status = self.0.cached.borrow().clone();
-        let mut index = 0;
-        loop {
-            let listener = self.0.status_listeners.borrow().get(index).cloned();
-            let Some(listener) = listener else { break };
-            listener(Some(&status));
-            if self.0.status_listeners.borrow().get(index).is_some_and(|item| Rc::ptr_eq(item, &listener)) {
-                index += 1;
-            }
-        }
+        self.0.status_listeners.each(|listener| listener(Some(&status)));
     }
     fn shape_changed(prior: &LiveStatus, next: &LiveStatus) -> bool {
         let mut a: Vec<_> = prior.capabilities.iter().map(LiveCapability::as_str).collect();
@@ -527,15 +520,7 @@ impl RemoteScriptLiveAdapter {
                 return Err(LiveError::error("remote event sequence gap or replay requires reset"));
             }
             self.0.last_event_sequence.set(event.sequence);
-            let mut index = 0;
-            loop {
-                let listener = self.0.listeners.borrow().get(index).cloned();
-                let Some(listener) = listener else { break };
-                listener(&event);
-                if self.0.listeners.borrow().get(index).is_some_and(|item| Rc::ptr_eq(item, &listener)) {
-                    index += 1;
-                }
-            }
+            self.0.listeners.each(|listener| listener(&event));
             return Ok(());
         }
         let pending = self.0.pending.borrow_mut().remove(id).ok_or_else(|| LiveError::error("unknown or duplicate remote response"))?;
@@ -1002,13 +987,11 @@ impl LiveAdapter for RemoteScriptLiveAdapter {
         Err(LiveError::error("remote adapter is asynchronous; use reconnectAsync"))
     }
     fn subscribe(&self, listener: LiveListener) -> Result<Unsubscribe, LiveError> {
-        if !self.0.listeners.borrow().iter().any(|item| Rc::ptr_eq(item, &listener)) {
-            self.0.listeners.borrow_mut().push(listener.clone());
-        }
+        self.0.listeners.add(listener.clone());
         let weak = Rc::downgrade(&self.0);
         Ok(Box::new(move || {
             if let Some(inner) = weak.upgrade() {
-                inner.listeners.borrow_mut().retain(|item| !Rc::ptr_eq(item, &listener));
+                inner.listeners.remove(&listener);
             }
         }))
     }
@@ -1149,13 +1132,11 @@ impl AsyncLiveAdapter for RemoteScriptLiveAdapter {
         true
     }
     fn subscribe_status(&self, listener: StatusListener) -> Unsubscribe {
-        if !self.0.status_listeners.borrow().iter().any(|item| Rc::ptr_eq(item, &listener)) {
-            self.0.status_listeners.borrow_mut().push(listener.clone());
-        }
+        self.0.status_listeners.add(listener.clone());
         let weak = Rc::downgrade(&self.0);
         Box::new(move || {
             if let Some(inner) = weak.upgrade() {
-                inner.status_listeners.borrow_mut().retain(|item| !Rc::ptr_eq(item, &listener));
+                inner.status_listeners.remove(&listener);
             }
         })
     }

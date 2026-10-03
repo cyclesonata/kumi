@@ -496,6 +496,9 @@ pub struct LiveStatus {
     pub willington_kinds: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<LiveEnvironment>,
+    /// Channel-specific evidence and future negotiated status fields.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl LiveStatus {
@@ -2944,6 +2947,7 @@ impl LiveAdapter for UnavailableLiveAdapter {
             provenance: None,
             willington_kinds: None,
             environment: None,
+            extra: Map::new(),
         })
     }
     fn snapshot(&self) -> Result<LiveSnapshot, LiveError> {
@@ -4096,6 +4100,7 @@ impl LiveAdapter for DeterministicLiveSimulator {
             provenance: None,
             willington_kinds: None,
             environment: None,
+            extra: Map::new(),
         })
     }
     fn snapshot(&self) -> Result<LiveSnapshot, LiveError> {
