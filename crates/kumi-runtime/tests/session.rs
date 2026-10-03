@@ -48,6 +48,7 @@ struct Record {
     audition: RefCell<Option<Rc<dyn Fn(&AuditionRequest)>>>,
     goal_rig: RefCell<Option<Rc<dyn GoalRig>>>,
     goal_requests: RefCell<Vec<AuditionRequest>>,
+    audio_resolved: RefCell<Vec<String>>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -89,6 +90,13 @@ struct TestIntegration {
 }
 #[async_trait(?Send)]
 impl Integration for TestIntegration {
+    fn has_audio_file(&self) -> bool {
+        true
+    }
+    async fn audio_file(&self, named: &str, _: Signal) -> Result<Option<String>, RuntimeError> {
+        self.record.audio_resolved.borrow_mut().push(named.into());
+        Ok(None)
+    }
     async fn start(&self, _: Signal) -> Result<(), RuntimeError> {
         (self.listener)(ConnectionState::Connecting, None);
         (self.listener)(ConnectionState::Connected, None);
@@ -1421,4 +1429,89 @@ local_test!(match_polish_confirms_improvement_at_full_length_and_restores_if_not
         }
         h.session.close().await.unwrap();
     }
+});
+
+struct NamesOnly;
+#[async_trait(?Send)]
+impl KernelTool for NamesOnly {
+    fn name(&self) -> &str {
+        "find_sounds"
+    }
+    fn description(&self) -> &str {
+        "Names only"
+    }
+    fn input_schema(&self) -> JsonObject {
+        JsonObject::new()
+    }
+    async fn execute(&self, _: JsonObject, _: Signal) -> Result<ToolResult, RuntimeError> {
+        panic!("replaced by library")
+    }
+}
+local_test!(library_tools_preferences_status_and_forgetting_follow_session_lifecycle, {
+    use kumi_runtime::library::{create_library, sources::SourceOptions, LibraryOptions};
+    let temp = tempfile::tempdir().unwrap();
+    let samples = temp.path().join("samples");
+    std::fs::create_dir(&samples).unwrap();
+    kumi_runtime::library::library_logs(&temp.path().to_string_lossy())
+        .sounds
+        .append(&[json!({"path":samples.join("Kick.wav"),"size":100,"mtime":1,"seconds":1,"features":1})])
+        .await
+        .unwrap();
+    std::fs::write(
+        temp.path().join("taste.json"),
+        serde_json::to_vec(&json!({"sets":2,"at":1,"lines":[{"id":"tempo","line":"Tempo: usually 124–126 BPM"}]})).unwrap(),
+    )
+    .unwrap();
+    let library = create_library(LibraryOptions {
+        dir: temp.path().to_string_lossy().into(),
+        folders: Some(vec![samples.to_string_lossy().into()]),
+        find_sets: Some(false),
+        fork: Some(false),
+        sources: Some(SourceOptions { home: Some(temp.path().to_string_lossy().into()), ..Default::default() }),
+        ..Default::default()
+    });
+    let h = harness(None, |o| o.library = Some(library.clone()));
+    h.observation.borrow_mut().tools = vec![Rc::new(NamesOnly), Rc::new(Plan { received: Rc::new(RefCell::new(vec![])) })];
+    assert!(h.session.has_library() && h.session.has_taste() && h.session.has_forget_taste());
+    assert_eq!(h.session.library(), Some(library.status()));
+    h.session.start().await.unwrap();
+    let tools = h.record.created.borrow()[0].tools.clone();
+    assert_eq!(
+        tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        ["make_changes", "find_sounds", "find_presets", "my_sets", "live_manual"]
+    );
+    assert!(h.record.created.borrow()[0].instructions.contains("Tempo: usually 124–126 BPM"));
+    let sounds = tools.iter().find(|t| t.name() == "find_sounds").unwrap();
+    let result = sounds.execute(json!({"like":"the kick in this Set"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+    assert!(result.is_error);
+    assert_eq!(*h.record.audio_resolved.borrow(), ["the kick in this Set"]);
+    assert_eq!(h.session.taste().await.unwrap()[0].id, "tempo");
+    assert!(h.session.forget_taste("tempo").await.unwrap());
+    assert!(!h.session.forget_taste("tempo").await.unwrap());
+    assert!(h.session.taste().await.unwrap().is_empty());
+    // The existing kernel keeps its cached preferences until it is rebuilt.
+    h.session.refresh().await.unwrap();
+    assert_eq!(h.record.created.borrow().len(), 1);
+    h.session.reconfigure().await.unwrap();
+    h.session.refresh().await.unwrap();
+    assert!(!h.record.created.borrow().last().unwrap().instructions.contains("Tempo: usually"));
+    h.events.borrow_mut().clear();
+    library.pause();
+    delay(450).await;
+    assert!(h.events.borrow().iter().any(|e| matches!(e, SessionEvent::Library(LibraryEvent { status }) if *status == library.status())));
+    h.session.close().await.unwrap();
+    let count = h.events.borrow().len();
+    let independent = Rc::new(Cell::new(0));
+    let seen = independent.clone();
+    let unlisten = library.on_status(Rc::new(move |_| seen.set(seen.get() + 1)));
+    library.resume();
+    delay(450).await;
+    assert_eq!(h.events.borrow().len(), count);
+    assert!(independent.get() > 0, "the session does not own the library lifetime");
+    unlisten();
+    library.close().await;
+    let without = harness(None, |_| {});
+    assert!(!without.session.has_library() && !without.session.has_taste() && !without.session.has_forget_taste());
+    assert!(without.session.library().is_none());
+    without.session.close().await.unwrap();
 });

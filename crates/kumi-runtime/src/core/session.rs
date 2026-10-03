@@ -16,6 +16,7 @@ use crate::{
     audio::tools::{listening_tools, ListeningOptions},
     integrations::ableton::project::new_conversation_id,
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
+    library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
     web::{
         net::WebClient,
         tool::{web_tools, WebToolOptions},
@@ -83,6 +84,7 @@ pub struct SessionOptions {
     pub techniques: Option<Rc<dyn TechniqueStore>>,
     pub technique_settle_ms: Option<u64>,
     pub gaps: Option<String>,
+    pub library: Option<Rc<Library>>,
     pub matching: bool,
     pub match_budget: Option<MatchBudget>,
     pub playbook: Option<Rc<dyn PlaybookStore>>,
@@ -113,6 +115,7 @@ impl SessionOptions {
             techniques: None,
             technique_settle_ms: None,
             gaps: None,
+            library: None,
             matching: true,
             match_budget: None,
             playbook: None,
@@ -236,6 +239,8 @@ struct Inner {
     listening: Vec<Rc<dyn KernelTool>>,
     browsing: Vec<Rc<dyn KernelTool>>,
     gaps: Vec<Rc<dyn KernelTool>>,
+    shelf: Vec<Rc<dyn KernelTool>>,
+    unlisten_library: RefCell<Option<Box<dyn FnOnce()>>>,
     timeout_ms: u64,
     idle_ms: u64,
     turn_limit_ms: u64,
@@ -355,11 +360,35 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             })
             .unwrap_or_default();
         let browsing = if options.web || options.web_client.is_some() {
-            web_tools(WebToolOptions { on_event: emit, client: options.web_client.clone(), ..Default::default() })
+            web_tools(WebToolOptions { on_event: emit.clone(), client: options.web_client.clone(), ..Default::default() })
         } else {
             vec![]
         };
         let gaps = options.gaps.as_ref().map(gap_tools).unwrap_or_default();
+        let shelf = options
+            .library
+            .as_ref()
+            .map(|library| {
+                let resolve = weak.clone();
+                library.tools(LibraryToolsOptions {
+                    on_event: Some(emit.clone()),
+                    resolve: Some(Rc::new(move |named, signal| {
+                        let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        async move {
+                            match integration {
+                                Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
+                                _ => Ok(None),
+                            }
+                        }
+                        .boxed_local()
+                    })),
+                })
+            })
+            .unwrap_or_default();
+        let unlisten_library = options
+            .library
+            .as_ref()
+            .map(|library| library.on_status(Rc::new(move |status| emit(SessionEvent::Library(LibraryEvent { status })))));
         Inner {
             options,
             timeout_ms,
@@ -374,6 +403,8 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             watching,
             browsing,
             gaps,
+            shelf,
+            unlisten_library: RefCell::new(unlisten_library),
             saving: RefCell::new(ready()),
             playbook_queue: RefCell::new(ready()),
             state: RefCell::new(State {
@@ -628,8 +659,12 @@ impl Session {
             self.assert_current(op)?;
             let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
             self.assert_current(op)?;
+            let habits =
+                if let Some(library) = &self.0.options.library { library.instructions().await.unwrap_or_default() } else { String::new() };
+            self.assert_current(op)?;
             let extra = [
                 memory.as_ref().map(|m| memory_instructions(m, observation.project.as_ref().map(|p| p.name.as_str()))).unwrap_or_default(),
+                habits,
                 recipe_instructions(&recipes),
                 if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
                 technique_instructions(&techniques),
@@ -639,13 +674,19 @@ impl Session {
             .filter(|s: &String| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
-            let mut tools: Vec<Rc<dyn KernelTool>> = observation.tools.iter().map(|tool| self.with_technique(tool.clone())).collect();
+            let mut tools: Vec<Rc<dyn KernelTool>> = observation
+                .tools
+                .iter()
+                .filter(|tool| self.0.shelf.is_empty() || tool.name() != FIND_SOUNDS_TOOL)
+                .map(|tool| self.with_technique(tool.clone()))
+                .collect();
             if let Some(notes) = &self.0.notes {
                 tools.extend(notes.tools.clone());
             }
             tools.extend(self.0.listening.clone());
             tools.extend(self.0.watching.clone());
             tools.extend(self.0.browsing.clone());
+            tools.extend(self.0.shelf.clone());
             tools.extend(self.0.recipes.clone());
             if let Some(learned) = &self.0.learned {
                 tools.extend(learned.tools.clone());
@@ -1509,6 +1550,30 @@ impl SessionController for Session {
         let result = outcome.borrow_mut().take();
         Ok(result)
     }
+    fn has_library(&self) -> bool {
+        self.0.options.library.is_some()
+    }
+    fn library(&self) -> Option<LibraryStatus> {
+        self.0.options.library.as_ref().map(|library| library.status())
+    }
+    fn has_taste(&self) -> bool {
+        self.0.options.library.is_some()
+    }
+    async fn taste(&self) -> Result<Vec<KeptLine>, RuntimeError> {
+        match &self.0.options.library {
+            Some(library) => Ok(library.taste().await?.into_iter().map(|line| KeptLine { id: line.id, line: line.line }).collect()),
+            None => Ok(vec![]),
+        }
+    }
+    fn has_forget_taste(&self) -> bool {
+        self.0.options.library.is_some()
+    }
+    async fn forget_taste(&self, id: &str) -> Result<bool, RuntimeError> {
+        match &self.0.options.library {
+            Some(library) => library.forget_taste(id).await,
+            None => Ok(false),
+        }
+    }
     fn has_memory(&self) -> bool {
         true
     }
@@ -1814,6 +1879,9 @@ impl SessionController for Session {
         (self.0.options.on_event)(SessionEvent::State { state: TurnState::Closed });
         if let Some(op) = &op {
             op.signal.cancel();
+        }
+        if let Some(unlisten) = self.0.unlisten_library.borrow_mut().take() {
+            unlisten();
         }
         let this = self.clone();
         tokio::task::spawn_local(async move {
