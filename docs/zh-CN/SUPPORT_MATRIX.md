@@ -1,53 +1,57 @@
-# 支持与取证平台矩阵
+# 支持的平台
 
 [English](../en/SUPPORT_MATRIX.md) · 简体中文 · [日本語](../ja/SUPPORT_MATRIX.md)
 
-"支持"分为宿主/软件包支持与真实 Ableton Live 认证。绿色的宿主单元格
-绝不会被提升为 Live 单元格。
+Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，以及在哪里测试过什么。每一项“已测试”背后的证据列在[实现状态](IMPLEMENTATION_STATUS.md)中。
 
-## 运行时与操作系统
+## Kumi
 
-| 平台 | 版本 / 架构 | 状态 | 证据 |
-|---|---|---|---|
-| Node.js | 22.x、24.x | 仅当精确 SHA 矩阵为绿时,该候选才具有受支持的宿主/软件包契约 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml);来自其他 SHA 的配置或结果不是证据 |
-| Node.js | 21.x、23.x、25.x、26.x、27.x 或任何未列出的/未来主版本 | 不受支持的发布运行时 | 需要显式的完整矩阵与规范策略更新 |
-| macOS 宿主 | GitHub `macos-15`;本地 macOS arm64 环境 | 仅当精确 SHA 任务通过时支持宿主/软件包契约 | Node/软件包/生命周期门禁;需要单独的本地 Live 证据 |
-| Windows 宿主 | GitHub Windows Server 2025 x64(`windows-2025`) | 仅当精确 SHA 任务通过时支持宿主/软件包契约 | Node/软件包/生命周期/ACL/联接点/占用文件门禁;不是 Windows 11 或 Live 证据 |
-| Windows 桌面 | Windows 11 x64 | 过程已记录,未认证 | 需要精确候选宿主加 Live 证据;不得继承 Server 状态 |
-| Linux 宿主 | Ubuntu 24.04 x64(`ubuntu-24.04`) | 仅支持宿主契约 | Node/软件包门禁;无 Live 声明 |
+| 系统 | 版本 | 处理器 | 状态 |
+| --- | --- | --- | --- |
+| macOS | 13（Ventura）或更高 | Apple 芯片、Intel | 已在 Apple 芯片上配合 Live 测试 |
+| Windows | 10 或 11 | x64、ARM64 | 已测试安装和连接 Live；见 [Windows](#windows) |
+| Linux | glibc 发行版（不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | Kumi 可以安装和运行，但没有 Live：Live 没有 Linux 版 |
 
-推荐 Node 24 LTS。Node 25 已于 2026-06-01 终止维护；Node 26 尚未验证。
-软件包引擎范围为 `>=22 <23 || >=24 <25`；精确发布可使用 Node 22 或 24。
-稳定版 Node 23、25、预发布版与未列出的主版本都会故障关闭。
-操作系统供应商生命周期变化需要矩阵更新,而不是隐式支持。
-
-## MCP 连接模式
-
-stdio 支持旧 `2025-11-25` initialize 与新 `2026-07-28` 逐请求元数据 / 发现。新版仅提供 complete 结果及 private / TTL 0 缓存，不声明主动 push、MRTR、Tasks 或 HTTP。
-进程内恢复限制见 [USER_GUIDE.md](USER_GUIDE.md)。协议检查不是特定客户端 / 模型或新增真实 Live 环境的认证。
+安装程序会带上 Kumi 自己的 Node，也就是构建和测试 Kumi 时所用的那个确切的 Node 24 版本，所以你不必自己安装 Node。如果以后的 Kumi 换用另一个 Node 主版本，`kumi update` 会提示你重新运行安装程序，由它带来新的 Node。
 
 ## Ableton Live
 
-| 操作系统 | Live 版本 / 版本层级 | 状态 | 证据 / 限制 |
-|---|---|---|---|
-| macOS | Live 12.4.5b8 beta;已安装的版本层级不会通过 Remote Script 状态 API 暴露 | 观察到的工程目标,不是公开发布认证 | [`../evidence/`](../evidence/);必须为最终候选摘要重新运行;版本层级明确未知 |
-| macOS | Live 12 Suite | 协商契约,缺少版本层级特定认证 | 通用 API 在运行时发现;绝不假设 Suite 设备/内容 |
-| macOS | Live 12 Standard | 协商契约,缺少版本层级特定认证 | 缺失的设备/内容保持不可用 |
-| macOS | Live 12 Intro | 协商契约,缺少版本层级特定认证 | 精简的功能/内容面保持不可用 |
-| Windows 11 | Live 12 Suite / Standard / Intro | 未认证 / 外部环境不可用 | 服务器宿主 CI 不是 Windows Live;每个层级都需要安装、激活、变更、重启、恢复与卸载证据 |
-| Linux | 任意 | 不支持 | 本产品不在 Linux 上提供 Ableton Live |
-| Live 11 或更早 | 任意 | 不支持/未验证 | 不声明协议/API 兼容性 |
+| Live | 状态 |
+| --- | --- |
+| 12.4 或更高 | 全部功能，包括 Kumi 的 Live 扩展：离线渲染、把 MIDI 片段写进编曲视图、清除一段范围，以及 **Ask Kumi about this**。已在 macOS 上的 Live 12.4.15 beta 中测试。 |
+| 12.0 至 12.3 | 桥接提供该版本 Live 的 API 所具备的功能；没有扩展，因此上述功能都不可用。`kumi doctor` 会说明这一点。未测试。 |
+| 11 或更早 | 不支持。 |
+
+版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。可选的 Willington 提供方只适用于某一个确切的 Live 构建版本；见 [Willington 集成](WILLINGTON_INTEGRATION.md)。
+
+## Windows
+
+已测试：在 CI 上，于 Windows PowerShell 5.1 中测试了安装程序、`kumi update`、`kumi bridge` 和 `kumi uninstall`；在一台装有 Live 12.4.15 beta 的 Windows 10 电脑上，测试了用 `kumi bridge` 安装到已移出用户文件夹的 User Library、Remote Script 在 Live 中加载，以及 Kumi 连接。CI 的 Windows 运行器使用默认文件夹的管理员账户，因此无法暴露只在普通账户或移动过的库中才会出现的问题。
+
+尚未在 Windows 上确认：
+
+- **Live 把 Extensions 文件夹放在哪里。** Kumi 使用 `%APPDATA%\Ableton\Extensions`；`KUMI_LIVE_EXTENSIONS_DIR` 可以覆盖它。在确认之前，扩展的各项功能在 Windows 上都未经测试。
+- **全屏应用在 Windows 终端中的表现。** 推荐使用 Windows Terminal；见[终端](KUMI_TUI.md#终端)。
+- **从 Kumi 1.6.0 或更早版本运行 `kumi update`** 时，如果 PATH 上 Git 的 `tar` 排在 Windows 自带的 tar 前面（例如在从 Git Bash 启动的 PowerShell 中），会因 tar 错误而失败。请重新运行那行安装命令，或在 `kumi update` 之前运行 `$env:Path = "$env:SystemRoot\System32;$env:Path"`。
+
+## 源码副本与独立桥接所用的 Node.js
+
+| Node.js | 状态 |
+| --- | --- |
+| 22.x、24.x | 支持；推荐 Node 24 LTS |
+| 25.x | 不支持：已于 2026 年 6 月 1 日终止维护 |
+| 26.x 及更高、21.x 及更早、预发布版 | 经过测试之前不支持 |
+
+每个包的 engines 范围都是 `>=22 <23 || >=24 <25`。源码副本中的 `kumi` 会拒绝其他主版本（`kumi doctor` 除外，它会说明问题所在）。桥接的服务器和 `ableton-mcp-setup` 同样会拒绝；`ableton-mcp-diagnostics` 会报告它们；`ableton-mcp-lifecycle` 和 `ableton-mcp-migrate` 仍可运行，以便检查或移除旧的安装。
+
+## MCP 协议
+
+桥接通过 stdio 使用两代 MCP 协议：`2025-11-25`（使用 initialize 握手）和 `2026-07-28`（使用逐请求元数据和 `server/discover`）。在新一代协议中，每个结果都是完整的，缓存提示为 private 且 TTL 为零，也不会在未经请求时推送任何内容；不提供 MRTR、Tasks 或 HTTP。测试覆盖了这两代协议；没有对任何特定的 MCP 客户端或模型进行认证。如何连接客户端见[用户指南](USER_GUIDE.md)。
 
 ## 无障碍
 
-服务器自有的 stdio 文本契约经过语义顺序、纯文本、非颜色状态与无指针
-依赖的测试。VoiceOver、Narrator、Ableton Live、插件窗口、终端与第三方
-MCP 客户端是版本依赖的外部界面,不在服务器测试的认证范围内。
+`KUMI_UI=plain`（或把输出通过管道传出）会让 Kumi 使用逐行输出的纯文本界面，适合屏幕阅读器；见[纯文本模式](KUMI_TUI.md#纯文本模式)。桥接自身的输出是顺序固定的纯文本，没有仅靠颜色区分的状态，也没有需要鼠标指针的操作。两者都尚未用 VoiceOver 或 Narrator 测试过；Live、插件窗口和 MCP 客户端的表现则由各自的开发者决定。
 
-## 发布含义
+## CI 覆盖的范围
 
-本地未发布的 MIT tarball 可以在没有签名的情况下构建并通过生命周期测试。
-只有当每个精确 SHA 的 CI 矩阵任务通过时,候选才是宿主发布就绪的。Windows
-Server 宿主证据不认证 Windows 11、Ableton Live、Narrator 或插件窗口。
-这些外部单元格保持明确不可用,直到合适的环境产生绑定候选的证据;绝不
-得把它们改写为通过单元格。
+CI 在 GitHub 托管的 macOS 15、Ubuntu 24.04 和 Windows Server 2025 运行器上，使用 Node 22 和 24 运行；这些运行器都没有 Live。[测试](TESTING.md#ci)列出了每个作业。

@@ -1,33 +1,87 @@
 # Optional Willington integration
 
-Willington is an optional, separately installed native provider selected for the exact connected Live build. Rack Zones is validated for Live 12.4.15b5 on macOS ARM64. Ordinary Kumi needs no native library or extension configuration. The default unavailable adapter and default simulator do not advertise these operations.
+English · [简体中文](../zh-CN/WILLINGTON_INTEGRATION.md) · [日本語](../ja/WILLINGTON_INTEGRATION.md)
 
-## Implemented
+Willington is a separately installed set of native providers that reach parts
+of Live its Python API doesn't: Session clip Follow Actions, rack macro
+mappings and names, and rack chain zones. The multi-version bundle selects bindings for the exact
+connected Live build. Follow Actions and DeviceTools have validated macOS ARM64
+b4/b5 profiles; Rack Zones is supported on Live 12.4.15b5 macOS ARM64. Ordinary Kumi and the bridge
+need none of it: without it, these tools simply don't appear.
 
-- Modulators browser fallback: when the native category is empty or missing, use the stock device BrowserItems under Audio/MIDI Effects. Native nonempty results remain authoritative. Search and URI lookup use the same fallback.
-- Rack discovery uses `macros_mapped` and the native rack parameter layout. Indexed recall/delete selects and invokes within one main-thread operation.
-- `set_clip_follow_actions` / `live_follow_actions_preview` and `live_follow_actions_apply`: Session clips only, all ten fields captured, coupled chances normalized, strict identity/state checks, stopped playback, compensation on partial writes, explicit history undo and exact-key recovery.
-- `edit_rack_mapping` / `live_willington_device_preview` and `live_willington_device_apply`: macro rename, selected variation rename, map/unmap and continuous/enum/boolean mapping ranges. Indices are zero-based. Continuous/enum endpoints use parameter units and may be inverted. Boolean endpoints are ordered integer on-interval thresholds from 0 to 127.
+## What it adds
 
-Rack transactions capture names or mapping/index/range, identities, macro values and unmapped parameter values. A mapped parameter's value settles on a later Live tick, so its state revision fences the mapping and driving macro values rather than the transient derived value. Undo refuses external edits and restores the captured state. It does not invoke global Live Undo.
+| Kumi tool | Bridge tools | Edit kinds | Provider |
+| --- | --- | --- | --- |
+| `set_clip_follow_actions` | `live_follow_actions_preview/apply` | All ten Follow Action fields of a Session clip | WillingtonBindings |
+| `edit_rack_mapping` | `live_willington_device_preview/apply` | `macro-name`, `variation-name`, `macro-mapping` | WillingtonDeviceTools |
+| `edit_rack_mapping` | `live_willington_device_preview/apply` | `selector-zone`, `key-zone`, `velocity-zone` | WillingtonRackZones |
 
-## Local enablement
+The bridge offers only the edit kinds whose provider is installed with writes
+enabled: `live_willington_device_preview` lists just those `kind` values. Every
+edit needs the transport stopped.
 
-Install the multi-version bundle with `WillingtonRuntime`, `WillingtonBindings` and `WillingtonDeviceTools` as sibling folders in your User Library’s `Remote Scripts` directory. Include `WillingtonRackZones` to enable rack zones. Manual installations must include `WillingtonRuntime` and preserve the bundle’s `build/<profile-id>/` directories and manifests. DeviceTools must provide `get_macro_mapping` and `get_selected_variation_name`. Native packages check executable SHA and running Mach-O UUID; retained real-Live evidence covers macOS ARM64 Live 12.4.15b4 and a matching b5 profile (see [b5 runtime transaction evidence](../evidence/kumi-clip-follow-actions-b5.json)).
+Some rack improvements need no Willington: racks read with Live's own macro
+layout, recalling or deleting a variation by index, and the fallback to the
+stock modulator devices when Live's Browser has no Modulators category. They
+work with any bridge.
 
-Disable standalone Willington control surfaces and restart Live before letting Kumi own the provider. Place an owner-only regular `willington.json` beside the installed AbletonMcpBridge entrypoint. Kumi updates preserve this file and its permissions:
+## Install and enable
 
-```json
-{"version":1,"followActions":true,"deviceTools":true,"enableWrites":false}
-```
+1. Install the multi-version bundle into Live's Remote Scripts folder, beside
+   AbletonMcpBridge. Include the required `WillingtonRuntime` alongside the
+   providers you want: `WillingtonBindings` (Follow Actions),
+   `WillingtonDeviceTools` (macros and variations; it must provide
+   `get_macro_mapping` and `get_selected_variation_name`) and
+   `WillingtonRackZones` (zones). Manual copies must preserve the runtime,
+   `build/<profile-id>/` directories and manifests. Each provider selects
+   validated bindings using the running Live process’s OS, architecture, version
+   and executable hash. Native packages also verify the running Mach-O UUID.
+   Windows and Intel macOS bindings are not yet available.
+2. Turn off any standalone Willington control surface in Live and restart Live.
+   The bridge won't share the providers with another owner.
+3. Create `willington.json` beside the bridge's `__init__.py`, in
+   `Remote Scripts/AbletonMcpBridge`. It must be a regular file, owner-only and
+   at most 4 KiB, with the keys below (`rackZones` is optional):
 
-Explicitly set `enableWrites` to true only for the supported installation. Follow Action writes also require a passing self-test receipt matching the installed library SHA. A missing validated profile skips only that component; the same configuration can enable Follow Actions and DeviceTools on b4 and also Rack Zones on b5. Typed no-profile refusals are remembered and logged once per component per Live process. Unknown/malformed configuration, missing artifacts, integrity failures, unexpected startup failures or another active owner leave the native extensions unavailable and ordinary bridge service active. Initialization logs report the cause, active components and components with writes enabled. A missing or stale Follow Action self-test disables Follow writes while independent DeviceTools and RackZones remain available. Disconnect disables Follow writes and uninstalls DeviceTools and RackZones. Follow bindings have no uninstall API: their native code and Clip properties remain registered for the Live process, and Kumi reuses the disabled registration on reconnect. A fresh matching self-test receipt is still required when enabling writes. Config changes require restarting Live. Remove the file to return to the standard bridge. Native libraries, local configuration and private fixtures are not bundled in Kumi's package.
+   ```json
+   {"version": 1, "followActions": true, "deviceTools": true, "rackZones": true, "enableWrites": false}
+   ```
 
-To opt into zones, add `"rackZones": true` to the configuration above. Supported
-kinds are selector zones on Audio Effect Racks and selector, key and velocity zones
-on Instrument and MIDI Effect Racks, targeting regular chains. Writes require
-stopped playback and `enableWrites: true`; preview/apply/history undo fence the
-complete zone state and rack/chain identity.
+   | Key | Meaning |
+   | --- | --- |
+   | `version` | Always `1` |
+   | `followActions` | Load WillingtonBindings |
+   | `deviceTools` | Load WillingtonDeviceTools |
+   | `rackZones` | Optional; load WillingtonRackZones |
+   | `enableWrites` | Allow edits; `false` loads the providers without offering edits |
+
+4. For Follow Action edits, WillingtonBindings also needs a passing self-test:
+   `self-test.json` in its folder with `"status": "passed"` and
+   `library_sha256` equal to the SHA-256 of the selected
+   `build/<profile-id>/libwillington.dylib` (the root library for legacy packages).
+   Repeat the [standalone self-test](#follow-action-self-test) after switching
+   builds or replacing that library. Without matching evidence, Follow Action
+   edits stay off and the other providers still work. Set `enableWrites` to
+   `true` when ready to enable edits.
+5. Restart Live. Config changes take effect only at Live's start.
+
+Kumi updates keep `willington.json`. Delete it to go back to the plain bridge.
+
+A missing validated profile skips only that component: one configuration can
+use Follow Actions and DeviceTools on b4 and also Rack Zones on b5. These typed
+no-profile refusals are cached and logged once per component per Live process.
+
+Malformed configuration, missing artifacts, integrity errors, unexpected startup
+failures or another active owner leave the native extensions unavailable; the
+ordinary bridge stays active. Live's log (Log.txt) reports the cause and names
+the providers actually active and enabled for writes. A missing or stale Follow
+self-test disables only Follow writes.
+
+When the Remote Script stops, it turns Follow Action writes off and uninstalls
+DeviceTools and RackZones. Follow Action bindings can't be uninstalled: they
+stay registered in that Live process, and the bridge reuses them, writes off,
+when it starts again.
 
 ## Follow Action self-test
 
@@ -74,27 +128,110 @@ and Live Undo in the current Set, so use a disposable Set.
    attempt to own native bindings. Kumi rechecks the receipt against its selected
    library before enabling Follow writes with `enableWrites: true`.
 
-## Evidence and limits
+## Follow Actions
 
-Automated tests cover negotiation absence, malformed fields, detached targets, stale apply, external changes before undo, partial-write compensation, provider ownership/reconnect, deployment-policy changes before undo, failures before undo dispatch, float32 timing/mapping readback, canonical macro references, URI-fenced Browser lookup and lost apply/undo acknowledgements. Rack state reads are scoped to the rack; ordinary snapshots do not read native Follow fields; Follow tools request them only for their exact Session clip. The advertised rack edit kinds reflect the enabled DeviceTools and RackZones providers. Simulator evidence is separate from real-Live evidence.
+`live_follow_actions_preview/apply` sets all ten fields of one Session clip:
+enabled, linked, actions A and B, chances A and B, loop count, time, and jump
+targets A and B.
 
-Real Live tests used a disposable saved fixture through the authenticated bridge and McpHost: Follow Action preview/apply/readback/history undo; macro rename; continuous inverted, enum inverted and boolean mappings; variation rename with Unicode text. Each edit was undone, and the owned Follow Action test clip was removed. These are stopped-playback tests, not evidence of save/reload persistence or musical Follow Action scheduling.
+- Actions are numbers: 0 none, 1 stop, 2 again, 3 previous, 4 next, 5 first,
+  6 last, 7 any, 8 other, 9 jump. Jump targets are 1-based scene numbers.
+- The two chances add up to 100; give one and the other is set to the rest.
+- Linked timing uses the loop count; unlinked timing uses `time` in beats.
+- The transport must be stopped and the clip not recording.
+- It doesn't change scene Follow Actions or Live's global Follow Action switch.
+  For launch Legato, use the clip settings tool (`set_clip` in Kumi).
+
+The preview captures all ten fields. If a write fails partway, the earlier
+fields go back. Undo restores the captured fields, and is refused if the clip
+changed since.
+
+## Macros, variations and mappings
+
+`live_willington_device_preview/apply` with `ref` naming a rack:
+
+| Kind | Arguments | Notes |
+| --- | --- | --- |
+| `macro-name` | `macroIndex` (0–15), `name` | Renames a macro |
+| `variation-name` | `name` | Renames the selected variation; a named variation must be selected |
+| `macro-mapping` | `targetRef`, `mappingIndex` (0–15, or `null` to unmap), `minimum`, `maximum`, `mappingKind` | Maps a parameter inside this rack to a macro |
+
+Mapping kinds:
+
+- `continuous` and `enum`: `minimum` and `maximum` in the parameter's own units,
+  within its range; the range may be inverted. `enum` endpoints are whole
+  numbers.
+- `boolean`: integer macro thresholds from 0 to 127, `minimum` ≤ `maximum`.
+
+`targetRef` must come from fresh discovery and lie inside this rack, its nested
+devices or its chains' mixers. A transaction captures the names, or the
+mapping, the parameter's value and the macro values, with the identities
+involved. Live sets a mapped parameter's value a tick later, so a mapping is
+fenced on the mapping and the macro values, not that value. Every write is read
+back and, if it doesn't match, put back exactly. Undo restores the captured
+state and is refused if the rack changed since. It's the transaction's own
+undo, not Live's.
+
+## Rack chain zones
+
+`live_willington_device_preview/apply` with `ref` naming a rack and `targetRef`
+one of its regular chains:
+
+| Rack | Zones |
+| --- | --- |
+| Audio Effect Rack | `selector-zone` |
+| Instrument Rack, MIDI Effect Rack | `selector-zone`, `key-zone`, `velocity-zone` |
+
+Drum Racks and return chains are refused. A zone has four integer endpoints,
+`minimum`, `fadeMinimum`, `fadeMaximum` and `maximum`, which must stay in order
+(`minimum` ≤ `fadeMinimum` ≤ `fadeMaximum` ≤ `maximum`) within 0–127 (1–127
+for velocity). An endpoint you leave out keeps its current value, so moving a
+range may mean giving both fade endpoints too.
+
+The preview captures all four endpoints. Apply and undo fence the rack and the
+chain by identity and the whole zone state; a write that doesn't read back as
+asked is put back exactly.
+
+## Evidence
+
+| Provider | Run | Live | Bridge | Covers |
+| --- | --- | --- | --- | --- |
+| Follow Actions | [kumi-clip-follow-actions-b5.json](../evidence/kumi-clip-follow-actions-b5.json), 2026-09-30 | 12.4.15b5, macOS arm64 | 1.0.53 | Kumi changes and undo on a saved test Set, transport stopped |
+| Follow Actions, macros, mapping | [willington-kumi-chat.json](../evidence/willington-kumi-chat.json), 2026-09-30 | 12.4.15b4 ARM64 | 1.0.52 | A real Kumi chat: Follow Actions, macro rename, mapping, each undone |
+| Rack zones | [rack-zones-b5.json](../evidence/rack-zones-b5.json), 2026-10-01; completion 2026-10-02 | 12.4.15b5 (2026-09-24 build), arm64 | 1.0.66 (Kumi transactions) | Readback, write, undo and redo, save/reopen, Kumi undo; completion adds signal gating, fades and actual Max invocation |
+
+Variation rename and the inverted continuous and enum mappings were tested
+through the bridge directly. Follow Action scheduling and save/reopen persistence
+of Follow Action and macro edits were not tested.
 
 Rack Zones completion results and receipt digests are in the [public validation
 summary](../evidence/rack-zones-b5.json): 42 signal-gating checks, 49 fade
 measurements with 14 directional comparisons, and seven actual Max `live.object`
-write/read/restore cycles. Measurements use normalized Live meters; exact linear
-gain, silence at fade endpoints, held-note edits, overlapping multi-chain
-crossfades and other builds/platforms are not claimed. Earlier Kumi transaction
-and save/reopen evidence remains in that summary. The raw completion receipts
-and harness are retained in the private Willington repository at the immutable
-commit recorded in the summary; public readers do not need that repository to
-read the results, but cannot independently inspect those raw receipts here.
+write/read/restore cycles. The promoted `live-12.4.15b5-arm64` library is
+byte-identical to the tested candidate library. Measurements use normalized Live
+meters; exact linear gain, silence at fade endpoints, held-note edits, overlapping
+multi-chain crossfades and other builds/platforms are not claimed. Rack Zones
+remains unsupported on b4. Raw completion receipts and the harness are retained
+in the private Willington repository at the immutable commit recorded in the
+summary; those raw files are not published here.
 
-The following remain deliberately unavailable through Kumi:
+The bridge's automated tests cover the rest without Live: missing providers,
+malformed config, stale and conflicting edits, partial writes, ownership and
+reconnects, and lost replies.
 
-- Variation overwrite: requires full stored macro contents and enabled-mask readback/restoration, not just the variation name.
-- Direct Drum Sampler sample replacement: requires authoritative current sample identity/path and restoration of replacement-related state. Existing preset/browser workflows remain available.
-- Modulator mapping: native patch processing is asynchronous. Kumi still needs bounded settled-state verification, exact target/source ownership capture, cancellation and restoration before this can become a history transaction.
+## Deliberately unavailable
 
-These native methods existing in Willington is not sufficient evidence of an undoable Kumi operation. Do not advertise them by adding only a runtime descriptor or protocol entry.
+Willington has native methods for these, but Kumi doesn't offer them until
+they can be undone safely:
+
+- **Overwriting a variation**: needs reading and restoring the full stored macro
+  values and enabled mask, not just the variation's name.
+- **Replacing a Drum Sampler's sample directly**: needs the current sample's
+  identity and path, and restoring what replacing it changes. Loading presets
+  and samples through the Browser works.
+- **Mapping a modulator**: the native change settles later, out of step with
+  Live's thread. It needs settled-state checks, exact ownership of source and
+  target, cancellation and restoration first.
+
+A native method existing isn't enough for an undoable operation: don't offer
+one by adding only a runtime descriptor or a protocol entry.

@@ -1,5 +1,9 @@
 # Kumi's benchmark: recreate a section by ear
 
+> A dated record, 30 September 2026: Kumi before 1.2, bridge 1.0.52, Live 12.4 on macOS. Matching has
+> changed since, so the scores describe that version only. The driver and the scorer were kept locally
+> and are not in the repository.
+
 The prompt, exactly as a producer typed it, in the real app (`npm run kumi`, full screen, driven through
 a PTY by `.pi/kumi-evidence/tui/match-session.py`) on real Live 12.4 (bridge 1.0.52), in the disposable
 "Kumi Acceptance" Set at 120 BPM, with an empty MIDI track "Benchmark" selected:

@@ -2,172 +2,97 @@
 
 English · [简体中文](../zh-CN/OPERATIONS.md) · [日本語](../ja/OPERATIONS.md)
 
-Running, supervising, and shutting down the host in daily use. For uncertain
-state after a failure, see [RECOVERY.md](RECOVERY.md).
+Running the bridge day to day: starting it, checking it, its limits, and what
+it writes to disk. To install it, see [delivery](DELIVERY.md). When something
+fails, see [recovery](RECOVERY.md).
 
-Run the host under a supervisor with stdout and stderr kept separate.
+## Start
 
-## Start and observe
-
-```sh
-cd apps/mcp-server
-npm ci
-npm run build
-node dist/src/cli.js --config /absolute/path/bridge-config.json
-```
-
-Use `server_status`, `capabilities`, and `live_status` after initialization. A
-valid `live_status` identifies `ableton-live/v1`, a connected `remote-script`
-adapter, a non-null epoch, the expected registry hash, and the negotiated
-operations. `live_snapshot` and bounded discovery provide the active read-only
-check. For audition, discover the exact Set, scene, target tracks/slots, and
-Session playback before preview; diagnostics discovery is not authorization to
-launch.
-
-Diagnostics accepts no arguments or exactly one `--config PATH`:
+The MCP client starts the server, one process per client:
 
 ```sh
-npm run diagnostics -- --config /absolute/path/bridge-config.json
+node /absolute/path/dist/src/cli.js --config /absolute/path/bridge-config.json
 ```
 
-Diagnostics separates local host/package/configuration readiness from
-authenticated reachability, discovery reachability, registry hash, epoch,
-protocol, and `liveConnected`. A file, process, open port, installed package,
-simulator, or fake-Live result cannot establish real Live connectivity.
+The server reads MCP messages as JSON lines on stdin and writes them on stdout.
+Keep stdout for MCP alone. The server's own log lines go to stderr, prefixed
+`mcp-host:`. Set the [deployment policy](USER_GUIDE.md#deployment-policy) and
+any other [environment variables](USER_GUIDE.md#environment-variables) in the
+server's environment.
 
-Remote Script file diagnostics are a separate, disabled-by-default local
-contract. They can be provisioned only during lifecycle install with
-`--enable-bridge-diagnostics`; creating a predictable temporary file cannot
-activate them. The destination is the owner-only, non-linked
-`bridge-diagnostics.log` under the selected lifecycle state directory. A
-nonblocking 64-record queue feeds one daemon writer; records are at most 512
-bytes and the active file resets before exceeding 256 KiB. Records contain only
-a timestamp, fixed event code, coarse allowlisted category, and bounded dropped
-count—not exception messages/tracebacks, request data, secrets/MACs/tokens,
-Set/project/object names, Browser queries, PCM, or media paths. Queue pressure
-drops records. Link/path drift, log-full/write failure, or an unsafe descriptor
-disables logging without changing the operational error. Uninstall/reinstall
-without the flag disables the configured sink; after uninstall and inspection,
-the retained log may be removed with the rest of owner state.
+Kumi starts its own server. It sets the policy to the tools it uses, gives the
+server a PATH that holds only Node's folder, and waits up to 65 seconds for an
+answer.
 
-## Limits and shutdown
+## Check the connection
 
-The host bounds JSON-RPC frames at 500 MiB (the largest string Node holds),
-remote frames at 256 MiB, remote pending work at 4096 requests, and tracked
-request identifiers at 4096; tool calls have no rate limit. Stdio allows bounded concurrent work (default
-16, maximum 64), backpressures at four times the configured concurrency,
-preserves response order, and treats cancellation after dispatch as
-non-retracting. PCM analysis is limited to 10,000,000 samples / 600 seconds;
-reference comparison to 4,000,000 samples / 30 seconds per source / 10 seconds
-lag. DSP runs in at most two active and four queued disposable workers with a
-512 MiB heap, 30 second wall limit, 64 MiB request, 2 MiB stdout, and 16 KiB
-stderr. Live capture is limited to one mapper-owned lifecycle, one-to-nine
-requested seconds, a ten-second watchdog, 32 MiB WAV, 12 seconds, and two
-channels.
+Call `live_status`. A working connection shows:
 
-Close stdin for normal completion. On EOF, signal, initialization failure,
-cancellation, output failure, timeout, or disconnect, the host closes the
-adapter and settles pending work; reinitialize to obtain a new epoch. A
-scene-audition disconnect, timeout, or acknowledgement loss is uncertain
-playback state, not a safe retry condition.
+- `"connected": true`;
+- `"adapter": "remote-script"`;
+- `"provenance": "real-live"`;
+- a numeric `epoch`;
+- the registry hash and operations the Remote Script offers.
 
-## Realtime operations
+Don't take an open port or a running Live as proof: only an authenticated
+`live_status` is.
 
-A configured `realtimePort` does not grant authority by itself. Use
-`live_realtime_arm_preview`/`apply`, keep the returned token out of logs,
-inspect `live_realtime_stats`, and always call `live_realtime_disarm`. Accepted
-UDP packets and applied Live-thread callbacks are separate counters. Endpoint,
-replay, rate, queue, expiry, and generation-fence drops are explicit. See
-[REALTIME_CONTROL.md](REALTIME_CONTROL.md) for packet formats, limits, OSC/XY/Max
-extension semantics, and recovery.
+`ableton-mcp-diagnostics --config <path>` checks the same from a terminal. It
+reports Node, the package, the configuration and the secret's permissions. It
+then makes a short authenticated read of the Set (set, scenes, tracks,
+playback, one track's clip slots). [Delivery](DELIVERY.md) explains the report
+stage by stage.
 
-## Domain and extension boundaries
+## Limits
 
-Rename, Browser load, and audio-clip changes use purpose-specific
-preview/apply/undo transactions; generic authenticated `invoke` is not
-user-facing mutation authority. Browser load requires a fresh exact
-`browser.inspect` device identity. Audio edits are field-negotiated per clip;
-warp-marker readback does not grant marker-edit authority. Subscriptions
-negotiate only event types with real producers (`transport`, `object`, and
-protocol `reset`). Coalescing an undelivered adjacent event preserves its
-sequence; actual queue overflow or an epoch change emits `reset`, and a reset
-or sequence gap requires a fresh snapshot.
+| Limit | Value |
+| --- | --- |
+| One MCP message | 500 MiB |
+| One message from the Remote Script | 256 MiB |
+| Requests waiting on the Remote Script | 4,096 |
+| Requests in flight | 16 at a time; past 64 waiting, new ones get `-32000 Server is busy` |
+| Deadline for a request to Live | `timeoutMs` (5 s by default). Snapshots and discovery get six times that, and previews and applies get 15–45 s plus 20 ms per track in the Set. Never over 60 s. |
+| Preview lifetime | 10 minutes; batch, MIDI clip and device-state previews 30 s; capture previews 60 s |
+| Undo records kept | 1 GiB in all; 512 each for batches, MIDI clips and device states (the oldest applied change gives up its undo first) |
+| Events queued for a slow client | 65,536, then `notifications/live_event_overflow` |
+| Notes per page | 2,000 |
+| Parameters in one change | 10,000 |
+| Batch | 32 operations |
+| Audio analysis | 10,000,000 samples or 600 s; 2 workers at a time, 4 waiting, 30 s each |
+| Reference comparison | 4,000,000 samples, 30 s per source, 10 s alignment lag |
 
-`ableton://max-extension` truthfully reports that no Max device is bundled.
-Canonical `project.new/open/save/save-as/collect/export/bounce` identifiers
-reserve a future adapter contract, but current adapters do not advertise or
-execute them. Local `project.info` and receipt-bound `.als` backup remain the
-only project file operations. The read-only `live_project_snapshot_export`
-returns artifact-bound pages under `strict`, `collaboration`, or `local` path
-policy; collect every page through `complete=true` before persisting it.
-`live_project_snapshot_diff` validates and compares two complete bundles even
-while Live is disconnected. Page cursors are non-authoritative artifact
-coordinates, never cross-run object identity. Truncation limits absence claims,
-and ambiguous duplicates stay explicit. These host-side semantic tools do not
-implement canonical `project.export`, edit `.als`, collect media, decode plug-in
-or Max blobs, propose a merge, or bypass the bridge snapshot traversal/frame
-bounds. Each persisted page bundle is capped at 24 MiB, leaving transport
-headroom for the two-bundle diff request. Saved-Set FileRef evidence stops after
-4,096 unique entries plus the first overflow observation; overflow counts are
-explicit lower bounds and make dependencies incomplete. UNC/device/network
-references are not probed, and Pack/User Library labels are path-segment
-heuristics rather than installed-ownership claims. Export rejects a page limit
-that would require more than 512 assemblable pages.
+Tool calls have no rate limit. [Realtime control](REALTIME_CONTROL.md) and
+[audio intelligence](AUDIO_INTELLIGENCE.md) list their own limits.
 
-## Recording operations
+## Answers, cancellation and shutdown
 
-Both Session and Arrangement recording start require an exact armed
-destination, explicit intent, and output-safety evidence. The mapper
-atomically rechecks both prior recording booleans plus destination and safety
-authority. Do not issue a second start or a new key after uncertainty: in an
-unchanged bridge/Live epoch, reconcile only the exact original transaction and
-key; otherwise discover fresh playback, then use
-`live_session_emergency_stop` with exact active targets and `expectedRecording`
-set to the freshly observed `stopped`, `session`, `arrangement`, or `both`
-mode to clear playback and both recording modes; verify `recordingStopped=true`
-and fresh stopped state.
+Each answer goes out as soon as its request finishes, so a slow request (a big
+Set's export, a render) doesn't hold up the others. Match answers to requests
+by `id`.
 
-## Audio capture supervision
+A `notifications/cancelled` stops a request that hasn't started. If the request
+has already reached Live, cancelling doesn't undo it. The change may have
+happened, so read before changing anything else.
 
-Before capture, record the exact Set, source/destination slots, destination
-route/arm/monitor baseline, playback/recording state, output-safety provenance,
-and raw-file directory count. Do not supervise by port/process presence alone;
-require `real-live` provenance and all canonical capture operations.
+Closing stdin ends the server. It closes an undo step left open, then lets Live
+go. Restarting the server starts with no undo records; see
+[recovery](RECOVERY.md#after-a-restart).
 
-During apply, the MCP request can remain open for the requested duration plus
-bounded finalization/analysis. Cancellation emits no MCP response but the host
-continues independent stop/cleanup; wait for `live_audio_capture_status` from a
-fresh client. A killed host does not remove mapper authority: the Live-side
-watchdog stops recording, and a new packaged host can run
-`live_audio_capture_emergency_stop` with exact observed identities.
+## Files the bridge writes
 
-A passing completion requires mapper state `cleaned`, `playbackStopped=true`,
-transport/Session/Arrangement recording false, restored route/arm/monitoring,
-an empty destination slot, `rawFileUnlinked=true`, and no WAV/ASD residual.
-Never log a confirmation, mapper/recovery token, PCM, or media path. See
-[AUDIO_INTELLIGENCE.md](AUDIO_INTELLIGENCE.md).
+| What | Where |
+| --- | --- |
+| Configuration, secret, receipt, journal | The lifecycle's state folder: `~/.config/ableton-mcp`, or `%APPDATA%\ableton-mcp` on Windows, unless you chose another |
+| Remote Script diagnostics log | `bridge-diagnostics.log` in the state folder, only after `ableton-mcp-lifecycle install --enable-bridge-diagnostics`. It holds event codes without names or data; capped at 16 MiB, then it starts over. |
+| Copies of imported audio | `~/.config/ableton-mcp/import-staging` (`%APPDATA%\ableton-mcp\import-staging`), or `ABLETON_MCP_IMPORT_STAGING_DIR`. Live plays these copies, so remove them only once no clip uses them; see [Live safety](LIVE_SAFETY.md). |
+| Drum Sampler carrier presets | The `Kumi` folder in Live's User Library, removed once loaded |
+| Device states | The folder you name to `live_device_state_save` |
+| Set backups | Beside the saved Set (`live_project_backup_apply`) |
+| Renders | The Live extension's temporary folder, kept 6 hours |
 
-## Delivery lifecycle supervision
+## Several clients
 
-Use `ableton-mcp-lifecycle`; the direct Remote Script copier is a lower-level
-development primitive, not the complete product lifecycle. Always review a
-non-mutating plan, stop Live explicitly for install/upgrade/rollback/uninstall,
-and retain the exact tarball SHA, receipt, journal, and any quarantine path.
-Never delete or edit a backup outside the receipt while rollback is available.
-
-After a mutation, status must show matching managed hashes, owner-only secret
-permissions, stopped/unloaded Live as appropriate, and `restartRequired` until
-manual Control Surface selection plus authenticated real-Live activation.
-`activated` requires registry identity and `real-live` provenance; a free port,
-process, fake mapper, or simulator does not satisfy it. Repair quarantines
-drift and never invents a missing secret. Uninstall preserves modified/unknown
-content and the secret by default. Exact commands and Windows/macOS path policy
-are in [DELIVERY.md](DELIVERY.md).
-
-## Evidence boundary
-
-Node/Python tests, the simulator, fake-Live mapper, authenticated loopback
-checks, package verification, and benchmarks establish repository-controlled
-contracts only. They do not prove a real Ableton Live version, disposable Set,
-visible UI state, audible/realtime behavior, hardware, accessibility, installer
-runtime, signing, notarization, or release readiness.
+Each client starts its own server, and the Remote Script accepts up to 64
+connections. Servers don't share undo records or know each other's changes. An
+apply refused with "Live state changed since the preview" may be another
+client's doing: read again and preview again.

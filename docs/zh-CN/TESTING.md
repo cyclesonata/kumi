@@ -1,141 +1,120 @@
-# 测试指南
+# 测试
 
 [English](../en/TESTING.md) · 简体中文 · [日本語](../ja/TESTING.md)
 
-## MCP 兼容性证据
+如何运行仓库各部分的测试、它们需要什么，以及 CI 运行什么。所有常规测试都不需要 Live，也不需要登录。
 
-`mcp-protocol.test.ts` 覆盖新版发现 / 每请求元数据 / 版本拒绝 / 旧版回退、ID 完成后复用与并发重复拒绝、private / TTL 0 及结构化重放标志。
-还覆盖不变的确认 / 策略 / 丢失应答后的账本恢复、无主动推送和排队应答取消。
-transport 回归测试从导出的 `serve()` 响应 data handler 内立即复用 ID（数字 / 字符串以及成功 / 错误响应），并测试已完成的成功 / 错误响应在有背压的 busy 响应后进入串行输出队列后再取消。ID 释放与最终 abort 检查位于实际发送边界，而非入队或 write callback 完成时；旧响应清理不能删除复用 ID 的新取消所有者。`stdio.test.ts` 同时覆盖仅 callback 延迟和 drain 背压。
-`verify-package.mjs` 分别启动已安装的旧版与新版进程。
-这些只是宿主 / fake-Live 证据，不是第三方客户端或新增真实 Live 认证。
+## 快速开始
 
-## 变换不变量
-
-旋转属性测试包含无 ID 的完全重复音符与重复对象引用，保证音高多重集合、输入顺序及所有非音高字段不变。
-修复的是纯函数辅助模块；MCP 修改路径仍要求稳定的音符 ID。
-音符摘要采用 UTF-16 代码单元排序而非 ICU 排序，使用英语 / 瑞典语子进程及排序敏感输入验证，并固定代表性 ASCII 摘要。
-
-## 层级不变量
-
-链查找测试验证后续同级设备、嵌套机架、仅鼓垫包含的链与鼓垫内机架的真实所属设备。原所有者字段缺陷在当前调用方中是潜在问题，不声称已经证明真实 Live 误编辑。
-
-## 语义隐私不变量
-
-名称保留配置保留 `Verse / Chorus`，仍筛查绝对、引号、赋值、嵌入的无空格根路径、驱动器、网络、设备和 URI 路径形态；basename / 项目相对 locator 在最终审计前经过同一筛查。
-旧中断可由合法的 `REUSABLE-TOKEN.wav` 重现。斜杠不是单个 basename 中的字符，不声称该例已经复现。
-
-## 确定性门禁
-
-从 `apps/mcp-server` 串行运行:
+在源码副本中，使用 Node 22/24（推荐 Node 24 LTS）：
 
 ```sh
-npm ci
-npm run typecheck
-npm test
-npm run property-test
-npm run coverage
-npm run benchmark
-npm run audio:oracle
-npm run compatibility
-npm run package:verify
-npm run journey:verify
-npm pack --dry-run --json
+npm run setup                                   # 安装并构建所有内容
+npm test                                        # Kumi：应用、运行时和 Live 扩展
+(cd apps/mcp-server && npm test)                # 桥接
+python3 -m unittest discover -s remote-script -p 'test_*.py'   # Remote Script
 ```
 
-然后从仓库根目录运行:
+有些检查需要 Node 以外的东西：
+
+| 需要 | 用于 |
+| --- | --- |
+| PATH 上的 Python 3（`python3`，在 Windows 上为 `python.exe`；CI 使用 3.11） | Remote Script 测试、`package:verify`、`journey:verify` |
+| PATH 上的 `ffmpeg` | `audio:oracle` |
+| 在 `vendor/` 中本地提供的 Extensions SDK | 构建 Live 扩展或对其做类型检查（它的测试不需要） |
+
+在 Windows 上，有几个测试会创建符号链接，这需要开发人员模式或管理员账户。没有这项权限时，其中一些会跳过，少数会以 `EPERM` 失败；CI 的 Windows 运行器具有这项权限。
+
+## Kumi
+
+在仓库根目录运行。
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run typecheck` | 先构建运行时，再对应用和运行时做类型检查 |
+| `npm test` | 先构建，再运行应用、运行时和 Live 扩展的测试 |
+| `KUMI_TEST_BRIDGE=1 npm test` | 同上，但桥接互操作测试为必需而不是跳过；需先构建桥接（`npm run setup` 会构建） |
+
+`npm test` 为测试提供独立的主目录：`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME` 和 `KUMI_HOME` 都指向一个全新的临时文件夹，`KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 则被移除，因此任何测试都无法触及你的 Live 文件夹或 `~/.kumi`。
+
+## 桥接
+
+在 `apps/mcp-server` 中运行过 `npm ci` 之后，在该目录中运行。
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run typecheck` | 对桥接做类型检查 |
+| `npm test` | 先构建，逐个运行每个测试文件，然后运行脚本测试：发布文档、能力清单、文档漂移和 CI 保留期 |
+| `npm run property-test` | 在生成的音频上对音频分析做属性测试：有界、有限、结果中没有原始 PCM |
+| `npm run coverage` | 带 V8 覆盖率的测试：总体至少 85% 的行、65% 的分支和 84% 的函数，每个模块都有下限，delivery、lifecycle、host、remote-adapter、project 和 Session MIDI 的门槛更高 |
+| `npm run benchmark` | 在最大音频输入下测量延迟，不插桩；不属于 `npm test` 或覆盖率 |
+| `npm run audio:oracle` | 在生成的音频上，把响度和真峰值的测量结果与 FFmpeg 的 `ebur128` 对比 |
+| `npm run compatibility` | 先运行 `policy:verify`（检查 package.json、CI 和文档中的 Node 策略），再检查当前的 Node 和系统 |
+| `npm run package:verify` | 打包桥接，安装该 tarball 并进行检查（见下文） |
+| `npm run journey:verify` | 安装打包好的桥接，并通过它针对假 Live 走完五个用户旅程 |
+| `npm run capability:manifest` | 注册表变化后重新生成 `docs/evidence/capability-manifest.json`；有测试会对比它 |
+
+`package:verify` 会拒绝其列表之外的任何文件，检查 `release-manifest.json` 中的每个哈希，并检查 `LICENSE.md` 与仓库中的一致。然后，它在两代 MCP 协议下启动已安装的服务器，运行 `setup`、`migrate` 和 `diagnostics`，在名称含空格和非 ASCII 字母的文件夹中运行生命周期（安装、一次连不上 Live 的激活、修复、一次被拒绝的回滚、卸载），并让已安装的 Remote Script 针对假 Live 应答一次经认证的探查。`ABLETON_MCP_ARTIFACT=<tarball>` 让 `package:verify` 和 `journey:verify` 检查指定的 tarball，而不是自己打包。
+
+## Remote Script
+
+在仓库根目录运行：
 
 ```sh
 python3 -m unittest discover -s remote-script -p 'test_*.py'
-git diff --check
-git diff --cached --check
+python3 -m compileall -q remote-script/AbletonMcpBridge
 ```
 
-Node 测试编译到 `dist/`,覆盖:MCP 生命周期、模式验证、有界并发 stdio
-组帧、异步适配器行为、已认证回环响应、Session 试听 preflight/apply/
-stop、事务、能力感知的工具发现与部署策略配置档(含 list-changed
-通知)、带中间态栅栏分块执行与重放感知恢复的确定性带种子 MIDI 变换、
-Browser 检查与加固的单文件导入、只读 Arrangement 自动化、take-lane/comp
-与 warp 标记探测(修订绑定分页)、标准响度/真峰值、有界参考对齐、密钥剥离 worker 取消/队列
-限制、安全的 WAV/ASD 生命周期、信号链诊断、知情同意捕获的正常/取消
-路径、属性、交付、回执驱动的安装/激活/升级/修复/回滚/卸载、旅程规划/
-回退/权利/无障碍契约,以及软件包安装。`journey:verify` 安装打包产物,
-只翻译允许列表中的特征,阻止身份/复制冲突,并把全部五个计划中每个
-`planned` 阶段驱动到真实的工具结果。它验证阶段/状态顺序,跨任何显式
-重新规划绑定事件,记录软件包 SHA-256 与终态残留,并覆盖 MIDI/结构/
-Arrangement、表情音符、Browser 加载后的能力重新规划与已发布参数撤销、
-标准参考分析与非因果 Live 上下文、路由/录音/订阅/实时契约、不确定性,
-以及带显式 `fake-live` 来源的恢复。仅真实 Live 的捕获与宿主实时授权在
-该证据中保持不可用,而不会被提升。
+这些测试针对假 Live 对象运行 Remote Script，覆盖：认证、顺序控制、主线程队列、注册表及其哈希、探查、事务、捕获与实时安全，以及可选的 Willington 提供方。
 
-Python 测试覆盖:零依赖的 Control Surface 入口、规范注册表加载与哈希、
-认证、排序/重放拒绝、主线程排队、fake-Live 引用、层级发现、空剪辑槽位、
-依形状宣告操作、Session 播放操作、Session MIDI、定位点、结构、设备/
-参数验证、轨道作用域路由选择、捕获栅栏/看门狗/紧急/清理,以及桥接拆除。
-软件包验证器启动已安装的生产桥接,并检查已认证的 fake Set、场景、轨道、
-子槽位与播放发现。
+## Kumi 的 Live 扩展
 
-CI 在 Ubuntu 24.04 上构建一个干净的本地未发布 tarball,上传前运行
-`package:verify`,再从全新分离的本地克隆加全新 `npm ci` 重复打包并
-比对字节,记录精确 Git SHA 与 tarball SHA-256,然后在每个 Node 22/24
-的 Ubuntu 24.04、macOS 15 与 Windows Server 2025 任务中安装同一产物。
-每个候选任务验证严格清单/哈希,并演练生命周期计划/安装、不可用激活、
-幂等修复、非自有回滚拒绝与卸载;Windows 还测试原生 ACL 修复、联接点
-拒绝、占用文件恢复与随附的版本 2 迁移。稳定的 `Required CI` 检查只有在
-候选、完整 Node/OS 矩阵与完整 Python 矩阵全部成功时才通过。这些仍是
-宿主/软件包契约。
+根目录的 `npm test` 会运行 `apps/live-extension/test`，它针对假 Live 加载已提交的 `dist/extension.js`，并对照记录的 sha256 检查它。构建扩展（在 `apps/live-extension` 中运行 `npm run build`）需要 `vendor/` 中的 Extensions SDK；没有 SDK 时，已提交的构建保持原样。重新构建之后，请把 `dist/extension.js` 连同它的 `.sha256` 一起提交。
 
-操作者专用的打包真实 Live Phase 8 验证器不是 CI 替代品。安装 `npm pack`
-产物并 visibly 准备一次性 Set/输出/目标路由后,用显式证据输入运行:
+## 需要 Live 或模型的检查
+
+这些检查需要主动运行。它们会改动真实的东西或消耗真实的 token，所以 CI 不运行它们。
+
+| 命令（在根目录运行） | 需要 | 作用 |
+| --- | --- | --- |
+| `npm run accept:live --workspace @kumi/app -- --set "<Set>"` | 打开了某个工程的一次性副本的 Live | 做出 Kumi 能做的每一类修改，用 Kumi 的撤销逐一撤销，播放、并轨、聆听和观看，并测量读取大型工程的耗时。不使用模型。 |
+| `npm run eval:changes --workspace @kumi/app [-- <case>]` | 你的登录和模型 | 检验模型如何使用 Kumi 的工具，针对一个带有真实桥接工具 schema 的合成桥接进行。从不触及 Live。 |
+| `npm run probe:inference --workspace @kumi/app` | 你的登录 | 用一个无害的工具发送一次经认证的请求。从不触及 Live。 |
+
+桥接的工具变化之后，运行 `node apps/kumi/scripts/make-bridge-tools.mjs`（需已构建桥接），以刷新 `eval:changes` 使用的 schema。
+
+桥接还有一项仅供操作者使用的捕获检查：`apps/mcp-server` 中的 `npm run audio:live-verify`。它需要一个由生命周期安装并在真实 Live 上激活的桥接、一个准备好的一次性工程，以及 `PHASE8_CLI`、`PHASE8_RECEIPT`、`PHASE8_EXPECTED_GIT_SHA`、`PHASE8_TARBALL_SHA`、`PHASE8_EXPECTED_REGISTRY_HASH` 和 `PHASE8_OUTPUT_SAFETY_PROVENANCE`（可选：`PHASE8_CONFIG`、`PHASE8_SET_NAME`、`PHASE8_LIVE_VERSION`、`PHASE8_SOURCE_TRACK_INDEX`、`PHASE8_DESTINATION_TRACK_INDEX`、`PHASE8_RECORDED_DIRECTORY`）。它在触及 Live 之前对照回执检查已安装的文件，然后录制、取消并恢复一次捕获，并还原它改动过的所有内容。
+
+## 文档
+
+编辑文档之后，在 `apps/mcp-server` 中（先在那里运行过 `npm ci`）运行：
 
 ```sh
-PHASE8_CLI=/absolute/receipt-owned/dist/src/cli.js \
-PHASE8_CONFIG=/absolute/receipt-owned/bridge-config.json \
-PHASE8_RECEIPT=/absolute/receipt-owned/install-receipt.json \
-PHASE8_EXPECTED_GIT_SHA=<40-hex-candidate-sha> \
-PHASE8_TARBALL_SHA=<64-hex-artifact-sha256> \
-PHASE8_EXPECTED_REGISTRY_HASH=<64-hex-canonical-registry-sha256> \
-PHASE8_OUTPUT_SAFETY_PROVENANCE='<fresh operator observation>' \
-PHASE8_LIVE_VERSION='<visible Live version>' \
-  npm run audio:live-verify > /owner-only/path/phase-8-audio-live.json
+npm run policy:verify
+node --test scripts/docs-drift.test.mjs scripts/release-documentation.test.mjs
 ```
 
-在触碰 Live 之前,验证器要求已激活的真实 Live 生命周期回执,绑定预期的
-干净 Git SHA、产物摘要、规范注册表、回执自有的 CLI/配置、发布清单摘要、
-每个已安装软件包文件与每个已安装 Remote Script 文件,并拒绝多余、缺失、
-链接或漂移的软件包字节。然后要求运行时 `remote-script`/`real-live`
-来源与相同的注册表哈希。验证器还拒绝缺失的原始媒体目录、非空的源设备
-基线、缺失的源剪辑,或目标不是 visibly 准备好的
-`No Input`/未 armed/监听关闭/为空。它验证在原宿主仍然存活时取消响应
-被抑制,在捕获期间杀死另一个宿主,要求映射器看门狗收尾,独立恢复,并在
-失败时补偿其临时音符/混音器/设备变更。
+`policy:verify` 检查写明受支持 Node 版本的文档以及 README 徽章是否仍然写着 22 和 24。漂移测试检查英文、中文和日文的用户指南是否列出相同的工具，以及是否没有文件数量紧挨着清单（manifest）或 tarball 之类的词（请改为写出 `release-manifest.json`）。发布文档测试会暂存桥接打包的指南，并检查其中的每个链接。`npm run package:verify` 会在已安装的包中检查同样的指南。
 
-内置的 V8 覆盖率门禁测量编译后的运行时代码(不包括独立的仅基准入口点
-与墙钟基准测试 —— 后者仅在独立的 `npm run benchmark` 门禁中未插桩运行,
-并有意排除在 `npm test` 与覆盖率之外),并强制总体至少 85% 行、65%
-分支、84% 函数,生产模块下限,以及 delivery、lifecycle、host、
-remote-adapter、project 与 Session MIDI 模块的更强阈值。插桩计时不作为
-性能证据。覆盖率是回归信号,不是真实 Live、安全、恢复或平台证据的
-替代品。
+## CI
 
-基准对声明的最大 PCM 输入预热并报告重复延迟测量。`audio:oracle` 生成
-临时 PCM,把 BS.1770/EBU 与真峰值输出与 FFmpeg `ebur128` 比较,并移除
-owner-only 临时树;不提交第三方音频。延迟、输出大小、有界内存、DSP
-对照、软件包与真实 Live 证据是不同的关注点;彼此不能替代。
+每个拉取请求以及每次推送到 `main` 时，都会运行三个工作流：
+
+| 工作流 | 作业 | 运行内容 |
+| --- | --- | --- |
+| **CI** | `Build exact local candidate`（Ubuntu，Node 24） | 空白字符检查；桥接的类型检查、测试、属性测试、覆盖率、基准测试、`audio:oracle`、`compatibility` 和 `package:verify`；打包桥接两次（第二次在全新的克隆中）并要求字节完全相同；把 tarball 作为 `exact-local-candidate` 产物保留 90 天 |
+| | `Node 22, 24 / ubuntu-24.04, macos-15, windows-2025`（六个作业） | 桥接的类型检查、测试、属性测试、基准测试和 `compatibility`；针对同一个 tarball 运行 `package:verify`、`scripts/verify-candidate.mjs` 和 `journey:verify`；设置、迁移和诊断 |
+| | `Python Remote Script contract`（同样的三个系统，Python 3.11） | 对照 tarball 检查 Remote Script 的文件，运行 Python 测试，编译该包 |
+| | `Required CI` | 只有以上全部通过时才通过 |
+| **Kumi** | `Kumi / Node 22`、`Kumi / Node 24`（Ubuntu）、`Kumi / macOS / Node 24`、`Kumi / Windows / Node 24` | 根目录类型检查，构建桥接，使用 `KUMI_TEST_BRIDGE=1` 运行 `npm test`，`git diff --check` |
+| **Installer** | `Build the release bundle`，然后是 `Install / macOS`、`Linux`、`Windows` | 构建发行包并在本地提供。在每个系统上：像制作人那样安装（在 Windows 上使用 Windows PowerShell 5.1），检查版本、`doctor` 和桥接加载，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，运行 `kumi update`（在 macOS 和 Linux 上还有 `--rollback`），以及 `kumi uninstall`。在 `v*` 标签上，`publish` 随后把发行包附加到发布版本上。 |
+
+要合并到 `main`，`Required CI` 和四个 Kumi 作业必须通过。Installer 不是必需的。其余规则见[发布与分发](DISTRIBUTION_POLICY.md#合并门禁)。
 
 ## 通过意味着什么
 
-通过证明确定性的仓库行为与软件包契约。它不证明真实的 Control Surface
-已在 Ableton Live 中加载、受支持的 Live API 形状、可见的 Set 状态、可
-发声或实时行为、平台安装器运行时、无障碍、硬件、签名、公证或发布。
+通过表明代码的行为与其测试所描述的一致，各个包能在 macOS、Linux 和 Windows 上安装和运行，安装程序能在 GitHub 的运行器上工作。它并不表明 Remote Script 能在你的 Live 中加载、Live 的 API 与假对象的结构一致、任何东西听起来如何，或者某个终端或屏幕阅读器能与 Kumi 配合使用。上面那些需要主动运行的检查，以及[实现状态](IMPLEMENTATION_STATUS.md#证据)中的记录，覆盖的是真实的 Live。
 
-## 变更纪律
+## 编写测试
 
-为每个新的协议方法或 Live 副作用添加成功与故障关闭测试。覆盖陈旧
-epoch/游标/修订、过期确认、冲突幂等键、超时、分发前后取消、断连、
-确认丢失、部分变更、补偿失败、外部编辑、外部播放与受护栏撤销。打包的
-生产旅程与受跟踪的真实 Live 阶段证据必须保持 `fake-live`、模拟器与
-`real-live` 来源的区别。Phase 8 证据必须包括正常捕获、受控再捕获、
-取消清理、宿主重启看门狗恢复、精确基线回读与零 WAV/ASD 残留。保持
-夹具有界且隐私保护。绝不打开、复制、暂存、打包或暴露受保护的本地
-SDK 证据。
+对于每个新的协议方法或对 Live 的修改，请添加一个证明它能工作的测试，并添加测试证明它会拒绝应当拒绝的情况：过期的引用、修订号和纪元（epoch）、过期的确认、重复使用的幂等键、超时、发送前和发送后的取消、断开连接、丢失的确认应答、部分修改、失败的补偿、期间在 Live 中做出的修改，以及撤销。在测试声称的内容中把假 Live、模拟器和真实 Live 区分开（`fake-live`、`simulator` 和 `real-live` 来源）。保持测试夹具小巧且不含隐私数据，绝不让测试触及真实的 Live 文件夹或 `~/.kumi`。

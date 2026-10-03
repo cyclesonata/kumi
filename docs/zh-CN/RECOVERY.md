@@ -1,119 +1,91 @@
-# 恢复规程
+# 恢复步骤
 
 [English](../en/RECOVERY.md) · 简体中文 · [日本語](../ja/RECOVERY.md)
 
-操作中途失败时的处理方法。黄金法则:**不确定的状态绝不用新授权重试** ——
-在不变的 epoch 中对账原事务,或从新鲜的权威状态人工恢复。
+调用失败或修改结果不确定时该怎么做。
 
-## 协议与输入错误
+原则：**永远不要用一项新的修改去应对一项不确定的修改。** 如果应用请求超时或丢失了应答，只能在服务器和 Live 都还在运行时，用相同的 `transactionId` 和 `idempotencyKey` 重试同一个应用请求。否则，请重新读取 Live，并手动把状态改正。
 
-修正请求并使用新鲜的请求标识符。对于畸形或超大输入,丢弃被拒绝的帧,
-只查看 stderr 上已隐去敏感信息的诊断。如果认证、组帧、排序或响应关联
-不再可信,停止并重启进程;不要继续该流。
+## 读懂错误
 
-## 配置与生命周期错误
+格式错误的请求会收到 JSON-RPC 错误：
 
-核实:配置路径显式、常规、非符号链接且由所有者控制;配置为版本 1 或 2;
-桥接主机是精确回环;端口在安装预检时不同且空闲;独立的密钥具有确凿的
-owner-only 权限。绝不要把密钥放在命令行上。
+| 代码 | 含义 |
+| --- | --- |
+| `-32700` | 这一行不是 JSON |
+| `-32600` | 无效请求、消息超过 500 MiB、`id` 已被使用，或服务器正在关闭 |
+| `-32601` | 没有这个工具 |
+| `-32602` | 参数无效，或协议版本有误 |
+| `-32002` | 尚未初始化，或没有这个资源或提示词（`2025-11-25`） |
+| `-32022` | 不支持的协议版本（错误中会列出支持的版本） |
+| `-32000` | 忙：等待中的请求太多；等一部分完成后再重试 |
+| `-32603` | 内部错误 |
 
-对于回执驱动的生命周期故障,先停止 Live,检查
-`install-receipt.json`、`lifecycle-journal.json`、受管哈希与隔离区,然后
-再重试。失败的安装会移除新建的密钥/配置/桥接状态。失败的升级会恢复旧的
-配置/桥接,回执代际不变。被占用的文件、ACL 错误、符号链接/联接点、被
-占用端口或中断的重命名都不是成功;释放句柄或修复权限,然后使用 status
-与 repair。修复会把漂移保留在隔离区,并拒绝凭空生成缺失的密钥。回滚只
-使用回执绑定的先前代际。卸载在提交前暂存自有路径,提交失败则恢复它们,
-注销回执自有的回滚代际,隔离漂移,并默认保留密钥(除非显式要求回执自有
-的清除)。如果提交后的删除被阻塞,回执会保留 `pendingCleanup`;释放句柄
-并重复完全相同的卸载命令。`preserved` 路径是操作者内容,重试绝不会删除
-它们。回滚可用时,绝不要手动替换或删除备份。参见 [DELIVERY.md](DELIVERY.md)。
+拒绝执行的工具会返回 `isError: true` 和 `{"reason": "...", "remediation": "..."}`。原因（reason）是桥接或 Live 自己给出的，只有一行。请阅读它：
 
-## 适配器不确定
+- **“Nothing changed in Live”**，或以 “; nothing changed” 结尾的原因：这次调用什么也没做。按它说的修正，然后重新预览。
+- **“Live state changed since the preview”**：预览和应用之间有东西变了，可能是你自己在 Live 中的编辑，也可能是其他客户端。重新读取，然后重新预览。
+- **`tool-unavailable-in-current-live-shape`**：当前的 Live 此刻不提供该工具。读取 `ableton://capabilities` 查看原因。
+- **`tool-denied-by-deployment-policy`**：[部署策略](USER_GUIDE.md#部署策略)隐藏了它。
+- **remediation 说修改结果不确定**：见下一节。
 
-认证失败、注册表不匹配、响应 MAC 失败、重放、序列错误、畸形响应、超时、
-取消、断连或确认丢失,都意味着结果**未知**。不要发出新的变更授权。仍在
-运行的宿主只能重连到同一个已认证桥接与不变的 Live epoch,复用原事务、
-原确认、规范参数与原幂等键,获取 Remote Script 账本结果,并验证新鲜的事后
-状态。这是对账,不是新的重放。桥接或 Live epoch 变化会故障关闭,需要人工
-权威恢复。
+## 修改结果不确定时
 
-隐藏的清理令牌在同一适配器实例执行的传输重连后仍然有效,但有意不持久化
-到磁盘,也不可转移给替代宿主进程。宿主事务记录同样在内存中:进程替换后,
-自动破坏性清理不可用,需要精确的人工回读/恢复;只有独立授权的紧急停止
-能在重启后存活。
+在应用或撤销过程中出现超时、断线或丢失应答，会让修改处于不确定状态：它可能已经发生，也可能没有。
 
-对于已取消的 stdio 请求,不发出取消响应。分发前的取消可能阻止工作;分发
-后的取消不会撤销 Live 工作。后者按不确定处理,在任何进一步变更前进行
-新鲜回读。
+1. 不要重新预览，也不要发送新的键。
+2. 只要同一个服务器还在运行、Live 也没有重启，就用相同的 `transactionId` 和 `idempotencyKey` 再次发送同一个应用（或撤销）请求。Remote Script 记得自己执行过什么。它会返回第一次的结果，或者把修改完成，然后由桥接读回。
+3. 如果 Live 在此期间重启过，重试会被拒绝。请读取工程（`live_discover`、`live_snapshot`），确认修改是否存在，并手动把状态改正。
+4. 然后用 `live_recovery_finalize` 关闭这条记录：
 
-## 事务恢复
+   ```json
+   {"transactionId": "<id>", "resolution": "manually-restored", "confirmation": "finalize-recovery-record",
+    "evidence": {"provenance": "checked the mixer in Live", "scope": "track 3 volume"}}
+   ```
 
-预览过期、陈旧 epoch、陈旧修订、无效父级、Session 槽位被占用、结构名称
-重复、定位点冲突、不支持或已禁用的参数、越界或量化错误的值,或外部编辑,
-都要求新鲜的权威发现与新预览。确认丢失的 apply、undo 或补偿仍受恢复保护,
-在不变的桥接/Live epoch 内只接受原幂等键。多步结构、定位点、捕获、MIDI
-与自动化的恢复会重放保留的精确步骤参数,验证已完成步骤,只恢复事务自有
-的剩余部分。不同的键会故障关闭。对于设备参数,恢复前验证相同的设备子级
-关系与精确的先前/已应用值。
+   如果你决定保留 Live 现在的状态，请使用 `"accepted-current-state"`。关闭记录不会改变 Live 中的任何东西。只要有任何东西在播放、录音或占用实时通道，它就会被拒绝。
 
-任意删除设备与 Arrangement 剪辑不可用,因为已删除状态无法重建。清理只删除
-创建指纹与当前层级仍匹配的精确事务创建身份;被修改或替换的自有对象会被
-拒绝。权威人工恢复之后,`live_recovery_finalize` 要求
-`confirmation=finalize-recovery-record`、声明的解决方案,以及有界的来源/
-范围证据;它拒绝活跃的可发声/录音/实时工作,并在释放宿主容量之前注销
-Remote Script 的重放权。
+不确定的记录会占用服务器的撤销容量。当它们占满容量时，新的修改会被拒绝（“capacity is exhausted by recovery-protected work”），直到你关闭这些记录。
 
-对于场景试听,先进行新鲜的已认证播放发现。如果连接 epoch、Set 名称、场景
-修订、录音状态、arm/监听状态、输出证据或活跃目标与事务不同,受护栏的停止
-会被拒绝,操作者必须手动检查 Set。同 epoch 的确认丢失只接受原 apply 或
-stop 键;绝不要替换新键。独立的、基于新鲜观察的
-`live_session_emergency_stop` 在宿主重启后仍可用。
+## 常见问题
 
-录音确认丢失始终是不确定状态。重新读取两种录音模式、精确的目标轨道与播放
-目标。只在不变的 epoch 内通过原事务/键对账可能已应用的开始;绝不要预览或
-分发第二次开始作为恢复。如果任一录音模式仍活跃,调用
-`live_session_emergency_stop`,携带精确的新鲜播放目标与必需的
-`expectedRecording` 值(`session`、`arrangement` 或 `both`;仅当两个新鲜
-标志都为 false 时使用 `stopped`);其映射器侧栅栏也会验证录音状态,并在报告
-`recordingStopped=true` 之前清除 Session Record 与 Arrangement Record。
+| 问题 | 处理方法 |
+| --- | --- |
+| 服务器以 “Unsupported Node.js” 退出 | 用 Node 22 或 24 运行。 |
+| “version-1 configuration does not enable a Live adapter” | 用 `ableton-mcp-setup` 加上桥接选项写出版本 2 的文件；见[配置文件](USER_GUIDE.md#配置文件)。 |
+| “secret file is invalid”，或其权限 “must be conclusively owner-only” | 密钥必须是一行 32 个或更多字符，且只有你能读取。如果是通过生命周期工具安装的，`ableton-mcp-lifecycle repair` 会恢复正确的权限。 |
+| `live_status` 显示 `"connected": false` | 确认 Live 正在运行，并已将 **AbletonMcpBridge** 选为控制界面（Control Surface），且配置中的端口和密钥与 Remote Script 使用的一致。然后运行 `ableton-mcp-diagnostics --config <path>`。 |
+| AbletonMcpBridge 没有在 Live 中加载；Live 的日志显示 “bridge configuration reference is missing or unsafe” | Remote Script 安装时没有带 `--config`。请带上 `--config` 重新安装（见[连接到 Live](USER_GUIDE.md#连接到-live)），或使用生命周期工具。 |
+| “Unknown or expired … transaction” | 预览已过期，或服务器已重启。请重新预览。 |
+| `live_undo` 拒绝：引用 “isn't the one this change was made on any more” | 该对象已被替换。请手动改正；如果 Live 最后一个撤销步骤正是这项修改，也可以使用 `live_song_undo`。 |
+| 你误删了东西 | 立即使用 `live_song_undo`（`confirmation: "undo-in-live"`）；`live_undo` 无法恢复删除。 |
+| Live 扩展的工具不见了 | 扩展没有运行：它需要 Live 12.4 或更高版本，并且要么安装在 Live 的 Extensions 文件夹中，要么开启 Live 的 Developer Mode；见 [Kumi 的 Live 扩展](USER_GUIDE.md#kumi-的-live-扩展)。 |
 
-## 实时恢复
+安装问题（生命周期回执、隔离、修复和回滚）见[交付](DELIVERY.md)。
 
-当 `live_realtime_stats` 报告回调失败、被撤销的工作、分发前丢弃或持续的
-待处理工作时,立即 disarm。Disarm、过期、重新 arm 与桥接拆除会对尚未开始
-的回调进行代际隔离。不要从 UDP 发送成功或 `accepted` 计数推断送达;只有
-`applied` 才报告已完成的、经过验证的 Live 线程写入。通过新鲜的权威引用
-恢复被触碰的参数,并验证停止/未录音状态。当实时令牌缺失或数据平面可疑时,
-TCP 的 `live_session_emergency_stop` 是独立的恢复路径。参见
-[REALTIME_CONTROL.md](REALTIME_CONTROL.md)。
+## 停止一切播放或录音
 
-## 音频捕获恢复
+`live_session_emergency_stop` 会停止 Session 片段、走带以及两种录音模式。它不需要事务，所以重启后也能使用。
 
-不要从 MCP 取消、宿主退出或传输静默推断已清理。打开全新的打包宿主并调用
-`live_audio_capture_status`。该工具隐去恢复令牌与原始路径,但报告精确的
-捕获/源/目标身份、活跃/状态、看门狗停止、文件可用性与播放停止。
+1. 读取正在播放的内容：用 `{"kind": "session-playback"}` 调用 `live_discover`。
+2. 原样发送你读到的内容：
 
-如果状态不是 `cleaned`,调用 `live_audio_capture_emergency_stop`,携带
-`confirmation=emergency-stop-and-clean` 与新鲜观察到的精确身份。它会独立地
-停止精确的源/目标槽位与轨道、走带与录音;跨任何量化触发竞态重新断言停止;
-除非检测到外部编辑,否则恢复自有的路由/arm/监听/位置状态;验证、私有隔离、
-截断并解除已保存工程/用户库边界内精确新鲜 WAV/`.asd` inode 的链接;并在原始
-清理之后只删除精确的映射器自有捕获剪辑。
+   ```json
+   {"confirmation": "emergency-stop", "expectedTargets": ["<trackRef>|<clipSlotRef>|<sceneRef>"],
+    "expectedRecording": "session"}
+   ```
 
-成功要求 `cleanup.safe=true`、无残留、最终状态 `cleaned`、
-`playbackStopped=true`,且无 WAV/ASD 文件。如果路由被外部改变、媒体在边界
-之外、Set 路径不可用、文件身份变化、格式不支持或解除链接失败,停止所有新的
-捕获尝试并手动解决指定的残留。绝不要删除任意路径,也不要声称取证级擦除。
-参见 [AUDIO_INTELLIGENCE.md](AUDIO_INTELLIGENCE.md)。
+   `expectedRecording` 为 `stopped`、`session`、`arrangement` 或 `both`。
 
-## 重启
+3. 如果因为播放状态在此期间发生变化而被拒绝，请重新读取并重复。成功时会报告 `"stopped": true` 和 `recordingStopped`。
 
-1. 停止监督器并保留已隐去敏感信息的诊断。
-2. 确认没有生成的归档或凭据文件被收集。
-3. 以 stdout 与 stderr 分离的方式重启 `dist/src/cli.js`。
-4. 用 `2025-11-25` 初始化,然后发送 `notifications/initialized`。
-5. 获取新鲜状态与发现,重新预览,并使用新的有界幂等键。
+要停止你触发的单个片段，请使用 `live_clip_launch_stop`；要停止试听，请使用 `live_session_audition_stop`。捕获有自己的紧急停止；见[音频智能](AUDIO_INTELLIGENCE.md)。对于实时控制，请调用 `live_realtime_disarm`，并参阅[实时控制](REALTIME_CONTROL.md)。
 
-如果涉及真实 Live,先停止并目视检查 Set 再继续。仓库可控的证据不能替代
-这种检查,也不能证明已恢复。
+## 重启之后
+
+服务器只在内存中保存撤销记录和预览，所以重启会丢失它们。Live 重启或重新连接会让 Live 获得新的 epoch，之前的所有引用都会失效。
+
+1. 启动服务器并重新初始化。
+2. 调用 `live_status`，并重新读取工程。
+3. 重启前做出的修改无法用 `live_undo` 撤销。Live 自己的撤销（`live_song_undo`）可能仍然保留着它们。
+4. 如果服务器停止时有修改处于不确定状态，请手动检查：已经没有可以重试或关闭的记录了。
