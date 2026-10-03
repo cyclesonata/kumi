@@ -71,7 +71,7 @@ kumi            # 在你的工程旁打开 Kumi
 
 ## 当前状态
 
-Kumi 1.6 已在 macOS 上的 Ableton Live 12.4（测试版）中测试。在 Windows 上，安装 Kumi 以及把它连接到 Live 已经过测试；其余功能在 Windows 上还是新的，出问题时请发送一份 `kumi report`。接下来将支持 Renoise 和 Reaper。
+Kumi 1.7 已在 macOS 上的 Ableton Live 12.4（测试版）中测试。在 Windows 上，安装 Kumi 以及把它连接到 Live 已经过测试；其余功能在 Windows 上还是新的，出问题时请发送一份 `kumi report`。接下来将支持 Renoise 和 Reaper。
 
 ## 开发
 
