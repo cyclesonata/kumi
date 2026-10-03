@@ -52,6 +52,9 @@ class NativeRelease(unittest.TestCase):
             self.assertEqual(manifest["build"]["builder"], self.builder)
             self.assertEqual(manifest["build"]["runtime"], "rust-native")
             self.assertEqual(manifest["roles"]["ableton-mcp-server"], "native-runtime")
+            self.assertEqual(manifest["roles"]["ableton-mcp-analysis-worker"], "native-runtime")
+            package = json.load(tar.extractfile("bridge/package/package.json"))
+            self.assertEqual(package["bin"], {binary: binary for binary in release.BRIDGE_BINARIES})
             self.assertNotIn("compiled-runtime", manifest["roles"].values())
             self.assertEqual(manifest["files"]["LICENSE.md"], release.MIT_SHA256)
             self.assertEqual(set(manifest["files"]), set(manifest["roles"]))
@@ -68,6 +71,8 @@ class NativeRelease(unittest.TestCase):
                 expected = {"package/" + name for name in manifest["files"]} | {"package/release-manifest.json"}
                 self.assertEqual(set(bridge.getnames()), expected)
                 self.assertTrue(all(member.isfile() and not member.pax_headers for member in bridge.getmembers()))
+                for binary in release.BRIDGE_BINARIES:
+                    self.assertEqual(bridge.getmember("package/" + binary).mode, 0o755)
                 for member in bridge.getmembers():
                     self.assertEqual(bridge.extractfile(member).read(), tar.extractfile("bridge/" + member.name).read())
         self.assertTrue(gzip.decompress(artifact).endswith(b"\0" * 1024))
@@ -83,6 +88,23 @@ class NativeRelease(unittest.TestCase):
             self.build(out)
         self.assertEqual((out / result["bundle"]).read_bytes(), first)
         self.assertFalse(list(out.glob("kumi-native-stage-*")))
+
+    def test_bridge_only_requires_analysis_worker_and_supports_windows_names(self):
+        (self.binaries / "ableton-mcp-analysis-worker").unlink()
+        with self.assertRaises(ValueError):
+            release.build_release(release.ROOT, self.binaries, self.root / "missing", "x86_64-unknown-linux-gnu",
+                                  self.source, self.builder, "fixture", bridge_only=True)
+        for name in release.BRIDGE_BINARIES:
+            (self.binaries / (name + ".exe")).write_bytes(b"MZ fixture " + name.encode())
+        out = self.root / "windows"
+        result = release.build_release(release.ROOT, self.binaries, out, "x86_64-pc-windows-msvc",
+                                       self.source, self.builder, "fixture", bridge_only=True)
+        with tarfile.open(out / result["artifact"]) as archive:
+            package = json.load(archive.extractfile("package/package.json"))
+            for name in release.BRIDGE_BINARIES:
+                self.assertEqual(package["bin"][name], name + ".exe")
+                self.assertEqual(result["manifest"]["roles"][name + ".exe"], "native-runtime")
+                self.assertEqual(archive.getmember("package/" + name + ".exe").mode, 0o755)
 
     def test_manifest_rejects_unknown_roles_and_linked_payloads(self):
         with self.assertRaises(ValueError):

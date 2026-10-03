@@ -20,7 +20,8 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "ableton-mcp-native-release/v1"
-BINARIES = ("kumi", "ableton-mcp-server", "kumi-harness", "kumi-library-measure", "kumi-library-learner")
+BRIDGE_BINARIES = ("ableton-mcp-server", "ableton-mcp-analysis-worker")
+BINARIES = ("kumi", *BRIDGE_BINARIES, "kumi-harness", "kumi-library-measure", "kumi-library-learner")
 DOCUMENTS = [("apps/mcp-server/README.md", "README.md")] + [(f"docs/en/{name}.md", f"{name}.md") for name in (
     "USER_GUIDE", "USER_JOURNEYS", "OPERATIONS", "RECOVERY", "LIVE_SAFETY", "AUDIO_INTELLIGENCE",
     "REALTIME_CONTROL", "DELIVERY", "DEVELOPER_GUIDE", "TESTING", "IMPLEMENTATION_STATUS",
@@ -58,7 +59,7 @@ def inventory(folder: Path) -> dict[str, str]:
     return result
 
 def role(name: str) -> str:
-    if name in ("ableton-mcp-server", "ableton-mcp-server.exe"):
+    if name in BRIDGE_BINARIES or name.removesuffix(".exe") in BRIDGE_BINARIES:
         return "native-runtime"
     if name == "LICENSE.md":
         return "license"
@@ -162,11 +163,14 @@ def stage_bridge(root: Path, package: Path, binary: Path, target: str, source: d
         raise ValueError("bridge staging folder must be empty")
     package.mkdir(parents=True, exist_ok=True)
     metadata = tomllib.loads((root / "crates/ableton-mcp-server/Cargo.toml").read_text())["package"]
-    name = "ableton-mcp-server.exe" if "windows" in target else "ableton-mcp-server"
-    copy(binary, package / name)
-    (package / name).chmod(0o755)
+    extension = ".exe" if "windows" in target else ""
+    for command in BRIDGE_BINARIES:
+        name = command + extension
+        copy(binary.parent / name, package / name)
+        (package / name).chmod(0o755)
     json_write(package / "package.json", {"name": "@ableton-mcp/mcp-server", "version": metadata["version"],
-               "private": True, "license": "MIT", "runtime": "rust-native", "target": target, "bin": {"ableton-mcp-server": name}})
+               "private": True, "license": "MIT", "runtime": "rust-native", "target": target,
+               "bin": {command: command + extension for command in BRIDGE_BINARIES}})
     registry_hash = stage_assets(root, package, source["commit"])
     files = inventory(package)
     manifest = {"schema": SCHEMA, "package": {"name": "@ableton-mcp/mcp-server", "version": metadata["version"], "license": "MIT", "private": True},
@@ -257,7 +261,7 @@ def main() -> None:
         raise ValueError("invalid Rust target triple")
     source = source_evidence(ROOT)
     command = ["cargo", "build", "--locked", "--release", "--target", target]
-    command += ["-p", "ableton-mcp-server", "--bin", "ableton-mcp-server"] if args.bridge_only else ["--workspace", "--bins"]
+    command += ["-p", "ableton-mcp-server", "--bin", "ableton-mcp-server", "--bin", "ableton-mcp-analysis-worker"] if args.bridge_only else ["--workspace", "--bins"]
     recipe = " ".join(command)
     if args.binaries_dir is None:
         subprocess.run(command, cwd=ROOT, check=True)
