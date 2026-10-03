@@ -4163,6 +4163,15 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "track.create-return"
+            | "track.delete-return"
+            | "track.duplicate"
+            | "scene.duplicate"
+            | "audio.take-lane.read"
+            | "take-lane.create"
+            | "take-lane.rename"
+            | "take-lane.clip.create"
+            | "take-lane.audio-clip.create" => self.invoke_structure(operation, args),
             "scene.set"
             | "scene.fire-selected"
             | "track.view.set"
@@ -5353,3 +5362,6 @@ mod simulator_automation;
 
 #[path = "live_simulator_views.rs"]
 mod simulator_views;
+
+#[path = "live_simulator_structure.rs"]
+mod simulator_structure;
