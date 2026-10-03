@@ -366,7 +366,7 @@ pub mod string {
     }
 
     fn is_js_whitespace(c: char) -> bool {
-        c.is_whitespace() || c == '\u{FEFF}'
+        matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
     }
 
     /// `text.padEnd(width)` in UTF-16 code units.
@@ -439,6 +439,8 @@ mod tests {
         assert_eq!(string::slice("hello", -3, None), "llo");
         assert_eq!(string::head("hello", 2), "he");
         assert_eq!(string::trim("\u{FEFF} x \n"), "x");
+        assert_eq!(string::trim("\u{0085}x\u{0085}"), "\u{0085}x\u{0085}");
+        assert_eq!(string::trim("\u{2028}x\u{3000}"), "x");
         assert_eq!(string::pad_end("ab", 4), "ab  ");
         assert_eq!(string::pad_start("7", 3, '0'), "007");
     }
