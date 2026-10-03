@@ -21,6 +21,8 @@ pub use inference::create_inference_only_integration;
 pub mod live_command;
 pub mod more_changes;
 pub mod observation;
+pub mod options;
+pub use options::AbletonOptions;
 pub mod plan_stream;
 pub mod plugin_tool;
 pub mod project;
