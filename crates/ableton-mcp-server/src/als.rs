@@ -610,3 +610,119 @@ pub fn read_als_model(path: &str) -> Result<(SetSourceRead, AlsModel), ProjectEr
     let model = model_from_als_xml(&parse_als_xml(&source.xml)?, name.strip_suffix(".als").unwrap_or(&name))?;
     Ok((source, model))
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfflineAlsArtifactOptions {
+    pub profile: Option<String>,
+    pub exporter_version: String,
+    pub max_records: Option<f64>,
+}
+fn snapshot_clip(track: usize, index: usize, clip: &AlsClipModel) -> Value {
+    json!({"ref":format!("offline:clip:{track}:{}:{}:{}",clip.lane,clip.scene_index.unwrap_or(index),js_json::stringify(&json!(clip.start))),"name":clip.name,"kind":clip.kind,"start":clip.start,"length":clip.length,"notes":clip.notes,"warp":clip.warping,"takes":[],"automation":[],"loopStart":clip.loop_start,"loopEnd":clip.loop_end,"looping":clip.looping,"muted":clip.muted,"filePath":clip.sample_path,"sampleLength":clip.sample_length_beats})
+}
+pub fn create_offline_als_artifact(
+    source: &SetSourceRead,
+    model: &AlsModel,
+    options: &OfflineAlsArtifactOptions,
+) -> Result<Value, ProjectError> {
+    use crate::{
+        project::{
+            AbletonRootAttributes, ObservedKind, ProjectManifest, ProjectReference, ProjectSourceEvidence, ReferenceBounds,
+            ReferenceResolution,
+        },
+        project_semantic::{create_semantic_project_snapshot, CreateSemanticProjectOptions, SemanticUnavailable},
+    };
+    if model.tracks.iter().any(|track| track.clips.iter().any(|clip| clip.length.is_none())) {
+        return Err(fail("offline clip length is unavailable; semantic export refused"));
+    }
+    let tracks:Vec<_>=model.tracks.iter().enumerate().map(|(i,track)|{let clips:Vec<_>=track.clips.iter().filter(|c|c.lane=="session").enumerate().map(|(j,c)|snapshot_clip(i,j,c)).collect();let slots:Vec<_>=track.clips.iter().filter(|c|c.lane=="session").enumerate().map(|(j,c)|json!({"ref":format!("offline:slot:{i}:{}",c.scene_index.unwrap_or(j)),"parentRef":format!("offline:track:{i}"),"sceneIndex":c.scene_index.unwrap_or(j),"clipRef":clips[j]["ref"],"empty":false})).collect();let devices:Vec<_>=track.devices.iter().enumerate().map(|(j,d)|json!({"ref":format!("offline:device:{i}:{j}"),"name":d.name,"className":d.class_name,"kind":"device","enabled":null,"parameters":[]})).collect();json!({"ref":format!("offline:track:{i}"),"name":track.name,"kind":track.kind,"volume":track.volume,"pan":track.pan,"mute":null,"solo":null,"armed":null,"clips":clips,"clipSlots":slots,"devices":devices,"sends":[]})}).collect();
+    let arrangement: Vec<_> = model
+        .tracks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, t)| {
+            t.clips
+                .iter()
+                .filter(|c| c.lane == "arrangement")
+                .map(move |c| json!({"trackRef":format!("offline:track:{i}"),"clip":snapshot_clip(i,0,c)}))
+        })
+        .collect();
+    let snapshot = json!({"set":{"ref":"offline:set","name":model.set_name,"tempo":model.tempo},"tracks":tracks,"scenes":model.scenes.iter().enumerate().map(|(i,s)|json!({"ref":format!("offline:scene:{i}"),"name":s.name,"index":i,"colorIndex":null,"tempo":s.tempo})).collect::<Vec<_>>(),"arrangement":{"length":model.locators.last().map_or(0.,|l|l.time),"locators":model.locators.iter().enumerate().map(|(i,l)|json!({"ref":format!("offline:locator:{i}"),"name":l.name,"position":l.time})).collect::<Vec<_>>()},"arrangementClips":arrangement});
+    let mut seen = std::collections::HashSet::new();
+    let mut references = vec![];
+    let mut complete = model.parse_notes.is_empty();
+    'outer: for track in &model.tracks {
+        for clip in &track.clips {
+            let Some(path) = clip.sample_path.as_ref().filter(|s| !s.is_empty() && !seen.contains(*s)) else {
+                continue;
+            };
+            if seen.len() >= 4096 {
+                complete = false;
+                break 'outer;
+            }
+            seen.insert(path.clone());
+            references.push(ProjectReference {
+                value: path.clone(),
+                resolved_path: None,
+                exists: None,
+                project_local: None,
+                resolution: ReferenceResolution::Unresolved,
+            });
+        }
+    }
+    let evidence = ProjectSourceEvidence {
+        manifest: ProjectManifest {
+            path: source.path.clone(),
+            size: source.size,
+            mtime_ms: source.mtime_ms,
+            sha256: source.sha256.clone(),
+            tracks: model.tracks.len(),
+            scenes: model.scenes.len(),
+            media_refs: references.len(),
+        },
+        ableton: AbletonRootAttributes {
+            creator: model.creator.clone(),
+            major_version: model.major_version.clone(),
+            minor_version: model.minor_version.clone(),
+            schema_change_count: None,
+        },
+        reference_bounds: ReferenceBounds {
+            observed: references.len(),
+            observed_kind: if complete { ObservedKind::Exact } else { ObservedKind::LowerBound },
+            included: references.len(),
+            omitted: usize::from(!complete),
+            complete,
+        },
+        references,
+    };
+    let mut extra = vec![];
+    for (field, reason) in [
+        ("media-existence", "offline reads do not probe referenced media; lint checks metadata only under its allowed root"),
+        (
+            "live-playback",
+            "playback, armed/monitoring, meters, and performance state exist only in a running Live and are absent from the file",
+        ),
+        ("take-lanes", "take-lane and comp structure is not reconstructed by the offline parser"),
+        ("groove-pool", "groove pool contents are not reconstructed by the offline parser"),
+        ("tuning", "tuning system and song scale are not reconstructed by the offline parser"),
+    ] {
+        extra.push(SemanticUnavailable { field: field.into(), reason: reason.into(), source_name: "offline-parse".into() });
+    }
+    for note in &model.parse_notes {
+        extra.push(SemanticUnavailable { field: "parse-truncation".into(), reason: note.clone(), source_name: "offline-parse".into() });
+    }
+    create_semantic_project_snapshot(
+        &snapshot,
+        &CreateSemanticProjectOptions {
+            profile: options.profile.clone(),
+            exporter_version: options.exporter_version.clone(),
+            max_records: options.max_records,
+            live: json!({"protocol":"als-file/v1","adapter":"offline-file","provenance":"unknown"}),
+            project_path: None,
+            source_evidence: Some(evidence),
+            source_kind: Some("offline-file".into()),
+            extra_unavailable: extra,
+        },
+    )
+}
