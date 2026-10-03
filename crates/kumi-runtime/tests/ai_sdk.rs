@@ -7,6 +7,7 @@ use kumi_runtime::ai::{
     error::LanguageModelError,
     http::{Fetch, FetchInit, Response},
     openai_compatible::{openai_compatible, CompatibleSettings},
+    openai_responses::{openai_responses, ResponsesSettings},
     types::CallOptions,
 };
 use serde_json::{json, Value};
@@ -75,6 +76,14 @@ async fn compatible(test: Value) {
             headers: Default::default(),
             fetch,
         })
+    } else if test["provider"] == "openai" {
+        openai_responses(ResponsesSettings {
+            model: test["model"].as_str().unwrap().into(),
+            base_url: "http://fixture/v1".into(),
+            api_key: "fixture-key".into(),
+            headers: Default::default(),
+            fetch,
+        })
     } else {
         openai_compatible(CompatibleSettings {
             name: test.get("name").and_then(Value::as_str).unwrap_or("fixture").into(),
@@ -104,7 +113,15 @@ async fn compatible(test: Value) {
     }
     let parts: Vec<_> = stream.unwrap().collect().await;
     assert_eq!(*request.borrow(), expected["request"], "request differs");
-    let actual: Value = serde_json::from_str(&kumi_common::js::json::stringify(&serde_json::to_value(parts).unwrap())).unwrap();
+    let mut actual: Value = serde_json::from_str(&kumi_common::js::json::stringify(&serde_json::to_value(parts).unwrap())).unwrap();
+    for part in actual.as_array_mut().unwrap() {
+        if part["type"] == "source" {
+            let id = part["id"].as_str().unwrap();
+            assert_eq!(id.len(), 16);
+            assert!(id.bytes().all(|b| b.is_ascii_alphanumeric()));
+            part["id"] = json!("generated-source-id");
+        }
+    }
     assert!(actual == expected["parts"], "stream differs: {}", difference(&actual, &expected["parts"], "parts"));
     assert_eq!(
         kumi_common::js::json::stringify(&request.borrow()["body"]),
@@ -224,4 +241,158 @@ async fn anthropic_prepopulated_tools_compaction_iterations_and_metadata_match_t
         json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":{"type":"refusal","category":"test","explanation":"why","recommended_model":"other"}},"usage":{"output_tokens":9,"iterations":[{"type":"compaction","input_tokens":10,"output_tokens":2},{"type":"message","input_tokens":3,"output_tokens":4,"cache_creation_input_tokens":1,"cache_read_input_tokens":2}]},"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919","cleared_tool_uses":2,"cleared_input_tokens":10}]}}),
         json!({"type":"message_stop"})
     ])})).await;
+}
+
+fn responses_events(parts: Vec<Value>) -> String {
+    let mut events = vec![json!({"type":"response.created","response":{"id":"reply-1","created_at":10,"model":"gpt-6-sol"}})];
+    events.extend(parts);
+    events.push(json!({"type":"response.completed","response":{"usage":{"input_tokens":20,"output_tokens":10,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":4}},"service_tier":"default","reasoning":{"context":"ctx"}}}));
+    sse(events)
+}
+#[tokio::test]
+async fn responses_stateless_replay_images_and_output_metadata_match_the_sdk() {
+    compatible(json!({"provider":"openai","model":"gpt-6-sol","options":{
+        "prompt":[{"role":"user","content":[{"type":"text","text":"Tempo?"}]},
+        {"role":"assistant","content":[{"type":"reasoning","text":"Consider.","providerOptions":{"openai":{"itemId":"reason-before","reasoningEncryptedContent":"secret"}}},{"type":"text","text":"Checking","providerOptions":{"openai":{"itemId":"text-before","phase":"commentary"}}},{"type":"tool-call","toolCallId":"call-before","toolName":"tempo","input":{},"providerOptions":{"openai":{"itemId":"item-before"}}}]},
+        {"role":"tool","content":[{"type":"tool-result","toolCallId":"call-before","toolName":"tempo","output":{"type":"content","value":[{"type":"text","text":"120"},{"type":"file","mediaType":"image/png","data":{"type":"data","data":"AQID"},"providerOptions":{"openai":{"imageDetail":"high"}}}]}}]}],
+        "tools":[{"type":"function","name":"tempo","description":"Read","inputSchema":{"type":"object"}}],"toolChoice":{"type":"auto"},"providerOptions":{"openai":{"store":false,"instructions":"Produce.","promptCacheKey":"session-1","reasoningEffort":"high","textVerbosity":"low"}}
+    },"events":responses_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"text-1","phase":"final_answer"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":"rewritten","delta":"120 BPM."}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"rewritten"}})
+    ])})).await;
+}
+#[tokio::test]
+async fn responses_reasoning_summary_boundaries_encrypted_replay_and_store_match_the_sdk() {
+    for store in [false, true] {
+        compatible(json!({"provider":"openai","model":"gpt-5.1","options":{"prompt":[
+        {"role":"system","content":"Produce."},{"role":"assistant","content":[
+        {"type":"reasoning","text":"First","providerOptions":{"openai":{"itemId":"r0","reasoningEncryptedContent":"first"}}},
+        {"type":"reasoning","text":"Second","providerOptions":{"openai":{"itemId":"r0","reasoningEncryptedContent":"last"}}},
+        {"type":"reasoning","text":"Foreign"},{"type":"reasoning","text":"No encrypted content","providerOptions":{"openai":{"itemId":"r1"}}}]}],"providerOptions":{"openai":{"store":store,"reasoningEffort":"medium"}}},"events":responses_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"reason-1","encrypted_content":null}}),
+        json!({"type":"response.reasoning_summary_part.added","output_index":0,"item_id":"reason-1","summary_index":0}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"other","summary_index":0,"delta":"First"}),
+        json!({"type":"response.reasoning_summary_part.done","output_index":0,"item_id":"reason-1","summary_index":0}),
+        json!({"type":"response.reasoning_summary_part.added","output_index":0,"item_id":"reason-1","summary_index":1}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"reason-1","summary_index":1,"delta":"Second"}),
+        json!({"type":"response.reasoning_summary_part.done","output_index":0,"item_id":"reason-1","summary_index":1}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"reason-1","encrypted_content":"encrypted"}}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"compaction","id":"compact-1","encrypted_content":"compacted"}})
+    ])})).await;
+    }
+}
+#[tokio::test]
+async fn responses_function_arguments_async_and_namespace_metadata_match_the_sdk() {
+    compatible(json!({"provider":"openai","model":"gpt-6-sol","options":{"prompt":[],"tools":[{"type":"function","name":"tempo","inputSchema":{"type":"object"},"providerOptions":{"openai":{"async":true}}}],"toolChoice":{"type":"required"},"providerOptions":{"openai":{"store":false}}},"events":responses_events(vec![
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"f1","call_id":"call-1","name":"tempo","arguments":"","async":true}}),
+        json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"f1","delta":"{\"unit\":"}),
+        json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"f1","delta":"\"bpm\"}"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","status":"completed","id":"f1","call_id":"call-1","name":"tempo","arguments":"{\"unit\":\"bpm\"}","namespace":"live","caller":{"type":"program","caller_id":"program-1"}}})
+    ])})).await;
+}
+#[tokio::test]
+async fn responses_undeclared_parallel_function_calls_expand_only_valid_registered_tools() {
+    for input in [
+        json!({"tool_uses":[{"recipient_name":"functions.tempo","parameters":{}},{"recipient_name":"functions.play","parameters":{"state":true}}]}),
+        json!({"tool_uses":[{"recipient_name":"functions.unknown","parameters":{}}]}),
+        json!({}),
+    ] {
+        let arguments = kumi_common::js::json::stringify(&input);
+        compatible(json!({"provider":"openai","model":"gpt-6-sol","options":{"prompt":[],"tools":[{"type":"function","name":"tempo","inputSchema":{"type":"object"}},{"type":"function","name":"play","inputSchema":{"type":"object"}}]},"events":responses_events(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"f1","call_id":"parallel-1","name":"parallel","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"f1","delta":arguments}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","status":"completed","id":"f1","call_id":"parallel-1","name":"parallel","arguments":arguments}})
+        ])})).await;
+    }
+}
+#[tokio::test]
+async fn responses_capabilities_parameter_warnings_and_json_schema_normalization_match_the_sdk() {
+    for model in ["gpt-4.1", "gpt-5.1", "gpt-6-astra", "gpt-6-sol", "gpt-5-nano", "o3", "unknown"] {
+        compatible(json!({"provider":"openai","model":model,"options":{"prompt":[{"role":"system","content":"Produce."},{"role":"user","content":[{"type":"text","text":"Ask"}]}],
+            "temperature":0.5,"topP":0.8,"maxOutputTokens":100,"topK":10,"seed":1,"frequencyPenalty":1,"presencePenalty":1,"stopSequences":["stop"],
+            "responseFormat":{"type":"json","schema":{"type":"object","propertyNames":{"type":"string"},"properties":{"name":{"type":"string","pattern":"(?=x)x"}}}},
+            "providerOptions":{"openai":{"store":false,"reasoningEffort":"none","serviceTier":"flex","logprobs":true,"promptCacheRetention":"24h"}},
+            "tools":[{"type":"function","name":"tempo","inputSchema":{"type":"object","propertyNames":{"type":"string"}},"providerOptions":{"openai":{"async":true}}}],"toolChoice":{"type":"none"}
+        },"events":responses_events(vec![])})).await;
+    }
+}
+#[tokio::test]
+async fn responses_errors_before_output_are_thrown_and_later_errors_are_streamed() {
+    for code in ["rate_limit_exceeded", "insufficient_quota", "authentication_error", "503"] {
+        let error = json!({"type":"error","code":code,"message":"Failed","param":null,"sequence_number":2});
+        compatible(json!({"provider":"openai","model":"gpt-6-sol","options":{"prompt":[]},"events":sse(vec![json!({"type":"response.created","response":{"id":"r1","created_at":10,"model":"gpt-6-sol"}}),error.clone()])})).await;
+        compatible(json!({"provider":"openai","model":"gpt-6-sol","options":{"prompt":[]},"events":responses_events(vec![json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1"}}),error])})).await;
+    }
+}
+#[tokio::test]
+async fn responses_citations_unknown_future_events_and_incomplete_finish_match_the_sdk() {
+    for reason in ["max_output_tokens", "content_filter", "unknown"] {
+        compatible(json!({"provider":"openai","model":"gpt-4.1","options":{"prompt":[],"includeRawChunks":true},"events":sse(vec![
+            json!({"type":"response.created","response":{"id":"r1","created_at":10,"model":"gpt-4.1"}}),
+            json!({"type":"response.future_event","data":{"next":"generation"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1"}}),
+            json!({"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","start_index":0,"end_index":5,"url":"https://example.com","title":"Example"}}),
+            json!({"type":"response.output_text.annotation.added","annotation":{"type":"container_file_citation","start_index":0,"end_index":5,"container_id":"container","file_id":"file-1","filename":"source.txt"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m1"}}),
+            json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":reason}}})
+        ])})).await;
+    }
+}
+#[tokio::test]
+async fn anthropic_document_and_web_citations_match_the_sdk() {
+    compatible(json!({"provider":"anthropic","model":"claude-opus-4-6","options":{"prompt":[{"role":"user","content":[{"type":"file","mediaType":"text/plain","filename":"notes.txt","data":{"type":"text","text":"Source notes"},"providerOptions":{"anthropic":{"citations":{"enabled":true}}}}]}]},"events":anthropic_events(vec![
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"Source","document_index":0,"document_title":null,"start_char_index":0,"end_char_index":6}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"Web","url":"https://example.com","title":"Example","encrypted_index":"encrypted"}}}),
+        json!({"type":"content_block_stop","index":0})
+    ],"end_turn")})).await;
+}
+#[tokio::test(start_paused = true)]
+async fn responses_accepted_request_yields_after_sdk_grace_period_without_waiting_for_text() {
+    struct Waiting;
+    #[async_trait(?Send)]
+    impl Fetch for Waiting {
+        async fn fetch(&self, _url: &str, _init: FetchInit) -> Result<Response, LanguageModelError> {
+            let initial = sse(vec![json!({"type":"response.in_progress","response":{"id":"r1","created_at":10,"model":"gpt-6-sol"}})]);
+            let mut response = Response::text_response(200, "");
+            response.body = Some(Box::pin(futures::stream::iter([Ok(initial.into_bytes())]).chain(futures::stream::pending())));
+            Ok(response)
+        }
+    }
+    let model = openai_responses(ResponsesSettings {
+        model: "gpt-6-sol".into(),
+        base_url: "http://fixture/v1".into(),
+        api_key: "fixture-key".into(),
+        headers: Default::default(),
+        fetch: Rc::new(Waiting),
+    });
+    let began = tokio::time::Instant::now();
+    let stream = tokio::time::timeout(std::time::Duration::from_millis(100), model.do_stream(CallOptions::default()))
+        .await
+        .expect("accepted stream should be returned without waiting for model output")
+        .unwrap();
+    assert_eq!(began.elapsed(), std::time::Duration::from_millis(50));
+    assert!(matches!(stream.into_future().await.0, Some(kumi_runtime::ai::types::StreamPart::StreamStart { .. })));
+}
+#[tokio::test]
+async fn responses_invalid_function_frame_cannot_execute_a_tool() {
+    let request = Rc::new(RefCell::new(Value::Null));
+    let model = openai_responses(ResponsesSettings {
+        model: "gpt-6-sol".into(),
+        base_url: "http://fixture/v1".into(),
+        api_key: "fixture-key".into(),
+        headers: Default::default(),
+        fetch: Rc::new(Fixture {
+            request,
+            events: responses_events(vec![
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"f1","call_id":"c1","name":"tempo","arguments":"{}"}}),
+            ]),
+        }),
+    });
+    let parts: Vec<_> = model.do_stream(CallOptions::default()).await.unwrap().collect().await;
+    use kumi_runtime::ai::types::{FinishReasonUnified, StreamPart};
+    assert!(parts.iter().any(|p| matches!(p, StreamPart::Error { .. })));
+    assert!(!parts.iter().any(|p| matches!(p, StreamPart::ToolCall(_))));
+    assert!(matches!(parts.last(),Some(StreamPart::Finish{finish_reason,..}) if finish_reason.unified==FinishReasonUnified::Error));
 }

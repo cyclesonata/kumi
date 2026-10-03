@@ -23,5 +23,10 @@ try {
 }
 const parts = [];
 // Rust represents JavaScript Date values as epoch milliseconds.
-for await (const part of answer.stream) parts.push(part.type === "response-metadata" && part.timestamp instanceof Date ? { ...part, timestamp: part.timestamp.getTime() } : part);
+for await (const part of answer.stream) {
+  if (part.type === "source") {
+    if (!/^[A-Za-z0-9]{16}$/.test(part.id)) throw new Error("Invalid generated SDK source id");
+    parts.push({ ...part, id: "generated-source-id" });
+  } else parts.push(part.type === "response-metadata" && part.timestamp instanceof Date ? { ...part, timestamp: part.timestamp.getTime() } : part);
+}
 process.stdout.write(JSON.stringify({ request, parts }));

@@ -554,7 +554,30 @@ impl LanguageModel for AnthropicModel {
         let url = format!("{}/messages", self.0.base_url.trim_end_matches('/'));
         let response = post_json(self.0.fetch.as_ref(), &url, headers, body.clone(), options.abort_signal).await?;
         let response_headers = response.headers;
-        let mut stream = convert_stream(Box::pin(json_stream(response.body.unwrap())), warnings, options.include_raw_chunks == Some(true));
+        let documents = options
+            .prompt
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { content, .. } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|p| match p {
+                UserPart::File(part)
+                    if matches!(part.media_type.as_str(), "application/pdf" | "text/plain")
+                        && part
+                            .provider_options
+                            .as_ref()
+                            .and_then(|v| v.get("anthropic"))
+                            .is_some_and(|v| v["citations"]["enabled"] == true) =>
+                {
+                    Some(serde_json::to_value(part).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut stream =
+            convert_stream(Box::pin(json_stream(response.body.unwrap())), warnings, options.include_raw_chunks == Some(true), documents);
         let mut initial = vec![];
         for _ in 0..2 {
             if let Some(part) = stream.next().await {
@@ -612,6 +635,7 @@ struct StreamState {
     safeguard_results: Option<Value>,
     container: Value,
     context: Value,
+    documents: Vec<Value>,
 }
 fn caller(value: &Value) -> Option<Value> {
     let v = value.get("caller").filter(|v| !v.is_null())?;
@@ -834,7 +858,21 @@ impl StreamState {
                         let delta=string(delta,"partial_json");if delta.is_empty(){return;}
                         if let Some(block)=self.blocks.get_mut(&index).filter(|b|b.kind=="tool_use"){block.input+=&delta;let id=block.id.clone();self.emit(json!({"type":"tool-input-delta","id":id,"delta":delta}));}
                     },
-                    Some("citations_delta")=>{if delta["citation"]["type"]=="web_search_result_location"{if let Some(block)=self.blocks.get_mut(&index){block.citations.push(delta["citation"].clone());}}},
+                    Some("citations_delta")=>{
+                        let citation=&delta["citation"];
+                        if citation["type"]=="web_search_result_location"{
+                            if let Some(block)=self.blocks.get_mut(&index){block.citations.push(citation.clone());}
+                            let mut source=json!({"type":"source","sourceType":"url","id":super::generate_id(),"url":citation["url"]});field(&mut source,"title",nonnull(citation,"title"));
+                            source["providerMetadata"]=json!({"anthropic":{"citedText":citation["cited_text"],"encryptedIndex":citation["encrypted_index"]}});self.emit(source);
+                        }else if matches!(citation["type"].as_str(),Some("page_location"|"char_location")){
+                            if let Some(document)=citation["document_index"].as_u64().and_then(|i|self.documents.get(i as usize)){
+                                let mut source=json!({"type":"source","sourceType":"document","id":super::generate_id(),"mediaType":document["mediaType"],"title":nonnull(citation,"document_title").or_else(||nonnull(document,"filename")).unwrap_or(json!("Untitled Document"))});field(&mut source,"filename",nonnull(document,"filename"));
+                                let mut metadata=json!({"citedText":citation["cited_text"]});
+                                for(from,to)in if citation["type"]=="page_location"{[("start_page_number","startPageNumber"),("end_page_number","endPageNumber")]}else{[("start_char_index","startCharIndex"),("end_char_index","endCharIndex")]}{metadata[to]=citation[from].clone();}
+                                source["providerMetadata"]=json!({"anthropic":metadata});self.emit(source);
+                            }
+                        }
+                    },
                     _=>{},
                 }
             }
@@ -942,7 +980,12 @@ impl StreamState {
         }
     }
 }
-fn convert_stream(input: Pin<Box<dyn Stream<Item = Result<Value, LanguageModelError>>>>, warnings: Vec<Value>, raw: bool) -> StreamParts {
+fn convert_stream(
+    input: Pin<Box<dyn Stream<Item = Result<Value, LanguageModelError>>>>,
+    warnings: Vec<Value>,
+    raw: bool,
+    documents: Vec<Value>,
+) -> StreamParts {
     let state = StreamState {
         input,
         pending: VecDeque::from([StreamPart::StreamStart { warnings }]),
@@ -960,6 +1003,7 @@ fn convert_stream(input: Pin<Box<dyn Stream<Item = Result<Value, LanguageModelEr
         safeguard_results: None,
         container: Value::Null,
         context: Value::Null,
+        documents,
     };
     Box::pin(futures::stream::unfold(state, |mut state| async move {
         loop {
