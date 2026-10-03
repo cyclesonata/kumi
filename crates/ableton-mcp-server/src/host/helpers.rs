@@ -9,6 +9,24 @@ use serde_json::{json, Map, Value};
 use std::sync::LazyLock;
 
 pub const REQUEST_ID_MAX_LENGTH: usize = 128;
+/// String(value) for JSON input, including array joining and a shadowed Object.toString refusal.
+pub fn js_string(value: &Value) -> Result<String, LiveError> {
+    Ok(match value {
+        Value::String(text) => text.clone(),
+        Value::Object(fields) => {
+            if fields.contains_key("toString") {
+                return Err(LiveError::type_error("Cannot convert object to primitive value"));
+            }
+            "[object Object]".into()
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(|item| if item.is_null() { Ok(String::new()) } else { js_string(item) })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
+        _ => js_json::stringify(value),
+    })
+}
 pub const MUTATION_CANONICAL_LIMITS: CanonicalLimits =
     CanonicalLimits { max_depth: 256, max_string_length: 1_048_576, max_array_length: 10_000_000, max_object_properties: 10_000_000 };
 pub fn has_only(value: &Value, allowed: &[&str]) -> bool {
