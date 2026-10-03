@@ -13,9 +13,9 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 - **FOCUS**（右上）：你在 Live 中所处的位置，随你的选择变化而更新：轨道的设备树（含机架链）、以小型钢琴卷帘显示的片段音符，或 Session 视图、编曲视图的条带。你指向的设备（点击它，或在 Live 中使用 **Ask Kumi about this**）会被固定，用于你接下来的消息。
 - **NOW**（右侧中部）：Kumi 正在做的事，随进行实时绘出：某个值修改前后的样子、新片段的音符、色块、落入设备链的设备、“▶ Playing from the start marker”。
 - **标签页**（右下）：**HISTORY** 先列出 Kumi 最近记住的三项内容（各带 **forget**），然后是每项修改，最新的在前，各带 **undo**；无法撤销时则显示 **kept** / **no undo** / **check Live**。**GOAL** 显示 `/goal`（设定之前显示“No goal yet”）：目标、最佳得分及其趋势、领先的候选方案，以及用时。
-- **输入框**（左下）：等待发送的消息显示在它上方，被固定的设备显示为一个小标签。
+- **输入框**（左下）：等待发送的消息显示在它上方，被固定的设备显示为一个小标签。为空时显示 “ctrl+t to talk”。Kumi 聆听时，它的底行会显示一个闪烁的薄荷绿 `●`、时间和电平表，右侧是可用的按键；不用红色，因为在 Live 中红色表示录音。
 
-欢迎界面会显示自你上次使用以来工程中发生的变化；有更新的 Kumi 时也会显示。
+欢迎界面会显示自你上次使用以来工程中发生的变化；有更新的 Kumi 时也会显示；第一次时还会说明 Kumi 正在后台学习你的素材库。
 
 宽度不足 100 列时，Live 窗格会折叠为输入框上方的两行条带（先是你所在的位置和 Kumi 正在做的事，然后是最近一次修改及其撤销）。窗口小于 24×8 时，Kumi 会请你把窗口调大。
 
@@ -31,10 +31,11 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
 | `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
 | `kumi logout <provider>` | 移除 Kumi 在该提供方的登录 |
-| `kumi model [<provider>/<model>]` | 显示或选择模型 |
+| `kumi model [<provider>/<model>]` | 显示或选择模型，也可以是你电脑上的模型（`ollama/<model>`） |
 | `kumi auth` | 哪些提供方可用、当前模型以及登录文件（从不显示机密信息） |
 | `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
-| `kumi doctor` | 检查 Node、登录、桥接、Live、扩展、视频程序和终端；告诉你该运行什么 |
+| `kumi doctor` | 检查 Node、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么 |
+| `kumi library [--rebuild]` | Kumi 学习你的声音、预设和工程进行到了哪里；`--rebuild` 全部重新学习 |
 | `kumi update [--check \| --rollback]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（仅限已安装的 Kumi） |
 | `kumi report` | 写出 `~/kumi-report-<date and time>.txt`，出问题时把它发给我们 |
 | `kumi uninstall [--all] [--yes]` | 卸载已安装的 Kumi；`--all` 同时删除对话、笔记、配方和登录信息；`--yes` 跳过第一个确认问题 |
@@ -54,12 +55,13 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
 | `/refresh` | 重新读取工程，不询问模型 |
 | `/copy` | 把 Kumi 的上一个回答复制到剪贴板 |
-| `/model`、`/effort` | 选择模型（来自各提供方自己的列表；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效 |
+| `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效 |
 | `/login`、`/logout` | 登录（在浏览器中用 ChatGPT 登录，或输入只显示为圆点的 API 密钥）或退出登录 |
 | `/goal <what to reach>` | 追求一种声音，直到 Kumi 做到为止。只输入 `/goal` 会继续已暂停的目标；`/goal stop`（或 `/goal end`）结束它 |
-| `/memory` | Kumi 记住的一切：关于你和本工程的笔记、技巧、配方和经验；选择一项即可让它忘掉（配方可以运行或忘掉） |
+| `/memory` | Kumi 记住的一切：关于你和本工程的笔记、从你的工程中学到的东西、技巧、配方和经验；选择一项即可让它忘掉（配方可以运行或忘掉） |
 | `/recipes` | 你的配方：运行一个（Kumi 会为你写好消息开头 `Run my recipe "<name>" on `，由你补完）或忘掉它 |
-| `/status` | Kumi 连接到了什么、当前模型，以及使用 API 密钥时本次会话用掉的 token |
+| `/status` | Kumi 连接到了什么、当前模型、学习素材库的进度，以及使用 API 密钥时本次会话用掉的 token |
+| `/voice` | 说话功能：开始或停止、“停止后直接发送”、你说的语言和麦克风 |
 | `/update` | 获取最新的 Kumi：它会先询问，然后关闭、更新，再以同一段对话重新打开 |
 | `/help` | 按键和命令，以一条说明的形式显示在对话中 |
 | `/quit` | 关闭 Kumi |
@@ -81,6 +83,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | Alt-← / Alt-→、Ctrl-← / Ctrl-→、Alt-B / Alt-F | 左移 / 右移一个词 |
 | Ctrl-W、Alt-Backspace、Ctrl-Backspace | 删除光标前的词 |
 | Ctrl-K / Ctrl-U | 删除到行尾 / 行首 |
+| Ctrl-T | 用说话代替打字：再按一次停止，或按住说话。你说的话会出现在光标处；Enter 立即停止并发送，Esc 放弃 |
 
 **停止与移动**
 
@@ -109,7 +112,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 ## 终端
 
-Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。
+Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。支持该协议的终端会告知按住的 Ctrl-T 何时松开；在其他终端中，按键的重复停止时 Kumi 就停止聆听。
 
 ## 设计说明
 
@@ -122,7 +125,7 @@ Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256
 **基础**，全部由终端原语构建，不用任何 UI 框架：
 
 1. 终端 I/O（`tty.ts`）：原始模式、备用屏幕、括号粘贴（bracketed paste）、SGR 鼠标、焦点事件，以及终端提供时的 kitty 键盘协议；退出、崩溃和收到信号时都会恢复终端。
-2. 输入（`keys.ts`）：带修饰键的按键（xterm 和 CSI u）、粘贴、鼠标、被拆分到多次读取中的序列，以及通过短暂超时判定的单独 Esc。
+2. 输入（`keys.ts`）：带修饰键的按键（xterm 和 CSI u）、粘贴、鼠标、被拆分到多次读取中的序列，以及通过短暂超时判定的单独 Esc。在 kitty 协议下，按住的键的重复和松开都是各自的事件。
 3. 屏幕与渲染器（`screen.ts`、`render.ts`）：一个单元格网格；每一帧都与上一帧比较差异，只把发生变化的单元格写出，且在同步更新中进行。颜色从 24 位依次回退到 256 色、16 色和无色。
 4. 文本（`width.ts`、`wrap.ts`）：字素宽度（宽 CJK 字符和 emoji 占两个单元格）、换行与截断。
 5. 帧（`scheduler.ts`）：重绘会被合并，动画时钟只在有东西运动时运行。
