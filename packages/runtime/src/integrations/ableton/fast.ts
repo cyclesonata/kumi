@@ -79,9 +79,11 @@ export function findScript(items: readonly ({ device: string; parameter: string;
 export function setScript(items: readonly (FastTarget & { value: number })[]): string {
   return withArgs("fast-set", items, [
     ...FIND,
+    // Within its range, and on a step (Live's stepped parameters step by 1 from their minimum), as the bridge does.
     "def fit(p, v):",
-    "    v = min(float(p.max), max(float(p.min), float(v)))",
-    "    return float(round(v)) if getattr(p, 'is_quantized', False) else v",
+    "    lo, hi = float(p.min), float(p.max)",
+    "    v = min(hi, max(lo, float(v)))",
+    "    return min(hi, lo + round(v - lo)) if getattr(p, 'is_quantized', False) else v",
     "found = []",
     "for t in ARGS:",
     "    p = find(t)",
