@@ -129,8 +129,25 @@ pub async fn post_json(
 ) -> Result<Response, LanguageModelError> {
     let mut headers = headers;
     headers.entry("content-type".into()).or_insert_with(|| "application/json".into());
-    let response = fetch.fetch(url, FetchInit { method: "POST".into(), headers, body: Some(stringify(&body)), signal }).await?;
+    let mut response =
+        fetch.fetch(url, FetchInit { method: "POST".into(), headers, body: Some(stringify(&body)), signal: signal.clone() }).await?;
     if response.ok() && response.body.is_some() {
+        let status = response.status;
+        let response_headers = response.headers.clone();
+        let url = url.to_string();
+        response.body = response.body.take().map(|source| {
+            Box::pin(source.map(move |chunk| {
+                chunk.map_err(|error| {
+                    if signal.as_ref().is_some_and(Signal::is_cancelled) || matches!(error, LanguageModelError::ApiCall(_)) {
+                        return error;
+                    }
+                    let mut wrapped = ApiCallError::new("Failed to process successful response", &url, Some(body.clone()), Some(status));
+                    wrapped.cause = Some(error.to_string());
+                    wrapped.response_headers = Some(response_headers.clone());
+                    wrapped.into()
+                })
+            })) as ByteStream
+        });
         return Ok(response);
     }
     let status = response.status;

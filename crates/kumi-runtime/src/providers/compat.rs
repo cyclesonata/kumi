@@ -126,12 +126,9 @@ impl Mender {
         let index = match call.get("index").and_then(Value::as_f64) {
             Some(index) => index,
             None => {
-                let index = given_id.as_ref().and_then(|id| self.by_id.get(id).copied()).unwrap_or_else(|| {
-                    if named || self.latest.is_none() {
-                        self.ids.len() as f64
-                    } else {
-                        self.latest.unwrap()
-                    }
+                let index = given_id.as_ref().and_then(|id| self.by_id.get(id).copied()).unwrap_or_else(|| match self.latest {
+                    Some(latest) if !named => latest,
+                    _ => self.ids.len() as f64,
                 });
                 call.insert("index".into(), json!(index));
                 index

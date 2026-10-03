@@ -96,3 +96,25 @@ async fn native_http_streams_a_response_and_cancels_a_body_that_is_still_arrivin
     assert!(body.next().await.is_none());
     server.abort();
 }
+
+struct InterruptedFetch;
+#[async_trait(?Send)]
+impl Fetch for InterruptedFetch {
+    async fn fetch(&self, _: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        let mut response = Response::text_response(200, "");
+        response.headers.insert("x-fixture".into(), "yes".into());
+        response.body = Some(Box::pin(futures::stream::iter([Err(LanguageModelError::other("terminated"))])));
+        Ok(response)
+    }
+}
+#[tokio::test]
+async fn successful_response_read_errors_keep_the_sdk_request_status_and_headers() {
+    let response = post_json(&InterruptedFetch, "http://fixture/api", Headers::new(), json!({"request":true}), None).await.unwrap();
+    let error = response.text().await.unwrap_err();
+    let error = error.api_call().unwrap();
+    assert_eq!(error.message, "Failed to process successful response");
+    assert_eq!(error.status_code, Some(200));
+    assert_eq!(error.cause.as_deref(), Some("terminated"));
+    assert_eq!(error.request_body_values, Some(json!({"request":true})));
+    assert_eq!(error.response_headers.as_ref().unwrap()["x-fixture"], "yes");
+}

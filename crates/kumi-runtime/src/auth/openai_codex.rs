@@ -187,7 +187,7 @@ pub async fn login_codex_browser(
                     let mut query = std::collections::HashMap::new();
                     for (key, value) in callback.query_pairs().into_owned() { query.entry(key).or_insert(value); }
                     let code = query.get("code").filter(|code| !code.is_empty()).cloned();
-                    let valid = query.get("state") == Some(&state) && code.is_some() && !query.get("error").is_some_and(|error| !error.is_empty());
+                    let valid = query.get("state") == Some(&state) && code.is_some() && query.get("error").is_none_or(|error| error.is_empty());
                     let message = if valid { "Kumi is signed in. You can close this tab." } else { "Sign-in failed. Return to the terminal." };
                     let page = format!("<!doctype html><meta charset=\"utf-8\"><title>Kumi</title><p style=\"font:16px system-ui;margin:3rem\">{message}</p>");
                     let status = if valid { "200 OK" } else { "400 Bad Request" };
