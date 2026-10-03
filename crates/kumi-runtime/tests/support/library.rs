@@ -94,3 +94,72 @@ pub fn wav(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
     }
     out
 }
+
+pub fn put(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+pub fn sound_cases() -> Vec<(&'static str, Vec<Vec<f32>>)> {
+    vec![
+        ("Kick Deep.wav", vec![kick(48., 0.6)]),
+        ("Kick Short.wav", vec![kick(60., 0.25)]),
+        ("Hat Closed.wav", vec![hat(0.12, 3)]),
+        ("Untitled 7.wav", vec![kick(52., 0.5)]),
+        ("Beat 120 bpm.wav", vec![beat(120., 2)]),
+        ("Pad Am.wav", vec![pad(&[220., 261.63, 329.63], 3.), pad(&[220., 261.63, 329.63], 3.)]),
+        ("Dusty Snare.wav", vec![snare(0.25)]),
+    ]
+}
+pub struct Studio {
+    pub home: tempfile::TempDir,
+    pub user: std::path::PathBuf,
+    pub extra: std::path::PathBuf,
+    pub dir: std::path::PathBuf,
+}
+impl Studio {
+    pub fn new() -> Self {
+        use base64::Engine;
+        let home = tempfile::tempdir().unwrap();
+        let user = home.path().join("Music/Ableton/User Library");
+        let extra = home.path().join("Crate");
+        let dir = home.path().join(".kumi/library");
+        let locations = ["Samples/Kicks", "Samples/Kicks", "Samples/Hats", "Samples", "Samples/Loops", "Samples/Pads"];
+        for (index, (name, channels)) in sound_cases().into_iter().enumerate() {
+            let path = if index == 6 { extra.join(name) } else { user.join(locations[index]).join(name) };
+            put(&path, wav(&channels, 44100));
+        }
+        put(&user.join("Samples/Notes.txt"), "not audio");
+        put(&user.join("Ableton Folder Info/Previews/Kick Preview.wav"), wav(&[kick(50., 0.5)], 44100));
+        let files: serde_json::Value = serde_json::from_str(include_str!("library-files-oracle.json")).unwrap();
+        for (name, relative) in [
+            ("Rolling Bass.adv", "Presets/Instruments/Wavetable/Rolling Bass.adv"),
+            ("Vox Chain.adg", "Presets/Audio Effects/Vox Chain.adg"),
+            ("Tight Kit.adg", "Presets/Drums/Tight Kit.adg"),
+            ("instrument.amxd", "Max/Bubbles.amxd"),
+            ("Night Drive.als", "Projects/Night Drive Project/Night Drive.als"),
+            ("Night Drive.als", "Projects/Night Drive Project/Night Drive.backup-2026-01-01T00-00-00-000Z.als"),
+            ("Sunrise.als", "Projects/Sunrise Project/Sunrise.als"),
+        ] {
+            let case = files["cases"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap();
+            put(&user.join(relative), base64::engine::general_purpose::STANDARD.decode(case["body"].as_str().unwrap()).unwrap());
+        }
+        Self { home, user, extra, dir }
+    }
+    pub fn plan(&self, workers: usize) -> kumi_runtime::library::learn::LearnPlan {
+        use kumi_runtime::library::sources::{library_sources, SourceOptions};
+        kumi_runtime::library::learn::LearnPlan {
+            dir: self.dir.to_string_lossy().into(),
+            sources: library_sources(&SourceOptions {
+                home: Some(self.home.path().to_string_lossy().into()),
+                platform: Some("darwin".into()),
+                applications: Some(self.home.path().join("Applications").to_string_lossy().into()),
+                folders: Some(vec![self.extra.to_string_lossy().into()]),
+                ..Default::default()
+            }),
+            set_folders: vec![],
+            set_files: vec![],
+            plugin_presets: vec![],
+            workers: Some(workers),
+        }
+    }
+}
