@@ -45,6 +45,10 @@ unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
+# Line tables are enough for a panic's backtrace; full debug info multiplies the build folder's size.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
