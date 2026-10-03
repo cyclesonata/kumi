@@ -71,7 +71,7 @@ Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業
 
 ## 現状
 
-Kumi 1.7 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows では、Kumi のインストールと Live への接続を確認済みです。それ以外は Windows ではまだ新しいので、何か問題が起きたら `kumi report` を送ってください。次は Renoise と Reaper への対応を予定しています。
+Kumi 1.7.4 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows では、Kumi のインストールと Live への接続を確認済みです。それ以外は Windows ではまだ新しいので、何か問題が起きたら `kumi report` を送ってください。次は Renoise と Reaper への対応を予定しています。
 
 ## 開発
 
