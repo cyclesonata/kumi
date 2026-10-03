@@ -63,6 +63,6 @@ pub use kernel::budget::{budget_for, ContextBudget, DEFAULT_BUDGET};
 // TODO(port): re-exports from integrations/fallback
 // TODO(port): re-exports from integrations/ableton/focus
 // TODO(port): re-exports from integrations/ableton/project
+pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
 pub use core::match_run::{MatchBudget, MatchRun, MatchStatus, MatchStop, MATCH_BUDGET};
 pub use core::playbook::{create_playbook_store, lesson_line, playbook_brief, Lesson, PlaybookStore};
-// TODO(port): re-exports from core/goal
