@@ -244,23 +244,61 @@ pub mod number {
 
     /// `value.toFixed(digits)`.
     pub fn to_fixed(value: f64, digits: usize) -> String {
-        if !value.is_finite() {
+        if !value.is_finite() || value.abs() >= 1e21 {
             return to_string(value);
         }
-        if value.abs() >= 1e21 {
-            return to_string(value);
+        // ECMA-262 Number.prototype.toFixed: on the exact value of the double, the nearest n / 10^digits,
+        // the larger n when two are equally near (a tie rounds up, not to even as Rust's `{:.N}` does), and
+        // a "-" kept whenever the value was negative ("-0.00" for -0.001; "0.00" for -0).
+        let negative = value < 0.0;
+        // Rust prints the exact decimal expansion when asked for enough places (a double has at most 1074).
+        let exact = format!("{:.1100}", value.abs());
+        let (whole, fraction) = exact.split_once('.').expect("a decimal point");
+        let mut kept: Vec<u8> = whole.bytes().chain(fraction.bytes().take(digits)).collect();
+        let rest = &fraction.as_bytes()[digits..];
+        let round_up = rest.first().is_some_and(|&first| first >= b'5');
+        if round_up {
+            let mut index = kept.len();
+            loop {
+                if index == 0 {
+                    kept.insert(0, b'1');
+                    break;
+                }
+                index -= 1;
+                if kept[index] == b'9' {
+                    kept[index] = b'0';
+                } else {
+                    kept[index] += 1;
+                    break;
+                }
+            }
         }
-        let text = format!("{value:.digits$}");
-        if text.starts_with("-0") && text.trim_start_matches(['-', '0', '.']).is_empty() {
-            text[1..].to_string()
-        } else {
-            text
+        let split = kept.len() - digits;
+        let mut out = String::with_capacity(kept.len() + 2);
+        if negative {
+            out.push('-');
         }
+        out.push_str(std::str::from_utf8(&kept[..split]).expect("digits"));
+        if digits > 0 {
+            out.push('.');
+            out.push_str(std::str::from_utf8(&kept[split..]).expect("digits"));
+        }
+        out
     }
 
     /// `Math.round(value)`: halves round toward +∞, as JavaScript rounds.
     pub fn round(value: f64) -> f64 {
-        (value + 0.5).floor()
+        // The integer nearest `value`, the one toward +∞ when two are equally near; exact, so that
+        // 0.49999999999999994 rounds to 0 (floor(value + 0.5) would carry it to 1).
+        if !value.is_finite() {
+            return value;
+        }
+        let floor = value.floor();
+        if value - floor >= 0.5 {
+            floor + 1.0
+        } else {
+            floor
+        }
     }
 }
 
@@ -397,10 +435,44 @@ mod tests {
 
     #[test]
     fn number_helpers() {
-        assert_eq!(number::to_fixed(1.005, 2), "1.00");
-        assert_eq!(number::to_fixed(-0.001, 2), "0.00");
-        assert_eq!(number::round(2.5), 3.0);
-        assert_eq!(number::round(-2.5), -2.0);
+        // Node's answers: ties on the exact double round up, and a negative value keeps its sign.
+        for (value, digits, expected) in [
+            (0.0078125, 6, "0.007813"),
+            (2.5, 0, "3"),
+            (0.25, 1, "0.3"),
+            (-0.001, 2, "-0.00"),
+            (-0.0, 2, "0.00"),
+            (1.005, 2, "1.00"),
+            (-2.5, 0, "-3"),
+            (1.45, 1, "1.4"),
+            (0.5, 0, "1"),
+            (1.5, 0, "2"),
+            (-1.5, 0, "-2"),
+            (123.456, 2, "123.46"),
+            (0.000001, 5, "0.00000"),
+            (9.995, 2, "9.99"),
+            (0.1, 20, "0.10000000000000000555"),
+            (1e20, 2, "100000000000000000000.00"),
+            (5e-324, 3, "0.000"),
+            (0.615, 2, "0.61"),
+            (10.235, 2, "10.23"),
+            (-0.5, 0, "-1"),
+            (1.0000000000000002, 15, "1.000000000000000"),
+            (999.9999, 3, "1000.000"),
+            (0.0, 0, "0"),
+            (12345.6789, 0, "12346"),
+            (0.9999, 3, "1.000"),
+            (9.9999, 3, "10.000"),
+            (1e21, 2, "1e+21"),
+            (f64::NAN, 2, "NaN"),
+        ] {
+            assert_eq!(number::to_fixed(value, digits), expected, "({value}).toFixed({digits})");
+        }
+        for (value, expected) in
+            [(0.49999999999999994, 0.0), (2.5, 3.0), (-2.5, -2.0), (-0.4, 0.0), (1e16 + 1.0, 1e16), (-0.5, 0.0), (0.5, 1.0)]
+        {
+            assert_eq!(number::round(value), expected, "Math.round({value})");
+        }
         assert!(number::is_safe_integer(3.0));
         assert!(!number::is_safe_integer(3.5));
         assert_eq!(number::parse(" 12 "), Some(12.0));
