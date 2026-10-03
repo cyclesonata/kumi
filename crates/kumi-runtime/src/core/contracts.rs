@@ -880,7 +880,7 @@ pub struct LiveFocus {
     pub slot_ref: Option<String>,
     /// The selected scene's position (0 is the first), for FOCUS's Session strip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene_index: Option<usize>,
+    pub scene_index: Option<f64>,
     /// The selected device's reference (from bridge 1.0.45), for FOCUS's tree to mark exactly that one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_ref: Option<String>,
