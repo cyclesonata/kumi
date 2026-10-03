@@ -6,7 +6,8 @@ fn collator(locale: &str) -> CollatorBorrowed<'static> {
     let locale = locale.parse::<Locale>().unwrap_or_else(|_| "en-US".parse().unwrap());
     Collator::try_new(locale.into(), Default::default()).expect("compiled ICU collation data")
 }
-fn default_locale() -> String {
+/// The process locale, using ICU environment precedence and native system defaults.
+pub fn default_locale() -> String {
     // ICU's POSIX locale lookup, in priority order. A C locale maps to en-US in V8.
     let named = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
