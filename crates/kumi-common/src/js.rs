@@ -312,7 +312,7 @@ pub mod number {
 }
 
 pub mod string {
-    pub use crate::locale::locale_compare;
+    pub use crate::locale::{locale_compare, locale_compare_numeric_base};
     /// `text.length`: UTF-16 code units.
     pub fn utf16_len(text: &str) -> usize {
         text.encode_utf16().count()

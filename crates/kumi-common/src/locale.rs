@@ -63,6 +63,23 @@ pub fn locale_compare(a: &str, b: &str) -> Ordering {
     static COLLATOR: LazyLock<CollatorBorrowed<'static>> = LazyLock::new(|| collator(&default_locale()));
     COLLATOR.compare(a, b)
 }
+/// Default-locale comparison with `{ numeric: true, sensitivity: "base" }`.
+pub fn locale_compare_numeric_base(a: &str, b: &str) -> Ordering {
+    use icu_collator::{
+        options::{CollatorOptions, Strength},
+        preferences::CollationNumericOrdering,
+        CollatorPreferences,
+    };
+    static COLLATOR: LazyLock<CollatorBorrowed<'static>> = LazyLock::new(|| {
+        let locale = default_locale().parse::<Locale>().unwrap_or_else(|_| "en-US".parse().unwrap());
+        let mut preferences: CollatorPreferences = locale.into();
+        preferences.numeric_ordering = Some(CollationNumericOrdering::True);
+        let mut options = CollatorOptions::default();
+        options.strength = Some(Strength::Primary);
+        Collator::try_new(preferences, options).expect("compiled ICU collation data")
+    });
+    COLLATOR.compare(a, b)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

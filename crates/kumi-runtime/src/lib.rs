@@ -60,7 +60,7 @@ pub use version::KUMI_VERSION;
 // TODO(port): re-exports from integrations/ableton
 // TODO(port): re-exports from ears/device
 // TODO(port): re-exports from hands
-// TODO(port): re-exports from integrations/fallback
+pub use integrations::fallback::with_fallback;
 // TODO(port): re-exports from integrations/ableton/focus
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
 pub use core::match_run::{MatchBudget, MatchRun, MatchStatus, MatchStop, MATCH_BUDGET};
