@@ -45,6 +45,9 @@ struct Record {
     stop_works: Cell<bool>,
     listeners: RefCell<Vec<ConnectionListener>>,
     refresh_error: Cell<bool>,
+    audition: RefCell<Option<Rc<dyn Fn(&AuditionRequest)>>>,
+    goal_rig: RefCell<Option<Rc<dyn GoalRig>>>,
+    goal_requests: RefCell<Vec<AuditionRequest>>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -101,6 +104,22 @@ impl Integration for TestIntegration {
     async fn close(&self) -> Result<(), RuntimeError> {
         self.record.integration_closes.set(self.record.integration_closes.get() + 1);
         Ok(())
+    }
+    fn has_audition(&self) -> bool {
+        self.record.audition.borrow().is_some()
+    }
+    async fn audition(&self, request: &AuditionRequest, _: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
+        if let Some(callback) = self.record.audition.borrow().clone() {
+            callback(request);
+        }
+        Ok(Ok(AuditionResult { takes: vec![], seconds: 1., notes: vec![], best: None, reference: None }))
+    }
+    fn has_goal(&self) -> bool {
+        self.record.goal_rig.borrow().is_some()
+    }
+    async fn goal(&self, request: &AuditionRequest, _: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+        self.record.goal_requests.borrow_mut().push(request.clone());
+        Ok(self.record.goal_rig.borrow().clone().ok_or_else(|| "no rig".into()))
     }
     fn has_stop_live(&self) -> bool {
         true
@@ -926,5 +945,480 @@ local_test!(set_save_keeps_a_draft_and_failed_answer_abandons_it, {
         h.session.close().await.unwrap();
         assert_eq!(store.list().await.unwrap().len(), usize::from(!fail));
         assert_eq!(h.error("Inference failed"), fail);
+    }
+});
+
+use kumi_runtime::core::match_run::{MatchBudget, MatchState, MatchStop, MATCH_BUDGET};
+fn audition(score: f64, label: &str) -> AuditionEvent {
+    serde_json::from_value(json!({"round":1,"best":{"label":label,"score":score},"takes":[{"label":label,"score":score,"where":{"track":"Candidate"}},{"label":"Other","score":score-10.}],"gaps":["attack too slow"],"request":{"candidates":[{"track":"track:1","label":"Drift"}],"fromBeat":16,"beats":4,"reference":"~/ref.wav"}})).unwrap()
+}
+fn match_harness(rounds: Vec<Option<(&str, f64)>>, config: impl FnOnce(&mut SessionOptions)) -> Harness {
+    let rounds = rounds.into_iter().map(|r| r.map(|(l, s)| (l.to_owned(), s))).collect::<Vec<_>>();
+    let session = Rc::new(RefCell::new(None::<Session>));
+    let active = session.clone();
+    let count = Rc::new(Cell::new(0));
+    let run: Run = Rc::new(move |_, signal, emit| {
+        let n = count.get();
+        count.set(n + 1);
+        let event = rounds.get(n).cloned().flatten();
+        let session = active.borrow().clone().unwrap();
+        async move {
+            if let Some((label, score)) = event {
+                session.watch(WatchEvent::Audition(audition(score, &label)));
+            }
+            if signal.is_cancelled() {
+                return Err(RuntimeError::Aborted);
+            }
+            emit(KernelEvent::Text { text: format!("answer {}", n + 1) })?;
+            Ok(TurnResult {
+                stop_reason: StopReason::Completed,
+                usage: Some(Usage { input_tokens: 10., output_tokens: 5., ..Default::default() }),
+            })
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), config);
+    *session.borrow_mut() = Some(h.session.clone());
+    h
+}
+local_test!(match_rounds_reach_target_wrap_up_once_and_sum_usage, {
+    let h = match_harness(vec![Some(("Drift", 50.)), Some(("Drift", 60.)), Some(("Drift", 75.)), Some(("Drift", 93.)), None], |_| {});
+    h.session.start().await.unwrap();
+    h.session.submit("make my pad sound like this reference", None).await.unwrap();
+    let calls = h.record.calls.borrow();
+    assert_eq!(calls.len(), 5);
+    assert!(calls[1].starts_with(
+        "[Kumi] Score 50% (best: Drift). Budget left: 12 rounds, about 45 minutes. Biggest gaps: attack too slow. Keep going"
+    ));
+    assert!(calls[2].starts_with("[Kumi] Score 50% → 60%"));
+    assert!(calls[4].contains("That reaches 93%"));
+    drop(calls);
+    let statuses =
+        h.events.borrow().iter().filter_map(|e| if let SessionEvent::Match(m) = e { Some(m.clone()) } else { None }).collect::<Vec<_>>();
+    let last = statuses.last().unwrap();
+    assert_eq!(last.state, MatchState::Done);
+    assert_eq!(last.stop, Some(MatchStop::Reached));
+    assert_eq!(last.first, Some(50.));
+    let complete = h
+        .events
+        .borrow()
+        .iter()
+        .filter_map(|e| if let SessionEvent::TurnComplete { result, .. } = e { Some(result.clone()) } else { None })
+        .collect::<Vec<_>>();
+    assert_eq!(complete.len(), 1);
+    assert_eq!(complete[0].usage.as_ref().unwrap().input_tokens, 50.);
+    h.session.close().await.unwrap();
+});
+local_test!(match_plateau_requires_new_ideas_and_carry_on_ends_after_other_request, {
+    let h = match_harness(
+        vec![
+            Some(("Drift", 50.)),
+            Some(("Drift", 51.)),
+            Some(("Drift", 51.)),
+            Some(("Drift", 51.)),
+            Some(("Drift", 52.)),
+            Some(("Drift", 52.)),
+            None,
+        ],
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("recreate this sound", None).await.unwrap();
+    assert!(h.record.calls.borrow()[3].contains("Try something genuinely different now"));
+    assert!(h.record.calls.borrow().last().unwrap().contains("Refining and new ideas both stopped gaining"));
+    h.session.close().await.unwrap();
+    let h = match_harness(
+        vec![Some(("Drift", 50.)), Some(("Drift", 54.)), Some(("Drift", 58.)), None, Some(("Drift", 70.)), None, None, None, None, None],
+        |o| o.match_budget = Some(MatchBudget { rounds: 2, ..MATCH_BUDGET }),
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("match this reference", None).await.unwrap();
+    assert!(h.record.calls.borrow()[3].contains("That's the run's budget spent"));
+    h.session.submit("keep going", None).await.unwrap();
+    assert!(h.record.calls.borrow()[5].starts_with("[Kumi] Score 70% (best: Drift)"));
+    let before = h.record.calls.borrow().len();
+    h.session.submit("make a bass", None).await.unwrap();
+    h.session.submit("keep going", None).await.unwrap();
+    assert_eq!(h.record.calls.borrow().len(), before + 2);
+    h.session.close().await.unwrap();
+});
+local_test!(match_reauditions_changed_candidate_before_deciding_and_can_cancel, {
+    let session = Rc::new(RefCell::new(None::<Session>));
+    let active = session.clone();
+    let n = Rc::new(Cell::new(0));
+    let h = harness(
+        Some(Rc::new(move |_, _, _| {
+            let n0 = n.get();
+            n.set(n0 + 1);
+            let session = active.borrow().clone().unwrap();
+            async move {
+                if n0 == 0 {
+                    session.watch(WatchEvent::Audition(audition(50., "Drift")));
+                    session.watch(WatchEvent::Change(change("c1", "applied", 1)));
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    *session.borrow_mut() = Some(h.session.clone());
+    let active = h.session.clone();
+    let checked = Rc::new(Cell::new(0));
+    let counts = checked.clone();
+    *h.record.audition.borrow_mut() = Some(Rc::new(move |_| {
+        counts.set(counts.get() + 1);
+        active.watch(WatchEvent::Audition(audition(94., "Drift")));
+    }));
+    h.session.start().await.unwrap();
+    h.session.submit("make it sound like this", None).await.unwrap();
+    assert_eq!(checked.get(), 1);
+    assert_eq!(h.record.calls.borrow().len(), 1);
+    assert!(h.events.borrow().iter().any(|e| matches!(e, SessionEvent::Match(m) if m.stop == Some(MatchStop::Reached))));
+    h.session.close().await.unwrap();
+    let session = Rc::new(RefCell::new(None::<Session>));
+    let active = session.clone();
+    let n = Rc::new(Cell::new(0));
+    let h = harness(
+        Some(Rc::new(move |_, signal, _| {
+            let first = n.get() == 0;
+            n.set(n.get() + 1);
+            let session = active.borrow().clone().unwrap();
+            async move {
+                if first {
+                    session.watch(WatchEvent::Audition(audition(50., "Drift")));
+                } else {
+                    signal.cancelled().await;
+                    return Err(RuntimeError::Aborted);
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    *session.borrow_mut() = Some(h.session.clone());
+    h.session.start().await.unwrap();
+    let running = spawned(&h.session, "make it sound like the reference");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.status().state, TurnState::Idle);
+    h.session.close().await.unwrap();
+});
+local_test!(match_lessons_are_learned_updated_judged_read_and_forgotten, {
+    use kumi_runtime::core::playbook::{create_playbook_store, PlaybookStore, Reaction};
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_playbook_store(dir.path().join("lessons.json"));
+    let h = match_harness(
+        vec![
+            Some(("Operator FM", 52.)),
+            Some(("Collision", 64.)),
+            Some(("Collision + parallel delays", 73.)),
+            Some(("Collision + parallel delays", 73.)),
+            Some(("Collision + parallel delays", 74.)),
+            Some(("Collision + parallel delays", 74.)),
+            Some(("Collision + parallel delays", 74.)),
+            None,
+            Some(("Collision, brighter", 93.)),
+            None,
+            None,
+        ],
+        |o| o.playbook = Some(store.clone()),
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("make my plucked metallic percussion sound like this reference", None).await.unwrap();
+    let listed = h.session.lessons().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let lessons = store.list().await.unwrap();
+    assert_eq!(lessons[0].matched, "plucked metallic percussion");
+    assert_eq!((lessons[0].from, lessons[0].to), (52., 74.));
+    h.session.submit("keep going", None).await.unwrap();
+    h.session.lessons().await.unwrap();
+    assert_eq!(store.list().await.unwrap()[0].to, 93.);
+    h.session.submit("love it, thanks", None).await.unwrap();
+    h.session.lessons().await.unwrap();
+    assert_eq!(store.list().await.unwrap()[0].reaction, Some(Reaction::Liked));
+    let two = match_harness(vec![Some(("Collision", 94.)), None], |o| o.playbook = Some(store.clone()));
+    two.session.start().await.unwrap();
+    two.session.submit("make this metallic percussion hit sound like the reference", None).await.unwrap();
+    assert!(two.record.calls.borrow()[0].contains("Collision, brighter"));
+    assert!(two.session.forget_lesson(&listed[0].id).await.unwrap());
+    h.session.close().await.unwrap();
+    two.session.close().await.unwrap();
+});
+
+use kumi_runtime::core::{
+    evolve::Knob,
+    goal::{create_goal_store, GoalBudget, GoalPhase, GoalRun, GoalStore, GOAL_BUDGET},
+};
+struct SearchRig {
+    calls: RefCell<Vec<(Vec<GenerationTrial>, Option<GenerationOptions>)>>,
+    cleanup: RefCell<Vec<String>>,
+    scores: Vec<f64>,
+    screens: bool,
+    silent: bool,
+    structural: bool,
+    ms: u64,
+    values_score: bool,
+    settled: RefCell<Vec<f64>>,
+}
+impl SearchRig {
+    fn new(scores: Vec<f64>) -> Self {
+        Self {
+            calls: RefCell::new(vec![]),
+            cleanup: RefCell::new(vec![]),
+            scores,
+            screens: false,
+            silent: false,
+            structural: false,
+            ms: 1,
+            values_score: false,
+            settled: RefCell::new(vec![]),
+        }
+    }
+    fn knob() -> Knob {
+        Knob { r#ref: "knob:1".into(), device: "1:Operator".into(), name: "Filter Freq".into(), min: 0., max: 1., step: None, value: 0.2 }
+    }
+}
+#[async_trait(?Send)]
+impl GoalRig for SearchRig {
+    fn slots(&self) -> Vec<GoalSlotInfo> {
+        vec![GoalSlotInfo { name: "Candidate".into(), label: "Drift".into(), chain: "Operator".into(), knobs: vec![Self::knob()] }]
+    }
+    fn screens(&self) -> bool {
+        self.screens
+    }
+    async fn add(&self, _: &AuditionCandidate, _: Signal) -> Result<Result<GoalSlotInfo, String>, RuntimeError> {
+        Ok(Ok(self.slots()[0].clone()))
+    }
+    async fn generation(
+        &self,
+        trials: &[GenerationTrial],
+        signal: Signal,
+        options: Option<GenerationOptions>,
+    ) -> Result<Generation, RuntimeError> {
+        let at = self.calls.borrow().len();
+        self.calls.borrow_mut().push((trials.to_vec(), options));
+        tokio::select! {_=signal.cancelled()=>return Err(RuntimeError::Aborted),_=delay(self.ms)=>{}}
+        let mut result = Generation::default();
+        for trial in trials {
+            if !self.silent {
+                let score = if self.values_score {
+                    trial.values[0] * 100.
+                } else {
+                    *self.scores.get(at).or_else(|| self.scores.last()).unwrap_or(&50.)
+                };
+                result.scores.insert(trial.slot.clone(), score);
+            }
+            result.gaps.insert(trial.slot.clone(), vec!["attack too slow".into()]);
+            if self.structural {
+                result.structural.insert(trial.slot.clone(), StructuralMove { gap: "sub missing".into(), r#move: "add a sub".into() });
+            }
+        }
+        Ok(result)
+    }
+    async fn keep_best(&self, slot: &str, _: &[Knob], _: &[f64], signal: Signal) -> Result<String, RuntimeError> {
+        assert!(!signal.is_cancelled());
+        self.cleanup.borrow_mut().push(format!("keep:{slot}"));
+        Ok("Kumi · Goal best".into())
+    }
+    async fn settle(&self, _: &str, _: &[Knob], values: &[f64], signal: Signal) -> Result<Option<String>, RuntimeError> {
+        assert!(!signal.is_cancelled());
+        *self.settled.borrow_mut() = values.to_vec();
+        self.cleanup.borrow_mut().push("settle".into());
+        Ok(None)
+    }
+    async fn tidy(&self, top: &[String], signal: Signal) -> Result<Vec<String>, RuntimeError> {
+        assert!(!signal.is_cancelled());
+        self.cleanup.borrow_mut().push(format!("tidy:{}", top.join(",")));
+        Ok(vec![])
+    }
+    async fn close(&self) -> Result<Vec<String>, RuntimeError> {
+        self.cleanup.borrow_mut().push("close".into());
+        Ok(vec![])
+    }
+}
+fn goal_harness(rig: Rc<SearchRig>, reference: bool, config: impl FnOnce(&mut SessionOptions)) -> Harness {
+    let session = Rc::new(RefCell::new(None::<Session>));
+    let active = session.clone();
+    let run: Run = Rc::new(move |_, _, emit| {
+        let session = active.borrow().clone().unwrap();
+        async move {
+            if reference {
+                let mut heard = audition(50., "Drift");
+                heard.request.as_mut().unwrap().candidates[0].track = "Candidate".into();
+                heard.request.as_mut().unwrap().candidates[0].clip = Some("first".into());
+                session.watch(WatchEvent::Audition(heard));
+            }
+            emit(KernelEvent::Text { text: "Tried: a brighter filter".into() })?;
+            Ok(TurnResult { usage: Some(Usage { input_tokens: 10., output_tokens: 5., ..Default::default() }), ..complete() })
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), |o| {
+        o.goal_budget = Some(GoalBudget { ms: 2000, ..GOAL_BUDGET });
+        config(o)
+    });
+    *session.borrow_mut() = Some(h.session.clone());
+    *h.record.goal_rig.borrow_mut() = Some(rig);
+    h
+}
+async fn generation(session: &Session, n: u32) {
+    for _ in 0..500 {
+        if session.goal_status().is_some_and(|s| s.generation >= n) {
+            return;
+        }
+        delay(1).await;
+    }
+    panic!("goal did not reach generation {n}: {:?}", session.goal_status());
+}
+local_test!(goal_reaches_target_cleans_in_order_keeps_best_and_lesson, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_goal_store(dir.path().join("goals"));
+    let playbook = kumi_runtime::core::playbook::create_playbook_store(dir.path().join("lessons.json"));
+    let rig = Rc::new(SearchRig::new(vec![60., 75., 96.]));
+    let h = goal_harness(rig.clone(), true, |o| {
+        o.goals = Some(store.clone());
+        o.playbook = Some(playbook.clone());
+    });
+    h.session.start().await.unwrap();
+    h.session.goal(Some("make my pad sound like the reference")).await.unwrap();
+    let status = h.session.goal_status().unwrap();
+    assert_eq!(status.state, GoalPhase::Done);
+    assert_eq!(status.best.as_ref().unwrap().score, 96.);
+    assert_eq!(status.generation, 3);
+    assert_eq!(status.why.as_deref(), Some("reached 96%"));
+    assert_eq!(*rig.cleanup.borrow(), ["close", "tidy:Candidate", "keep:Candidate"]);
+    assert_eq!(h.record.calls.borrow().len(), 1);
+    assert_eq!(h.session.lessons().await.unwrap().len(), 1);
+    h.session.close().await.unwrap();
+    assert_eq!(store.load("unsaved").await.unwrap().unwrap().status, GoalRun::Done);
+});
+local_test!(goal_without_reference_finishes_regular_request_and_missing_rig_explains, {
+    let rig = Rc::new(SearchRig::new(vec![]));
+    let h = goal_harness(rig.clone(), false, |_| {});
+    h.session.start().await.unwrap();
+    h.session.goal(Some("build a complex rack")).await.unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Done);
+    assert!(h.notice("regular request"));
+    assert!(rig.calls.borrow().is_empty());
+    h.session.close().await.unwrap();
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.session.goal(Some("build a rack")).await.unwrap();
+    assert!(h.error("Context refresh failed"));
+    assert!(h.events.borrow().iter().any(|e| matches!(e, SessionEvent::Error { kind: Some(FailureKind::Request), .. })));
+    h.session.close().await.unwrap();
+});
+local_test!(goal_pauses_persists_resumes_without_setup_and_stop_finishes, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_goal_store(dir.path().join("goals"));
+    let mut raw = SearchRig::new(vec![55.]);
+    raw.ms = 25;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |o| {
+        o.goals = Some(store.clone());
+        o.idle_timeout_ms = Some(10);
+    });
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("match my reference")).await });
+    generation(&h.session, 2).await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Paused);
+    assert!(!h.error("without progress"));
+    assert!(!rig.cleanup.borrow().iter().any(|s| s.starts_with("tidy:")));
+    h.session.close().await.unwrap();
+    let kept = store.load("unsaved").await.unwrap().unwrap();
+    assert_eq!(kept.status, GoalRun::Paused);
+    let mut raw = SearchRig::new(vec![65.]);
+    raw.ms = 10;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |o| o.goals = Some(store.clone()));
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(None).await });
+    generation(&h.session, kept.generation + 1).await;
+    assert!(h.record.calls.borrow().is_empty());
+    assert!(h.session.stop_goal().await.unwrap());
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Done);
+    assert_eq!(h.session.goal_status().unwrap().why.as_deref(), Some("stopped"));
+    assert!(rig.cleanup.borrow().iter().any(|s| s.starts_with("tidy:")));
+    h.session.close().await.unwrap();
+    assert_eq!(store.load("unsaved").await.unwrap().unwrap().status, GoalRun::Done);
+    assert!(!h.session.stop_goal().await.unwrap());
+});
+local_test!(goal_silent_renders_pause_and_structural_gap_prompts_leap, {
+    let mut raw = SearchRig::new(vec![]);
+    raw.silent = true;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |_| {});
+    h.session.start().await.unwrap();
+    h.session.goal(Some("match the reference")).await.unwrap();
+    assert_eq!(rig.calls.borrow().len(), 2);
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Paused);
+    assert!(h.session.goal_status().unwrap().why.unwrap().contains("nothing came through"));
+    h.session.close().await.unwrap();
+    let mut raw = SearchRig::new(vec![55., 60., 96.]);
+    raw.structural = true;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |_| {});
+    h.session.start().await.unwrap();
+    h.session.goal(Some("match the reference")).await.unwrap();
+    assert_eq!(h.record.calls.borrow().len(), 2);
+    assert!(h.record.calls.borrow()[1].contains("Make a structural leap"));
+    assert!(h.record.calls.borrow()[1].contains("sub missing"));
+    assert!(h.record.calls.borrow()[1].contains("add a sub"));
+    assert_eq!(h.record.goal_requests.borrow().len(), 2);
+    assert!(h.record.goal_requests.borrow()[1].candidates.iter().all(|c| c.clip.as_deref() == Some("first")));
+    assert_eq!(h.session.goal_status().unwrap().idea.as_deref(), Some("a brighter filter"));
+    assert_eq!(rig.cleanup.borrow().iter().filter(|s| s.as_str() == "close").count(), 2);
+    h.session.close().await.unwrap();
+});
+local_test!(goal_full_length_checks_control_reported_scores_and_time_cap, {
+    let mut raw = SearchRig::new(vec![50., 55., 60., 65., 96.]);
+    raw.screens = true;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |_| {});
+    h.session.start().await.unwrap();
+    h.session.goal(Some("match the reference")).await.unwrap();
+    assert_eq!(h.session.goal_status().unwrap().best.unwrap().score, 96.);
+    assert_eq!(h.session.goal_status().unwrap().rendered, 5);
+    assert_eq!(rig.calls.borrow()[4].1.as_ref().unwrap().screen, Some(false));
+    h.session.close().await.unwrap();
+    let rig = Rc::new(SearchRig::new(vec![50.]));
+    let h = goal_harness(rig.clone(), true, |o| o.goal_budget = Some(GoalBudget { ms: 1, ..GOAL_BUDGET }));
+    h.session.start().await.unwrap();
+    h.session.goal(Some("match the reference")).await.unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Done);
+    assert_eq!(h.session.goal_status().unwrap().why.as_deref(), Some("the safety cap on its time"));
+    h.session.close().await.unwrap();
+});
+local_test!(match_polish_confirms_improvement_at_full_length_and_restores_if_not_better, {
+    for improves in [false, true] {
+        let mut raw = SearchRig::new(vec![50.]);
+        raw.values_score = improves;
+        let rig = Rc::new(raw);
+        let h = match_harness(vec![Some(("Drift", 50.)), None], |o| {
+            o.match_budget = Some(MatchBudget { rounds: 0, polish_ms: Some(50), ..MATCH_BUDGET });
+            let random = Rc::new(RefCell::new(kumi_runtime::core::evolve::seeded(123)));
+            o.goal_random = Some(Rc::new(move || (random.borrow_mut())()));
+        });
+        *h.record.goal_rig.borrow_mut() = Some(rig.clone());
+        h.session.start().await.unwrap();
+        h.session.submit("match this reference", None).await.unwrap();
+        assert_eq!(h.record.calls.borrow().len(), 2);
+        assert_eq!(rig.cleanup.borrow().as_slice(), ["close", "settle"]);
+        if improves {
+            assert!(h.record.calls.borrow()[1].contains("kept on the track"), "{}", h.record.calls.borrow()[1]);
+            assert!(rig.settled.borrow()[0] > 0.2);
+        } else {
+            assert!(h.record.calls.borrow()[1].contains("none beat it at full length"));
+            assert_eq!(*rig.settled.borrow(), [0.2]);
+        }
+        h.session.close().await.unwrap();
     }
 });

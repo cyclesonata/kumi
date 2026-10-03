@@ -214,7 +214,7 @@ pub fn goal_leap(
     best: Option<&Best>,
     gaps: &[String],
     stalled: bool,
-    structural: Option<&crate::audio::matching::Structural>,
+    structural: Option<&super::contracts::StructuralMove>,
 ) -> String {
     let trend = state.trend[state.trend.len().saturating_sub(8)..].iter().map(|v| to_string(*v)).collect::<Vec<_>>().join("% → ");
     let best = best.map(|b| format!("{}% ({})", to_string(b.score), b.label)).unwrap_or_else(|| "none yet".into());

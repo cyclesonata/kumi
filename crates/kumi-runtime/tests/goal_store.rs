@@ -1,8 +1,5 @@
 //! Goal persistence/prompts only; source goal.test.ts's session/search scenarios await integration.
-use kumi_runtime::{
-    audio::matching::{Structural, StructuralKind},
-    core::goal::*,
-};
+use kumi_runtime::{core::contracts::StructuralMove as Structural, core::goal::*};
 use serde_json::{json, Value};
 
 fn fixture() -> Value {
@@ -18,12 +15,9 @@ fn setup_and_structural_leap_prompts_match_typescript_exactly() {
         let state: GoalState = serde_json::from_value(case["state"].clone()).unwrap();
         let best: Option<Best> = serde_json::from_value(case["best"].clone()).unwrap();
         let gaps: Vec<String> = serde_json::from_value(case["gaps"].clone()).unwrap();
-        let structural = case.get("structural").map(|s| Structural {
-            kind: StructuralKind::MissingLow,
-            gap: s["gap"].as_str().unwrap().into(),
-            r#move: s["move"].as_str().unwrap().into(),
-            share: s["share"].as_f64().unwrap(),
-        });
+        let structural = case
+            .get("structural")
+            .map(|s| Structural { gap: s["gap"].as_str().unwrap().into(), r#move: s["move"].as_str().unwrap().into() });
         assert_eq!(goal_leap(&state, best.as_ref(), &gaps, case["stalled"].as_bool().unwrap(), structural.as_ref()), case["text"]);
     }
 }

@@ -1499,11 +1499,11 @@ pub struct KeptLine {
 }
 
 /// A lesson from matching sounds: its line, and when it was learned.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LessonEntry {
     pub id: String,
     pub line: String,
-    pub at: i64,
+    pub at: f64,
 }
 
 /// What running a recipe did, in words.

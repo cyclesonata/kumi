@@ -42,6 +42,14 @@ use tokio::{
     time::Instant,
 };
 
+mod goals;
+mod matching;
+use super::goal::{GoalBudget, GoalState, GoalStatus, GoalStore};
+use super::{
+    match_run::{MatchBudget, MatchRun},
+    playbook::PlaybookStore,
+};
+
 const UNSAVED: &str = "unsaved";
 const STILL_MISSING: &str =
     "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?";
@@ -75,6 +83,12 @@ pub struct SessionOptions {
     pub techniques: Option<Rc<dyn TechniqueStore>>,
     pub technique_settle_ms: Option<u64>,
     pub gaps: Option<String>,
+    pub matching: bool,
+    pub match_budget: Option<MatchBudget>,
+    pub playbook: Option<Rc<dyn PlaybookStore>>,
+    pub goal_random: Option<Rc<dyn Fn() -> f64>>,
+    pub goals: Option<Rc<dyn GoalStore>>,
+    pub goal_budget: Option<GoalBudget>,
 }
 impl SessionOptions {
     pub fn new(kernel_factory: KernelFactory, integration_factory: IntegrationFactory, on_event: Rc<dyn Fn(SessionEvent)>) -> Self {
@@ -99,6 +113,12 @@ impl SessionOptions {
             techniques: None,
             technique_settle_ms: None,
             gaps: None,
+            matching: true,
+            match_budget: None,
+            playbook: None,
+            goal_random: None,
+            goals: None,
+            goal_budget: None,
         }
     }
 }
@@ -162,6 +182,15 @@ struct Chosen {
     conversation: SavedConversation,
 }
 struct State {
+    matching: Option<Rc<RefCell<MatchRun>>>,
+    last_run: Option<Rc<RefCell<MatchRun>>>,
+    last_lesson: Option<matching::LastLesson>,
+    heard_last: Option<AuditionEvent>,
+    goal_state: Option<GoalState>,
+    goal_status: Option<GoalStatus>,
+    goal_op: Option<Rc<Operation>>,
+    goal_stopped: bool,
+    goal_reference: Option<String>,
     state: TurnState,
     connection: ConnectionState,
     observation: Option<String>,
@@ -199,6 +228,7 @@ struct Inner {
     options: SessionOptions,
     state: RefCell<State>,
     saving: RefCell<Done>,
+    playbook_queue: RefCell<Done>,
     notes: Option<MemoryTools>,
     learned: Option<Rc<TechniqueTools>>,
     watching: Vec<Rc<dyn KernelTool>>,
@@ -345,7 +375,17 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             browsing,
             gaps,
             saving: RefCell::new(ready()),
+            playbook_queue: RefCell::new(ready()),
             state: RefCell::new(State {
+                matching: None,
+                last_run: None,
+                last_lesson: None,
+                heard_last: None,
+                goal_state: None,
+                goal_status: None,
+                goal_op: None,
+                goal_stopped: false,
+                goal_reference: None,
                 state: TurnState::Idle,
                 connection: ConnectionState::Disconnected,
                 observation: None,
@@ -1200,37 +1240,7 @@ impl SessionController for Session {
         self.perform(
             true,
             Phase::Refresh,
-            Box::new(move |this, op| {
-                async move {
-                    let snapshot = this.observe(&op, pinned, false).await?;
-                    this.assert_current(&op)?;
-                    if let Some(l) = &this.0.learned {
-                        l.drafts.said(&text);
-                        l.drafts.turn_started(&text);
-                    }
-                    op.phase.set(Phase::Inference);
-                    let held = this.0.state.borrow().kernel.clone().unwrap();
-                    let current = this.clone();
-                    let progress = op.clone();
-                    let emit = Rc::new(move |event: KernelEvent| {
-                        if current.current(&progress) {
-                            progress.progress(Some(&event));
-                            current.emit(event.into());
-                        }
-                        Ok(())
-                    });
-                    Ok(Some(
-                        held.value
-                            .run(
-                                &format!("{text}{OBSERVATION_MARKER}\n{}\n</current_observation_untrusted>", snapshot.context),
-                                op.signal.clone(),
-                                emit,
-                            )
-                            .await?,
-                    ))
-                }
-                .boxed_local()
-            }),
+            Box::new(move |this, op| async move { this.submit_turn(op, text, pinned).await }.boxed_local()),
             None,
             Some(input.to_owned()),
         )?
@@ -1419,7 +1429,14 @@ impl SessionController for Session {
     }
     fn watch(&self, event: WatchEvent) {
         let mut change = match event {
-            WatchEvent::Audition(_) => return,
+            WatchEvent::Audition(event) => {
+                let run = self.0.state.borrow().matching.clone();
+                if let Some(run) = run {
+                    run.borrow_mut().auditioned(event.clone(), event.request.clone());
+                }
+                self.0.state.borrow_mut().heard_last = Some(event);
+                return;
+            }
             WatchEvent::Action(action) => {
                 if action.playing == Some(true) {
                     if let Some(l) = &self.0.learned {
@@ -1428,7 +1445,15 @@ impl SessionController for Session {
                 }
                 return;
             }
-            WatchEvent::Change(c) => c,
+            WatchEvent::Change(c) => {
+                if c.state == ChangeState::Applied {
+                    let run = self.0.state.borrow().matching.clone();
+                    if let Some(run) = run {
+                        run.borrow_mut().changed();
+                    }
+                }
+                c
+            }
         };
         if let Some(l) = &self.0.learned {
             l.drafts.change(change.clone());
@@ -1615,6 +1640,86 @@ impl SessionController for Session {
         } else {
             Ok(false)
         }
+    }
+    fn has_goal(&self) -> bool {
+        true
+    }
+    async fn goal(&self, text: Option<&str>) -> Result<(), RuntimeError> {
+        let goal = text.map(trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        {
+            let mut s = self.0.state.borrow_mut();
+            if s.state == TurnState::Closed {
+                return Err(RuntimeError::plain("Session is closed"));
+            }
+            if s.active.is_some() {
+                return Err(RuntimeError::plain("Session is busy; cancel first"));
+            }
+            if !s.started {
+                return Err(RuntimeError::plain("Session is not started"));
+            }
+            if goal.as_ref().is_some_and(|s| s.len() > 4096) {
+                return Err(RuntimeError::plain("Say the goal in at most 4 KiB"));
+            }
+            s.turns += 1;
+            s.interrupted = None;
+        }
+        let input = goal.as_ref().map(|s| format!("/goal {s}")).unwrap_or("/goal".into());
+        self.perform(
+            true,
+            Phase::Refresh,
+            Box::new(move |this, op| async move { this.run_goal(op, goal).await }.boxed_local()),
+            None,
+            Some(input),
+        )?
+        .await
+    }
+    fn has_stop_goal(&self) -> bool {
+        true
+    }
+    async fn stop_goal(&self) -> Result<bool, RuntimeError> {
+        self.stop_goal_inner().await
+    }
+    fn has_goal_status(&self) -> bool {
+        true
+    }
+    fn goal_status(&self) -> Option<GoalStatus> {
+        self.0.state.borrow().goal_status.clone()
+    }
+    fn has_lessons(&self) -> bool {
+        true
+    }
+    async fn lessons(&self) -> Result<Vec<LessonEntry>, RuntimeError> {
+        Ok(self
+            .playbook_serial(|s| async move { s.list().await }.boxed_local())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|l| LessonEntry { line: super::playbook::lesson_line(&l), id: l.id, at: l.at })
+            .collect())
+    }
+    fn has_forget_lesson(&self) -> bool {
+        true
+    }
+    async fn forget_lesson(&self, id: &str) -> Result<bool, RuntimeError> {
+        let this = self.clone();
+        let id = id.to_owned();
+        Ok(self
+            .playbook_serial(move |store| {
+                async move {
+                    let mut lessons = store.list().await?;
+                    let Some(at) = lessons.iter().position(|l| l.id == id) else {
+                        return Ok(false);
+                    };
+                    let gone = lessons.remove(at);
+                    store.save(&lessons).await?;
+                    this.emit(SessionEvent::Lesson { action: LessonAction::Forgot, id, line: super::playbook::lesson_line(&gone) });
+                    Ok(true)
+                }
+                .boxed_local()
+            })
+            .await
+            .unwrap_or(false))
     }
     fn has_stop_live(&self) -> bool {
         true
