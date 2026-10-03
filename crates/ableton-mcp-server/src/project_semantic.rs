@@ -23,10 +23,30 @@ pub(crate) fn fail(message: impl Into<String>) -> ProjectError {
     ProjectError(message.into())
 }
 pub fn compare_semantic_strings(left: &str, right: &str) -> Ordering {
-    left.encode_utf16().cmp(right.encode_utf16())
+    if left.is_ascii() && right.is_ascii() {
+        left.cmp(right)
+    } else {
+        left.encode_utf16().cmp(right.encode_utf16())
+    }
+}
+fn utf16_len(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
+    } else {
+        string::utf16_len(s)
+    }
 }
 pub fn canonical_semantic_json(value: &Value) -> Result<String, ProjectError> {
-    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> Result<String, ProjectError> {
+    fn quote(s: &str, out: &mut String) {
+        if s.bytes().any(|b| b < 32 || b == b'"' || b == b'\\') {
+            json::escape(s, out);
+        } else {
+            out.push('"');
+            out.push_str(s);
+            out.push('"');
+        }
+    }
+    fn visit(value: &Value, depth: usize, nodes: &mut usize, out: &mut String) -> Result<(), ProjectError> {
         *nodes += 1;
         if *nodes > 100_000_000 {
             return Err(fail("semantic artifact exceeds the canonical node bound"));
@@ -34,35 +54,52 @@ pub fn canonical_semantic_json(value: &Value) -> Result<String, ProjectError> {
         if depth > 24 {
             return Err(fail("semantic artifact exceeds the canonical depth bound"));
         }
-        Ok(match value {
-            Value::Null | Value::Bool(_) | Value::Number(_) => json::stringify(value),
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(&json::number(n)),
             Value::String(s) => {
-                if string::utf16_len(s) > 4096 {
+                if utf16_len(s) > 4096 {
                     return Err(fail("semantic artifact string exceeds the bound"));
                 }
-                json::stringify(value)
+                quote(s, out);
             }
             Value::Array(rows) => {
                 if rows.len() > 10_000_000 {
                     return Err(fail("semantic artifact array exceeds the bound"));
                 }
-                format!("[{}]", rows.iter().map(|row| visit(row, depth + 1, nodes)).collect::<Result<Vec<_>, _>>()?.join(","))
+                out.push('[');
+                for (i, row) in rows.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    visit(row, depth + 1, nodes, out)?;
+                }
+                out.push(']');
             }
             Value::Object(object) => {
-                if object.len() > 64 || object.keys().any(|key| string::utf16_len(key) > 128) {
+                if object.len() > 64 || object.keys().any(|key| utf16_len(key) > 128) {
                     return Err(fail("semantic artifact object exceeds field or key bounds"));
                 }
-                let mut keys: Vec<_> = object.keys().collect();
-                keys.sort_by(|a, b| compare_semantic_strings(a, b));
-                let mut rows = Vec::with_capacity(keys.len());
-                for key in keys {
-                    rows.push(format!("{}:{}", json::stringify(&json!(key)), visit(&object[key], depth + 1, nodes)?));
+                let mut entries: Vec<_> = object.iter().collect();
+                entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
+                out.push('{');
+                for (i, (key, value)) in entries.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    quote(key, out);
+                    out.push(':');
+                    visit(value, depth + 1, nodes, out)?;
                 }
-                format!("{{{}}}", rows.join(","))
+                out.push('}');
             }
-        })
+        }
+        Ok(())
     }
-    visit(value, 0, &mut 0)
+    let mut out = String::new();
+    visit(value, 0, &mut 0, &mut out)?;
+    Ok(out)
 }
 pub(crate) fn digest(value: &Value) -> Result<String, ProjectError> {
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(canonical_semantic_json(value)?))))
@@ -837,41 +874,51 @@ pub(crate) fn js_equal(a: &Value, b: &Value) -> bool {
 mod validation;
 pub use validation::validate_semantic_project_artifact;
 fn authority_audit(value: &Value, depth: usize) -> Result<(), ProjectError> {
-    if depth > 24 {
-        return Err(fail("semantic output exceeds the audit depth bound"));
-    }
-    if let Some(s) = value.as_str() {
-        if absolute_path(s) {
-            return Err(fail("semantic output contains an absolute, network, device, or file-URI path"));
+    fn visit<'a>(value: &'a Value, depth: usize, keys: &mut HashSet<&'a str>, strings: &mut HashSet<&'a str>) -> Result<(), ProjectError> {
+        if depth > 24 {
+            return Err(fail("semantic output exceeds the audit depth bound"));
         }
-        if authority(s) {
-            return Err(fail("semantic output contains reusable authority-like content"));
-        }
-        if live_reference(s) {
-            return Err(fail("semantic output contains a Live session reference-like value"));
-        }
-        return Ok(());
-    }
-    if let Some(rows) = value.as_array() {
-        for row in rows {
-            authority_audit(row, depth + 1)?;
-        }
-    }
-    if let Some(object) = value.as_object() {
-        static CAMEL: LazyLock<Regex> = LazyLock::new(|| regex("([a-z])([A-Z])"));
-        static FORBIDDEN: LazyLock<Regex> = LazyLock::new(|| {
-            regex("(?i)(?:^|_)(?:ref|objectIdentity|epoch|revision|transactionId|confirmation|token|secret|idempotencyKey|mac|authority|recoveryToken|preflightToken|accessToken|sessionRef)$")
-        });
-        for (key, child) in object {
-            if !["containsSessionReferences", "containsMutationAuthority", "crossRunIdentityClaimed"].contains(&key.as_str())
-                && FORBIDDEN.is_match(&CAMEL.replace_all(key, "${1}_${2}"))
-            {
-                return Err(fail(format!("semantic output contains forbidden session or authority field: {key}")));
+        if let Some(s) = value.as_str() {
+            if strings.contains(s) {
+                return Ok(());
             }
-            authority_audit(child, depth + 1)?;
+            if absolute_path(s) {
+                return Err(fail("semantic output contains an absolute, network, device, or file-URI path"));
+            }
+            if authority(s) {
+                return Err(fail("semantic output contains reusable authority-like content"));
+            }
+            if live_reference(s) {
+                return Err(fail("semantic output contains a Live session reference-like value"));
+            }
+            strings.insert(s);
+            return Ok(());
         }
+        if let Some(rows) = value.as_array() {
+            for row in rows {
+                visit(row, depth + 1, keys, strings)?;
+            }
+        }
+        if let Some(object) = value.as_object() {
+            static CAMEL: LazyLock<Regex> = LazyLock::new(|| regex("([a-z])([A-Z])"));
+            static FORBIDDEN: LazyLock<Regex> = LazyLock::new(|| {
+                regex("(?i)(?:^|_)(?:ref|objectIdentity|epoch|revision|transactionId|confirmation|token|secret|idempotencyKey|mac|authority|recoveryToken|preflightToken|accessToken|sessionRef)$")
+            });
+            for (key, child) in object {
+                if !keys.contains(key.as_str()) {
+                    if !["containsSessionReferences", "containsMutationAuthority", "crossRunIdentityClaimed"].contains(&key.as_str())
+                        && FORBIDDEN.is_match(&CAMEL.replace_all(key, "${1}_${2}"))
+                    {
+                        return Err(fail(format!("semantic output contains forbidden session or authority field: {key}")));
+                    }
+                    keys.insert(key);
+                }
+                visit(child, depth + 1, keys, strings)?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    visit(value, depth, &mut HashSet::new(), &mut HashSet::new())
 }
 fn artifact_digest_input(artifact: &Value) -> Value {
     let mut input = pick(artifact, &["schema", "policy", "provenance", "set", "manifest", "safety", "records"]);
