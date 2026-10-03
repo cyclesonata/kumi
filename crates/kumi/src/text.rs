@@ -35,6 +35,11 @@ impl StreamingText {
         StreamingText { state: State::Text, pending: String::new(), secrets: secrets.to_vec() }
     }
 
+    /// A key saved while the app is running joins its existing streaming redactions.
+    pub fn add_secret(&mut self, secret: String) {
+        self.secrets.push(secret);
+    }
+
     pub fn push(&mut self, input: &str) -> String {
         let mut clean = String::new();
         for character in input.chars() {

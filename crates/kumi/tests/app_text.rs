@@ -93,3 +93,14 @@ fn tty_input_keeps_split_utf8_as_complete_separate_codepoints() {
     assert!(source.paused.get());
     assert!(source.data.borrow().is_none());
 }
+
+#[test]
+fn newly_saved_secrets_redact_streamed_chunks_without_resetting_pending_controls() {
+    let mut text = StreamingText::new(&[]);
+    assert_eq!(text.push("hello "), "hello ");
+    assert_eq!(text.push("\x1b]0;hidden"), "");
+    text.add_secret("new-private-key".into());
+    assert_eq!(text.push("\x07new-private-"), "");
+    assert_eq!(text.push("key appeared"), "[redacted] appeared");
+    assert_eq!(text.finish(), "");
+}
