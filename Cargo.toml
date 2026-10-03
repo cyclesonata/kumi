@@ -31,7 +31,8 @@ percent-encoding = "2"
 fancy-regex = "0.14"
 rand = "0.9"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "brotli", "deflate", "http2"] }
+encoding_rs = "0.8"
 ryu = "1"
 # preserve_order: JSON objects keep insertion order, as JavaScript's do, so files and hashes come out the same.
 serde = { version = "1", features = ["derive"] }
