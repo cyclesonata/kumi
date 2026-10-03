@@ -248,7 +248,7 @@ const byPath = (path: string) => (/tracks 1 /.test(path) ? noise(12) : saw(12, 1
 test("an audition hears each candidate through Kumi's listening devices: nothing recorded, no track added, the devices gone after", async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
   const ears = fakeEars(() => b, byPath);
-  b = await opened({ transport: true, version: "1.0.72", renders: (source) => renders[source], restoreFile: join(scratch, "restore.json"), ears });
+  b = await opened({ transport: true, version: "1.0.73", renders: (source) => renders[source], restoreFile: join(scratch, "restore.json"), ears });
   try {
     const result = await tool(b.tools, "audition").execute({ candidates: [{ track: "track:1", label: "Saw" }, { track: "track:2", label: "Noise" }], from_beat: 8, beats: 2, reference, focus: "sound" }, signal());
     assert.equal(result.isError, false, result.text);
@@ -276,7 +276,7 @@ test("an audition hears each candidate through Kumi's listening devices: nothing
 test("when the listening device can't start (no Max for Live), the audition records instead", { timeout: 30_000 }, async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
   const ears = fakeEars(() => b, byPath, { silent: true });
-  b = await opened({ transport: true, version: "1.0.72", renders: (source) => renders[source], restoreFile: join(scratch, "restore-2.json"), ears });
+  b = await opened({ transport: true, version: "1.0.73", renders: (source) => renders[source], restoreFile: join(scratch, "restore-2.json"), ears });
   try {
     const result = await tool(b.tools, "audition").execute({ candidates: [{ track: "track:1", label: "Saw" }], from_beat: 8, beats: 2, reference, focus: "sound" }, signal());
     assert.equal(result.isError, false, result.text);
@@ -290,7 +290,7 @@ test("when the listening device can't start (no Max for Live), the audition reco
 test("with a bridge older than the listening device needs, Kumi records to listen, as before", { timeout: 30_000 }, async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
   const ears = fakeEars(() => b, byPath);
-  b = await opened({ transport: true, version: "1.0.71", renders: (source) => renders[source], restoreFile: join(scratch, "restore-old.json"), ears });
+  b = await opened({ transport: true, version: "1.0.72", renders: (source) => renders[source], restoreFile: join(scratch, "restore-old.json"), ears });
   try {
     const result = await tool(b.tools, "audition").execute({ candidates: [{ track: "track:1", label: "Saw" }], from_beat: 8, beats: 2, reference, focus: "sound" }, signal());
     assert.equal(result.isError, false, result.text);
@@ -302,7 +302,7 @@ test("with a bridge older than the listening device needs, Kumi records to liste
 test("listen hears a track in the Set by name: quietly over the loop while Live is stopped, and several tracks with what clashes while it plays", { timeout: 30_000 }, async () => {
   let b!: Awaited<ReturnType<typeof opened>>;
   const ears = fakeEars(() => b, (path) => (/tracks 1 /.test(path) ? saw(12, 112) : saw(12, 110)));
-  b = await opened({ transport: true, version: "1.0.72", renders: (source) => renders[source], restoreFile: join(scratch, "restore-3.json"), ears });
+  b = await opened({ transport: true, version: "1.0.73", renders: (source) => renders[source], restoreFile: join(scratch, "restore-3.json"), ears });
   const heard: HeardEvent[] = [];
   const [listen] = listeningTools({ onEvent: (event) => heard.push(event), hear: (request, given) => b.integration.hear!(request, given) });
   try {
