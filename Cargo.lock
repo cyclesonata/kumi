@@ -945,6 +945,7 @@ dependencies = [
  "hex",
  "hmac",
  "home",
+ "indexmap",
  "kumi-common",
  "libc",
  "memchr",
