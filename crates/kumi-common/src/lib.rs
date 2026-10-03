@@ -5,3 +5,5 @@
 pub mod abort;
 pub mod js;
 pub mod time;
+
+mod locale;

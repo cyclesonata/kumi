@@ -312,6 +312,7 @@ pub mod number {
 }
 
 pub mod string {
+    pub use crate::locale::locale_compare;
     /// `text.length`: UTF-16 code units.
     pub fn utf16_len(text: &str) -> usize {
         text.encode_utf16().count()
@@ -322,29 +323,19 @@ pub mod string {
         text.len()
     }
 
-    /// `text.slice(start, end)` in UTF-16 code units (negative indices count from the end). A cut
-    /// through a surrogate pair keeps the whole character out, since Rust strings can't hold half of one.
+    /// `text.slice(start, end)` in UTF-16 code units (negative indices count from the end).
+    /// A split surrogate becomes U+FFFD, matching Node's UTF-8 encoding of the sliced string.
+    /// Rust strings cannot retain an unpaired surrogate for later JSON `\uDxxx` serialization.
     pub fn slice(text: &str, start: i64, end: Option<i64>) -> String {
-        let len = utf16_len(text) as i64;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let len = units.len() as i64;
         let clamp = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
         let from = clamp(start);
         let to = end.map(clamp).unwrap_or(len);
         if to <= from {
             return String::new();
         }
-        let mut out = String::new();
-        let mut at: i64 = 0;
-        for ch in text.chars() {
-            let width = ch.len_utf16() as i64;
-            if at >= from && at + width <= to {
-                out.push(ch);
-            }
-            at += width;
-            if at >= to {
-                break;
-            }
-        }
-        out
+        String::from_utf16_lossy(&units[from as usize..to as usize])
     }
 
     /// `text.slice(0, max)`, for bounding what's shown or kept.
@@ -435,7 +426,12 @@ mod tests {
     fn strings_measure_in_utf16() {
         assert_eq!(string::utf16_len("a😀b"), 4);
         assert_eq!(string::slice("a😀b", 1, Some(3)), "😀");
-        assert_eq!(string::slice("a😀b", 1, Some(2)), "");
+        assert_eq!(string::slice("a😀b", 1, Some(2)), "�");
+        assert_eq!(string::slice("a😀b", 2, Some(3)), "�");
+        assert_eq!(string::slice("a😀b", 2, None), "�b");
+        assert_eq!(string::slice("😀😁", 1, Some(3)), "��");
+        assert_eq!(string::slice("a😀b", -2, None), "�b");
+        assert_eq!(string::head("a😀b", 2), "a�");
         assert_eq!(string::slice("hello", -3, None), "llo");
         assert_eq!(string::head("hello", 2), "he");
         assert_eq!(string::trim("\u{FEFF} x \n"), "x");

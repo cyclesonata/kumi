@@ -6,7 +6,7 @@ members = ["crates/kumi-common", "crates/kumi-runtime", "crates/ableton-mcp-serv
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/user1303836/kumi"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
 kumi-common = { path = "crates/kumi-common" }
@@ -25,6 +25,9 @@ hmac = "0.12"
 home = "0.5"
 # JavaScript's Map: insertion order kept.
 indexmap = "2"
+# JavaScript localeCompare uses ICU collation (the same major as URL normalization).
+icu_collator = "2.3"
+icu_locale_core = "2.3"
 libc = "0.2"
 memchr = "2"
 percent-encoding = "2"
