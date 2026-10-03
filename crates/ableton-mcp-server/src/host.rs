@@ -6,6 +6,7 @@
 pub mod audio;
 mod events;
 pub mod helpers;
+mod project;
 mod protocol;
 mod reads;
 mod resources;
@@ -85,6 +86,7 @@ pub struct McpHost {
     recovery_finalization_in_flight: Cell<bool>,
     active_async_operations: Cell<usize>,
     options: McpHostOptions,
+    semantic_exports: RefCell<VecDeque<project::SemanticExport>>,
 }
 impl Default for McpHost {
     fn default() -> Self {
@@ -151,6 +153,7 @@ impl McpHost {
             recovery_finalization_in_flight: Cell::new(false),
             active_async_operations: Cell::new(0),
             options,
+            semantic_exports: RefCell::new(VecDeque::new()),
         })
     }
     pub fn effective_tool_policy(&self) -> ToolPolicySpec {
