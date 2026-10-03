@@ -8,6 +8,28 @@ use std::rc::Rc;
 fn canonical(value: Value) -> String {
     canonical_json(&value, &UNBOUNDED_CANONICAL_LIMITS).unwrap()
 }
+fn normalize_paths(value: &mut Value) {
+    match value {
+        Value::Array(rows) => rows.iter_mut().for_each(normalize_paths),
+        Value::Object(rows) => {
+            for (key, value) in rows {
+                if key == "path" {
+                    if let Some(path) = value.as_str() {
+                        let root = std::env::temp_dir().to_string_lossy().trim_end_matches(std::path::MAIN_SEPARATOR).to_owned();
+                        if let Some(relative) = path.strip_prefix(&root) {
+                            let suffix =
+                                regex::Regex::new(r"kumi-simulated-render-\d+-").unwrap().replace(relative, "kumi-simulated-render-$$pid-");
+                            *value = json!(format!("$tmp{suffix}").replace('\\', "/"));
+                        }
+                    }
+                } else {
+                    normalize_paths(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 #[test]
 fn native_simulator_matches_typescript_state_results_events_and_authority_errors() {
     let scenarios: Vec<Value> = serde_json::from_str(include_str!("fixtures/simulator-oracle.json")).unwrap();
@@ -41,6 +63,18 @@ fn native_simulator_matches_typescript_state_results_events_and_authority_errors
                 "reconnect" => live.reconnect().map(|status| Some(serde_json::to_value(status).unwrap())),
                 method => panic!("unknown test action {method}"),
             };
+            if let Some(hash) = step["renderSha256"].as_str() {
+                let output = result.as_ref().unwrap().as_ref().unwrap();
+                let path = output["path"].as_str().unwrap();
+                let bytes = std::fs::read(path).unwrap();
+                use sha2::Digest;
+                assert_eq!(hex::encode(sha2::Sha256::digest(&bytes)), hash);
+                assert_eq!(bytes.len() as u64, output["bytes"].as_u64().unwrap());
+                std::fs::remove_file(path).unwrap();
+            }
+            if let Ok(Some(value)) = &mut result {
+                normalize_paths(value);
+            }
             if step["invocation"]["operation"] == "observe.subscribe" && step.get("error").is_none() {
                 let result = result.as_mut().unwrap().as_mut().unwrap();
                 let id = result["subscriptionId"].as_str().unwrap();

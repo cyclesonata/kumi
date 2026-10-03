@@ -4179,6 +4179,13 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "render.offline"
+            | "arrangement.midi-clip.create"
+            | "clip.clear-range"
+            | "device.duplicate"
+            | "drum-pad.sample-chain"
+            | "project.import"
+            | "transaction.group" => self.invoke_extension(operation, args),
             "observe.subscribe" | "observe.poll" | "observe.unsubscribe" => self.invoke_observe(operation, args),
             "session.capture-midi" | "scene.capture" | "session.audition-launch" | "session.audition-stop" | "session.emergency-stop" => {
                 self.invoke_session(operation, args)
@@ -5462,3 +5469,6 @@ mod simulator_session;
 
 #[path = "live_simulator_observe.rs"]
 mod simulator_observe;
+
+#[path = "live_simulator_extensions.rs"]
+mod simulator_extensions;
