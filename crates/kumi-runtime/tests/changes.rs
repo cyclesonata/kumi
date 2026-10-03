@@ -101,19 +101,26 @@ fn change_schemas_outputs_permanence_and_human_messages_match_source() {
 }
 
 #[test]
-fn base_change_summaries_match_complete_source_outputs() {
+fn all_change_summaries_match_complete_source_outputs() {
     let data: Value = serde_json::from_str(include_str!("support/change-summaries-oracle.json")).unwrap();
     let track =
         |value: &Value| value.as_str().and_then(|key| data["tracks"].get(key)).map(|value| serde_json::from_value(value.clone()).unwrap());
-    for case in data["cases"].as_array().unwrap() {
-        let result = kind(case)
-            .summarize_base(
-                case["preview"].as_object().unwrap(),
-                case["input"].as_object().unwrap(),
-                &track,
-                case.get("applied").and_then(Value::as_object),
-            )
-            .unwrap();
+    let values = data["values"].as_array().unwrap();
+    for compact in data["cases"].as_array().unwrap() {
+        let mut case = compact.clone();
+        for (key, value) in case.as_object_mut().unwrap() {
+            if key != "tool" {
+                *value = values[value.as_u64().unwrap() as usize].clone();
+            }
+        }
+        let meter = &case["meter"];
+        kumi_runtime::integrations::ableton::more_changes::set_meter(meter[0].as_f64().unwrap(), meter[1].as_f64().unwrap());
+        let result = kind(&case).summarize(
+            case["preview"].as_object().unwrap(),
+            case["input"].as_object().unwrap(),
+            &track,
+            case.get("applied").and_then(Value::as_object),
+        );
         let actual: Value = serde_json::from_str(&stringify(&serde_json::to_value(result).unwrap())).unwrap();
         assert_eq!(actual, case["value"], "{case}");
     }

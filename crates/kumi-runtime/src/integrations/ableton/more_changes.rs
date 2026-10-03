@@ -1,4 +1,4 @@
-//! Meter-aware change descriptions. The remaining change catalog is ported separately.
+//! Meter-aware change descriptions and the additional Live change catalog.
 use kumi_common::js::number::{parse, to_fixed, to_string};
 use std::cell::Cell;
 thread_local! {static BEATS_PER_BAR:Cell<f64>=const{Cell::new(4.0)};}
@@ -33,4 +33,10 @@ pub fn span(beats: f64) -> String {
 }
 pub const MORE_REFERENCE_FIELDS: &[&str] =
     &["targetRef", "targetTrackRef", "targetChainRef", "slotRef", "sceneRef", "takeLaneRef", "destinationTrackRef", "locatorRef"];
-// TODO(port): MORE_CHANGES catalog, preparation, and summaries.
+pub static MORE_CHANGES: std::sync::LazyLock<Vec<&'static super::changes::ChangeKind>> = std::sync::LazyLock::new(|| {
+    let names: Vec<String> = serde_json::from_str(include_str!("more-change-tools.json")).unwrap();
+    names
+        .iter()
+        .map(|name| super::changes::CHANGES.iter().find(|kind| &kind.tool == name).expect("additional change is in full catalog"))
+        .collect()
+});

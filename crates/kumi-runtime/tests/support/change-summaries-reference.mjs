@@ -1,9 +1,9 @@
 import {writeFileSync} from 'node:fs';
 import {CHANGES} from '../../../../packages/runtime/dist/src/integrations/ableton/changes.js';
-import {MORE_CHANGES} from '../../../../packages/runtime/dist/src/integrations/ableton/more-changes.js';
+import {MORE_CHANGES, setMeter} from '../../../../packages/runtime/dist/src/integrations/ableton/more-changes.js';
 const tracks={'t1':{name:'Bass',color:'#c08040'},'7:track:2':{name:'Kick'},'empty':{name:'',color:''}};
-const cases=[];
-const add=(tool,preview={},input={},applied)=>{const kind=CHANGES.find(k=>k.tool===tool);cases.push({tool,preview,input,...(applied===undefined?{}:{applied}),value:kind.summarize(preview,input,ref=>tracks[ref],applied)});};
+const cases=[]; let meter=[4,4];
+const add=(tool,preview={},input={},applied)=>{const kind=CHANGES.find(k=>k.tool===tool);cases.push({tool,preview,input,meter,...(applied===undefined?{}:{applied}),value:kind.summarize(preview,input,ref=>tracks[ref],applied)});};
 for(const kind of CHANGES.filter(k=>!MORE_CHANGES.includes(k)))add(kind.tool);
 const fields=[null,false,'',0,1,-1,0.33333,'  padded  ',[],{}];
 for(const v of fields){
@@ -28,4 +28,39 @@ for(const parameters of [[],[{ref:'p',name:'Drive',currentValue:0,proposedValue:
 for(const color of [-1,0,16777215,16777216,1.5,123456])add('set_track_color',{}, {ref:'t1'},{color});
 for(const input of [{},{start:0,end:32,startName:'Intro',endName:'Drop'}, {start:1.005,end:1.99999}, {startName:'x'.repeat(100),endName:'　'}])add('set_locators',{},input);
 for(const deviceRef of ['7:device:2','7:device:2:chain:1','bad',null])for(const action of ['sidechain','routing'])add('set_sidechain',{}, {deviceRef,action,routingType:'Kick'});
-writeFileSync(new URL('./change-summaries-oracle.json',import.meta.url),JSON.stringify({tracks,cases})+'\n');
+const rich = { trackRef:'7:track:2', clipRef:'7:clip:2:1', deviceRef:'7:device:2:1', ref:'7:device:2:1', targetTrackRef:'t1',
+    loopEnabled:true,loopStart:4,loopLength:8,loopEnd:16,metronome:true,punchIn:false,punchOut:true,position:10,
+    inputType:' Kick ',inputSubRouting:'Post FX',outputType:'Main',outputSubRouting:'Stereo',arm:true,monitoring:'auto',
+    trackActivator:false,crossfadeAssign:2,panningMode:1,crossfader:.3,kind:'macro-name',macroIndex:2,mappingIndex:4,
+    minimum:0,maximum:100,fadeMinimum:4,fadeMaximum:80,muted:true,looping:true,launchMode:2,launchQuantization:1,colorIndex:6,
+    legato:true,velocityAmount:.635,ramMode:false,pitchCoarse:5,pitchFine:-2,gain:.5,warping:false,warpMode:6,fadeInLength:1,
+    arrangementPosition:8,targetSceneIndex:2,source:'7:clip:2:1',length:8,name:'Rich',action:'set',setting:'sample.slice_mode',
+    notes:[{pitch:60,start:0,duration:1,velocity:100},{}],noteIds:[1,2],grid:1,transform:'transpose',params:{semitones:-12},
+    points:[{},{}],tempo:125.005,tempoEnabled:true,signatureNumerator:7,signatureDenominator:8,swingAmount:.335,
+    clipTriggerQuantization:1,midiRecordingQuantization:4,enabled:true,index:-1,mute:true,solo:false,autoColor:true,
+    rootNote:1,scaleName:'  Minor  ',grooveAmount:1.25,filePath:'/samples/Kick.wav',sceneIndex:1,fromBeat:4,toBeat:32,start:4};
+for(meter of [[4,4],[7,8],[3,4]]) {
+ setMeter(...meter);
+ for(const kind of MORE_CHANGES){
+   add(kind.tool); add(kind.tool,{},rich); add(kind.tool,{...rich,proposed:rich,prior:{...rich,loop:{start:0,length:4,enabled:false},loopStart:0,loopEnd:8,looping:false,signatureNumerator:4,signatureDenominator:4,swingAmount:0},destination:rich,payload:rich,target:rich,device:rich,clip:rich,scene:rich,track:{...rich,alsoDeletes:[{},{}]},locator:rich,diff:{add:1,update:2,delete:3},removes:[{}],cuts:[{},{}]},rich,{partial:{made:1,of:2}});
+ }
+ for(const input of [{},{loopStart:null},{loopEnabled:true},{loopEnabled:false},{loopStart:4,loopLength:8},{metronome:false,punchIn:true,punchOut:false,position:0}])add('set_transport',{prior:{loop:{enabled:true,start:0,length:16}},proposed:input});
+ for(const action of ['quantize','quantize-pitch','select','delete-range','duplicate','crop','duplicate-loop','duplicate-region','insert','insert-step','create-envelope','delete-envelope','create-return','delete-return','duplicate-track','modulate','slice-clear','set-amount','add','delete'])for(const tool of ['edit_notes','edit_clip','set_automation','change_structure','edit_device','set_groove','set_warp_markers'])add(tool,{prior:{length:4},notes:3},{...rich,action});
+ for(const kind of ['key-zone','velocity-zone','selector-zone','macro-name','variation-name','macro-mapping', ['key-zone']])for(const mappingIndex of [null,0,.5,'2'])add('edit_rack_mapping',{proposed:{minimum:4,fadeMaximum:64}},{...rich,kind,mappingIndex,name:{name:'object'}});
+ for(const n of [-1,0,.5,1,3,4,6,12,null,'1']){
+   add('set_clip',{prior:{loopStart:2,loopEnd:6,looping:true},proposed:{launchMode:n,velocityAmount:n,looping:true,loopStart:n}},{clipRef:rich.clipRef});
+   add('set_audio_clip',{proposed:{pitchCoarse:n,pitchFine:n,warpMode:n}},{...rich,gain:null});
+   add('set_mixer_options',{proposed:{crossfadeAssign:n,panningMode:n}},rich);
+   add('set_scale',{}, {rootNote:n,scaleName:'　Dorian\tMode　'});
+   add('set_song',{prior:{signatureNumerator:null,signatureDenominator:'a',swingAmount:n},proposed:{signatureNumerator:n,swingAmount:n}});
+   add('set_scene',{proposed:{tempo:n,tempoEnabled:n,signatureNumerator:3,signatureDenominator:4}});
+   add('move_device',{}, {...rich,index:n});
+ }
+ for(const ref of ['7:track:2','7:clip:2:0','7:arrangement_clip:2','7:device:2:0','7:chain:2:1','7:clip_slot:2:0','7:slot:2','7:drum_pad:2:36','7:clip:22','7:clip:2x','7:track:2x','7:device:2x',null])add('set_device_details',{}, {deviceRef:ref});
+ for(const clips of [[],[rich],[rich,{...rich,trackRef:'t1'}],[null,{notes:[{},{}]}],[{trackRef:'t1',notes:[{pitch:40,start:0,duration:0},{pitch:42,start:0,duration:1}],length:4}], [{notes:Array.from({length:520},(_,i)=>({pitch:i%128,start:i/4,duration:1})),length:32,start:8}]])for(const partial of [{},{made:0,of:2},{made:1,of:1},{made:'1',of:2}])add('write_arrangement_clip',{}, {clips},{partial});
+}
+const values=[], indexed=new Map();
+const ref=value=>{const key=JSON.stringify(value);if(!indexed.has(key)){indexed.set(key,values.length);values.push(value);}return indexed.get(key);};
+const compact=cases.map(({tool,...fields})=>({tool,...Object.fromEntries(Object.entries(fields).map(([key,value])=>[key,ref(value)]))}));
+writeFileSync(new URL('./change-summaries-oracle.json',import.meta.url),JSON.stringify({tracks,values,cases:compact})+'\n');
+writeFileSync(new URL('../../src/integrations/ableton/more-change-tools.json',import.meta.url),JSON.stringify(MORE_CHANGES.map(k=>k.tool))+'\n');

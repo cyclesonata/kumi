@@ -1,4 +1,5 @@
 //! Native change preparation and metadata for Live's guarded preview/apply operations.
+mod more_summaries;
 mod summaries;
 use crate::core::{contracts::*, errors::RuntimeError};
 use async_trait::async_trait;
@@ -286,6 +287,17 @@ async fn resolve_parameters(given: &JsonObject, context: &dyn ChangeContext) -> 
     displayed(input, context).await
 }
 impl ChangeKind {
+    pub fn summarize(
+        &self,
+        preview: &JsonObject,
+        input: &JsonObject,
+        track: &dyn Fn(&Value) -> Option<KnownTrack>,
+        applied: Option<&JsonObject>,
+    ) -> ChangeSummary {
+        summaries::base(self, preview, input, track, applied)
+            .or_else(|| more_summaries::more(self, preview, input, track, applied))
+            .expect("change catalog has a summary for every kind")
+    }
     pub fn has(&self, method: &str) -> bool {
         self.methods.iter().any(|m| m == method)
     }
@@ -602,18 +614,5 @@ pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState,
         score: None,
         note: None,
         at,
-    }
-}
-// The change descriptions are implemented separately from their preparation.
-
-impl ChangeKind {
-    pub fn summarize_base(
-        &self,
-        preview: &JsonObject,
-        input: &JsonObject,
-        track: &dyn Fn(&Value) -> Option<KnownTrack>,
-        applied: Option<&JsonObject>,
-    ) -> Option<ChangeSummary> {
-        summaries::base(self, preview, input, track, applied)
     }
 }
