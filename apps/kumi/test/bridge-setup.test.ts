@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { setupBridge, type BridgeSetupIo, type Ran } from "../src/bridge-setup.js";
+import { systemProgram } from "@kumi/runtime";
+import { isLiveRunning, setupBridge, type BridgeSetupIo, type Ran } from "../src/bridge-setup.js";
 import { formerExtensionsDir, liveExtensionsDir, removeFormerExtension } from "../src/live-extension.js";
 
 /** A repository bridge at `bundled`, Live's Remote Scripts folder, and (with `installed`) a bridge installed there. */
@@ -96,6 +98,35 @@ test("a first install packs Kumi's bridge, then has its lifecycle plan and apply
     assert(apply!.args.includes("--apply") && apply!.args.includes("--confirm-live-stopped"));
     assert(!apply!.args.includes("--allow-dirty-private-build"), "only a developer asks for that");
     assert.match(w.out, /choose AbletonMcpBridge as a Control Surface/);
+  } finally { w.done(); }
+});
+
+test("an installed Kumi copies the bridge its release prepared, without npm, and refuses a copy that doesn't match its checksum", async () => {
+  const w = world({ bundled: "1.0.34" });
+  try {
+    const prepared = join(w.root, "prepared");
+    const packageRoot = join(prepared, "package", "node_modules", "@ableton-mcp", "mcp-server");
+    mkdirSync(join(packageRoot, "dist", "src"), { recursive: true });
+    writeFileSync(join(packageRoot, "dist", "src", "lifecycle-cli.js"), "");
+    writeFileSync(join(prepared, "bridge.tgz"), "tarball bytes");
+    const sha = createHash("sha256").update("tarball bytes").digest("hex");
+    writeFileSync(join(prepared, "prepared.json"), JSON.stringify({ artifact: "bridge.tgz", sha256: sha }));
+    w.lifecycle.push(answer({ version: "ableton-mcp-lifecycle/v1", action: "install", applied: false, state: "planned" }),
+      answer({ version: "ableton-mcp-lifecycle/v1", action: "install", applied: true, state: "installed-restart-required" }));
+    assert.equal(await setupBridge(w.io({ prepared })), 0, w.out);
+    assert.ok(!w.calls.some((call) => call.command === "npm"), "nothing packed or installed");
+    const flag = (args: readonly string[], name: string) => args[args.indexOf(name) + 1]!;
+    const plan = w.calls[0]!;
+    assert.equal(readFileSync(flag(plan.args, "--artifact"), "utf8"), "tarball bytes");
+    assert.equal(flag(plan.args, "--artifact-sha256"), sha);
+    assert.ok(existsSync(join(flag(plan.args, "--package-root"), "dist", "src", "lifecycle-cli.js")), "its package is copied beside it");
+    assert.match(w.out, /Copying the bridge…\nInstalling Live's Remote Script and the bridge…\nDone: the Ableton bridge 1\.0\.34 is installed/);
+
+    writeFileSync(join(prepared, "prepared.json"), JSON.stringify({ artifact: "bridge.tgz", sha256: "0".repeat(64) }));
+    const ran = w.calls.length;
+    assert.equal(await setupBridge(w.io({ prepared })), 1);
+    assert.match(w.out, /Kumi's copy of the bridge is damaged/);
+    assert.equal(w.calls.length, ran, "nothing runs");
   } finally { w.done(); }
 });
 
@@ -243,4 +274,16 @@ test("on Windows, the extension Kumi 1.6.0 put in %APPDATA%\\Ableton, which Live
     assert.equal(removeFormerExtension(env, "win32"), true);
     assert.equal(existsSync(join(former, "kumi.kumi")), false); assert.equal(existsSync(join(former, "someone.else")), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("on Windows, whether Live is open is asked of Get-Process, which answers in a moment; tasklist only when PowerShell won't start", { skip: process.platform !== "win32" && "Windows only" }, async () => {
+  const asked: string[] = [];
+  const ran = (code: number, stdout: string): Ran => ({ code, stdout, stderr: "" });
+  const computer = (powershell: Ran, tasklist: Ran) => async (command: string) => { asked.push(command); return command === systemProgram("powershell") ? powershell : tasklist; };
+  assert.equal(await isLiveRunning(computer(ran(0, "1138176\r\n"), ran(0, ""))), true);
+  assert.equal(await isLiveRunning(computer(ran(0, ""), ran(0, "Ableton Live 12 Suite.exe  4242 Console  1  900,000 K"))), false, "Get-Process's answer stands");
+  assert.deepEqual(asked, [systemProgram("powershell"), systemProgram("powershell")], "tasklist isn't asked");
+  asked.length = 0;
+  assert.equal(await isLiveRunning(computer(ran(1, ""), ran(0, "Ableton Live 12 Suite.exe  4242 Console  1  900,000 K"))), true);
+  assert.deepEqual(asked, [systemProgram("powershell"), systemProgram("tasklist")]);
 });
