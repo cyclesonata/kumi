@@ -1,0 +1,930 @@
+//! Session behavior ported from packages/runtime/test/session.test.ts.
+use async_trait::async_trait;
+use futures::{future::LocalBoxFuture, FutureExt};
+use kumi_common::abort::Signal;
+use kumi_runtime::{
+    core::{
+        contracts::*,
+        errors::{FailureKind, KumiError, RuntimeError},
+        session::*,
+    },
+    integrations::ableton::project::create_conversation_store,
+    kernel::budget::{transcript_of, OBSERVATION_MARKER},
+};
+use serde_json::{json, Value};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
+use tokio::sync::{oneshot, Notify};
+
+type Run = Rc<dyn Fn(String, Signal, KernelEmit) -> LocalBoxFuture<'static, Result<TurnResult, RuntimeError>>>;
+fn complete() -> TurnResult {
+    TurnResult { stop_reason: StopReason::Completed, usage: None }
+}
+fn cancelled() -> TurnResult {
+    TurnResult { stop_reason: StopReason::Cancelled, usage: Some(Usage { input_tokens: 4., output_tokens: 3., ..Default::default() }) }
+}
+async fn delay(ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+async fn settle() {
+    for _ in 0..12 {
+        tokio::task::yield_now().await;
+    }
+}
+#[derive(Default)]
+struct Record {
+    calls: RefCell<Vec<String>>,
+    created: RefCell<Vec<KernelOptions>>,
+    closes: Cell<usize>,
+    integration_closes: Cell<usize>,
+    observations: Cell<usize>,
+    stops: Cell<usize>,
+    stop_works: Cell<bool>,
+    listeners: RefCell<Vec<ConnectionListener>>,
+    refresh_error: Cell<bool>,
+}
+struct TestKernel {
+    record: Rc<Record>,
+    history: RefCell<Vec<Value>>,
+    run: Option<Run>,
+}
+#[async_trait(?Send)]
+impl Kernel for TestKernel {
+    async fn run(&self, input: &str, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
+        self.record.calls.borrow_mut().push(input.into());
+        self.history.borrow_mut().push(json!({"role":"user","content":input.split(OBSERVATION_MARKER).next().unwrap()}));
+        if let Some(run) = &self.run {
+            run(input.into(), signal, emit).await
+        } else {
+            emit(KernelEvent::Text { text: "answer".into() })?;
+            Ok(complete())
+        }
+    }
+    async fn close(&self) {
+        self.record.closes.set(self.record.closes.get() + 1);
+    }
+    fn has_checkpoint(&self) -> bool {
+        true
+    }
+    fn checkpoint(&self) -> Result<KernelCheckpoint, RuntimeError> {
+        Ok(KernelCheckpoint { version: 1, messages: self.history.borrow().clone(), origin: None, tools: None })
+    }
+    fn has_transcript(&self) -> bool {
+        true
+    }
+    fn transcript(&self) -> Vec<TranscriptLine> {
+        transcript_of(&self.history.borrow())
+    }
+}
+struct TestIntegration {
+    record: Rc<Record>,
+    observation: Rc<RefCell<Observation>>,
+    listener: ConnectionListener,
+}
+#[async_trait(?Send)]
+impl Integration for TestIntegration {
+    async fn start(&self, _: Signal) -> Result<(), RuntimeError> {
+        (self.listener)(ConnectionState::Connecting, None);
+        (self.listener)(ConnectionState::Connected, None);
+        Ok(())
+    }
+    async fn observe(&self, _: Signal, _: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
+        self.record.observations.set(self.record.observations.get() + 1);
+        if self.record.refresh_error.get() {
+            return Err(RuntimeError::plain("secret-token-must-not-escape"));
+        }
+        Ok(self.observation.borrow().clone())
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        self.record.integration_closes.set(self.record.integration_closes.get() + 1);
+        Ok(())
+    }
+    fn has_stop_live(&self) -> bool {
+        true
+    }
+    async fn stop_live(&self, _: Signal) -> Result<bool, RuntimeError> {
+        self.record.stops.set(self.record.stops.get() + 1);
+        Ok(self.record.stop_works.get())
+    }
+}
+struct Harness {
+    session: Session,
+    record: Rc<Record>,
+    events: Rc<RefCell<Vec<SessionEvent>>>,
+    observation: Rc<RefCell<Observation>>,
+}
+fn harness(run: Option<Run>, config: impl FnOnce(&mut SessionOptions)) -> Harness {
+    let record = Rc::new(Record::default());
+    record.stop_works.set(true);
+    let observation = Rc::new(RefCell::new(Observation {
+        key: "epoch:1".into(),
+        revision: None,
+        label: "Fixture Set".into(),
+        context: "fresh fixture context".into(),
+        instructions: "fixture instructions".into(),
+        tools: vec![],
+        project: None,
+        tracks: None,
+        saved_at: None,
+    }));
+    let events = Rc::new(RefCell::new(vec![]));
+    let out = events.clone();
+    let r = record.clone();
+    let factory: KernelFactory = Rc::new(move |options| {
+        r.created.borrow_mut().push(options.clone());
+        let record = r.clone();
+        let run = run.clone();
+        async move {
+            Ok(Rc::new(TestKernel { record, history: RefCell::new(options.checkpoint.map(|c| c.messages).unwrap_or_default()), run })
+                as Rc<dyn Kernel>)
+        }
+        .boxed_local()
+    });
+    let r = record.clone();
+    let obs = observation.clone();
+    let integration: IntegrationFactory = Box::new(move |listener| {
+        r.listeners.borrow_mut().push(listener.clone());
+        Rc::new(TestIntegration { record: r.clone(), observation: obs.clone(), listener })
+    });
+    let mut options = SessionOptions::new(factory, integration, Rc::new(move |e| out.borrow_mut().push(e)));
+    options.timeout_ms = Some(5000);
+    options.cancel_grace_ms = Some(10);
+    options.close_timeout_ms = Some(25);
+    options.missing_after_ms = Some(30);
+    config(&mut options);
+    Harness { session: create_session(options).unwrap(), record, events, observation }
+}
+impl Harness {
+    fn connection(&self, state: ConnectionState, cause: Option<DisconnectCause>) {
+        let listener = self.record.listeners.borrow().last().unwrap().clone();
+        listener(state, cause);
+    }
+    fn error(&self, text: &str) -> bool {
+        self.events.borrow().iter().any(|e| matches!(e, SessionEvent::Error{message,..} if message.contains(text)))
+    }
+    fn notice(&self, text: &str) -> bool {
+        self.events.borrow().iter().any(|e| matches!(e, SessionEvent::Notice{message} if message.contains(text)))
+    }
+    fn words(&self, index: usize) -> Option<Vec<String>> {
+        self.record.created.borrow()[index]
+            .checkpoint
+            .as_ref()
+            .map(|c| c.messages.iter().map(|m| m["content"].as_str().unwrap().to_owned()).collect())
+    }
+}
+macro_rules! local_test { ($name:ident,$body:block) => { #[tokio::test(flavor="current_thread")] async fn $name() { tokio::task::LocalSet::new().run_until(async $body).await; } }; }
+fn hang_once() -> Run {
+    let n = Rc::new(Cell::new(0));
+    Rc::new(move |_, _, _| {
+        let hang = n.get() == 0;
+        n.set(n.get() + 1);
+        async move {
+            if hang {
+                futures::future::pending::<()>().await;
+            }
+            Ok(complete())
+        }
+        .boxed_local()
+    })
+}
+fn spawned(session: &Session, text: &str) -> tokio::task::JoinHandle<Result<(), RuntimeError>> {
+    let session = session.clone();
+    let text = text.to_owned();
+    tokio::task::spawn_local(async move { session.submit(&text, None).await })
+}
+
+local_test!(fresh_context_events_concurrency_and_stop_live, {
+    let gate = Rc::new(Notify::new());
+    let hold = gate.clone();
+    let h = harness(
+        Some(Rc::new(move |_, _, emit| {
+            let gate = hold.clone();
+            async move {
+                emit(KernelEvent::Text { text: "hello".into() })?;
+                emit(KernelEvent::ToolStart { id: "t1".into(), name: "read_fixture".into() })?;
+                emit(KernelEvent::ToolEnd { id: "t1".into(), name: "read_fixture".into(), elapsed_ms: 3, is_error: false })?;
+                gate.notified().await;
+                Ok(TurnResult { usage: Some(Usage { input_tokens: 5., output_tokens: 2., ..Default::default() }), ..complete() })
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    let running = spawned(&h.session, "question");
+    settle().await;
+    assert!(h.session.submit("second", None).await.unwrap_err().to_string().contains("busy"));
+    assert_eq!(h.session.status().state, TurnState::Running);
+    assert!(h.record.calls.borrow()[0].contains("fresh fixture context"));
+    assert!(h.session.stop_live().await.unwrap());
+    assert_eq!(h.record.stops.get(), 1);
+    assert_eq!(h.session.status().state, TurnState::Running);
+    gate.notify_one();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.record.observations.get(), 2);
+    assert_eq!(h.events.borrow().iter().filter(|e| matches!(e, SessionEvent::Kernel(KernelEvent::Text { .. }))).count(), 1);
+    assert!(h
+        .events
+        .borrow()
+        .iter()
+        .any(|e| matches!(e,SessionEvent::TurnComplete{result,..} if result.usage.as_ref().is_some_and(|u|u.input_tokens==5.))));
+    h.record.stop_works.set(false);
+    assert!(!h.session.stop_live().await.unwrap());
+    assert_eq!(h.events.borrow().iter().filter(|e| matches!(e, SessionEvent::Action(_))).count(), 1);
+    assert_eq!(h.session.status().state, TurnState::Idle);
+    h.session.close().await.unwrap();
+});
+local_test!(uncooperative_cancel_fences_late_events_and_recovers, {
+    let emit = Rc::new(RefCell::new(None::<KernelEmit>));
+    let old = emit.clone();
+    let gate = Rc::new(Notify::new());
+    let hold = gate.clone();
+    let calls = Rc::new(Cell::new(0));
+    let h = harness(
+        Some(Rc::new(move |_, _, out| {
+            let first = calls.get() == 0;
+            calls.set(calls.get() + 1);
+            let hold = hold.clone();
+            if first {
+                *old.borrow_mut() = Some(out.clone());
+            }
+            async move {
+                if first {
+                    hold.notified().await;
+                } else {
+                    out(KernelEvent::Text { text: "fresh".into() })?;
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    h.session.cancel().await.unwrap();
+    let running = spawned(&h.session, "cancel me");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("next", None).await.unwrap();
+    emit.borrow().as_ref().unwrap()(KernelEvent::Text { text: "stale".into() }).unwrap();
+    gate.notify_one();
+    settle().await;
+    assert_eq!(h.record.created.borrow().len(), 2);
+    assert!(h.notice("Cancelled work was discarded"));
+    assert_eq!(
+        h.events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Kernel(KernelEvent::Text { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["fresh"]
+    );
+    h.session.close().await.unwrap();
+});
+local_test!(cooperative_cancel_keeps_kernel_usage_and_finished_steps, {
+    let n = Rc::new(Cell::new(0));
+    let h = harness(
+        Some(Rc::new(move |_, signal, _| {
+            let first = n.get() == 0;
+            n.set(n.get() + 1);
+            async move {
+                if first {
+                    signal.cancelled().await;
+                    Ok(cancelled())
+                } else {
+                    Ok(complete())
+                }
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    let running = spawned(&h.session, "cancel");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("followup", None).await.unwrap();
+    assert_eq!(h.record.created.borrow().len(), 1);
+    assert_eq!(h.record.closes.get(), 0);
+    assert!(h.events.borrow().iter().any(|e|matches!(e,SessionEvent::TurnComplete{result,..}if result.stop_reason==StopReason::Cancelled&&result.usage.as_ref().is_some_and(|u|u.input_tokens==4.))));
+    h.session.close().await.unwrap();
+    assert_eq!(h.session.status().connection, ConnectionState::Disconnected);
+});
+local_test!(uncooperative_timeout_is_bounded_and_quarantines_kernel, {
+    let h = harness(Some(hang_once()), |o| o.timeout_ms = Some(15));
+    h.session.start().await.unwrap();
+    h.session.submit("timeout", None).await.unwrap();
+    assert!(h.error("without progress"));
+    h.session.submit("recovered", None).await.unwrap();
+    assert_eq!(h.record.created.borrow().len(), 2);
+    h.session.close().await.unwrap();
+});
+local_test!(progress_refreshes_quiet_timer_and_tool_work_suspends_it, {
+    for tool in [false, true] {
+        let h = harness(
+            Some(Rc::new(move |_, _, emit| {
+                async move {
+                    if tool {
+                        emit(KernelEvent::ToolStart { id: "t1".into(), name: "make_changes".into() })?;
+                        delay(120).await;
+                        emit(KernelEvent::ToolEnd { id: "t1".into(), name: "make_changes".into(), elapsed_ms: 120, is_error: false })?;
+                    } else {
+                        for _ in 0..8 {
+                            delay(15).await;
+                            emit(KernelEvent::Text { text: ".".into() })?;
+                        }
+                    }
+                    Ok(complete())
+                }
+                .boxed_local()
+            })),
+            |o| o.idle_timeout_ms = Some(40),
+        );
+        h.session.start().await.unwrap();
+        h.session.submit("work", None).await.unwrap();
+        assert!(!h.error(""), "{:?}", h.events.borrow());
+        h.session.close().await.unwrap();
+    }
+    let h = harness(
+        Some(Rc::new(|_, signal, _| {
+            async move {
+                signal.cancelled().await;
+                Ok(cancelled())
+            }
+            .boxed_local()
+        })),
+        |o| o.idle_timeout_ms = Some(40),
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("think", None).await.unwrap();
+    assert!(h.error("Kumi stopped after 1 second without progress."));
+    assert_eq!(h.record.created.borrow().len(), 1);
+    h.session.close().await.unwrap();
+});
+local_test!(busy_turn_still_stops_at_hard_limit, {
+    let h = harness(
+        Some(Rc::new(|_, signal, emit| {
+            async move {
+                loop {
+                    tokio::select! {_=signal.cancelled()=>break,_=delay(5)=>{emit(KernelEvent::Text{text:".".into()})?;}}
+                }
+                Ok(cancelled())
+            }
+            .boxed_local()
+        })),
+        |o| {
+            o.idle_timeout_ms = Some(1000);
+            o.turn_limit_ms = Some(60);
+        },
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("forever", None).await.unwrap();
+    assert!(h.error("this answer had run for"));
+    h.session.close().await.unwrap();
+});
+local_test!(refresh_failure_never_calls_inference_or_exposes_private_errors, {
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.record.refresh_error.set(true);
+    h.session.submit("current state?", None).await.unwrap();
+    assert!(h.record.calls.borrow().is_empty());
+    assert!(h.error("Context refresh failed"));
+    assert!(!format!("{:?}", h.events.borrow()).contains("secret-token"));
+    h.session.close().await.unwrap();
+});
+local_test!(set_identity_resets_but_label_and_tools_keep_context, {
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.session.submit("one", None).await.unwrap();
+    h.observation.borrow_mut().label = "Renamed Set".into();
+    h.session.refresh().await.unwrap();
+    assert_eq!(h.session.status().observation.as_deref(), Some("Renamed Set"));
+    assert_eq!(h.record.created.borrow().len(), 1);
+    h.observation.borrow_mut().revision = Some("2".into());
+    h.session.submit("two", None).await.unwrap();
+    assert_eq!(h.words(1).unwrap(), ["one"]);
+    assert!(!h.notice("fresh conversation"));
+    h.observation.borrow_mut().key = "epoch:2".into();
+    h.session.submit("three", None).await.unwrap();
+    assert!(h.words(2).is_none());
+    assert!(h.notice("open Set changed"));
+    h.session.close().await.unwrap();
+});
+local_test!(model_reconfiguration_waits_for_running_answer_and_keeps_history, {
+    let n = Rc::new(Cell::new(0));
+    let gate = Rc::new(Notify::new());
+    let hold = gate.clone();
+    let h = harness(
+        Some(Rc::new(move |_, _, _| {
+            n.set(n.get() + 1);
+            let wait = n.get() == 2;
+            let hold = hold.clone();
+            async move {
+                if wait {
+                    hold.notified().await;
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("one", None).await.unwrap();
+    let running = spawned(&h.session, "two");
+    settle().await;
+    h.session.reconfigure().await.unwrap();
+    assert_eq!(h.record.created.borrow().len(), 1);
+    gate.notify_one();
+    running.await.unwrap().unwrap();
+    h.session.submit("three", None).await.unwrap();
+    assert_eq!(h.words(1).unwrap(), ["one", "two"]);
+    h.session.close().await.unwrap();
+});
+local_test!(actionable_errors_keep_kind_and_provider, {
+    let h = harness(
+        Some(Rc::new(|_, _, _| {
+            async { Err(KumiError::with_provider(FailureKind::Auth, "Not signed in to Anthropic.", "anthropic").into()) }.boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("hello", None).await.unwrap();
+    assert!(h.events.borrow().iter().any(|e|matches!(e,SessionEvent::Error{message,kind:Some(FailureKind::Auth),provider:Some(provider)}if message=="Not signed in to Anthropic."&&provider=="anthropic")));
+    h.session.close().await.unwrap();
+});
+local_test!(disconnect_cancels_invalidates_and_offers_resend_once, {
+    let h = harness(Some(hang_once()), |_| {});
+    h.session.start().await.unwrap();
+    let running = spawned(&h.session, "live");
+    settle().await;
+    h.connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.status().observation, None);
+    assert!(h.notice("Live closed"));
+    delay(35).await;
+    assert!(h.notice("Is it open"));
+    h.connection(ConnectionState::Connected, None);
+    settle().await;
+    assert!(h.events.borrow().iter().any(|e| matches!(e,SessionEvent::Resend{text}if text=="live")));
+    h.session.submit("music theory", None).await.unwrap();
+    h.connection(ConnectionState::Disconnected, Some(DisconnectCause::Bridge));
+    h.connection(ConnectionState::Connected, None);
+    settle().await;
+    assert!(h.notice("link to Live dropped"));
+    assert_eq!(h.events.borrow().iter().filter(|e| matches!(e, SessionEvent::Resend { .. })).count(), 1);
+    h.session.close().await.unwrap();
+});
+local_test!(idle_disconnect_reobserves_without_replacing_kernel, {
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.session.submit("first", None).await.unwrap();
+    h.connection(ConnectionState::Disconnected, None);
+    let before = h.record.observations.get();
+    h.connection(ConnectionState::Connected, None);
+    settle().await;
+    assert_eq!(h.record.observations.get(), before + 1);
+    assert_eq!(h.record.created.borrow().len(), 1);
+    assert!(h.notice("Live is back."));
+    h.session.close().await.unwrap();
+});
+local_test!(new_conversation_keeps_bridge_and_resets_configured_limit, {
+    let h = harness(None, |o| o.max_turns = Some(1));
+    h.session.start().await.unwrap();
+    h.session.submit("one", None).await.unwrap();
+    assert!(h.session.submit("two", None).await.unwrap_err().to_string().contains("limit"));
+    h.session.new_conversation().await.unwrap();
+    assert_eq!(h.record.integration_closes.get(), 0);
+    assert_eq!(h.record.closes.get(), 1);
+    assert_eq!(h.session.status().turns, 0);
+    h.session.submit("two", None).await.unwrap();
+    h.session.close().await.unwrap();
+});
+local_test!(default_session_has_no_turn_limit_and_validates_prompts, {
+    let h = harness(None, |_| {});
+    assert!(h.session.submit("x", None).await.is_err());
+    h.session.start().await.unwrap();
+    assert!(h.session.submit(" \u{feff}", None).await.is_err());
+    assert!(h.session.submit(&"x".repeat(16385), None).await.is_err());
+    for n in 0..30 {
+        h.session.submit(&n.to_string(), None).await.unwrap();
+    }
+    assert_eq!(h.session.status().turns, 30);
+    h.session.close().await.unwrap();
+    assert!(h.session.submit("x", None).await.is_err());
+});
+local_test!(startup_failure_cleans_integration_and_late_kernel_is_closed, {
+    let h = harness(None, |o| o.kernel_factory = Rc::new(|_| async { Err(RuntimeError::plain("private startup failure")) }.boxed_local()));
+    assert!(h.session.start().await.is_err());
+    assert_eq!(h.record.integration_closes.get(), 1);
+    assert!(!format!("{:?}", h.events.borrow()).contains("private"));
+    h.session.close().await.unwrap();
+    let (tx, rx) = oneshot::channel::<Rc<dyn Kernel>>();
+    let held = Rc::new(RefCell::new(Some(rx)));
+    let h = harness(None, |o| {
+        o.kernel_factory = Rc::new(move |_| {
+            let rx = held.borrow_mut().take().unwrap();
+            async move { Ok(rx.await.unwrap()) }.boxed_local()
+        })
+    });
+    let s = h.session.clone();
+    let starting = tokio::task::spawn_local(async move { s.start().await });
+    settle().await;
+    h.session.close().await.unwrap();
+    let kernel = Rc::new(TestKernel { record: h.record.clone(), history: RefCell::new(vec![]), run: None });
+    assert!(tx.send(kernel).is_ok());
+    let _ = starting.await;
+    settle().await;
+    assert_eq!(h.record.closes.get(), 1);
+    assert_eq!(h.session.status().state, TurnState::Closed);
+});
+local_test!(reconnect_carries_same_set_but_other_saved_set_starts_fresh, {
+    let h = harness(None, |_| {});
+    h.observation.borrow_mut().project = Some(ProjectRef { id: "p1".into(), name: "Set A".into() });
+    h.session.start().await.unwrap();
+    h.session.submit("one", None).await.unwrap();
+    h.session.reconnect().await.unwrap();
+    assert_eq!(h.words(1).unwrap(), ["one"]);
+    assert_eq!(h.record.integration_closes.get(), 1);
+    // A closed integration's late callback cannot change the new connection.
+    let old = h.record.listeners.borrow()[0].clone();
+    old(ConnectionState::Disconnected, None);
+    assert_eq!(h.session.status().connection, ConnectionState::Connected);
+    h.observation.borrow_mut().project = Some(ProjectRef { id: "p2".into(), name: "Set B".into() });
+    h.session.reconnect().await.unwrap();
+    assert!(h.words(2).is_none());
+    h.session.close().await.unwrap();
+});
+
+async fn saved(store: &dyn ConversationStore, place: &str, turns: u32) -> CurrentConversation {
+    for _ in 0..100 {
+        if let Some(kept) = store.current(place).await.unwrap() {
+            if kept.conversation.turns == Some(turns) {
+                return kept;
+            }
+        }
+        delay(2).await;
+    }
+    panic!("conversation was not saved");
+}
+fn project(h: &Harness, id: &str) {
+    let mut o = h.observation.borrow_mut();
+    o.key = id.into();
+    o.project = Some(ProjectRef { id: id.into(), name: id.into() });
+}
+local_test!(saved_conversation_restart_new_and_explicit_resume, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let one = harness(None, |o| o.conversations = Some(store.clone()));
+    project(&one, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    one.session.start().await.unwrap();
+    one.session.submit("remember 42", None).await.unwrap();
+    one.session.close().await.unwrap();
+    let kept = store.current("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await.unwrap().unwrap();
+    assert_eq!(kept.conversation.turns, Some(1));
+    let two = harness(None, |o| o.conversations = Some(store.clone()));
+    project(&two, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    two.session.start().await.unwrap();
+    assert_eq!(two.words(0).unwrap(), ["remember 42"]);
+    assert!(two.events.borrow().iter().any(|e| matches!(e,SessionEvent::Resumed{lines,..}if lines[0].text=="remember 42")));
+    two.session.new_conversation().await.unwrap();
+    assert_eq!(two.record.integration_closes.get(), 0);
+    assert!(two.words(1).is_none());
+    assert!(two.notice("The last one is kept"));
+    two.session.submit("a new idea", None).await.unwrap();
+    saved(store.as_ref(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1).await;
+    delay(10).await;
+    let listed = two.session.conversations().await.unwrap();
+    assert_eq!(listed.len(), 2);
+    let original = listed.iter().find(|r| r.first == "remember 42").unwrap();
+    assert!(two.session.resume_conversation(&original.id).await.unwrap());
+    assert_eq!(two.words(2).unwrap(), ["remember 42"]);
+    assert!(two.events.borrow().iter().any(|e| matches!(e, SessionEvent::Resumed { chosen: Some(true), .. })));
+    two.session.close().await.unwrap();
+    assert_eq!(store.current("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await.unwrap().unwrap().id, original.id);
+});
+local_test!(unsaved_conversation_moves_with_first_save, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    h.session.start().await.unwrap();
+    h.session.submit("sketch a progression", None).await.unwrap();
+    saved(store.as_ref(), "unsaved", 1).await;
+    h.observation.borrow_mut().project = Some(ProjectRef { id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(), name: "Sketch".into() });
+    h.session.submit("now add drums", None).await.unwrap();
+    h.session.close().await.unwrap();
+    assert!(store.list("unsaved").await.unwrap().is_empty());
+    let kept = store.current("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").await.unwrap().unwrap();
+    assert_eq!(
+        kept.conversation.checkpoint.messages.iter().map(|v| v["content"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["sketch a progression", "now add drums"]
+    );
+});
+local_test!(unreadable_kept_history_is_shown_and_retained, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store
+        .save(
+            "cccccccccccccccccccccccccccccccc",
+            "old001",
+            &SavedConversation {
+                saved_at: 1,
+                checkpoint: KernelCheckpoint {
+                    version: 1,
+                    messages: vec![json!({"role":"user","content":"from another model"}), json!({"role":"assistant","content":"sure"})],
+                    origin: None,
+                    tools: None,
+                },
+                changes: None,
+                first: None,
+                turns: None,
+            },
+        )
+        .await
+        .unwrap();
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        let original = o.kernel_factory.clone();
+        o.kernel_factory = Rc::new(move |options| {
+            let original = original.clone();
+            async move {
+                if options.checkpoint.is_some() {
+                    Err(RuntimeError::plain("Unsupported checkpoint version."))
+                } else {
+                    original(options).await
+                }
+            }
+            .boxed_local()
+        });
+    });
+    project(&h, "cccccccccccccccccccccccccccccccc");
+    h.session.start().await.unwrap();
+    assert!(h.events.borrow().iter().any(|e|matches!(e,SessionEvent::Resumed{unreadable:Some(true),lines,..}if lines.iter().map(|l|l.text.as_str()).collect::<Vec<_>>()==["from another model","sure"])));
+    assert!(h.notice("couldn't continue that conversation"));
+    assert_eq!(store.list("cccccccccccccccccccccccccccccccc").await.unwrap().len(), 1);
+    h.session.close().await.unwrap();
+});
+fn change(id: &str, state: &str, at: i64) -> ChangeRecord {
+    serde_json::from_value(
+        json!({"id":id,"family":"tempo","title":"Tempo 120 → 124 BPM","state":state,"at":at,"clip":{"length":4,"notes":[]}}),
+    )
+    .unwrap()
+}
+local_test!(earlier_process_changes_expire_without_pictures_and_same_process_keeps_undo, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let one = harness(None, |o| o.conversations = Some(store.clone()));
+    project(&one, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    one.session.start().await.unwrap();
+    one.session.watch(WatchEvent::Change(change("c1", "applied", 1)));
+    one.session.watch(WatchEvent::Change(change("c2", "undone", 2)));
+    one.session.submit("turn bass down", None).await.unwrap();
+    saved(store.as_ref(), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 1).await;
+    project(&one, "ffffffffffffffffffffffffffffffff");
+    one.session.submit("hello F", None).await.unwrap();
+    saved(store.as_ref(), "ffffffffffffffffffffffffffffffff", 1).await;
+    project(&one, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    one.session.submit("back to E", None).await.unwrap();
+    assert!(one.events.borrow().iter().any(|e| matches!(e,SessionEvent::Resumed{lines,changes:None,..}if lines[0].text=="turn bass down")));
+    one.session.close().await.unwrap();
+    let two = harness(None, |o| o.conversations = Some(store.clone()));
+    project(&two, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    two.session.start().await.unwrap();
+    let events = two.events.borrow();
+    let changes = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::Resumed { changes: Some(c), .. } => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].state, ChangeState::Expired);
+    assert_eq!(changes[1].state, ChangeState::Undone);
+    assert!(changes.iter().all(|c| c.id.contains(':') && c.clip.is_none()));
+    drop(events);
+    two.session.close().await.unwrap();
+});
+local_test!(settled_history_is_recovered_after_uncooperative_work, {
+    let n = Rc::new(Cell::new(0));
+    let h = harness(
+        Some(Rc::new(move |_, _, _| {
+            n.set(n.get() + 1);
+            let hang = n.get() == 2;
+            async move {
+                if hang {
+                    futures::future::pending::<()>().await;
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("finished", None).await.unwrap();
+    let running = spawned(&h.session, "unfinished");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("next", None).await.unwrap();
+    assert_eq!(h.words(1).unwrap(), ["finished"]);
+    h.session.close().await.unwrap();
+});
+local_test!(memory_instructions_tools_and_forgetting, {
+    use kumi_runtime::core::memory::{create_memory_store, MemoryStoreOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_memory_store(MemoryStoreOptions {
+        projects_dir: dir.path().join("projects"),
+        producer_file: dir.path().join("producer.json"),
+    });
+    store.save(MemoryScope::Producer, None, &[MemoryNote { id: "p1".into(), text: "Prefers short reverbs".into(), at: 1 }]).await.unwrap();
+    let h = harness(None, |o| o.memory = Some(store.clone()));
+    h.session.start().await.unwrap();
+    let tools = {
+        let created = h.record.created.borrow();
+        assert!(created[0].instructions.contains("[p1] Prefers short reverbs"));
+        created[0].tools.clone()
+    };
+    assert_eq!(tools.iter().map(|t| t.name()).collect::<Vec<_>>(), ["remember", "forget"]);
+    tools[0]
+        .execute(json!({"note":"The Reese is the main bass","about":"producer"}).as_object().unwrap().clone(), Signal::new())
+        .await
+        .unwrap();
+    assert_eq!(h.session.memory().await.unwrap().unwrap().memory.producer.len(), 2);
+    assert_eq!(h.session.forget("p1").await.unwrap().unwrap().text, "Prefers short reverbs");
+    h.session.close().await.unwrap();
+});
+
+#[derive(Clone)]
+struct Plan {
+    received: Rc<RefCell<Vec<JsonObject>>>,
+}
+#[async_trait(?Send)]
+impl KernelTool for Plan {
+    fn name(&self) -> &str {
+        "make_changes"
+    }
+    fn description(&self) -> &str {
+        "Make changes."
+    }
+    fn input_schema(&self) -> JsonObject {
+        json!({"type":"object","properties":{"steps":{"type":"array"}},"additionalProperties":false}).as_object().unwrap().clone()
+    }
+    async fn execute(&self, input: JsonObject, _: Signal) -> Result<ToolResult, RuntimeError> {
+        self.received.borrow_mut().push(input);
+        Ok(ToolResult::text("done"))
+    }
+    fn stream(&self, _: Signal, _: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
+        Some(Box::new(PlanStream { plan: self.clone(), started: Cell::new(false) }))
+    }
+}
+struct PlanStream {
+    plan: Plan,
+    started: Cell<bool>,
+}
+#[async_trait(?Send)]
+impl StreamingCall for PlanStream {
+    fn push(&self, _: &str) {
+        self.started.set(true);
+    }
+    async fn finish(&self, input: Option<JsonObject>) -> Result<ToolResult, RuntimeError> {
+        self.plan.execute(input.unwrap(), Signal::new()).await
+    }
+    async fn abandon(&self) {}
+    fn started(&self) -> bool {
+        self.started.get()
+    }
+}
+fn draft() -> Value {
+    json!({"name":"Reese stack","fits":"wide Reese basses","idea":"Two detuned saws with glide, then saturation and a low cut."})
+}
+local_test!(technique_is_removed_before_whole_and_streamed_plans_and_kept_when_played, {
+    use kumi_runtime::core::techniques::{create_technique_store, TechniqueStore};
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_technique_store(dir.path().join("techniques.json"));
+    let received = Rc::new(RefCell::new(vec![]));
+    let tools = Rc::new(RefCell::new(Vec::<Rc<dyn KernelTool>>::new()));
+    let streamed = Rc::new(Cell::new(false));
+    let use_tools = tools.clone();
+    let way = streamed.clone();
+    let run: Run = Rc::new(move |_, signal, _| {
+        let plan = use_tools.borrow().iter().find(|t| t.name() == "make_changes").unwrap().clone();
+        let streamed = way.get();
+        async move {
+            let input = json!({"steps":[{"tool":"load_device"}],"technique":draft()}).as_object().unwrap().clone();
+            if streamed {
+                let call = plan.stream(signal, Rc::new(|| {})).unwrap();
+                assert!(!call.started());
+                call.push("{");
+                assert!(call.started());
+                call.finish(Some(input)).await?;
+            } else {
+                plan.execute(input, signal).await?;
+            }
+            Ok(complete())
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), |o| {
+        o.techniques = Some(store.clone());
+        o.gaps = Some(dir.path().join("gaps.jsonl").to_string_lossy().into_owned());
+        let factory = o.kernel_factory.clone();
+        o.kernel_factory = Rc::new(move |options| {
+            *tools.borrow_mut() = options.tools.clone();
+            factory(options)
+        });
+    });
+    h.observation.borrow_mut().tools.push(Rc::new(Plan { received: received.clone() }));
+    h.session.start().await.unwrap();
+    let plan = h.record.created.borrow()[0].tools[0].clone();
+    assert!(plan.description().starts_with("Make changes. When the plan builds"));
+    assert!(plan.input_schema()["properties"]["technique"].is_object());
+    for way in [false, true] {
+        streamed.set(way);
+        h.session.submit("build a Reese", None).await.unwrap();
+        assert_eq!(received.borrow().last().unwrap(), json!({"steps":[{"tool":"load_device"}]}).as_object().unwrap());
+        h.session.watch(WatchEvent::Action(ActionEvent { title: "Playing".into(), playing: Some(true), recording: None }));
+        delay(10).await;
+    }
+    assert_eq!(
+        h.events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Technique(t) => Some(t.action),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [TechniqueAction::Kept, TechniqueAction::Updated]
+    );
+    assert_eq!(h.session.techniques().await.unwrap()[0].name, "Reese stack");
+    let id = store.list().await.unwrap()[0].id.clone();
+    assert!(h.session.forget_technique(&id).await.unwrap());
+    assert!(store.list().await.unwrap().is_empty());
+    let result = plan
+        .execute(json!({"steps":[{"tool":"load_device"},{"tool":"load_device"}]}).as_object().unwrap().clone(), Signal::new())
+        .await
+        .unwrap();
+    assert!(result.text.contains("technique"));
+    h.session.close().await.unwrap();
+});
+local_test!(set_save_keeps_a_draft_and_failed_answer_abandons_it, {
+    use kumi_runtime::core::techniques::{create_technique_store, TechniqueStore, TECHNIQUE_TOOL};
+    for fail in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = create_technique_store(dir.path().join("techniques.json"));
+        let tools = Rc::new(RefCell::new(Vec::<Rc<dyn KernelTool>>::new()));
+        let use_tools = tools.clone();
+        let count = Rc::new(Cell::new(0));
+        let run: Run = Rc::new(move |_, signal, _| {
+            let first = count.get() == 0;
+            count.set(count.get() + 1);
+            let tool = use_tools.borrow().iter().find(|t| t.name() == TECHNIQUE_TOOL).unwrap().clone();
+            async move {
+                if first {
+                    let mut input = draft().as_object().unwrap().clone();
+                    input.insert("action".into(), json!("draft"));
+                    tool.execute(input, signal).await?;
+                    if fail {
+                        return Err(RuntimeError::plain("provider went away"));
+                    }
+                }
+                Ok(complete())
+            }
+            .boxed_local()
+        });
+        let h = harness(Some(run), |o| {
+            o.techniques = Some(store.clone());
+            let factory = o.kernel_factory.clone();
+            o.kernel_factory = Rc::new(move |options| {
+                *tools.borrow_mut() = options.tools.clone();
+                factory(options)
+            });
+        });
+        project(&h, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        h.observation.borrow_mut().saved_at = Some(1000);
+        h.session.start().await.unwrap();
+        h.session.submit("build a Reese", None).await.unwrap();
+        h.session.refresh().await.unwrap();
+        assert!(store.list().await.unwrap().is_empty());
+        if fail {
+            h.session.submit("I love it", None).await.unwrap();
+        } else {
+            h.observation.borrow_mut().saved_at = Some(2000);
+            h.session.refresh().await.unwrap();
+        }
+        delay(10).await;
+        h.session.close().await.unwrap();
+        assert_eq!(store.list().await.unwrap().len(), usize::from(!fail));
+        assert_eq!(h.error("Inference failed"), fail);
+    }
+});

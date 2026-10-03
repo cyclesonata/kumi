@@ -47,11 +47,11 @@ pub use core::recipes::{
     create_recipe_store, recipe_instructions, recipe_tools, slug, Recipe, RecipeStore, FORGET_RECIPE_TOOL, RUN_RECIPE_TOOL,
     SAVE_RECIPE_TOOL,
 };
-pub use system::system_program;
-pub use version::KUMI_VERSION;
-// TODO(port): re-exports from core/session
+pub use core::session::{create_session, Session, SessionOptions};
 pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};
 pub use kernel::budget::{budget_for, ContextBudget, DEFAULT_BUDGET};
+pub use system::system_program;
+pub use version::KUMI_VERSION;
 // TODO(port): re-exports from providers
 // TODO(port): re-exports from providers/models
 // TODO(port): re-exports from providers/local

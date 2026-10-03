@@ -1428,17 +1428,17 @@ pub struct RecipeParam {
 }
 
 /// A recipe as the app lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecipeSummary {
     pub name: String,
     pub about: String,
     pub params: Vec<RecipeParam>,
     pub steps: usize,
-    pub used: usize,
+    pub used: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_used: Option<i64>,
-    pub created: i64,
+    pub last_used: Option<f64>,
+    pub created: f64,
 }
 
 /// A note written or removed, for the app to show; `pending` while the Set isn't saved yet.
