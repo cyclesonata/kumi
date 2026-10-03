@@ -33,7 +33,7 @@ fn require_siblings(args: &Map<String, Value>, devices: &Value) -> Result<(), Li
 fn track_path(state: &Value, reference: &Value) -> Option<String> {
     array(&state["tracks"]).iter().position(|t| t.get("ref") == Some(reference)).map(|i| format!("/tracks/{i}"))
 }
-fn chain_path(state: &Value, reference: &Value) -> Option<String> {
+pub(super) fn chain_path(state: &Value, reference: &Value) -> Option<String> {
     for (ti, t) in array(&state["tracks"]).iter().enumerate() {
         for (di, d) in array(&t["devices"]).iter().enumerate() {
             for (ci, c) in array(&d["chains"]).iter().enumerate() {

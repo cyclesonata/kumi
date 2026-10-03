@@ -6,7 +6,7 @@ pub(super) fn fields(row: &Value, names: &[&str]) -> Value {
 fn track_view(track: &Value) -> Value {
     json!({"collapsed":track["view"]["isCollapsed"],"deviceInsertMode":track["view"]["deviceInsertMode"],"showChains":track["view"]["isShowingChains"]})
 }
-fn fence(args: &Map<String, Value>, state: &Value, what: &str) -> Result<(), LiveError> {
+pub(super) fn fence(args: &Map<String, Value>, state: &Value, what: &str) -> Result<(), LiveError> {
     if args.get("expectedStateRevision") != Some(&json!(simulator_revision(state))) {
         Err(LiveError::error(format!("{what} state changed since preview")))
     } else {

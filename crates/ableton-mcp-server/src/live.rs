@@ -4163,6 +4163,29 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "drum-pad.set"
+            | "drum-pad.load-sample"
+            | "drum-pad.load-samples"
+            | "drum-pad.delete-all-chains"
+            | "rack.set"
+            | "rack.action"
+            | "rack.view.set" => self.invoke_racks(operation, args),
+            "chain.set"
+            | "chain-mixer.set"
+            | "parameter.re-enable-automation"
+            | "device-io.set"
+            | "compressor.sidechain.set"
+            | "device.bank.set"
+            | "device.comparison.save-to-slot"
+            | "simpler.replace-sample"
+            | "drift.set"
+            | "drum-cell.set"
+            | "eq8.set"
+            | "hybrid-reverb.set"
+            | "looper.set"
+            | "meld.set"
+            | "plugin.set"
+            | "looper.action" => self.invoke_device_state(operation, args),
             "locator.jump" | "view.set" | "view.control" => self.invoke_view_control(operation, args),
             "automation.step.insert" | "automation.value-at" => self.invoke_gap_automation(operation, args),
             "automation.envelope.clear" => self.clear_envelopes(args),
@@ -5386,3 +5409,9 @@ mod simulator_structure;
 
 #[path = "live_simulator_clips.rs"]
 mod simulator_clips;
+
+#[path = "live_simulator_device_state.rs"]
+mod simulator_device_state;
+
+#[path = "live_simulator_racks.rs"]
+mod simulator_racks;

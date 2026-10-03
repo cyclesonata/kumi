@@ -164,9 +164,13 @@ fn simulator_subscriptions_preserve_set_identity_and_reentrant_removal() {
 #[test]
 fn simulator_invalid_authority_fields_match_typescript_errors() {
     let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/simulator-errors.json")).unwrap();
+    let scenarios: Vec<Value> = serde_json::from_str(include_str!("fixtures/simulator-oracle.json")).unwrap();
     let mut mismatches = Vec::new();
     for case in cases {
         let live = DeterministicLiveSimulator::new();
+        if let Some(name) = case["initialStateCase"].as_str() {
+            *live.state.borrow_mut() = scenarios.iter().find(|scenario| scenario["name"] == name).unwrap()["steps"][0]["value"].clone();
+        }
         let result = live.invoke(&serde_json::from_value(case["invocation"].clone()).unwrap());
         let actual = result.err().map(|e| e.to_string());
         if actual.as_deref() != case["error"].as_str() {
