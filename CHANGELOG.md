@@ -8,7 +8,8 @@ each Kumi release names the bridge it ships with.
 Kumi on Windows, from installing it to its first answer: `kumi update` works from any PowerShell,
 `kumi bridge` notices Live within moments and handles a User Library on another drive, Kumi's Live
 extension goes where Live on Windows looks for it, and Windows terminals show Kumi's colours and
-icons. Ships with bridge 1.0.72.
+icons. With the optional Willington provider, one installation covers Live 12.4.15b4 and b5, and
+rack chain zones are supported on b5. Ships with bridge 1.0.72.
 
 ### Windows
 
@@ -34,8 +35,26 @@ icons. Ships with bridge 1.0.72.
 - Enter or Ctrl-C stops the waiting. It's read as a key, so a step under way finishes, and on
   Windows cmd doesn't ask "Terminate batch job (Y/N)?" afterwards.
 
+### Optional Willington provider
+
+- Willington's multi-version bundle picks each provider's bindings for the Live build that's
+  running, so one installation covers macOS ARM64 Live 12.4.15b4 and b5. It needs
+  `WillingtonRuntime` beside the providers; see
+  [Optional Willington integration](docs/en/WILLINGTON_INTEGRATION.md).
+- Rack chain zones are supported on Live 12.4.15b5, checked in real Live with 42 signal-gating
+  checks, 49 fade measurements and seven Max `live.object` write, read and restore cycles
+  ([summary](docs/evidence/rack-zones-b5.json)).
+- A provider with no bindings for the running build is skipped on its own: on b4, Follow Action
+  and rack macro edits keep working without zones. The bridge tries a skipped provider once per
+  Live session and logs why once. Missing files or a failed integrity check still turn all of
+  Willington off, and Kumi carries on without it.
+- Follow Action writes check the self-test receipt against the library picked for this build.
+  After switching builds, run the self-test again; the guide gives its steps for the bundle.
+- Live's log names the Willington providers that started and those with writes on.
+
 ### Bridge 1.0.72
 
+- The Willington changes above.
 - A User Library on another drive than Kumi's folder (D:, an external drive) upgrades, rolls back,
   repairs and uninstalls. Those moved the Remote Script's folder with a rename, which can't cross
   drives; now it's copied, and its reference file is made owner-only again.
