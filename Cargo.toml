@@ -23,6 +23,8 @@ futures = "0.3"
 hex = "0.4"
 hmac = "0.12"
 home = "0.5"
+# JavaScript's Map: insertion order kept.
+indexmap = "2"
 libc = "0.2"
 memchr = "2"
 percent-encoding = "2"

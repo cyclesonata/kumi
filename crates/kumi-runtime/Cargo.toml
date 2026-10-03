@@ -28,6 +28,7 @@ futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
 home.workspace = true
+indexmap.workspace = true
 memchr.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
