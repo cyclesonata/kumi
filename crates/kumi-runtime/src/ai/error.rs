@@ -67,6 +67,7 @@ impl std::error::Error for ApiCallError {}
 /// one of Kumi's own, or any other error by its message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum LanguageModelError {
     ApiCall(ApiCallError),
     Kumi(KumiError),
